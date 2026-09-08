@@ -93,6 +93,20 @@ design.
 the block design, so bursts survive to the HP port. Converting to `mem_itf`
 first would flatten them, at roughly 7× against DDR latency.
 
+The carve-out is one-way protected, and it is worth being clear about which
+way. `amoeba_assign_master` clamps the core's address space to
+`ddr_carveout`/`ddr_size`, so a runaway core address cannot reach the PS
+kernel. Nothing clamps the PS. If Linux on the A9 is left free to allocate at
+`0x1000_0000` it will, and the kernel and the soft core then share pages —
+corruption that moves between boots and reads as a core bug. The carve-out has
+to be reserved on the PS side too, with a `mem=` bootarg or a reserved-memory
+node in the PYNQ devicetree on the SD card.
+
+The PS's writes into it must also be uncached. Zynq-7000's HP ports are not
+coherent with the Cortex-A9 caches — that is what ACP is for — so an image
+written through a cached mapping can sit in L1 or L2 while the PL reads stale
+DDR. `sw/amoeba/mmio.py` gets this by opening `/dev/mem` with `O_SYNC`.
+
 Keep the BRAM build after DDR works: it is the deterministic one. DDR refresh
 jitters interrupt arrival, so a failing DDR run is not necessarily reproducible
 — and reproducibility is what the trace windows below depend on.

@@ -47,7 +47,13 @@
 #define configTICK_RATE_HZ                      ( ( TickType_t ) 10000 )
 
 /* ---- Memory ---- */
+/* Overridable from the build, like configCPU_CLOCK_HZ above.  64 KiB is most
+ * of the 128 KiB block RAM target and is the ceiling there; a DDR build has
+ * 256 MiB and wants far more, because tc_mem_stress sizes its working set out
+ * of this heap and has to outrun the cache to mean anything. */
+#ifndef configTOTAL_HEAP_SIZE
 #define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 64 * 1024 ) )
+#endif
 #define configMINIMAL_STACK_SIZE                ( ( uint32_t ) 256 )  /* in words */
 #define configMAX_TASK_NAME_LEN                 16
 #define configSTACK_DEPTH_TYPE                  uint32_t

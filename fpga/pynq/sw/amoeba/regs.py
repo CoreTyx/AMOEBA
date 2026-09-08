@@ -16,6 +16,19 @@ MEM_BASE = 0x4400_0000          # image window; size comes from CAPS.mem_kb
 DMA_BASE = 0x4040_0000
 DMA_SIZE = 0x1_0000
 
+# The DDR carve-out, from opt(ddr_carveout)/opt(ddr_size) in tcl/bd_pynq.tcl.
+# In an AXI build this is the core's memory: the bridge subtracts EXT_MEM_BASE
+# from the core's address and adds this, so core 0x8000_0000 is PS 0x1000_0000.
+# It is also the trace DMA's target.
+#
+# The PS must be kept out of this range.  Nothing in the PL enforces it -- the
+# clamp in bd_pynq.tcl stops the CORE from reaching PS memory, not the other
+# way round -- so if Linux on the A9 is left free to allocate here, the kernel
+# and the soft core will quietly share pages.  Pass a matching `mem=` bootarg
+# or reserved-memory node in the PS devicetree on the SD card.
+DDR_CARVEOUT_BASE = 0x1000_0000
+DDR_CARVEOUT_SIZE = 0x1000_0000         # 256 MiB
+
 # ---- the core's own view of memory, from pkg/config_baremetal_linux.vh ------
 # EXT_MEM_BASE is 0x80000000 in every configuration in this project.  The PS
 # needs it to turn a program's load address into an offset in the image window.
@@ -44,6 +57,32 @@ R_TRIG_PC_LO = 0x50
 R_TRIG_PC_HI = 0x54
 R_TRACE_STAT = 0x58
 
+# ---- external AHB probe, from rtl/amoeba_bus_probe.sv -----------------------
+# The only window onto the bus between the core and its memory.  Everything
+# else in this map describes the core; when the core stalls on a bus that
+# never answers, these are what tell the two apart.
+R_BUS_STATE = 0x60
+R_BUS_XACT = 0x64
+R_BUS_BEAT = 0x68
+R_BUS_ERR = 0x6C
+R_BUS_STALL = 0x70
+R_BUS_ADDR = 0x74
+R_BUS_XADDR = 0x78
+R_BUS_WAIT = 0x7C
+R_BUS_ERRWAIT = 0x80
+R_BUS_ERRXACT = 0x84
+R_BUS_PRESTATE = 0x88
+R_BUS_CAPSEL = 0x8C
+R_BUS_CAPDAT = 0x90
+R_BUS_CAPSTAT = 0x94
+R_BUS_RSTXACT = 0x98
+R_BUS_CAPRDAT = 0x9C
+
+CAP_VALID = 1 << 31          # amoeba_bus_probe stamps this on every written entry
+CAP_CORE_RESET = 1 << 30     # was the core held on THAT cycle -- see decode_cap
+
+CAP_DEPTH = 64
+
 ID_MAGIC = 0x414D_4F42          # "AMOB"
 
 # ---- CTRL bits --------------------------------------------------------------
@@ -70,8 +109,61 @@ TRACE_WINDOW = 2
 TRACE_PC_TRIG = 3
 
 
+# ---- BUS_STATE bit fields ---------------------------------------------------
+BUS_HSEL = 1 << 2
+BUS_HTRANS = 0x3 << 3
+BUS_HWRITE = 1 << 5
+BUS_HBURST = 0x7 << 6
+BUS_HSIZE = 0x7 << 9
+BUS_HREADY = 1 << 12
+BUS_HRESP = 1 << 13
+BUS_SEEN_FIRST = 1 << 14
+BUS_CORE_RESET = 1 << 15
+
+HTRANS_NAMES = {0: "IDLE", 1: "BUSY", 2: "NONSEQ", 3: "SEQ"}
+
+
+def decode_bus_state(v: int) -> str:
+    """Render BUS_STATE as the sentence you would otherwise have to assemble
+    by hand from a hex word at three in the morning."""
+    htrans = (v >> 3) & 0x3
+    return (
+        f"HSEL={1 if v & BUS_HSEL else 0} "
+        f"HTRANS={HTRANS_NAMES[htrans]} "
+        f"HWRITE={1 if v & BUS_HWRITE else 0} "
+        f"HBURST={(v >> 6) & 0x7} "
+        f"HSIZE={(v >> 9) & 0x7} "
+        f"HREADY={1 if v & BUS_HREADY else 0} "
+        f"HRESP={1 if v & BUS_HRESP else 0} "
+        f"core_reset={1 if v & BUS_CORE_RESET else 0}"
+    )
+
+
+def decode_cap(v: int) -> str:
+    """One captured AHB cycle, as laid out by amoeba_bus_probe's cap_word."""
+    if not (v & CAP_VALID):
+        return "<never written>"
+    return (
+        f"HSEL={(v >> 9) & 1} "
+        f"HTRANS={HTRANS_NAMES[(v >> 6) & 0x3]:6s} "
+        f"HWRITE={(v >> 8) & 1} "
+        f"HSIZE={(v >> 3) & 0x7} "
+        f"HBURST={v & 0x7} "
+        f"HREADY={(v >> 10) & 1} "
+        f"HRESP={(v >> 11) & 1} "
+        f"addr=...{(v >> 12) & 0xFFF:03x} "
+        f"rst={(v >> 30) & 1}"
+    )
+
+
 def caps_mem_kb(caps: int) -> int:
-    """Image memory size in KiB, CAPS[31:16]."""
+    """Image memory size in KiB, CAPS[31:16].
+
+    MEANINGFUL ONLY IN A BRAM BUILD.  The field carries the MEM_KB parameter
+    verbatim, and an AXI build passes it through unchanged even though the
+    memory is then the DDR carve-out -- 256 MiB, which does not fit in 16 bits
+    of KiB anyway.  Ask Amoeba.mem_bytes instead of reading this directly.
+    """
     return (caps >> 16) & 0xFFFF
 
 

@@ -4,8 +4,18 @@
  * Provides printf (via NS16550 UART at 0x10000000), exit() via the
  * standard RISC-V HTif tohost protocol, and basic string/memory helpers.
  *
- * tohost is declared extern; its address is fixed at 0x80800000 by
- * freertos_amoeba.ld.  The testbench monitors writes to that address.
+ * tohost is declared extern; the linker script fixes its address, and which
+ * address depends on the target:
+ *
+ *   freertos_wally.ld      0x80800000   simulation, 128 MB of memory
+ *   freertos_pynq_ddr.ld   0x80800000   FPGA, 256 MiB DDR carve-out
+ *   freertos_pynq.ld       0x8001F000   FPGA, 128 KiB block RAM -- the array
+ *                                       truncates rather than faulting, so
+ *                                       0x80800000 would alias onto the reset
+ *                                       vector.  See that file.
+ *
+ * Whatever it is, the monitor watching for the write has to agree: the
+ * testbench here, and amoeba_bus_mon's TOHOST_ADDR on the FPGA.
  *
  * NOTE: handle_trap is intentionally NOT provided.  FreeRTOS installs
  * freertos_risc_v_trap_handler via mtvec before main() runs (freertos_crt.S).
@@ -53,27 +63,36 @@ void uartSend(char c)
  * than add an ISA extension to silicon for a test hook, evict the line the way
  * any cache lets you: read enough addresses that map to the same set.
  *
- * Why this works on every configuration, without knowing the geometry.  The
- * linker fixes tohost at 0x80800000 and RAM starts at 0x80000000, so tohost's
- * offset from the RAM base is 8 MB.  For any power-of-two way size W <= 8 MB
- * that makes tohost's set index zero, and every address at RAM_BASE + k*W has
- * that same index.  Reading RAM_BASE + k*SWEEP_STRIDE for k = 0..SWEEP_N-1
- * therefore lands SWEEP_N*SWEEP_STRIDE/W distinct tags in tohost's set:
+ * Why this works on every configuration, without knowing the geometry.  Every
+ * linker script in this directory puts tohost on a 4 KiB boundary, and RAM
+ * starts at 0x80000000, so tohost's offset from the RAM base is a multiple of
+ * 4 KiB.  For any power-of-two way size W <= 4 KiB that makes tohost's set
+ * index zero, and every address at RAM_BASE + k*W has that same index.
+ * Reading RAM_BASE + k*SWEEP_STRIDE for k = 0..SWEEP_N-1 therefore lands
+ * SWEEP_N*SWEEP_STRIDE/W distinct tags in tohost's set:
  *
- *     way size 512 B  ->  128 conflicts     (config_baremetal_linux: 1 way)
- *     way size 4 KiB  ->   16 conflicts     (config.vh, config_freertos: 4 ways)
- *     way size 64 KiB ->    1 conflict
+ *     way size 4 KiB  ->   16 conflicts     every config here: 4 ways
+ *     way size 512 B  ->  128 conflicts     margin, if one ever shrinks
  *
- * Any of those exceeds the associativity it is paired with, so the dirty line
- * is guaranteed out.  The swept range is the first 64 KiB of RAM, which is the
- * program image itself -- always mapped, always safe to read, and distinct from
- * tohost in the tag bits.
+ * Both exceed the associativity they are paired with, so the dirty line is
+ * guaranteed out.  Every pkg/config*.vh in this project is 4 ways of 4096
+ * bytes today, so 16 against 4 is the case that actually runs; the stride is
+ * left at 512 because the extra reads are free and the argument then survives
+ * a smaller way size without anyone having to notice.
+ *
+ * A way size ABOVE 4 KiB would break the set-index-zero argument and needs
+ * re-deriving -- at 64 KiB ways the sweep lands only one conflicting tag,
+ * which evicts nothing at 4-way associativity.  Nothing here uses one.
+ *
+ * The swept range is the first 64 KiB of RAM, which is the program image
+ * itself -- always mapped, always safe to read, and distinct from tohost in
+ * the tag bits.
  *
  * Cost is SWEEP_N misses, a few thousand cycles, once per test run.
  */
 #define RAM_BASE      0x80000000UL
-#define SWEEP_STRIDE  512UL           /* smallest way size any config uses */
-#define SWEEP_N       128UL           /* 64 KiB swept: covers way sizes to 64 KiB */
+#define SWEEP_STRIDE  512UL           /* <= the smallest way size, with margin */
+#define SWEEP_N       128UL           /* 64 KiB swept */
 
 static void htif_writeback(void)
 {

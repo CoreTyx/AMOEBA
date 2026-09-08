@@ -72,8 +72,14 @@ for pyname, rtlname in (("TRACE_OFF", "MODE_OFF"), ("TRACE_ALL", "MODE_ALL"),
 
 # ---- base addresses, from bd_pynq.tcl ---------------------------------------
 tcl = open(BD_TCL).read()
+# DDR_CARVEOUT_* is here for the same reason as the rest: in an AXI build it
+# is where the core's memory actually lives, and a driver that writes an image
+# to the wrong physical address gets no error from anything -- the core simply
+# fetches whatever was already there.
 for pyname, key in (("CTL_BASE", "ctl_base"), ("MEM_BASE", "mem_base"),
-                    ("DMA_BASE", "dma_base")):
+                    ("DMA_BASE", "dma_base"),
+                    ("DDR_CARVEOUT_BASE", "ddr_carveout"),
+                    ("DDR_CARVEOUT_SIZE", "ddr_size")):
     m = re.search(rf"^\s*{key}\s+(0x[0-9A-Fa-f]+)", tcl, re.M)
     if m:
         check(pyname, hex(getattr(regs, pyname)), hex(int(m.group(1), 16)))
@@ -90,4 +96,4 @@ if fails:
     sys.exit(1)
 
 print(f"register map OK: {len(rtl_offsets)} offsets, 4 trace modes, "
-      "3 base addresses, ID magic")
+      "5 base addresses, ID magic")

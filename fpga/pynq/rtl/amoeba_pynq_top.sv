@@ -90,7 +90,15 @@ module amoeba_pynq_top import cvw::*; #(
     parameter int    MEM_KB          = 128,
     parameter bit    TRACE           = 1'b1,
     parameter int    TRACE_FIFO_LOG2 = 9,
-    parameter int    PKT_RECORDS     = 256
+    parameter int    PKT_RECORDS     = 256,
+    // Base of the DDR carve-out in the PS's physical map, and the reason the
+    // AHB address leaving this module is not the address the core emitted.
+    //
+    // Passed from opt(ddr_carveout) in tcl/bd_pynq.tcl, which is the SAME
+    // value that tcl assigns as this master's address segment.  One source,
+    // so the translation below and the interconnect's decode cannot disagree.
+    // Ignored when MEM_BRAM = 1.
+    parameter int unsigned DDR_CARVEOUT_BASE = 32'h1000_0000
 )(
     input  logic                  aclk,
     input  logic                  aresetn,
@@ -146,7 +154,11 @@ module amoeba_pynq_top import cvw::*; #(
     // the three inputs are only consumed when MEM_BACKEND == "AXI" and should
     // be tied off in the block design otherwise.
     output logic                  m_ahb_hsel,
-    output logic [PA_BITS-1:0]    m_ahb_haddr,
+    // 32 bits, not PA_BITS.  ahblite_axi_bridge's s_ahb_haddr is 32 bits wide
+    // and the whole core address map fits below 4 GiB, so the top 24 bits of
+    // HADDR are always zero.  Declaring the port at its real width makes the
+    // truncation explicit here instead of silent in the block design.
+    output logic [31:0]           m_ahb_haddr,
     output logic [63:0]           m_ahb_hwdata,
     output logic [7:0]            m_ahb_hwstrb,
     output logic                  m_ahb_hwrite,
@@ -158,6 +170,20 @@ module amoeba_pynq_top import cvw::*; #(
     input  logic [63:0]           m_ahb_hrdata,
     input  logic                  m_ahb_hready,
     input  logic                  m_ahb_hresp,
+    // Reset for the external AHB slave, active low, asserted whenever the core
+    // is.  ahblite_axi_bridge latches HRESP on failure and clears it only on a
+    // transfer that succeeds, so a bridge reset only by the PL's aresetn keeps
+    // an error from one run for the life of the bitstream.  Tying its reset to
+    // the core's makes every run start from a clean slave.
+    output logic                  m_ahb_hresetn,
+
+    // The core's combined bus HREADY, for the bridge's s_ahb_hready_in.  An
+    // AHB slave qualifies address phases on the BUS ready, not its own: with
+    // hready_in looped back to the bridge's own hready_out (the previous
+    // wiring), an address phase pipelined over a stalled internal-slave data
+    // phase is accepted early and then detected AGAIN when the bus really
+    // advances.  CVW's own fpgaTopArtyA7.sv wires the combined HREADY here.
+    output logic                  m_ahb_hready_bus,
 
     // No console pins.  See "NO SERIAL PINS" in the header.
     output logic                  uart_txd_obs
@@ -174,12 +200,60 @@ module amoeba_pynq_top import cvw::*; #(
         $error("amoeba_pynq_top_v.v hardcodes PA_BITS=56, this config wants %0d", PA_BITS);
     end
 
+    // The rebase above is only sound if the whole translated window fits in
+    // the 32 bits the bridge's address port carries.  Checking it here turns a
+    // mis-set ddr_carveout/ddr_size into an elaboration error rather than a
+    // board that wraps onto the PS kernel at run time.
+    if (!MEM_BRAM && ((64'(DDR_CARVEOUT_BASE) + P.EXT_MEM_RANGE) >= 64'h1_0000_0000)) begin : g_carveout_overflow
+        $error("DDR carve-out 0x%0h + EXT_MEM_RANGE 0x%0h overruns 32 bits",
+               DDR_CARVEOUT_BASE, P.EXT_MEM_RANGE);
+    end
+
+    // A carve-out that is not aligned to its own size makes the rebase carry
+    // across the range boundary, so an address near the top of EXT_MEM lands
+    // outside the assigned segment.  bd_pynq.tcl picks both; keep them
+    // consistent.
+    if (!MEM_BRAM && ((64'(DDR_CARVEOUT_BASE) & P.EXT_MEM_RANGE) != 64'd0)) begin : g_carveout_align
+        $error("DDR carve-out 0x%0h is not aligned to EXT_MEM_RANGE 0x%0h",
+               DDR_CARVEOUT_BASE, P.EXT_MEM_RANGE);
+    end
+
     // ---- reset -------------------------------------------------------------
     logic rst;                              // PL reset, synchronous active high
     assign rst = ~aresetn;
 
-    logic core_reset_sw, core_reset_ext;
-    assign core_reset_ext = rst | core_reset_sw;
+    logic core_reset_sw, core_reset_ext, core_hold_req;
+    assign core_hold_req = rst | core_reset_sw;
+
+    // STAGGERED RELEASE: THE BRIDGE COMES OUT OF RESET BEFORE THE CORE DOES.
+    //
+    // Two requirements that look contradictory and are not:
+    //
+    //  - The bridge must be reset once per run.  ahblite_axi_bridge's HRESP is
+    //    a latched register cleared only by a transfer that succeeds, so an
+    //    error taken in one run survives into the next; and beat_ok is gated
+    //    on !HRESP, so the beat counter then reads zero forever.  A probe
+    //    whose numbers describe a flag latched in some earlier run is not a
+    //    measurement.  Resetting the bridge only from aresetn gives that up.
+    //
+    //  - The bridge must not be reset in the same cycle the core starts
+    //    fetching.  It spans two clock domains and only its AHB half is reset
+    //    here; releasing both halves' view of the world simultaneously with
+    //    the first transfer leaves nothing settled.
+    //
+    // So release the bridge on the software's request and hold the CORE for
+    // BRIDGE_LEAD cycles longer.  The bridge gets a quiet window it can only
+    // spend idling -- ahb_run is still built from core_reset_ext, so no
+    // transfer can leave during it.
+    localparam int BRIDGE_LEAD = 16;
+    logic [4:0] lead_cnt;
+    always_ff @(posedge aclk) begin
+        if (rst)                 lead_cnt <= 5'(BRIDGE_LEAD);
+        else if (core_hold_req)  lead_cnt <= 5'(BRIDGE_LEAD);
+        else if (|lead_cnt)      lead_cnt <= lead_cnt - 1'b1;
+    end
+
+    assign core_reset_ext = core_hold_req | (|lead_cnt);
 
     // ---- DUT ---------------------------------------------------------------
     logic [P.AHBW-1:0]   HRDATAEXT;
@@ -220,16 +294,113 @@ module amoeba_pynq_top import cvw::*; #(
         .UARTSout      (uart_txd_obs)
     );
 
-    assign m_ahb_hsel      = HSELEXT;
-    assign m_ahb_haddr     = HADDR;
+    // ---- THE AHB LEAVES THIS MODULE ONLY WHILE THE CORE IS RUNNING --------
+    //
+    // wallypipelinedcore does NOT park its AHB outputs while it is held in
+    // reset.  Measured on hardware with the core halted and no image loaded:
+    //
+    //   HSEL=1 HTRANS=NONSEQ HWRITE=0 HBURST=INCR8 HSIZE=3 HREADY=1
+    //
+    // held statically, every cycle, for as long as reset is asserted.  It is
+    // not a transfer in flight -- it is the ebu's combinational HTRANS decode
+    // settling on NONSEQ out of reset -- but nothing downstream can tell the
+    // difference, and an AHB slave is required to believe it.
+    //
+    // amoeba_mem_bram never saw this because it takes HRESETn and is therefore
+    // held alongside the core.  ahblite_axi_bridge is reset from aresetn,
+    // which does not deassert between runs, so it accepted that static NONSEQ
+    // as a real burst 25 million times a second, issued AXI it could not
+    // complete, and latched its (sticky) HRESP.  By the time the core was
+    // released the bridge had been in an error state for a second and a half,
+    // and the core's genuine first fetch was answered from that state.  The
+    // symptom was "0 retired, 0 traps" and an error with no wait cycles, which
+    // reads exactly like a bridge rejecting our fetch.
+    //
+    // Gating here rather than fixing the reset wiring alone: this makes it
+    // structurally impossible for any transfer to leave while the core is
+    // held, whatever the core's outputs do and whatever the slave's reset is
+    // connected to.  HRESETn is the core's own synchronized reset; the
+    // core_reset_ext term additionally covers the two-cycle window after
+    // configuration where wallypipelinedsoc's reset synchroniser has not yet
+    // shifted the asserted value through.
+    logic ahb_run;
+    assign ahb_run = HRESETn & ~core_reset_ext;
+
+    // Released BRIDGE_LEAD cycles before core_reset_ext, by construction:
+    // core_reset_ext holds until lead_cnt drains, this does not.
+    assign m_ahb_hresetn   = ~core_hold_req;
+    // ALWAYS SELECTED WHILE RUNNING, AND THAT IS THE FIX FOR ABORTED BURSTS.
+    //
+    // Wally terminates an in-flight cache-line fill whenever the fetch is
+    // flushed -- buscachefsm takes .Flush(FlushD) and drops to ADR_PHASE, so
+    // every branch redirect during a fill ends an INCR8 early.  That is legal
+    // AHB and every simulation backend tolerates it.  ahblite_axi_bridge also
+    // tolerates it -- it has a designed burst-termination path that swallows
+    // the leftover AXI read beats -- but the ONLY entries into that path are
+    // idle_detected/nonseq_detected, and both are qualified on S_AHB_HSEL=1.
+    //
+    // On an abort the IFU stops driving the fetch address, HADDR moves off
+    // the external region, and HSELEXT drops in the very cycle the bridge
+    // needed to see HSEL=1 + HTRANS=IDLE.  ongoing_burst then latches, RREADY
+    // freezes with undelivered beats of an ARLEN=7 read AXI does not allow to
+    // abandon, and the next fetch either wedges behind the corpse or is
+    // served its stale beats.  Measured: two clean bursts, one abort, then a
+    // dead bus and 0 retired for the rest of the run.
+    //
+    // So: the bridge is the only slave on this exported bus -- keep it
+    // selected for as long as the core is running, and express "the core is
+    // not talking to you" purely through HTRANS=IDLE.  A selected slave
+    // seeing IDLE does nothing, except notice a terminated burst, which is
+    // the entire point.
+    assign m_ahb_hsel      = ahb_run;
+    // Core PA -> PS PA.
+    //
+    // ahblite_axi_bridge does NOT translate: it drives the AHB address onto
+    // AXI unchanged.  The core emits EXT_MEM_BASE-relative addresses starting
+    // at 0x8000_0000; the block design assigns this master a segment at
+    // DDR_CARVEOUT_BASE.  Without the rebase below the interconnect decodes
+    // nothing at all, the access never completes, and -- because a Zynq GP/HP
+    // port has no default slave and no timeout -- the core hangs forever on
+    // its first instruction fetch.  That is the failure this line prevents,
+    // and it is invisible in simulation because the Verilator tier drives
+    // ahb_to_memitf directly and never sees the bridge.
+    //
+    // In a BRAM build the bus does not leave this module; the port is an
+    // observation point for an ILA, so it carries the untranslated address.
+    // The mask is a CLAMP, and it is doing safety work, not tidiness.
+    //
+    // The obvious form of this is a subtract and an add.  It is not used,
+    // because the block design cannot bound this master: ahblite_axi_bridge
+    // exposes no AXI address space of its own -- IPI models it as a
+    // pass-through whose addresses come from the AHB side -- so there is
+    // nothing to attach an address segment to, and the interconnect therefore
+    // hands it the PS's ENTIRE 512 MB of DDR.  A stray core address would land
+    // in the running Linux kernel, which presents as the board hanging at
+    // random and is close to undiagnosable.
+    //
+    // AND-ing the offset with EXT_MEM_RANGE before OR-ing in the carve-out
+    // base makes escape structurally impossible: every address this module can
+    // emit is inside the carve-out by construction, whatever the core does.
+    // An out-of-range access wraps within the window instead of leaving it.
+    // The elaboration guards below are what make the OR equivalent to an add.
+    assign m_ahb_haddr     = MEM_BRAM
+                           ? 32'(HADDR)
+                           : 32'(64'(DDR_CARVEOUT_BASE)
+                                 | ((64'(HADDR) - P.EXT_MEM_BASE)
+                                    & P.EXT_MEM_RANGE));
     assign m_ahb_hwdata    = 64'(HWDATA);
     assign m_ahb_hwstrb    = 8'(HWSTRB);
     assign m_ahb_hwrite    = HWRITE;
     assign m_ahb_hsize     = HSIZE;
     assign m_ahb_hburst    = HBURST;
     assign m_ahb_hprot     = HPROT;
-    assign m_ahb_htrans    = HTRANS;
+    // IDLE unless the core is both running and genuinely addressing external
+    // memory.  The HSELEXT term matters now that m_ahb_hsel no longer carries
+    // it: without the mask an internal CLINT/UART access (HSELEXT=0,
+    // HTRANS=NONSEQ) would read as a phantom transaction to the bridge.
+    assign m_ahb_htrans    = (ahb_run & HSELEXT) ? HTRANS : 2'b00;
     assign m_ahb_hmastlock = HMASTLOCK;
+    assign m_ahb_hready_bus = HREADY;
 
     // ---- memory backend ----------------------------------------------------
     if (MEM_BRAM) begin : g_mem
@@ -318,6 +489,59 @@ module amoeba_pynq_top import cvw::*; #(
         MEM_BRAM                                // [    0] 1 = BRAM, 0 = AXI/DDR
     };
 
+    // ---- external AHB probe ------------------------------------------------
+    // Reset from aresetn, not HRESETn, so the counters survive a core reset and
+    // can be read after a run that never started.  Cleared by MON_CLEAR along
+    // with the other monitors.
+    logic [31:0] bus_state, bus_xact, bus_beat, bus_err, bus_stall;
+    logic [31:0] bus_addr, bus_xaddr, bus_wait;
+    logic [31:0] bus_errwait, bus_errxact, bus_prestate;
+    logic [31:0] bus_capdat, bus_capstat, bus_rstxact, bus_caprdat;
+    logic [5:0]  bus_capsel;
+
+    amoeba_bus_probe #(
+        .PA_BITS (PA)
+    ) probe (
+        .clk         (aclk),
+        .rstn        (aresetn),
+        .clear       (mon_clear),
+        // The GATED signals: the probe reports what the slave can see, so
+        // rst_xact reading non-zero now means the gate above has failed
+        // rather than merely describing the core's behaviour in reset.
+        .HSEL        (m_ahb_hsel),
+        .HTRANS      (m_ahb_htrans),
+        .HWRITE      (HWRITE),
+        .HBURST      (HBURST),
+        .HSIZE       (HSIZE),
+        .HADDR       (HADDR),
+        .HREADY      (HREADYEXT),
+        .HRESP       (HRESPEXT),
+        .HRDATA      (HRDATAEXT),
+        // core_reset_ext, not core_reset_sw: the gate above is built from
+        // core_reset_ext, so watching core_reset_sw let `armed` and `rst_xact`
+        // describe a different reset from the one that actually parks the
+        // bus.  The two disagreed and the probe reported a transfer count and
+        // a core_reset bit that could not both be true.
+        .core_reset  (core_reset_ext),
+        .xaddr       (m_ahb_haddr),
+        .state       (bus_state),
+        .xact_count  (bus_xact),
+        .beat_count  (bus_beat),
+        .err_count   (bus_err),
+        .stall_count (bus_stall),
+        .first_addr  (bus_addr),
+        .max_wait    (bus_wait),
+        .err_wait    (bus_errwait),
+        .err_xact    (bus_errxact),
+        .pre_state   (bus_prestate),
+        .cap_sel     (bus_capsel),
+        .cap_dat     (bus_capdat),
+        .cap_rdat    (bus_caprdat),
+        .cap_stat    (bus_capstat),
+        .rst_xact    (bus_rstxact),
+        .first_xaddr (bus_xaddr)
+    );
+
     amoeba_ctl #(
         .ADDR_W (12),
         .CAPS   (CAPS_WORD)
@@ -361,7 +585,23 @@ module amoeba_pynq_top import cvw::*; #(
         .trace_level   (trace_level),
         .trace_state   (trace_state),
         .trace_overflow(trace_overflow),
-        .trace_stalling(ExternalStall)
+        .trace_stalling(ExternalStall),
+        .bus_state     (bus_state),
+        .bus_xact      (bus_xact),
+        .bus_beat      (bus_beat),
+        .bus_err       (bus_err),
+        .bus_stall     (bus_stall),
+        .bus_addr      (bus_addr),
+        .bus_xaddr     (bus_xaddr),
+        .bus_wait      (bus_wait),
+        .bus_errwait   (bus_errwait),
+        .bus_errxact   (bus_errxact),
+        .bus_prestate  (bus_prestate),
+        .bus_capsel    (bus_capsel),
+        .bus_capdat    (bus_capdat),
+        .bus_capstat   (bus_capstat),
+        .bus_rstxact   (bus_rstxact),
+        .bus_caprdat   (bus_caprdat)
     );
 
     // ---- bus monitor -------------------------------------------------------
@@ -466,11 +706,26 @@ module amoeba_pynq_top import cvw::*; #(
         assign m_axis_trace_tvalid = 1'b0;
         assign m_axis_trace_tlast  = 1'b0;
         assign m_axis_trace_tkeep  = '0;
-        assign retired             = '0;
-        assign traps               = '0;
         assign trace_level         = '0;
         assign trace_state         = '0;
         assign trace_overflow      = 1'b0;
+
+        // retired/traps are NOT tied off here.  They used to be, and the
+        // result was that every TRACE=0 build reported "0 retired, 0 traps"
+        // whether the core was executing or wedged -- see amoeba_retire.sv.
+        amoeba_retire #(.XLEN(P.XLEN)) retire_cnt (
+            .clk         (HCLK),
+            .rst         (rst),
+            .clear       (mon_clear),
+            .core_reset  (core_reset_ext),
+            .StallW      (dut.soc.core.StallW),
+            .FlushW      (dut.soc.core.FlushW),
+            .PCM         (dut.soc.core.ifu.PCM),
+            .InstrValidM (dut.soc.core.ieu.InstrValidM),
+            .TrapM       (dut.soc.core.TrapM),
+            .retired     (retired),
+            .traps       (traps)
+        );
     end
 
     // soc_reset is the DUT's synchronized reset, brought out for waves only.

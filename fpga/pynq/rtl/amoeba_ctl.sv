@@ -85,7 +85,27 @@ module amoeba_ctl #(
     input  logic [15:0]           trace_level,
     input  logic [1:0]            trace_state,
     input  logic                  trace_overflow,
-    input  logic                  trace_stalling
+    input  logic                  trace_stalling,
+
+    // ---- external AHB probe, from amoeba_bus_probe -------------------------
+    // Read-only, and the only window onto the bus between the core and its
+    // memory.  See that module's header for why this exists at all.
+    input  logic [31:0]           bus_state,
+    input  logic [31:0]           bus_xact,
+    input  logic [31:0]           bus_beat,
+    input  logic [31:0]           bus_err,
+    input  logic [31:0]           bus_stall,
+    input  logic [31:0]           bus_addr,
+    input  logic [31:0]           bus_xaddr,
+    input  logic [31:0]           bus_wait,
+    input  logic [31:0]           bus_errwait,
+    input  logic [31:0]           bus_errxact,
+    input  logic [31:0]           bus_prestate,
+    output logic [5:0]            bus_capsel,
+    input  logic [31:0]           bus_capdat,
+    input  logic [31:0]           bus_capstat,
+    input  logic [31:0]           bus_rstxact,
+    input  logic [31:0]           bus_caprdat
 );
 
     // ---- register offsets --------------------------------------------------
@@ -110,6 +130,22 @@ module amoeba_ctl #(
     localparam logic [7:0] R_TRIG_PC_LO  = 8'h50;
     localparam logic [7:0] R_TRIG_PC_HI  = 8'h54;
     localparam logic [7:0] R_TRACE_STAT  = 8'h58;
+    localparam logic [7:0] R_BUS_STATE   = 8'h60;
+    localparam logic [7:0] R_BUS_XACT    = 8'h64;
+    localparam logic [7:0] R_BUS_BEAT    = 8'h68;
+    localparam logic [7:0] R_BUS_ERR     = 8'h6C;
+    localparam logic [7:0] R_BUS_STALL   = 8'h70;
+    localparam logic [7:0] R_BUS_ADDR    = 8'h74;
+    localparam logic [7:0] R_BUS_WAIT    = 8'h7C;
+    localparam logic [7:0] R_BUS_ERRWAIT = 8'h80;
+    localparam logic [7:0] R_BUS_ERRXACT = 8'h84;
+    localparam logic [7:0] R_BUS_PRESTATE = 8'h88;
+    localparam logic [7:0] R_BUS_CAPSEL  = 8'h8C;   // W: entry index
+    localparam logic [7:0] R_BUS_CAPDAT  = 8'h90;   // R: that entry
+    localparam logic [7:0] R_BUS_CAPSTAT = 8'h94;   // R: {done, ptr}
+    localparam logic [7:0] R_BUS_RSTXACT = 8'h98;   // R: xfers during reset
+    localparam logic [7:0] R_BUS_CAPRDAT = 8'h9C;   // R: HRDATA[31:0]
+    localparam logic [7:0] R_BUS_XADDR   = 8'h78;
 
     // ---- write channel -----------------------------------------------------
     // Address and data are accepted independently; the write commits when both
@@ -170,6 +206,22 @@ module amoeba_ctl #(
             R_TRIG_PC_LO:    rdata_n = trig_pc[31:0];
             R_TRIG_PC_HI:    rdata_n = trig_pc[63:32];
             R_TRACE_STAT:    rdata_n = {14'h0, trace_state, trace_level};
+            R_BUS_STATE:     rdata_n = bus_state;
+            R_BUS_XACT:      rdata_n = bus_xact;
+            R_BUS_BEAT:      rdata_n = bus_beat;
+            R_BUS_ERR:       rdata_n = bus_err;
+            R_BUS_STALL:     rdata_n = bus_stall;
+            R_BUS_ADDR:      rdata_n = bus_addr;
+            R_BUS_XADDR:     rdata_n = bus_xaddr;
+            R_BUS_WAIT:      rdata_n = bus_wait;
+            R_BUS_ERRWAIT:   rdata_n = bus_errwait;
+            R_BUS_ERRXACT:   rdata_n = bus_errxact;
+            R_BUS_PRESTATE:  rdata_n = bus_prestate;
+            R_BUS_CAPSEL:    rdata_n = 32'(bus_capsel);
+            R_BUS_CAPDAT:    rdata_n = bus_capdat;
+            R_BUS_CAPSTAT:   rdata_n = bus_capstat;
+            R_BUS_RSTXACT:   rdata_n = bus_rstxact;
+            R_BUS_CAPRDAT:   rdata_n = bus_caprdat;
             default:         rdata_n = 32'hDEAD_C0DE;
         endcase
     end
@@ -180,6 +232,7 @@ module amoeba_ctl #(
             w_full      <= 1'b0;
             awaddr_q    <= '0;
             wdata_q     <= '0;
+            bus_capsel  <= '0;
             s_axi_bvalid<= 1'b0;
             s_axi_rvalid<= 1'b0;
             s_axi_rdata <= '0;
@@ -224,6 +277,7 @@ module amoeba_ctl #(
                     R_TRIG_COUNT:    trig_count        <= wr_data;
                     R_TRIG_PC_LO:    trig_pc[31:0]     <= wr_data;
                     R_TRIG_PC_HI:    trig_pc[63:32]    <= wr_data;
+                    R_BUS_CAPSEL:    bus_capsel        <= wr_data[5:0];
                     default: ; // read-only or unmapped: writes are ignored, not errors
                 endcase
             end

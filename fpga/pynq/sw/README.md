@@ -98,6 +98,44 @@ if the answer is more than 5% off. Reading the SLCR back would prove only that
 the write landed; counting real cycles is the only claim that does not depend on
 `pl.py`'s own divider arithmetic being right. `--fclk 0` turns both off.
 
+## The DDR backend
+
+`MEM_BACKEND=AXI` replaces the block RAM with a window on the PS's own DDR, and
+the driver follows it without the caller doing anything: `Amoeba.mem` maps the
+carve-out at its PS physical address instead of the image window, and the same
+`offset = paddr - EXT_MEM_BASE` arithmetic addresses both, because the bridge
+maps core `0x8000_0000` onto the carve-out base.
+
+Three things about that path are worth knowing before you use it, because each
+one fails silently rather than loudly.
+
+**The PS has to be kept out of the carve-out.** The block design clamps the
+core's window so a runaway core address cannot reach the PS kernel; nothing
+clamps the other direction. If Linux on the A9 is left free to allocate at
+`0x1000_0000`, the kernel and the soft core share pages and you get corruption
+that moves around between boots. Reserve it on the SD card — a `mem=` bootarg
+or a reserved-memory node in the PS devicetree.
+
+**The mapping must be uncached, and is.** `mmio.py` opens `/dev/mem` with
+`O_SYNC`, which makes the kernel map the region uncached. That is not
+housekeeping: Zynq-7000's HP ports are not coherent with the Cortex-A9 caches,
+so an image written through a cached mapping can still be sitting in L1 or L2
+while the PL reads stale DDR underneath it. The core then executes garbage from
+memory the PS can read back perfectly, which looks like a bitstream fault and is
+not one.
+
+**`load()` does not scrub the whole carve-out.** Uncached writes run at tens of
+MB/s, so zeroing 256 MiB would cost seconds on every run to clear memory no
+program reads. It zeroes the image's span and the HTIF page — that page
+mattering because a stale exit word there is read the instant the core starts,
+and the run "completes" immediately with the previous run's exit code. Memory
+above the image keeps whatever the last run left; pass `zero_all=True` when
+that matters.
+
+`CAPS.mem_kb` is a BRAM-only field. It carries the `MEM_KB` build parameter
+verbatim and an AXI build leaves it at its default, so it cheerfully reports a
+128 KiB block RAM that is not in the design. Ask `Amoeba.mem_bytes`.
+
 ## You do not need the `.hwh` for this part
 
 The driver addresses the control block at a fixed address out of `regs.py`

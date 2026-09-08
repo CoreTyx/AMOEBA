@@ -156,6 +156,11 @@ if {$stage eq "synth"} {
 }
 
 # ---- implementation --------------------------------------------------------
+# See tcl/opt_design_pre.tcl: without this hook Vivado 2024.1 segfaults inside
+# opt_design's power-optimisation task on this design.
+set_property STEPS.OPT_DESIGN.TCL.PRE \
+    [file normalize [file join $script_dir opt_design_pre.tcl]] [get_runs impl_1]
+
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {

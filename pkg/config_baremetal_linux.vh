@@ -88,8 +88,8 @@ localparam logic ZICSR_SUPPORTED    = 1; // required throughout M/S/U
 // data access traps", which is exactly what this config now does, so the RVFI
 // shadow checker no longer trips the false mismatch that forces LINUX_RVFI=0
 // on the main config (see sim/Makefile).
-localparam logic ZICCLSM_SUPPORTED  = 0;
-localparam logic ZICOND_SUPPORTED   = 0;
+localparam logic ZICCLSM_SUPPORTED  = 0; // fade able
+localparam logic ZICOND_SUPPORTED   = 0; // fade fs
 
 // Multiplication & division extensions
 // M implies (and in the configuration file requires) Zmmul
@@ -104,13 +104,14 @@ localparam logic ZMMUL_SUPPORTED = 1;
 // reservation in a standalone address register and valid bit (lrsc.sv), not in
 // cache-line state, so evicting the line does not clear the reservation and a
 // constrained LR/SC sequence still makes forward progress.
-localparam logic ZAAMO_SUPPORTED  = 1;
-localparam logic ZALRSC_SUPPORTED = 1;
+localparam logic ZAAMO_SUPPORTED  = 1; // we need this
+localparam logic ZALRSC_SUPPORTED = 1; // we need this
 
 // Bit manipulation extensions
 // B extension is Zba + Zbb + Zbs
 // The kernel probes these from the device tree; with them absent from the dts
 // it never emits them.
+// --------fade if no keystone--------
 localparam logic ZBA_SUPPORTED = 0;
 localparam logic ZBB_SUPPORTED = 0;
 localparam logic ZBS_SUPPORTED = 0;
@@ -118,6 +119,7 @@ localparam logic ZBC_SUPPORTED = 0;
 
 // Scalar crypto extensions
 // Zkn is all 6 of these.  The kernel's crypto is generic C on this build.
+// --------fade if no keystone--------
 localparam logic ZBKB_SUPPORTED = 0;
 localparam logic ZBKC_SUPPORTED = 0;
 localparam logic ZBKX_SUPPORTED = 0;
@@ -128,6 +130,7 @@ localparam logic ZKNH_SUPPORTED = 0;
 // Compressed extensions
 // C extension is Zca + Zcf (if RV32 and F supported) + Zcd (if D supported)
 // All compressed extensions require Zca
+// WE ARE USING A ONLY, DONT NEED ANY OTHERS
 localparam logic ZCA_SUPPORTED = 1;  // required: the kernel is built with C
 localparam logic ZCB_SUPPORTED = 0;
 localparam logic ZCF_SUPPORTED = 0; // RV32 only, requires F
@@ -141,6 +144,7 @@ localparam logic ZCD_SUPPORTED = 0; // requires D
 // that does not advertise f/d, or the kernel enables FS and faults.
 // A build that clears these must also compile with +define+ECE411_NO_FLOAT, or
 // rv64_core_wrapper taps soc.core.fpu.fpu.fregfile, which no longer elaborates.
+// NO FLOATS WE ARE USING BERKELEY SOFTFLOAT
 localparam logic F_SUPPORTED   = 0;
 localparam logic D_SUPPORTED   = 0;
 localparam logic Q_SUPPORTED   = 0;
@@ -155,6 +159,7 @@ localparam logic U_SUPPORTED = 1; // User mode
 // Supervisor level extensions
 // Not required: without Sstc the kernel sets its timer through the SBI TIME
 // extension, which OpenSBI backs with the CLINT's mtimecmp.
+// NOBODY GAFS
 localparam logic SSTC_SUPPORTED = 0; // Supervisor-mode timer interrupts
 
 // Hardware performance counters
@@ -179,6 +184,8 @@ localparam logic SSTC_SUPPORTED = 0; // Supervisor-mode timer interrupts
 //
 // Turn it back on only together with COUNTERS = 12'd32, and expect to pay for
 // all 32.
+
+// LETS MAKE OUR OWN COUNTERS INSTEAD
 localparam logic ZICNTR_SUPPORTED = 0;
 localparam logic ZIHPM_SUPPORTED  = 0;
 localparam COUNTERS = 12'd0;
@@ -187,6 +194,7 @@ localparam COUNTERS = 12'd0;
 // No DMA-coherent device exists on this SoC, so nothing needs a cache
 // maintenance op.  Requires dropping CONFIG_RISCV_ISA_ZICBOM/ZICBOZ and the
 // riscv,cbom-block-size / riscv,cboz-block-size dts properties.
+// WE DONT NEED SW CACHE MGMT
 localparam logic ZICBOM_SUPPORTED = 0;
 localparam logic ZICBOZ_SUPPORTED = 0;
 localparam logic ZICBOP_SUPPORTED = 0;
@@ -200,14 +208,15 @@ localparam logic ZICBOP_SUPPORTED = 0;
 // fault when A is clear, or when D is clear on a store, and Linux's RISC-V
 // fault handler has always been able to set those bits in software (Svade is
 // the architectural fallback, and Linux ran this way on QEMU for years).
+// WE NEED ONLY SV39 VIRT MEM
 localparam logic SV32_SUPPORTED    = 0;
 localparam logic SV39_SUPPORTED    = 1;
 localparam logic SV48_SUPPORTED    = 0;
 localparam logic SV57_SUPPORTED    = 0;
 localparam logic SVPBMT_SUPPORTED  = 0;
-localparam logic SVNAPOT_SUPPORTED = 0;
+localparam logic SVNAPOT_SUPPORTED = 0; // FLAGGED FOR MAYBE
 localparam logic SVINVAL_SUPPORTED = 0;
-localparam logic SVADU_SUPPORTED   = 0;
+localparam logic SVADU_SUPPORTED   = 0; // FLAGGED FOR MAYBE
 
 
 // LSU microarchitectural Features
@@ -216,6 +225,8 @@ localparam logic SVADU_SUPPORTED   = 0;
 // every fetch and every page-table walk becomes an AHB round trip through a
 // 3-cycle behavioral memory, and a boot is hundreds of millions of
 // instructions.  They stay -- see the geometry below.
+// REVIEWED - BUS SUPPORTED MIGHT BE 0 SOON!!!
+// We lowkey have 2 caches
 localparam logic BUS_SUPPORTED = 1;
 localparam logic DCACHE_SUPPORTED = 1;
 localparam logic ICACHE_SUPPORTED = 1;
@@ -228,6 +239,7 @@ localparam logic BIGENDIAN_SUPPORTED = 0;
 // here is a three-level Sv39 walk, and every one of those walks is served by
 // the 512-byte D-cache below -- shrinking both at once compounds, and 2 entries
 // would put the walker in the critical path of nearly every access.
+// "THAT'S ALL FINE" - SAIPARNAV
 localparam ITLB_ENTRIES = 32'd8;
 localparam DTLB_ENTRIES = 32'd8;
 
@@ -267,11 +279,12 @@ localparam DTLB_ENTRIES = 32'd8;
 // four times the tag array holding exactly the same data.  512 bits is also the
 // floor for CACHE_SRAMLEN = 128 to divide evenly and for the AHB burst to stay
 // at 8 beats of AHBW.
+// Reviewed - pending area estimates (each is 8KB = 2KB * 4)
 localparam DCACHE_NUMWAYS = 32'd4;
-localparam DCACHE_WAYSIZEINBYTES = 32'd4096;
+localparam DCACHE_WAYSIZEINBYTES = 32'd2048;
 localparam DCACHE_LINELENINBITS = 32'd512;
 localparam ICACHE_NUMWAYS = 32'd4;
-localparam ICACHE_WAYSIZEINBYTES = 32'd4096;
+localparam ICACHE_WAYSIZEINBYTES = 32'd2048;
 localparam ICACHE_LINELENINBITS = 32'd512;
 localparam CACHE_SRAMLEN = 32'd128;
 
@@ -293,13 +306,15 @@ localparam PMP_ENTRIES = 32'd0;
 
 // grain size should be a full cache line to avoid problems with accesses within a cache line
 // that span grain boundaries but are handled without a spill
-localparam PMP_G = 32'd0;  // unused with PMP_ENTRIES = 0
+localparam PMP_G = 32'd0;  // pending thought experiement
 
 // Address space
 // boot_shim.bin, per testcode/linux/README.md's memory layout.
+// "approved" - shwetha
 localparam logic [63:0] RESET_VECTOR = 64'h0000000080000000;
 
 // WFI Timeout Wait
+// this is the width of the counter that waits for interrupts (triggers on overflow)
 localparam WFI_TIMEOUT_BIT = 32'd16;
 
 // Peripheral Physical Addresses
@@ -328,7 +343,7 @@ localparam logic [63:0] EXT_MEM_RANGE    = 64'h0FFFFFFF;
 localparam logic CLINT_SUPPORTED = 1;
 localparam logic [63:0] CLINT_BASE       = 64'h02000000;
 localparam logic [63:0] CLINT_RANGE      = 64'h0000FFFF;
-localparam logic GPIO_SUPPORTED = 0;
+localparam logic GPIO_SUPPORTED = 0;        // Maybe
 localparam logic [63:0] GPIO_BASE        = 64'h10060000;
 localparam logic [63:0] GPIO_RANGE       = 64'h000000FF;
 // required: the console, and the only way a boot reports success -- the
@@ -352,6 +367,7 @@ localparam logic SPI_SUPPORTED = 0;
 localparam logic [63:0] SPI_BASE         = 64'h10040000;
 localparam logic [63:0] SPI_RANGE        = 64'h00000FFF;
 
+// "we don't need to care about that " -s sai
 // Bus Interface width
 localparam AHBW = (XLEN);
 
@@ -366,6 +382,7 @@ localparam logic GPIO_LOOPBACK_TEST = 1;
 localparam logic SPI_LOOPBACK_TEST  = 1;
 
 // Hardware configuration
+// "we don't need to care about that " -s sai
 localparam UART_PRESCALE = 32'd1;
 
 // Interrupt configuration
@@ -382,9 +399,9 @@ localparam PLIC_SDC_ID = 32'd9;
 // Performance only, never correctness.  Off here for the same reason as the
 // caches, and it stacks with them: no predictor and an 8-line I-cache means
 // most taken branches cost both a mispredict and a miss.
-localparam logic BPRED_SUPPORTED = 0;
-localparam BPRED_TYPE = `BP_GSHARE; // BP_GSHARE_BASIC, BP_GLOBAL, BP_GLOBAL_BASIC, BP_TWOBIT
-localparam BPRED_SIZE = 32'd10;
+localparam logic BPRED_SUPPORTED = 1;
+localparam BPRED_TYPE = `BP_TWOBIT; // BP_GSHARE_BASIC, BP_GLOBAL, BP_GLOBAL_BASIC, BP_TWOBIT
+localparam BPRED_SIZE = 32'd8;
 localparam BPRED_NUM_LHR = 32'd6;
 localparam BTB_SIZE = 32'd10;
 localparam RAS_SIZE = 32'd16;
@@ -397,6 +414,6 @@ localparam RADIX = 32'd4;
 localparam DIVCOPIES = 32'd4;
 
 // Memory synthesis configuration
-localparam logic USE_SRAM = 0;
+localparam logic USE_SRAM = 0; // TODO: should be 1 for synth
 
 `include "config-shared.vh"

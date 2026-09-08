@@ -101,14 +101,24 @@ module amoeba_trace #(
     // ---- pipeline the M-stage taps to W ------------------------------------
     logic [31:0]     InstrRawE, InstrRawM, InstrRawW;
     logic [XLEN-1:0] PCW;
-    logic            InstrValidW, TrapW;
+    logic            InstrValidW;
+    logic            TrapW;
 
     flopenrc #(32)   iraw_e (clk, tap_rst, FlushE, ~StallE, InstrRawD, InstrRawE);
     flopenrc #(32)   iraw_m (clk, tap_rst, FlushM, ~StallM, InstrRawE, InstrRawM);
     flopenrc #(32)   iraw_w (clk, tap_rst, FlushW, ~StallW, InstrRawM, InstrRawW);
     flopenrc #(XLEN) pc_w   (clk, tap_rst, FlushW, ~StallW, PCM,        PCW);
     flopenrc #(1)    iv_w   (clk, tap_rst, FlushW, ~StallW, InstrValidM, InstrValidW);
-    flopenrc #(1)    trap_w (clk, tap_rst, FlushW, ~StallW, TrapM,       TrapW);
+    // NOT walked to W like the others.  A trap FLUSHES W in the very cycle
+    // TrapM asserts, so a TrapM value enabled through a FlushW-cleared flop
+    // can never be observed, and a trapped instruction never satisfies the
+    // retire condition either -- the old form made traps structurally
+    // uncountable (a FreeRTOS run full of timer interrupts reported 0).
+    // Edge-detect at M instead: the flush empties M behind a trap, so
+    // consecutive trap events are always at least two cycles apart.
+    logic TrapM_q;
+    flopr #(1) trap_q (clk, tap_rst, TrapM, TrapM_q);
+    assign TrapW = TrapM & ~TrapM_q;
 
     // Same retire condition hdl/rv64_core_wrapper.sv uses for monitor_valid.
     // The (|PCW) term suppresses the bubble that walks out of the pipeline
@@ -123,9 +133,9 @@ module amoeba_trace #(
         if (tap_rst) begin
             retired <= '0;
             traps   <= '0;
-        end else if (retire) begin
-            retired <= retired + 1'b1;
-            if (TrapW) traps <= traps + 1'b1;
+        end else begin
+            if (retire) retired <= retired + 1'b1;
+            if (TrapW)  traps   <= traps   + 1'b1;
         end
     end
 

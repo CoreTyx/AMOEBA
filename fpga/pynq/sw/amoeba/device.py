@@ -16,6 +16,9 @@ from . import pl as _pl
 from .mmio import Mmio
 
 
+PAGE_BYTES = 4096
+
+
 class AmoebaError(RuntimeError):
     pass
 
@@ -121,8 +124,10 @@ class Amoeba:
 
     def describe(self) -> str:
         v = self.version
+        kib = self.mem_bytes // 1024
+        size = f"{kib} KiB" if kib < 1024 else f"{kib // 1024} MiB"
         return (f"amoeba v{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}  "
-                f"mem={self.mem_kb} KiB  "
+                f"mem={size}  "
                 f"backend={'BRAM' if self.is_bram else 'AXI/DDR'}  "
                 f"trace={'yes' if self.has_trace else 'no'}")
 
@@ -145,17 +150,101 @@ class Amoeba:
 
     # ---- image ------------------------------------------------------------
     @property
+    def mem_bytes(self) -> int:
+        """The core's memory, in bytes, whichever backend provides it.
+
+        Not CAPS.mem_kb: that field carries the MEM_KB build parameter
+        verbatim and an AXI build leaves it at its default, so it reports a
+        128 KiB block RAM that is not there.  See regs.caps_mem_kb.
+        """
+        return self.mem_kb * 1024 if self.is_bram else R.DDR_CARVEOUT_SIZE
+
+    @staticmethod
+    def _carveout_is_reserved(base: int, size: int,
+                              iomem: str = "/proc/iomem") -> "Optional[str]":
+        """None if the carve-out is outside Linux's RAM, else what overlaps.
+
+        THIS IS NOT A TIDINESS CHECK.  The carve-out is ordinary DDR: if Linux
+        was not told to stay out of it, those pages hold running processes and
+        kernel data.  Loading an image there scribbles over whatever is live,
+        and the PL writes over it again from the other side.  The symptom is
+        not a failed load -- the readback verifies fine, because nothing has
+        reused the pages yet -- it is segfaults minutes later in unrelated
+        programs, an fpga_manager that returns EBUSY, and an SD card that
+        slowly fills with corruption.  It also silently invalidates any
+        measurement taken on that boot.
+
+        /proc/iomem lists what the kernel claims.  An overlap with a "System
+        RAM" region means the reservation was never made.
+        """
+        end = base + size
+        try:
+            with open(iomem) as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return None                # cannot tell; do not block on it
+        for line in lines:
+            head, _, name = line.partition(":")
+            name = name.strip()
+            if name != "System RAM":
+                continue
+            try:
+                lo_s, _, hi_s = head.strip().partition("-")
+                lo, hi = int(lo_s, 16), int(hi_s, 16) + 1
+            except ValueError:
+                continue
+            if lo < end and base < hi:
+                return f"{lo:#x}-{hi - 1:#x} is System RAM"
+        return None
+
+    @property
     def mem(self) -> Mmio:
+        """A window onto the core's memory.
+
+        Two different things behind one name, deliberately, so load() does not
+        have to care:
+
+        - BRAM build: the AXI4-Lite image window, port B of the dual-port
+          block RAM, at a PL address.  Word-at-a-time, because it is a
+          peripheral.
+        - AXI build: the DDR carve-out at its PS physical address.  The bridge
+          maps core 0x8000_0000 to this, so the same
+          `offset = paddr - EXT_MEM_BASE` arithmetic addresses both.  Written
+          with memcpy, because it is DRAM and 256 MiB a word at a time is not
+          a thing that finishes.
+        """
         if self._mem is None:
-            if not self.is_bram:
-                raise AmoebaError(
-                    "this bitstream has no image window: it is an AXI/DDR "
-                    "build, where the PS writes the carve-out directly")
-            self._mem = Mmio(R.MEM_BASE, self.mem_kb * 1024)
+            if self.is_bram:
+                self._mem = Mmio(R.MEM_BASE, self.mem_kb * 1024)
+            else:
+                clash = self._carveout_is_reserved(R.DDR_CARVEOUT_BASE,
+                                                   R.DDR_CARVEOUT_SIZE)
+                if clash:
+                    raise AmoebaError(
+                        f"the DDR carve-out 0x{R.DDR_CARVEOUT_BASE:08x}.."
+                        f"0x{R.DDR_CARVEOUT_BASE + R.DDR_CARVEOUT_SIZE - 1:08x}"
+                        f" is inside Linux's own RAM ({clash}).\n"
+                        "  Loading an image there overwrites live kernel and "
+                        "process memory, and the\n"
+                        "  PL writes over it from the other side.  It does not "
+                        "fail cleanly: the\n"
+                        "  readback verifies, and then unrelated programs "
+                        "segfault minutes later,\n"
+                        "  fpga_manager starts returning EBUSY, and every "
+                        "measurement from that\n"
+                        "  boot is suspect.\n"
+                        "  Reserve it on the PS side and reboot -- add "
+                        "'mem=256M' to the kernel\n"
+                        "  command line on the SD card, or a reserved-memory "
+                        "node in the devicetree.\n"
+                        "  See fpga/pynq/DESIGN.md 'carve-out'.")
+                self._mem = Mmio(R.DDR_CARVEOUT_BASE, R.DDR_CARVEOUT_SIZE,
+                                 wordwise=False)
         return self._mem
 
     def load(self, img: "_image.Image", *, verify: bool = True,
-             zero: bool = True, legacy_axi_reset: bool = False) -> None:
+             zero: bool = True, zero_all: bool = False,
+             legacy_axi_reset: bool = False) -> None:
         """Load a program while the core is held in reset.
 
         Checks three things before writing anything, because each of them
@@ -173,25 +262,88 @@ class Amoeba:
         if not self.in_reset:
             raise AmoebaError("core is running; call halt() before load()")
 
-        size = self.mem_kb * 1024
+        size = self.mem_bytes
         end = img.load_end - R.EXT_MEM_BASE
         if img.load_base < R.EXT_MEM_BASE or end > size:
+            if self.is_bram:
+                where = f"{size // 1024} KiB window at 0x{R.EXT_MEM_BASE:08x}"
+                fix = ("  The block RAM truncates rather than faulting, so "
+                       "this would wrap onto itself.  Rebuild with a matching "
+                       "linker script, or raise MEM_KB.")
+            else:
+                where = (f"{size // (1024 * 1024)} MiB DDR carve-out mapped "
+                         f"at 0x{R.EXT_MEM_BASE:08x}")
+                fix = ("  The block design clamps the core to the carve-out, "
+                       "so this would fault on the bus rather than wrap.  "
+                       "Rebuild with a matching linker script, or widen "
+                       "ddr_carveout/ddr_size in tcl/bd_pynq.tcl -- and if "
+                       "you widen it, reserve the extra range from the PS "
+                       "too.")
             raise AmoebaError(
                 f"image spans 0x{img.load_base:08x}..0x{img.load_end:08x}, "
-                f"outside the {self.mem_kb} KiB window at "
-                f"0x{R.EXT_MEM_BASE:08x}.\n"
-                "  The memory truncates rather than faulting, so this would "
-                "wrap onto itself.  Rebuild with a matching linker script, or "
-                "raise MEM_KB.")
+                f"outside the {where}.\n" + fix)
 
         want = R.tohost_addr(self.mem_kb, self.is_bram)
         have = img.tohost()
         if have is not None and have != want:
+            # Name the actual mistake when it is recognisable.  An image built
+            # for the OTHER backend is by far the most common cause of this,
+            # and generic advice here is worse than none: telling someone on a
+            # DDR build to "build with TARGET=pynq" sends them to rebuild the
+            # image exactly the way it already is.
+            other = R.tohost_addr(self.mem_kb, not self.is_bram)
+            if have == other:
+                # A PAIR IS MISMATCHED; EITHER HALF COULD BE THE WRONG ONE.
+                # Naming only the image is a trap: someone deploying a BRAM
+                # bitstream who forgot BITDIR gets told to rebuild images that
+                # were right all along, and rebuilding them makes it worse.
+                # The bitstream is the likelier culprit anyway -- it is the
+                # half deploy.sh takes from an environment variable.
+                mine, theirs = (("AXI/DDR", "block RAM") if not self.is_bram
+                                else ("block RAM", "AXI/DDR"))
+                target = "pynq-ddr" if not self.is_bram else "pynq"
+                bitdir = ("baremetal_linux-AXI" if not self.is_bram
+                          else "baremetal_linux-BRAM")
+                imgdir = "images" if not self.is_bram else "images-bram"
+                why = (f"  0x{have:08x} is where a {theirs} build puts it, but "
+                       f"this bitstream is {mine}.\n"
+                       f"  One of the two is the wrong one, and which depends "
+                       f"on what you meant to run.\n"
+                       f"\n"
+                       f"  If you meant to run {mine} -- the bitstream now on "
+                       f"the board -- fix the image:\n"
+                       f"      make -C fpga/pynq images IMAGE_TARGET={target}\n"
+                       f"      BITDIR=$PWD/bit/{bitdir} ./sw/deploy.sh "
+                       f"<board> {imgdir}/*.elf\n"
+                       f"\n"
+                       f"  If you meant to run {theirs}, the BITSTREAM is the "
+                       f"stale half: redeploy\n"
+                       f"  with BITDIR pointing at that build.  Check the "
+                       f"'backend=' line above --\n"
+                       f"  it reports what is actually programmed, not what "
+                       f"you intended.")
+            else:
+                why = ("  It matches neither backend's address, so it is not "
+                       "simply the wrong TARGET: check MEM_KB against the "
+                       "bitstream, and the PROVIDE(tohost) in the linker "
+                       "script.")
             raise AmoebaError(
                 f"{img.path} puts tohost at 0x{have:08x}; the bus monitor "
                 f"watches 0x{want:08x}.\n"
-                "  Exit detection would never fire.  Build with "
-                "TARGET=pynq (freertos_pynq.ld), or check MEM_KB.")
+                f"  Exit detection would never fire.\n{why}")
+
+        if legacy_axi_reset and not self.is_bram:
+            raise AmoebaError(
+                "--legacy-axi-reset is a block-RAM workaround and is unsafe "
+                "on an AXI/DDR build.\n"
+                "  It releases the core before writing the image.  That is "
+                "defensible against block RAM, where the array is zeroed by "
+                "configuration and the core just spins taking access faults "
+                "on an illegal instruction.  DDR is not zeroed: it still "
+                "holds the LAST run's program, so the core would execute it "
+                "while the PS overwrites it underneath.\n"
+                "  An AXI build has no image window and never needed the "
+                "workaround -- drop the flag.")
 
         if legacy_axi_reset:
             # Workaround for bitstreams built before amoeba_mem_bram got its
@@ -210,20 +362,45 @@ class Amoeba:
             # Do not reach for this on a fixed bitstream.
             self.start()
         try:
-            self._load_body(img, verify=verify, zero=zero)
+            self._load_body(img, verify=verify, zero=zero, zero_all=zero_all)
         finally:
             if legacy_axi_reset:
                 self.halt()
 
+    def _zero_for(self, img: "_image.Image", *, everything: bool) -> None:
+        """Clear the memory the program will use.
+
+        Block RAM comes up zeroed in the bitstream, so the first run after
+        programming is clean -- but the second starts on the first's memory,
+        which is a fine way to spend an afternoon on a bug that only appears
+        on re-runs.
+
+        SCOPE.  For block RAM this is the whole window, which costs nothing.
+        For the DDR carve-out it is the image's span plus the HTIF page, and
+        deliberately not the other 255 MiB: that mapping is uncached (see
+        mmio.py) so a full scrub runs at tens of MB/s, and it would spend
+        seconds per run clearing memory no program reads.
+
+        The HTIF page is not optional even though it sits above the image.  A
+        stale exit word left there by the previous run is read by the bus
+        monitor the moment the core starts, and the run "finishes" instantly
+        with the last run's exit code.
+        """
+        if everything or self.is_bram:
+            self.mem.fill(0, self.mem_bytes, 0)
+            return
+
+        end = min(img.load_end - R.EXT_MEM_BASE, self.mem_bytes)
+        self.mem.fill(0, end, 0)
+
+        page = R.tohost_addr(self.mem_kb, self.is_bram) - R.EXT_MEM_BASE
+        if end <= page and page + PAGE_BYTES <= self.mem_bytes:
+            self.mem.fill(page, PAGE_BYTES, 0)
+
     def _load_body(self, img: "_image.Image", *, verify: bool,
-                   zero: bool) -> None:
-        size = self.mem_kb * 1024
+                   zero: bool, zero_all: bool = False) -> None:
         if zero:
-            # Block RAM comes up zeroed in the bitstream, so the first run
-            # after programming is clean -- but the second starts on the
-            # first's memory, which is a fine way to spend an afternoon on a
-            # bug that only appears on re-runs.
-            self.mem.fill(0, size, 0)
+            self._zero_for(img, everything=zero_all)
 
         for seg in img.segments:
             self.mem.write_bytes(seg.paddr - R.EXT_MEM_BASE, seg.data)
@@ -301,13 +478,21 @@ class Amoeba:
 
     # ---- orchestration ----------------------------------------------------
     def run(self, img: "_image.Image", *, trace_mode: int = R.TRACE_OFF,
-            **load_kw) -> None:
-        """Halt, load, clear, release -- in that order, which is the point."""
+            on_armed=None, **load_kw) -> None:
+        """Halt, load, clear, release -- in that order, which is the point.
+
+        `on_armed` is called after the monitors are cleared and before the core
+        is released, which is the only moment a counter reading means "this
+        happened during the load" rather than "this happened at some point".
+        Attribution is the whole difficulty in reading these counters.
+        """
         self.halt()
         self.load(img, **load_kw)
         if self.has_trace:
             self.ctl.write(R.R_TRACE_MODE, trace_mode)
         self.clear_monitors()
+        if on_armed is not None:
+            on_armed(self)
         self.start()
 
     def stream_console(self, timeout: float, *,
@@ -331,3 +516,25 @@ class Amoeba:
         tail = self.read_console()
         if tail:
             yield tail
+
+    def close(self) -> None:
+        """Release the register and memory mappings.
+
+        Not strictly required -- the kernel reclaims them -- but explicit
+        teardown means the process is not unmapping device memory during
+        interpreter shutdown, when ordering is nobody's contract.
+        """
+        for attr in ("_ctl", "_mem"):
+            m = getattr(self, attr, None)
+            if m is not None:
+                try:
+                    m.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()

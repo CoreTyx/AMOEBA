@@ -15,3 +15,5 @@ bit/*/proj/
 
 # Program images: built by testcode/freertos with TARGET=pynq.
 images/
+# BRAM-linked images (different tohost); built with IMAGES_DIR=images-bram.
+images-bram/

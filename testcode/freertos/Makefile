@@ -60,8 +60,23 @@ INC := -I$(abspath .) \
 #     to be the clock the core is actually running at: FCLK_CLK0, not the
 #     simulation's 100 MHz.  Keep FPGA_CLOCK_HZ in step with FCLK_MHZ in
 #     fpga/pynq/Makefile.
+#
+#   - TARGET=pynq-ddr is the same board with MEM_BACKEND=AXI: 256 MiB of the
+#     PS's DDR instead of 128 KiB of block RAM, so tohost goes back to the
+#     fixed 0x80800000 the RTL watches in an AXI build.  It also moves the
+#     memory tests' working set high into the carve-out -- see below.
 TARGET ?= sim
 FPGA_CLOCK_HZ ?= 25000000
+
+# Where tc_mem_stress puts its working set on a DDR build, and how big.
+#
+# Not a detail: the program itself lives in the low 8 MiB, so a working set
+# allocated from the heap leaves address bits 23 and up constant for the
+# entire run.  A bridge that drops or transposes one of those bits would go
+# completely unnoticed, which is the opposite of the point.  0x8800_0000 is
+# 128 MiB into the carve-out, so bit 27 and everything below it toggles.
+DDR_MEMTEST_BASE ?= 0x88000000
+DDR_MEMTEST_KB   ?= 4096
 
 ifeq ($(TARGET),sim)
   LDSCRIPT  := freertos_wally.ld
@@ -69,8 +84,13 @@ ifeq ($(TARGET),sim)
 else ifeq ($(TARGET),pynq)
   LDSCRIPT  := freertos_pynq.ld
   TARGET_CFLAGS := -DconfigCPU_CLOCK_HZ=$(FPGA_CLOCK_HZ)
+else ifeq ($(TARGET),pynq-ddr)
+  LDSCRIPT  := freertos_pynq_ddr.ld
+  TARGET_CFLAGS := -DconfigCPU_CLOCK_HZ=$(FPGA_CLOCK_HZ) \
+                   -DMEMTEST_BASE=$(DDR_MEMTEST_BASE) \
+                   -DMEMTEST_KB=$(DDR_MEMTEST_KB)
 else
-  $(error TARGET=$(TARGET) is not known -- use sim or pynq)
+  $(error TARGET=$(TARGET) is not known -- use sim, pynq or pynq-ddr)
 endif
 
 LDFLAGS := -T$(LDSCRIPT) \

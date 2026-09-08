@@ -56,6 +56,14 @@ FPGA_MANAGER = "/sys/class/fpga_manager/fpga0"
 
 
 # ---- .bit parsing ---------------------------------------------------------
+# One .bit is 4 MB and program() wants two different things out of it: the
+# part name, for the banner, and the payload, to download.  Both went through
+# parse_bit, so every run read and parsed the whole file twice -- on a board
+# whose storage is an SD card, that is not free.  Keyed on identity, not just
+# path, so rebuilding a bitstream in place does not serve the stale one.
+_PARSE_CACHE: Dict[tuple, Tuple[Dict[bytes, bytes], bytes]] = {}
+
+
 def parse_bit(path: str) -> Tuple[Dict[bytes, bytes], bytes]:
     """Split a Xilinx .bit into its header fields and its raw payload.
 
@@ -63,6 +71,12 @@ def parse_bit(path: str) -> Tuple[Dict[bytes, bytes], bytes]:
     (design, part, date, time), then 'e' with a 4-byte length and the
     configuration stream.
     """
+    st = os.stat(path)
+    key_id = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    hit = _PARSE_CACHE.get(key_id)
+    if hit is not None:
+        return hit
+
     with open(path, "rb") as fh:
         blob = fh.read()
 
@@ -82,7 +96,9 @@ def parse_bit(path: str) -> Tuple[Dict[bytes, bytes], bytes]:
         k = blob[pos:pos + 1]; pos += 1
         if k == b"e":
             n = be32(pos); pos += 4
-            return fields, blob[pos:pos + n]
+            _PARSE_CACHE.clear()          # only ever one bitstream in flight
+            _PARSE_CACHE[key_id] = (fields, blob[pos:pos + n])
+            return _PARSE_CACHE[key_id]
         n = be16(pos); pos += 2
         fields[k] = blob[pos:pos + n]; pos += n
 
@@ -225,8 +241,27 @@ def _program_via_fpga_manager(path: str) -> None:
 
     with open(os.path.join(FPGA_MANAGER, "flags"), "w") as fh:
         fh.write("0")                       # full bitstream, not partial
-    with open(os.path.join(FPGA_MANAGER, "firmware"), "w") as fh:
-        fh.write(name)
+    try:
+        with open(os.path.join(FPGA_MANAGER, "firmware"), "w") as fh:
+            fh.write(name)
+    except OSError as exc:
+        # EBUSY here is almost never about this call.  It means the manager is
+        # still holding a previous operation -- usually because a process died
+        # part-way through programming, which on this board has a specific
+        # cause worth naming: writing outside a reserved DDR carve-out corrupts
+        # kernel memory, and the crash that follows leaves fpga0 wedged.
+        raise RuntimeError(
+            f"fpga_manager refused the bitstream: {exc}\n"
+            f"  state is '{_fpga_state()}' (want 'operating').\n"
+            "  Something left the manager mid-operation.  Recover with:\n"
+            "    sudo pkill -f run_freertos.py; sudo pkill -f probe_reset.py\n"
+            "    cat /sys/class/fpga_manager/fpga0/state\n"
+            "  and if it does not return to 'operating', reboot the board.\n"
+            "  If this keeps happening, check that the DDR carve-out is "
+            "reserved from\n"
+            "  Linux (grep 'System RAM' /proc/iomem) -- an unreserved carve-out"
+            " corrupts\n"
+            "  kernel memory and takes fpga_manager down with it.") from exc
 
     state = _fpga_state()
     if state != "operating":
@@ -253,17 +288,24 @@ def program(path: str, fclk_mhz: Optional[float] = 25.0,
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
+    t0 = time.monotonic()
     part = bit_part(path)
+    t_parse = time.monotonic() - t0
     if verbose:
         print(f"# programming PL: {os.path.basename(path)} for {part}")
 
+    t0 = time.monotonic()
     if _program_via_pynq(path):
         how = "pynq.Bitstream"
     else:
         _program_via_fpga_manager(path)
         how = "fpga_manager"
     if verbose:
-        print(f"#   downloaded via {how}")
+        # Timed because "it takes a while before anything appears" is otherwise
+        # unattributable, and the answer -- reading and rewriting 4 MB on an SD
+        # card -- looks nothing like a fault in the design.
+        print(f"#   downloaded via {how} "
+              f"(read {t_parse:.1f} s, download {time.monotonic() - t0:.1f} s)")
 
     if fclk_mhz is not None:
         before = fclk0_mhz()

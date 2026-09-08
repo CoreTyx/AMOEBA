@@ -103,7 +103,14 @@ all: lint
 
 # One source path per line.  Consumed by Verilator via -f and by
 # tcl/synth_ooc.tcl via a plain read, so there is one list, not two.
-$(SRCS_F): $(CURDIR)/Makefile
+#
+# ALL_SRCS is a prerequisite, not just the Makefile.  With only the Makefile
+# listed, adding a new RTL file left the filelist stale: `make lint` and
+# `make bitstream` both ran happily against a list that did not contain the
+# new module, and the only symptom was an elaboration error much later with
+# nothing pointing at the cause.  A wildcard is re-evaluated every time make
+# parses this file, so a new .sv now invalidates the list the moment it exists.
+$(SRCS_F): $(CURDIR)/Makefile $(ALL_SRCS)
 	@mkdir -p $(BUILD)
 	@printf '%s\n' $(ALL_SRCS) > $@
 	@echo "filelist: $(words $(ALL_SRCS)) sources -> $@"
@@ -252,7 +259,45 @@ bitstream: $(SRCS_F) check-vivado $(TINFO_DEP)
 # ---- board ------------------------------------------------------------------
 # BOARD_HOST is what a PYNQ-Z2 self-assigns on a direct Ethernet link.
 BOARD_HOST ?= xilinx@192.168.2.99
-IMAGES     ?= $(REPO)/testcode/freertos/freertos_wally.elf
+IMAGES     ?= $(wildcard $(IMAGES_DIR)/*.elf)
+
+# ---- program images --------------------------------------------------------
+# Built by hand until now, which produced six byte-identical ELFs once already:
+# `make` in testcode/freertos writes the SAME output name every time, so a
+# second build whose target is newer than its prerequisites is skipped, and
+# changing PROG does not invalidate it.  Hence the rm before each build, and
+# the distinctness check after all of them.
+#
+# IMAGE_TARGET picks the linker script, and it MUST match the bitstream:
+#   pynq      128 KiB block RAM, tohost at 0x8001F000   (MEM_BACKEND=BRAM)
+#   pynq-ddr  256 MiB DDR carve-out, tohost at 0x80800000 (MEM_BACKEND=AXI)
+# Amoeba.load() checks the ELF's tohost against the address the bus monitor
+# watches and refuses a mismatch, so getting this wrong is a clear error at
+# load time rather than a hang -- but it is still a wasted trip to the board.
+IMAGES_DIR   := $(CURDIR)/images
+FREERTOS_DIR := $(REPO)/testcode/freertos
+IMAGE_TARGET ?= pynq
+IMAGE_PROGS  := heartbeat_app \
+                $(notdir $(basename $(wildcard $(FREERTOS_DIR)/tc_*.c)))
+
+.PHONY: images
+images:
+	@mkdir -p $(IMAGES_DIR)
+	@rm -f $(IMAGES_DIR)/*.elf
+	@for p in $(IMAGE_PROGS); do \
+	    printf '  %-22s %s\n' "$$p" "$(IMAGE_TARGET)"; \
+	    rm -f $(FREERTOS_DIR)/freertos_wally.elf; \
+	    $(MAKE) -s -C $(FREERTOS_DIR) build TARGET=$(IMAGE_TARGET) \
+	        PROG=$(FREERTOS_DIR)/$$p.c >/dev/null; \
+	    cp $(FREERTOS_DIR)/freertos_wally.elf $(IMAGES_DIR)/$$p.elf; \
+	done
+	@n=$$(ls $(IMAGES_DIR)/*.elf | wc -l); \
+	 u=$$(md5sum $(IMAGES_DIR)/*.elf | awk '{print $$1}' | sort -u | wc -l); \
+	 if [ "$$n" != "$$u" ]; then \
+	   echo "ERROR: $$u distinct images out of $$n -- a stale ELF was copied"; \
+	   exit 1; \
+	 fi; \
+	 echo "$$n images in $(IMAGES_DIR), all distinct, TARGET=$(IMAGE_TARGET)"
 
 .PHONY: deploy
 deploy:

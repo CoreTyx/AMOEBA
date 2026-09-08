@@ -14,11 +14,15 @@
 // no logic, no defaults that differ from the real top, nothing to keep in step
 // except the port list.
 //
-// PA_BITS is hardcoded to 56 here because a Verilog-2001 file cannot include
-// pkg/config-shared.vh, which derives it as (XLEN==32 ? 34 : 56).  Every
-// configuration in this project is RV64, so 56 it is; amoeba_pynq_top carries
-// an elaboration-time $error if that ever stops being true, so this cannot
-// silently truncate the address bus.
+// PA_BITS is hardcoded to 56 in the ports that carry a full core address,
+// because a Verilog-2001 file cannot include pkg/config-shared.vh, which
+// derives it as (XLEN==32 ? 34 : 56).  Every configuration in this project is
+// RV64, so 56 it is; amoeba_pynq_top carries an elaboration-time $error if
+// that ever stops being true, so this cannot silently truncate.
+//
+// m_ahb_haddr is the exception at 32 bits, and deliberately so: it does not
+// carry a core address.  amoeba_pynq_top rebases it onto the DDR carve-out for
+// ahblite_axi_bridge, whose address port is 32 bits wide.
 //////////////////////////////////////////////////////////////////////////////
 
 module amoeba_pynq_top_v #(
@@ -26,7 +30,11 @@ module amoeba_pynq_top_v #(
     parameter MEM_KB          = 128,
     parameter TRACE           = 1,
     parameter TRACE_FIFO_LOG2 = 9,
-    parameter PKT_RECORDS     = 256
+    parameter PKT_RECORDS     = 256,
+    // Base of the DDR carve-out in the PS map.  Set from opt(ddr_carveout) in
+    // tcl/bd_pynq.tcl, the same value that tcl assigns as the AXI master's
+    // address segment.  See amoeba_pynq_top.sv for what it does.
+    parameter DDR_CARVEOUT_BASE = 32'h10000000
 )(
     input  wire        aclk,
     input  wire        aresetn,
@@ -74,7 +82,9 @@ module amoeba_pynq_top_v #(
     input  wire        s_axi_mem_rready,
 
     output wire        m_ahb_hsel,
-    output wire [55:0] m_ahb_haddr,
+    // 32, not 56: the bridge's s_ahb_haddr is 32 bits and amoeba_pynq_top
+    // rebases the core address onto the carve-out before driving this.
+    output wire [31:0] m_ahb_haddr,
     output wire [63:0] m_ahb_hwdata,
     output wire [7:0]  m_ahb_hwstrb,
     output wire        m_ahb_hwrite,
@@ -86,16 +96,19 @@ module amoeba_pynq_top_v #(
     input  wire [63:0] m_ahb_hrdata,
     input  wire        m_ahb_hready,
     input  wire        m_ahb_hresp,
+    output wire        m_ahb_hresetn,
+    output wire        m_ahb_hready_bus,
 
     output wire        uart_txd_obs
 );
 
     amoeba_pynq_top #(
-        .MEM_BRAM        (MEM_BRAM[0]),
-        .MEM_KB          (MEM_KB),
-        .TRACE           (TRACE[0]),
-        .TRACE_FIFO_LOG2 (TRACE_FIFO_LOG2),
-        .PKT_RECORDS     (PKT_RECORDS)
+        .MEM_BRAM          (MEM_BRAM[0]),
+        .DDR_CARVEOUT_BASE (DDR_CARVEOUT_BASE),
+        .MEM_KB            (MEM_KB),
+        .TRACE             (TRACE[0]),
+        .TRACE_FIFO_LOG2   (TRACE_FIFO_LOG2),
+        .PKT_RECORDS       (PKT_RECORDS)
     ) u_top (
         .aclk                (aclk),
         .aresetn             (aresetn),
@@ -155,6 +168,8 @@ module amoeba_pynq_top_v #(
         .m_ahb_hrdata        (m_ahb_hrdata),
         .m_ahb_hready        (m_ahb_hready),
         .m_ahb_hresp         (m_ahb_hresp),
+        .m_ahb_hresetn       (m_ahb_hresetn),
+        .m_ahb_hready_bus    (m_ahb_hready_bus),
 
         .uart_txd_obs        (uart_txd_obs)
     );
