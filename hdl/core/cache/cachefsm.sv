@@ -51,6 +51,7 @@ module cachefsm #(parameter READ_ONLY_CACHE = 0) (
 
   // cache internals
   input  logic       Hit,          // Exactly 1 way hits
+  input  logic       RefreshRequired, // Hit line exceeded refresh threshold
   input  logic       LineDirty,         // The selected line and way is dirty
   input  logic       HitLineDirty,   // The cache hit way is dirty
   input  logic       FlushAdrFlag,      // On last set of a cache flush
@@ -92,9 +93,9 @@ module cachefsm #(parameter READ_ONLY_CACHE = 0) (
 
   statetype CurrState, NextState;
 
-  assign AnyMiss = (CacheRW[0] | CacheRW[1]) & ~Hit & ~InvalidateCache; // exclusion-tag: cache AnyMiss
-  assign AnyUpdateHit = (CacheRW[0]) & Hit;                            // exclusion-tag: icache storeAMO1
-  assign AnyHit = AnyUpdateHit | (CacheRW[1] & Hit);                  // exclusion-tag: icache AnyUpdateHit
+  assign AnyMiss = (CacheRW[0] | CacheRW[1]) & (~Hit | RefreshRequired) & ~InvalidateCache; // exclusion-tag: cache AnyMiss
+  assign AnyUpdateHit = (CacheRW[0]) & Hit & ~RefreshRequired;        // exclusion-tag: icache storeAMO1
+  assign AnyHit = AnyUpdateHit | (CacheRW[1] & Hit & ~RefreshRequired); // exclusion-tag: icache AnyUpdateHit
   assign CMOZeroNoEviction = CMOpM[3] & ~LineDirty;   // (hit or miss) with no writeback store zeros now
   assign CMOWriteback = ((CMOpM[1] | CMOpM[2]) & Hit & HitLineDirty) | CMOpM[3] & LineDirty;
 
@@ -171,7 +172,7 @@ module cachefsm #(parameter READ_ONLY_CACHE = 0) (
   // Flush and eviction controls
                       CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2]) & CacheBusAck;
   assign SelVictim = (CurrState == STATE_WRITEBACK & ((~CacheBusAck & ~(CMOpM[1] | CMOpM[2])) | (CacheBusAck & CMOpM[3]))) |
-                  (CurrState == STATE_ACCESS & ((AnyMiss & LineDirty) | (CMOZeroNoEviction & ~Hit))) |
+                  (CurrState == STATE_ACCESS & ((AnyMiss & LineDirty & ~RefreshRequired) | (CMOZeroNoEviction & ~Hit))) |
                   (CurrState == STATE_WRITE_LINE);
   assign SelWriteback = (CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2] | ~CacheBusAck)) |
                         (CurrState == STATE_ACCESS & AnyMiss & LineDirty);

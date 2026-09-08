@@ -30,7 +30,8 @@
 
 module cacheway import cvw::*; #(parameter cvw_t P,
                   parameter PA_BITS, NUMSETS=512, LINELEN = 256, TAGLEN = 26,
-                  OFFSETLEN = 5, INDEXLEN = 9, READ_ONLY_CACHE = 0) (
+                  OFFSETLEN = 5, INDEXLEN = 9, READ_ONLY_CACHE = 0,
+                  parameter REFRESH_THRESHOLD = 0) (
   input  logic                        clk,
   input  logic                        reset,
   input  logic                        FlushStage,     // Pipeline flush of second stage (prevent writes and bus operations)
@@ -50,12 +51,15 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        FlushWay,       // This way is selected for flush and possible writeback if dirty
   input  logic                        InvalidateCache,// Clear all valid bits
   input  logic [LINELEN/8-1:0]        LineByteMask,   // Final byte enables to cache (D$ only)
+  input  logic                        RefreshCountEn,
+  input  logic                        RefreshRequired,
 
   output logic [LINELEN-1:0]          ReadDataLineWay,// This way's read data if valid
   output logic                        HitWay,         // This way hits
   output logic                        ValidWay,       // This way is valid
   output logic                        HitDirtyWay,    // The hit way is dirty
   output logic                        DirtyWay   ,    // The selected way is dirty
+  output logic                        RefreshRequiredWay,
   output logic [TAGLEN-1:0]           TagWay);        // This way's tag if valid
 
   logic [NUMSETS-1:0]                ValidBits;
@@ -73,10 +77,13 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic                               ClearDirtyWay;
   logic                               SelectedWay;
   logic                               InvalidateCacheDelay;
+  localparam integer REFRESH_COUNT_WIDTH = (REFRESH_THRESHOLD > 1) ? $clog2(REFRESH_THRESHOLD + 1) : 1;
+  localparam logic [REFRESH_COUNT_WIDTH-1:0] REFRESH_THRESHOLD_VALUE = REFRESH_THRESHOLD;
+  logic [REFRESH_COUNT_WIDTH-1:0]      RefreshCount [NUMSETS-1:0];
 
   if (!READ_ONLY_CACHE) begin : flushlogic
     mux2 #(1) seltagmux(VictimWay, FlushWay, FlushCache, SelecteDirty);
-    mux3 #(1) selectedmux(HitWay, FlushWay, VictimWay, {SelVictim, FlushCache}, SelectedWay);
+    mux3 #(1) selectedmux(HitWay, FlushWay, VictimWay, {SelVictim & ~RefreshRequired, FlushCache}, SelectedWay);
     // FlushWay is part of a one hot way selection. Must clear it if FlushWay not selected.
     // coverage off -item e 1 -fecexprrow 3
     // nonzero ways will never see FlushCache=0 while FlushWay=1 since FlushWay only advances on a subset of FlushCache assertion cases.
@@ -115,6 +122,12 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign HitDirtyWay = Dirty & ValidWay;
   assign DirtyWay = SelecteDirty & HitDirtyWay;                               // exclusion-tag: icache DirtyWay
   assign HitWay = ValidWay & (ReadTag == PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]) & ~InvalidateCacheDelay; // exclusion-tag: dcache HitWay
+  if (REFRESH_THRESHOLD != 0) begin : refresh_enabled
+    assign RefreshRequiredWay = ~READ_ONLY_CACHE & HitWay &
+                                (RefreshCount[CacheSetTag] >= REFRESH_THRESHOLD_VALUE);
+  end else begin : refresh_disabled
+    assign RefreshRequiredWay = '0;
+  end
 
   flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, 1'b1, InvalidateCache, InvalidateCacheDelay);
 
@@ -155,6 +168,20 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       if(InvalidateCache & ~InvalidateFlushStage)    ValidBits <= '0; // exclusion-tag: dcache invalidateway
       else if (SetValidEN) ValidBits[CacheSetData] <= SetValidWay;
       else if (ClearValidEN) ValidBits[CacheSetData] <= '0; // exclusion-tag: icache ClearValidBits
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      for (int set = 0; set < NUMSETS; set++) RefreshCount[set] <= '0;
+    end else if (InvalidateCache & ~InvalidateFlushStage) begin
+      for (int set = 0; set < NUMSETS; set++) RefreshCount[set] <= '0;
+    end else if (CacheEn) begin
+      if (SetValidEN || ClearValidEN)
+        RefreshCount[CacheSetData] <= '0;
+      else if (RefreshCountEn && (REFRESH_THRESHOLD != 0) &&
+           (RefreshCount[CacheSetTag] < REFRESH_THRESHOLD_VALUE))
+        RefreshCount[CacheSetTag] <= RefreshCount[CacheSetTag] + 1'b1;
     end
   end
 
