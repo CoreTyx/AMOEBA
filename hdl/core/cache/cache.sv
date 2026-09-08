@@ -29,7 +29,8 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module cache import cvw::*; #(parameter cvw_t P,
-                              parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE) (
+                              parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE,
+                              parameter REFRESH_THRESHOLD = 0) (
   input  logic                   clk,
   input  logic                   reset,
   input  logic                   Stall,             // Stall the cache, preventing new accesses. In-flight access finished but does not return to READY
@@ -80,6 +81,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [LINELEN-1:0]            ReadDataLineWay [NUMWAYS-1:0];
   logic [NUMWAYS-1:0]            HitWay, ValidWay;
   logic                          Hit;
+  logic [NUMWAYS-1:0]            RefreshRequiredWay;
+  logic                          RefreshRequired;
   logic [NUMWAYS-1:0]            VictimWay, DirtyWay, HitDirtyWay;
   logic                          LineDirty, HitLineDirty;
   logic [TAGLEN-1:0]             TagWay [NUMWAYS-1:0];
@@ -119,10 +122,11 @@ module cache import cvw::*; #(parameter cvw_t P,
     AdrSelMuxSelLRU, CacheSetLRU);
 
   // Array of cache ways, along with victim, hit, dirty, and read merging logic
-  cacheway #(P, PA_BITS, NUMSETS, LINELEN, TAGLEN, OFFSETLEN, SETLEN, READ_ONLY_CACHE) CacheWays[NUMWAYS-1:0](
+  cacheway #(P, PA_BITS, NUMSETS, LINELEN, TAGLEN, OFFSETLEN, READ_ONLY_CACHE, REFRESH_THRESHOLD) CacheWays[NUMWAYS-1:0](
     .clk, .reset, .CacheEn, .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask, .SelVictim,
     .SetValid, .ClearValid, .SetDirty, .ClearDirty, .VictimWay,
-    .FlushWay, .FlushCache, .ReadDataLineWay, .HitWay, .ValidWay, .DirtyWay, .HitDirtyWay, .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
+    .FlushWay, .FlushCache, .ReadDataLineWay, .HitWay, .ValidWay, .DirtyWay, .HitDirtyWay, .RefreshRequiredWay,
+    .RefreshCountEn(CacheAccess & Hit & ~RefreshRequired), .RefreshRequired, .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
 
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict
@@ -133,8 +137,9 @@ module cache import cvw::*; #(parameter cvw_t P,
     assign VictimWay = 1'b1; // one hot.
 
   assign Hit = |HitWay;
-  assign LineDirty = |DirtyWay;
   assign HitLineDirty = |HitDirtyWay;
+  assign RefreshRequired = (REFRESH_THRESHOLD != 0) & (|RefreshRequiredWay);
+  assign LineDirty = RefreshRequired ? HitLineDirty : |DirtyWay;
 
   // ReadDataLineWay is a 2d array of cache line len by number of ways.
   // Need to OR together each way in a bitwise manner.
@@ -224,7 +229,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .CacheBusRW, .CacheBusAck,
     .FlushStage, .InvalidateFlushStage, .CacheRW, .Stall,
-    .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheCommitted,
+    .Hit, .RefreshRequired, .LineDirty, .HitLineDirty, .CacheStall, .CacheCommitted,
     .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim,
     .ClearDirty, .SetDirty, .SetValid, .ClearValid, .SelWriteback,
     .FlushAdrCntEn, .FlushWayCntEn, .FlushCntRst,
