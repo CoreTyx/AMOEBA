@@ -328,8 +328,9 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW
 
-      cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.DCACHE_LINELENINBITS), .NUMSETS(P.DCACHE_WAYSIZEINBYTES*8/LINELEN),
-              .NUMWAYS(P.DCACHE_NUMWAYS), .LOGBWPL(LLENLOGBWPL), .WORDLEN(CACHEWORDLEN), .MUXINTERVAL(P.LLEN), .READ_ONLY_CACHE(0)) dcache(
+            cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.DCACHE_LINELENINBITS), .NUMSETS(P.DCACHE_WAYSIZEINBYTES*8/LINELEN),
+              .NUMWAYS(P.DCACHE_NUMWAYS), .LOGBWPL(LLENLOGBWPL), .WORDLEN(CACHEWORDLEN), .MUXINTERVAL(P.LLEN),
+              .READ_ONLY_CACHE(0), .REFRESH_THRESHOLD(4)) dcache(
         .clk, .reset, .Stall(GatedStallW & ~SelSpillE), .SelBusBeat, .FlushStage(LSUFlushW),
         .CacheRW(CacheRWM),
         .FlushCache(FlushDCache), .NextSet(IEUAdrExtE[11:0]), .PAdr(PAdrM),
