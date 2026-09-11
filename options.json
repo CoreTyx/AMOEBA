@@ -2,7 +2,7 @@
     "clock"       : 10000,
     "xlen"        : 64,
     "c_ext"       : true,
-    "f_ext"       : true,
+    "f_ext"       : false,
     "zicsr"       : true,
     "zifencei"    : true,
     "zbkb"        : true,

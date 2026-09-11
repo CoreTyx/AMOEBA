@@ -48,6 +48,9 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   input  logic        StallE, FlushE,          // Stall, flush Execute stage
   input  logic [1:0]  FlagsE,                  // Comparison flags ({eq, lt})
   input  logic        FWriteIntE,              // Write integer register, coming from FPU controller
+  // Includes M-stage multiplier retries so a younger branch cannot redirect
+  // fetch while an older instruction is being replayed.
+  input  logic        FTStall,                 // E/M shadow result is not trusted
   input  logic        FCvtIntE,                              // FPU convert float to int
   output logic        PCSrcE,                  // Select signal to choose next PC (for datapath and Hazard unit)
   output logic        ALUSrcAE, ALUSrcBE,      // ALU operands
@@ -432,7 +435,10 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign {eqE, ltE} = FlagsE;
   mux2 #(1) branchflagmux(eqE, ltE, Funct3E[2], BranchFlagE);
   assign BranchTakenE = BranchFlagE ^ Funct3E[0];
-  assign PCSrcE = JumpE | BranchE & BranchTakenE;
+  // Do not resolve a branch or jump while its compare/address result is under
+  // shadow validation.  The global FT stall holds the execute transaction.
+  // Branch redirection is externally visible; suppress it during retry.
+  assign PCSrcE = (JumpE | BranchE & BranchTakenE) & ~FTStall;
 
   // Other execute stage controller signals
   assign MemReadE = MemRWE[1];

@@ -39,6 +39,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
   input  logic [5:0]               NextCauseM,
   input  logic [P.XLEN-1:0]        CSRWriteValM,
+  input  logic [5:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
   input  logic [11:0]              MIP_REGW, MIE_REGW,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
   output logic [P.XLEN-1:0]        MEPC_REGW,
@@ -85,6 +86,9 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   localparam MCAUSE        = 12'h342;
   localparam MTVAL         = 12'h343;
   localparam MIP           = 12'h344;
+  // Custom machine read-only diagnostic CSR.  It is not part of the RISC-V
+  // architectural CSR map and is reserved for shadow/ECC diagnostics.
+  localparam MFTSTATUS     = 12'h7C0;
   localparam PMPCFG0       = 12'h3A0;
   // .. up to 15 more at consecutive addresses
   localparam PMPADDR0      = 12'h3B0;
@@ -164,7 +168,9 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   assign WriteMCOUNTERENM    = CSRMWriteM & (CSRAdrM == MCOUNTEREN);
   assign WriteMCOUNTINHIBITM = CSRMWriteM & (CSRAdrM == MCOUNTINHIBIT);
 
-  assign IllegalCSRMWriteReadonlyM = UngatedCSRMWriteM & (CSRAdrM == MVENDORID | CSRAdrM == MARCHID | CSRAdrM == MIMPID | CSRAdrM == MHARTID | CSRAdrM == MCONFIGPTR);
+  assign IllegalCSRMWriteReadonlyM = UngatedCSRMWriteM &
+    (CSRAdrM == MVENDORID | CSRAdrM == MARCHID | CSRAdrM == MIMPID |
+     CSRAdrM == MHARTID | CSRAdrM == MCONFIGPTR | CSRAdrM == MFTSTATUS);
 
   // CSRs
   assign TVECWriteValM = CSRWriteValM[0] ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00};
@@ -263,6 +269,8 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MIDELEG:       CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIDELEG_REGW};
       MIP:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIP_REGW};
       MIE:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIE_REGW};
+      // Custom CSR is intentionally read-only; writes are rejected above.
+      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-6){1'b0}}, FTStatus};
       MSCRATCH:      CSRMReadValM = MSCRATCH_REGW;
       MEPC:          CSRMReadValM = MEPC_REGW;
       MCAUSE:        CSRMReadValM = MCAUSE_REGW;

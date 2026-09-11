@@ -36,7 +36,10 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              IntDivE, W64E,                  // Integer division/remainder, and W-type instructions
   input  logic              MDUActiveE,                     // Mul/Div instruction being executed
   output logic [P.XLEN-1:0] MDUResultW,                     // multiply/divide result
-  output logic              DivBusyE                        // busy signal to stall pipeline in Execute stage
+  output logic              DivBusyE,                       // busy signal to stall pipeline in Execute stage
+  // M-stage retry/fault status; PE outputs are diagnostic only.
+  output logic              FTStallM, FTUnresolvedM,
+  output logic              MUL_PE_p, MUL_PE_r
 );
 
   logic [P.XLEN*2-1:0]      ProdM;                          // double-width product from mul
@@ -44,9 +47,19 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]        PrelimResultM;                  // selected result before W truncation
   logic [P.XLEN-1:0]        MDUResultM;                     // result after W truncation
   logic                     W64M;                           // W-type instruction
+  logic                     MulActiveE;
 
-  // Multiplier
-  mul #(P.XLEN) mul(.clk, .reset, .StallM, .FlushM, .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .ProdM);
+  // Multiplier.  The shadow wrapper preserves the original E->M PP register
+  // timing and retries only a held MUL transaction.
+  // The divider remains on its original path; only integer multiply is
+  // duplicated here.
+  // The divider remains on its original path; only integer multiply is
+  // duplicated here.
+  assign MulActiveE = MDUActiveE & ~IntDivE;
+  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
+    .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
+    .ProdM, .stall_req(FTStallM), .unresolved(FTUnresolvedM),
+    .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
 
   // Divider
   // Start a divide when a new division instruction is received and the divider isn't already busy or finishing

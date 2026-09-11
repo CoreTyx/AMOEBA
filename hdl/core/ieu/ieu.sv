@@ -38,8 +38,11 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                             // PC
   input  logic [P.XLEN-1:0] PCLinkE,                         // PC + 4
+  input  logic              FTStallM,                         // M-stage retry freezes E control
   output logic              PCSrcE,                          // Select next PC (between PC+4 and IEUAdrE)
   input  logic              FWriteIntE, FCvtIntE,            // FPU writes to integer register file, FPU converts float to int
+  output logic              FTStallE, FTUnresolvedE,          // shadow execution control/fault status
+  output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, // diagnosis bits
   output logic [P.XLEN-1:0] IEUAdrE,                         // Memory address
   output logic              IntDivE, W64E,                   // Integer divide, RV64 W-type instruction
   output logic [2:0]        Funct3E,                         // Funct3 instruction field
@@ -110,7 +113,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .clk, .reset, .StallD, .FlushD, .InstrD, .STATUS_FS, .ENVCFG_CBE, .ImmSrcD,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
-    .StallE, .FlushE, .FlagsE, .FWriteIntE,
+    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
     .BranchSignedE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE, .MDUActiveE,
@@ -126,5 +129,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
-    .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW);
+    .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
+    .InstrValidE, .FTStallE, .FTUnresolvedE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r);
 endmodule

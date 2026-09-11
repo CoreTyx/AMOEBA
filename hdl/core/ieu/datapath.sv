@@ -53,9 +53,13 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        BALUControlE,            // ALU Control signals for B instructions in Execute Stage
   input  logic              BMUActiveE,              // Bit manipulation instruction being executed
   input  logic [1:0]        CZeroE,                  // {czero.nez, czero.eqz} instructions active
+  input  logic              InstrValidE,             // current execute-stage instruction is valid
   output logic [1:0]        FlagsE,                  // Comparison flags ({eq, lt})
   output logic [P.XLEN-1:0] IEUAdrE,                 // Address computed by ALU
   output logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // ALU sources before the mux chooses between them and PCE to put in srcA/B
+  // FT control feeds hazard/trap handling; PE bits are diagnostic only.
+  output logic              FTStallE, FTUnresolvedE,
+  output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r,
   // Memory stage signals
   input  logic              StallM, FlushM,          // Stall, flush Memory stage
   input  logic              FWriteIntM, FCvtIntW,    // FPU writes integer register file, FPU converts float to int
@@ -94,6 +98,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] IFResultW;                      // Result from either IEU or single-cycle FPU op writing an integer register
   logic [P.XLEN-1:0] IFCvtResultW;                   // Result from IEU, signle-cycle FPU op, or 2-cycle FCVT float to int
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
+  logic ALUStallE, CMPStallE, ALUUnresolvedE, CMPUnresolvedE;
 
   // Decode stage
   regfile #(P.XLEN, P.E_SUPPORTED) regf(clk, reset, RegWriteW, Rs1D, Rs2D, RdW, ResultW, R1D, R2D);
@@ -106,12 +111,26 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
   mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
-  comparator #(P.XLEN) comp(ForwardedSrcAE, ForwardedSrcBE, BranchSignedE, FlagsE);
+  // Comparator output controls branches; duplicate it before branch decode.
+  ft_cmp #(.WIDTH(P.XLEN)) ftcmp(
+    .clk, .reset, .flush(FlushE), .valid(InstrValidE),
+    .a(ForwardedSrcAE), .b(ForwardedSrcBE), .sgnd(BranchSignedE), .flags(FlagsE),
+    .stall_req(CMPStallE), .unresolved(CMPUnresolvedE), .pe_primary(CMP_PE_p), .pe_shadow(CMP_PE_r));
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
-  alu   #(P)       alu(SrcAE, SrcBE, W64E, UW64E, SubArithE, ALUSelectE, BSelectE, ZBBSelectE, Funct3E, Funct7E, Rs2E, BALUControlE, BMUActiveE, CZeroE, ALUResultE, IEUAdrE);
+  // ALU drives both the architectural result and LSU address.
+  ft_alu #(P) ftalu(
+    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .A(SrcAE), .B(SrcBE),
+    .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
+    .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
+    .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
+    .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(ALUStallE),
+    .unresolved(ALUUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r));
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
+  // Either E-stage checker holds the complete pipeline or reports a fault.
+  assign FTStallE = ALUStallE | CMPStallE;
+  assign FTUnresolvedE = ALUUnresolvedE | CMPUnresolvedE;
 
   // Memory stage pipeline register
   flopenrc #(P.XLEN) SrcAMReg(clk, reset, FlushM, ~StallM, SrcAE, SrcAM);

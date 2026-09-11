@@ -36,6 +36,11 @@ module amoalu import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] AMOResultM    // ALU output
 );
 
+  // TODO(amo-ft): protect AMO computation before it can drive an externally
+  // visible read-modify-write transaction.  The E-stage shadow wrappers do
+  // not cover this M-stage result, and retry must be coordinated with LR/SC,
+  // cache/bus commit, and reservation state.
+
   logic [P.XLEN-1:0] a, b, y;
   logic               lt, cmp, sngd, sngd32, eq32, lt32, w64;
 
