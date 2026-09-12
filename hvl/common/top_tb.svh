@@ -80,9 +80,13 @@
                              dut.soc.core.ieu.c.DummySelW ? 33 : 32);
                 end else if (dut.InstrValidW && (|dut.PCW)) begin
                     TrcRetireCtr <= TrcRetireCtr + 64'd1;
-                    $display("[retire] %5d real  pc=%08h  %08h  rd=x%0d rs1=x%0d rs2=x%0d",
+                    $display("[retire] %5d real  pc=%08h  %08h  rd=x%0d rs1=x%0d rs2=x%0d  | wd=%08h v=%0d%0d%0d d=%0d%0d%0d pcM=%08h pcE=%08h pcD=%08h",
                              TrcRetireCtr, dut.PCW[31:0], TrcInstrW,
-                             TrcInstrW[11:7], TrcInstrW[19:15], TrcInstrW[24:20]);
+                             TrcInstrW[11:7], TrcInstrW[19:15], TrcInstrW[24:20],
+                             dut.monitor_pc_wdata[31:0],
+                             dut.InstrValidM, dut.InstrValidE, dut.InstrValidD,
+                             dut.DummyM, dut.DummyE, dut.DummyD,
+                             dut.PCM[31:0], dut.PCE[31:0], dut.PCD[31:0]);
                 end
             end
         end
