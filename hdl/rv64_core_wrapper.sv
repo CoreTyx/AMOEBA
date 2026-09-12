@@ -259,8 +259,19 @@ module rv64_core_wrapper import cvw::*; (
     assign Rs1D = soc.core.ieu.dp.regf.a1;
     assign Rs2D = soc.core.ieu.dp.regf.a2;
 
+    // AMOEBA: dummy instruction flag, piped M->W alongside the other monitor signals
+    // so it lines up with InstrValidW rather than the core's own W-stage register.
+    logic        DummyD, DummyE, DummyM, DummyW;
+    assign DummyD = soc.core.InjectD;
+    assign DummyE = soc.core.ieu.c.DummyE;
+    assign DummyM = soc.core.ieu.c.DummyM;
+
     logic [1:0]  MemRWM;
     logic [2:0]  Funct3M;
+    // Taken-branch/jump resolution, pipelined E->M->W alongside IEUAdr.  IEUAdrE is
+    // the ALU result used both as the memory address and as the branch target, so
+    // IEUAdrW is the architectural target exactly when PCSrcW is set.
+    logic        PCSrcM_r, PCSrcW_r;
     logic [63:0] IEUAdrM, WriteDataM, ReadDataW;
     assign MemRWM     = soc.core.MemRWM;
     assign Funct3M    = soc.core.Funct3M;
@@ -298,17 +309,22 @@ module rv64_core_wrapper import cvw::*; (
             InstrRawE_r <= '0; InstrRawM_r <= '0;
             TrapW <= '0; MemRWW <= '0; Funct3W <= '0;
             IEUAdrW <= '0; WriteDataW <= '0;
+            PCSrcM_r <= '0; PCSrcW_r <= '0;
             Rs1E <= '0; Rs2E <= '0; Rs1M <= '0; Rs2M <= '0;
             Rs1W <= '0; Rs2W <= '0;
             Rs1DataM <= '0; Rs2DataM <= '0;
             Rs1DataW <= '0; Rs2DataW <= '0;
             Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 0;
             InterruptTakenPending <= '0;
+            DummyW <= '0;
         end else begin
             // Clear intr pending when the first handler instruction is reported
             if (IntrReported) InterruptTakenPending <= '0;
             if (!StallE) InstrRawE_r <= FlushE ? '0 : InstrRawD;
             if (!StallM) InstrRawM_r <= FlushM ? '0 : InstrRawE_r;
+            // Same enables as the core's own E->M register for IEUAdr, so PCSrcM_r
+            // stays aligned with IEUAdrM and therefore PCSrcW_r with IEUAdrW.
+            if (!StallM) PCSrcM_r <= FlushM ? 1'b0 : soc.core.PCSrcE;
             if (!StallW) begin
                 if (TrapM & InterruptM) begin
                     // External interrupt: suppress the interrupted instruction (if any in M)
@@ -321,12 +337,14 @@ module rv64_core_wrapper import cvw::*; (
                 end else begin
                     InstrValidW <= (FlushW & ~TrapM) ? '0 : InstrValidM;
                 end
+                DummyW      <= (FlushW & ~TrapM) ? '0 : DummyM;
                 PCW         <= (FlushW & ~TrapM) ? '0 : PCM;
                 InstrRawW   <= (FlushW & ~TrapM) ? '0 : InstrRawM_r;
                 TrapW       <= TrapM & ~InterruptM;   // rvfi_trap only for exceptions
                 MemRWW      <= FlushW ? '0 : MemRWM;
                 Funct3W     <= Funct3M;
                 IEUAdrW     <= IEUAdrM;
+                PCSrcW_r    <= (FlushW & ~TrapM) ? 1'b0 : PCSrcM_r;
                 WriteDataW  <= WriteDataM;
                 Rs1W        <= Rs1M;
                 Rs2W        <= Rs2M;
@@ -377,7 +395,12 @@ module rv64_core_wrapper import cvw::*; (
         return m;
     endfunction
 
-    assign monitor_valid      = InstrValidW & ~StallW & (|PCW);
+    // Injected dummy instructions are already invisible here because the core forces
+    // their InstrValidE/M low, which is what InstrValidW is derived from.  DummyW is
+    // ANDed in as well so that this stays true if that gating is ever relaxed: a dummy
+    // reaching Spike or the RVFI monitor would be reported as a mismatch on every run.
+
+    assign monitor_valid      = InstrValidW & ~StallW & (|PCW) & ~DummyW;
     assign monitor_order      = rvfi_order_ctr;
     // For compressed instructions, only bits[15:0] are valid; zero-extend to 32 bits.
     assign monitor_inst       = (InstrRawW[1:0] != 2'b11) ? {16'h0000, InstrRawW[15:0]} : InstrRawW;
@@ -415,11 +438,25 @@ module rv64_core_wrapper import cvw::*; (
     // next PC; the fetch discontinuity is expressed by rvfi_intr on the first handler
     // instruction (see InterruptTakenPending above), which rvfimon honors when
     // comparing the shadow PC against the next pc_rdata.
-    assign monitor_pc_wdata = RetW                 ? EPCW        :   // mret/sret: return to saved EPC
-                              TrapW                ? TrapVectorW :   // exception: jump to handler
-                              InstrValidM          ? PCM         :   // normal: lookahead to M stage
-                              InstrValidE          ? PCE         :
-                              InstrValidD          ? PCD         :
+    // A taken branch or jump takes its architectural next PC from its own resolution
+    // (IEUAdrW), not from a pipeline lookahead.  The lookahead cannot serve this case:
+    // the mispredict flushes D and E, and the target has not been refetched yet, so
+    // every downstream stage is empty when the branch retires -- PCE is even cleared
+    // to zero by the flush while the IEU still shows a dummy in E.  Insertion makes
+    // that window reachable often enough to fail; without it the refill usually lands
+    // in time and the lookahead happens to be right.
+    //
+    // The lookahead still serves sequential instructions, and treats a stage holding
+    // an injected dummy as occupied: the IFU's PC pipeline knows nothing about
+    // insertion and replays the held PC, so a dummy carries the PC of the real
+    // instruction that follows it.  Each term is guarded on a nonzero PC so a stage
+    // cleared by a flush is never selected.
+    assign monitor_pc_wdata = RetW                                ? EPCW        :  // mret/sret: return to saved EPC
+                              TrapW                               ? TrapVectorW :  // exception: jump to handler
+                              PCSrcW_r                            ? IEUAdrW     :  // taken branch/jump: resolved target
+                              ((InstrValidM | DummyM) & (|PCM))   ? PCM         :  // sequential: lookahead to M
+                              ((InstrValidE | DummyE) & (|PCE))   ? PCE         :
+                              ((InstrValidD | DummyD) & (|PCD))   ? PCD         :
                               pc_wdata_seq;
 
     assign monitor_mem_addr   = IEUAdrW & ~64'h7;
