@@ -510,6 +510,10 @@ jobs:
   ci-linux-boot-ecc-inject:
     name: Linux Boot with ECC Inject
     runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      actions: read
     needs:
       - ci-ecc-unit
       - ci-baremetal-ecc
@@ -527,20 +531,32 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
-            autoconf flex bison libfl-dev help2man zlib1g-dev \
-            device-tree-compiler gcc-riscv64-unknown-elf
+            autoconf flex bison libfl-dev help2man zlib1g-dev
           pip3 install --quiet pyyaml
 
-      - name: Cache Linux boot image
-        id: cache-linux-image
-        uses: actions/cache@v4
-        with:
-          path: testcode/linux/build
-          key: linux-boot-image-${{ hashFiles('testcode/linux/Makefile') }}
+      - name: Download boot image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p testcode/linux/build
+          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          echo "Looking for a boot image built from branch: $BRANCH"
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                     --branch "$BRANCH" \
+                     --workflow linux-image.yml --status success \
+                     --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful linux-image.yml run on branch '$BRANCH'."
+            echo "That workflow builds on push when testcode/linux/** changes;"
+            echo "otherwise run it manually (Actions -> Linux Boot Image -> Run workflow)."
+            exit 1
+          fi
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name amoeba-linux-boot-image --dir testcode/linux/build
+          ls -la testcode/linux/build
 
-      - name: Build Linux boot image
-        if: steps.cache-linux-image.outputs.cache-hit != 'true'
-        run: make -C testcode/linux
+      - name: Show image provenance
+        run: cat testcode/linux/build/boot.provenance
 
       - name: Restore Linux+ECC inject build cache
         uses: actions/cache@v4
@@ -552,12 +568,17 @@ jobs:
       - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
         run: touch sim/verilator/build_linux_ecc_inject/Vtop_tb
 
-      - name: Run Linux boot with ECC injection
-        run: make -C sim linux_boot_ecc_inject
+      - name: Boot Linux with ECC injection
+        run: |
+          make -C sim linux_boot_ecc_inject \
+            LINUX_TIMEOUT=800000000
 
-      - name: Upload boot UART log
+      - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-ecc-inject-boot-uart
-          path: sim/verilator/linux_ecc_inject_boot/boot_uart.log
+          name: linux-ecc-inject-boot-logs
+          path: |
+            sim/verilator/linux_ecc_inject_boot/simulation.log
+            sim/verilator/linux_ecc_inject_boot/boot_uart.log
+          retention-days: 14
