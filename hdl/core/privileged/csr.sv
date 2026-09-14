@@ -41,6 +41,11 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic                     CSRReadM, CSRWriteM,       // read or write CSR
   input  logic                     PrivModeSecFaultW,         // TMR correctable fault from privmode
   input  logic                     PrivModeUncorrectableFaultW, // TMR uncorrectable fault from privmode
+  input  logic                     RegEccSecErrW,             // IEU ECC SEC (correctable)
+  input  logic                     RegEccDedErrW,             // IEU ECC DED (uncorrectable)
+  input  logic                     RegEccDedErrPipeW,         // DED from W-stage pipeline reg only (precise MEPC source)
+  input  logic [P.XLEN-1:0]        PCW,                       // W-stage PC, used as MEPC when DED is from W-stage pipeline reg
+  input  logic [1:0]               MemRWM,                    // memory read/write in M stage (for DED mtval)
   input  logic                     TrapM,                     // trap is occurring
   input  logic                     mretM, sretM,              // return instruction
   input  logic                     InterruptM,                // interrupt is occurring
@@ -148,6 +153,8 @@ module csr import cvw::*;  #(parameter cvw_t P) (
       12, 1, 3:               NextFaultMtvalM = PCSpillM;  // Instruction page/access faults, breakpoint
       2:                      NextFaultMtvalM = {{(P.XLEN-32){1'b0}}, InstrOrigM}; // Illegal instruction fault
       0, 4, 6, 13, 15, 5, 7:  NextFaultMtvalM = IEUAdrxTvalM; // Instruction misaligned, Load/Store Misaligned/page/access faults
+      // Hardware error (ECC DED): memory address if load/store, else 0
+      19:                     NextFaultMtvalM = (|MemRWM) ? IEUAdrxTvalM : '0;
       default:                NextFaultMtvalM = '0; // Ecall, interrupts
     endcase
 
@@ -204,7 +211,9 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////////////////////
 
   assign CSRAdrM = InstrM[31:20];
-  assign UnalignedNextEPCM = TrapM ? PCM : CSRWriteValM;
+  // Use PCW as MEPC when the DED fault originates in the W-stage pipeline register
+  // (the faulting instruction is in W at that point); PCM is correct for all other traps.
+  assign UnalignedNextEPCM = TrapM ? (RegEccDedErrPipeW ? PCW : PCM) : CSRWriteValM;
   assign NextEPCM = P.ZCA_SUPPORTED ? {UnalignedNextEPCM[P.XLEN-1:1], 1'b0} : {UnalignedNextEPCM[P.XLEN-1:2], 2'b00}; // 3.1.15 alignment
   assign NextCauseM = TrapM ? {InterruptM, CauseM}: {CSRWriteValM[P.XLEN-1], CSRWriteValM[4:0]};
   assign NextMtvalM = TrapM ? NextFaultMtvalM : CSRWriteValM;
@@ -223,7 +232,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////////////////////
 
   csrharden csrharden(.PrivModeSecFaultW, .PrivModeUncorrectableFaultW, .MppReservedM,
-    .IllegalCSRAccessM, .InstrValidM, .SecFaultM);
+    .IllegalCSRAccessM, .InstrValidM, .RegEccSecErrW, .RegEccDedErrW, .SecFaultM);
 
   ///////////////////////////////////////////
   // CSRs

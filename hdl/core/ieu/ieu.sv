@@ -34,6 +34,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
+  output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (for precise EPC)
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
@@ -133,5 +134,5 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
-    .RegEccSecErrW, .RegEccDedErrW);
+    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW);
 endmodule

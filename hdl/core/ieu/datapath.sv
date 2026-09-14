@@ -81,7 +81,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [4:0]        RdW,                     // Destination register
   // ECC error aggregation outputs
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
-  output logic              RegEccDedErrW            // any uncorrectable ECC error → fault signal
+  output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
+  output logic              RegEccDedErrPipeW        // DED from W-stage pipeline reg only (IFResultM→IFResultW)
   // Hazard Unit signals
 );
 
@@ -178,5 +179,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   assign RegEccDedErrW = ded_err_rd1 | ded_err_rd2
                        | ded_rd1e | ded_rd2e | ded_imme
                        | ded_srcam | ded_ieumm | ded_wdm | ded_ifrw;
+  // Separate W-stage pipeline reg DED: instruction in W when this fires, so MEPC should use PCW
+  assign RegEccDedErrPipeW = ded_ifrw;
 
 endmodule

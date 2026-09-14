@@ -174,6 +174,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          DCacheStallM, ICacheStallF;
   logic                          wfiM, IntPendingM;
   logic                          RegEccSecErrW, RegEccDedErrW;  // ECC error aggregates from IEU
+  logic                          RegEccDedErrPipeW;               // DED from W-stage pipeline reg only
+  logic [P.XLEN-1:0]             PCW;                             // W-stage PC (PCM registered)
   logic                          RegEccDedErrSticky;              // latched DED fault — cleared only by reset
   logic                          PrivModeUncorrectableFaultW_priv; // from privileged unit before ECC OR
 
@@ -202,7 +204,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
-     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW,
+     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -314,6 +316,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
       .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
+      .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .PCW, .MemRWM,
       .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
@@ -323,6 +326,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             EPCM, TrapVectorM, RetM, TrapM,
             sfencevmaM, BigEndianM, wfiM, IntPendingM, PrivModeUncorrectableFaultW_priv} = '0;
   end
+
+  // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
+  flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
 
   // DED fault is sticky: once a double-bit error is seen it holds until reset
   always_ff @(posedge clk)
