@@ -454,3 +454,110 @@ jobs:
 
       - name: Run ECC baremetal test (inject_en=1)
         run: make -C sim run_ecc_inject PROG=../testcode/baremetal_ecc/${{ matrix.test }}.c
+
+  # ── Build Linux + ECC inject simulator ──────────────────────────────────────
+  ci-build-linux-ecc-inject:
+    name: Build (Linux + ECC Inject Sim)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch riscv-formal submodule
+        run: git submodule update --init third_party/riscv-formal
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 python3-pip gcc g++ make \
+            autoconf flex bison libfl-dev help2man zlib1g-dev
+          pip3 install --quiet pyyaml
+
+      - name: Cache Verilator v5.026
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.026-${{ runner.os }}
+
+      - name: Build Verilator v5.026 from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+          cd /tmp/verilator-src && autoconf
+          ./configure --prefix=/opt/verilator
+          make -j$(nproc)
+          make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> $GITHUB_PATH
+
+      - name: Compile (Linux + ECC Inject)
+        run: PATH=/opt/verilator/bin:$PATH make -C sim verilator/build_linux_ecc_inject/Vtop_tb
+
+      - name: Cache Linux+ECC inject build
+        uses: actions/cache@v4
+        with:
+          path: sim/verilator/build_linux_ecc_inject
+          key: linux-ecc-inject-build-${{ runner.os }}-${{ github.sha }}
+
+  # ── Linux boot with ECC injection ────────────────────────────────────────────
+  # Runs in parallel to the plain Linux boot (if added later).  Gate: all ECC
+  # unit tests, all ECC baremetal tests, and all plain baremetal tests must pass
+  # before we trust the simulator enough to attempt a full Linux boot under
+  # continuous LFSR bit-flip injection.
+  ci-linux-boot-ecc-inject:
+    name: Linux Boot with ECC Inject
+    runs-on: ubuntu-latest
+    needs:
+      - ci-ecc-unit
+      - ci-baremetal-ecc
+      - ci-baremetal
+      - ci-build-linux-ecc-inject
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch riscv-formal submodule
+        run: git submodule update --init third_party/riscv-formal
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 python3-pip gcc g++ make \
+            autoconf flex bison libfl-dev help2man zlib1g-dev \
+            device-tree-compiler gcc-riscv64-unknown-elf
+          pip3 install --quiet pyyaml
+
+      - name: Cache Linux boot image
+        id: cache-linux-image
+        uses: actions/cache@v4
+        with:
+          path: testcode/linux/build
+          key: linux-boot-image-${{ hashFiles('testcode/linux/Makefile') }}
+
+      - name: Build Linux boot image
+        if: steps.cache-linux-image.outputs.cache-hit != 'true'
+        run: make -C testcode/linux
+
+      - name: Restore Linux+ECC inject build cache
+        uses: actions/cache@v4
+        with:
+          path: sim/verilator/build_linux_ecc_inject
+          key: linux-ecc-inject-build-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+
+      - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
+        run: touch sim/verilator/build_linux_ecc_inject/Vtop_tb
+
+      - name: Run Linux boot with ECC injection
+        run: make -C sim linux_boot_ecc_inject
+
+      - name: Upload boot UART log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-ecc-inject-boot-uart
+          path: sim/verilator/linux_ecc_inject_boot/boot_uart.log

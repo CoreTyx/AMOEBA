@@ -58,6 +58,8 @@ module csr_harden_tb;
   logic       ch_MppReservedM;
   logic       ch_IllegalCSRAccessM;
   logic       ch_InstrValidM;
+  logic       ch_RegEccSecErrW;
+  logic       ch_RegEccDedErrW;
   logic [6:0] ch_SecFaultM;
 
   csrharden dut_csrharden (
@@ -66,6 +68,8 @@ module csr_harden_tb;
     .MppReservedM                (ch_MppReservedM),
     .IllegalCSRAccessM           (ch_IllegalCSRAccessM),
     .InstrValidM                 (ch_InstrValidM),
+    .RegEccSecErrW               (ch_RegEccSecErrW),
+    .RegEccDedErrW               (ch_RegEccDedErrW),
     .SecFaultM                   (ch_SecFaultM)
   );
 
@@ -138,6 +142,7 @@ module csr_harden_tb;
     // All inputs zero → all SecFaultM bits zero
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden all-zero [0]",   ch_SecFaultM[0] == 0);
     check("csrharden all-zero [1]",   ch_SecFaultM[1] == 0);
@@ -148,6 +153,7 @@ module csr_harden_tb;
     // PrivModeSecFaultW=1 → SecFaultM[0]=1, others 0
     ch_PrivModeSecFaultW = 1; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden PrivModeSecFaultW→[0]",    ch_SecFaultM[0] == 1);
     check("csrharden PrivModeSecFaultW→[1]=0",  ch_SecFaultM[1] == 0);
@@ -158,6 +164,7 @@ module csr_harden_tb;
     // PrivModeUncorrectableFaultW=1 → SecFaultM[3]=1, others 0
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 1;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden UncorrFault→[0]=0",  ch_SecFaultM[0] == 0);
     check("csrharden UncorrFault→[3]",    ch_SecFaultM[3] == 1);
@@ -166,6 +173,7 @@ module csr_harden_tb;
     // MppReservedM=1 → SecFaultM[1]=1, others 0
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 1; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden MppReserved→[0]=0",   ch_SecFaultM[0] == 0);
     check("csrharden MppReserved→[1]",     ch_SecFaultM[1] == 1);
@@ -176,6 +184,7 @@ module csr_harden_tb;
     // IllegalCSRAccess=1 & InstrValid=1 → SecFaultM[2]=1
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 1;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden IllegalCSR+Valid→[2]",   ch_SecFaultM[2] == 1);
     check("csrharden IllegalCSR+Valid→[0]=0", ch_SecFaultM[0] == 0);
@@ -185,30 +194,56 @@ module csr_harden_tb;
     // IllegalCSRAccess=1 & InstrValid=0 → SecFaultM[2]=0 (gate works)
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
     check("csrharden IllegalCSR+!Valid→[2]=0", ch_SecFaultM[2] == 0);
 
-    // All faults simultaneously → SecFaultM[3:0]=4'b1111
+    // RegEccSecErrW=1 → SecFaultM[4]=1, others 0
+    ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
+    ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 0;
+    #1;
+    check("csrharden RegEccSec→[4]",     ch_SecFaultM[4] == 1);
+    check("csrharden RegEccSec→[5]=0",   ch_SecFaultM[5] == 0);
+    check("csrharden RegEccSec→[3:0]=0", ch_SecFaultM[3:0] == 4'b0);
+    check("csrharden RegEccSec→[6]=0",   ch_SecFaultM[6] == 0);
+
+    // RegEccDedErrW=1 → SecFaultM[5]=1, others 0
+    ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
+    ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 1;
+    #1;
+    check("csrharden RegEccDed→[5]",     ch_SecFaultM[5] == 1);
+    check("csrharden RegEccDed→[4]=0",   ch_SecFaultM[4] == 0);
+    check("csrharden RegEccDed→[3:0]=0", ch_SecFaultM[3:0] == 4'b0);
+    check("csrharden RegEccDed→[6]=0",   ch_SecFaultM[6] == 0);
+
+    // All faults simultaneously → SecFaultM[5:0]=6'b111111
     ch_PrivModeSecFaultW = 1; ch_PrivModeUncorrectableFaultW = 1;
     ch_MppReservedM = 1; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 1;
+    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1;
     #1;
     check("csrharden all-fault [3:0]=4'b1111",  ch_SecFaultM[3:0] == 4'b1111);
-    check("csrharden all-fault [6:4]=0",         ch_SecFaultM[6:4] == 3'b0);
+    check("csrharden all-fault [5:4]=2'b11",     ch_SecFaultM[5:4] == 2'b11);
+    check("csrharden all-fault [6]=0",            ch_SecFaultM[6] == 0);
 
-    // SecFaultM[6:4] must always be 0
+    // SecFaultM[6] must always be 0
     ch_PrivModeSecFaultW = 1; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 1;
+    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1;
     #1;
-    check("csrharden reserved bits 1", ch_SecFaultM[6:4] == 3'b0);
+    check("csrharden reserved bits 1", ch_SecFaultM[6] == 0);
 
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 1;
     ch_MppReservedM = 1; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 1;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
     #1;
-    check("csrharden reserved bits 2", ch_SecFaultM[6:4] == 3'b0);
+    check("csrharden reserved bits 2", ch_SecFaultM[6] == 0);
 
     // Restore to zero
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
   endtask
 
   // ── Part 2: privmode functional path tests ────────────────────────────────────

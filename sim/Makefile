@@ -57,6 +57,16 @@ VER_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 ECC_INJECT_DIR       := build_ecc_inject
 ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
+# Same flags as the Linux boot simulator but with ECE411_SIM_INJECT to enable LFSR
+# bit-flip injection every 2^INJECT_PERIOD cycles.  Waveforms and Spike co-sim are
+# compiled out; RVFI is suppressed for the same reason as the plain Linux boot.
+LINUX_ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
+	+define+ECE411_LINUX +define+ECE411_NO_TRACE +define+ECE411_NO_RVFI +define+ECE411_SIM_INJECT \
+	+incdir+$(CURDIR)/../hvl/verilator \
+	-Wall --timescale 1ps/1ps -Mdir $(LINUX_ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 \
+	-CFLAGS "-O3 -flto -DNDEBUG -DECE411_NO_TRACE" -LDFLAGS "-flto" --x-assign fast --x-initial fast \
+	--cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads 1
 
 
 # ── No-Spike simulator (shared by ISA-level tests and FreeRTOS tests) ──────────
@@ -195,6 +205,38 @@ linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 		+UART_FAIL_ECE411="$(LINUX_FAIL)" \
 		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_RUN_DIR)/boot_uart.log" \
 		|& tee $(CURDIR)/$(LINUX_RUN_DIR)/simulation.log
+
+# ── Linux + ECC inject simulator ─────────────────────────────────────────────
+# Combines the Linux boot environment (ECE411_LINUX) with LFSR error injection
+# (ECE411_SIM_INJECT).  The injector fires every 2^INJECT_PERIOD cycles; the
+# ECC pipeline corrects single-bit flips transparently, so a successful boot to
+# userspace proves end-to-end ECC correction under real workloads.
+verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
+	mkdir -p verilator/$(LINUX_ECC_INJECT_DIR)
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	cd verilator ;\
+	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(LINUX_ECC_INJECT_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(LINUX_ECC_INJECT_DIR)/compile.log
+	cd verilator/$(LINUX_ECC_INJECT_DIR) ;\
+	$(MAKE) --jobs=$(shell echo $(shell nproc)-2 | bc) -f Vtop_tb.mk |& tee -a compile.log
+
+.PHONY: build_linux_ecc_inject
+build_linux_ecc_inject: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb
+	@echo "Linux+ECC inject simulator built (ECE411_LINUX + ECE411_SIM_INJECT, waveforms compiled out)"
+
+LINUX_ECC_INJECT_RUN_DIR ?= verilator/linux_ecc_inject_boot
+
+.PHONY: linux_boot_ecc_inject
+linux_boot_ecc_inject: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb $(LINUX_MEMLST)
+	mkdir -p $(LINUX_ECC_INJECT_RUN_DIR)
+	cd verilator && ./$(LINUX_ECC_INJECT_DIR)/Vtop_tb \
+		+TIMEOUT_ECE411=$(LINUX_TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+MEMLST_ECE411="$(LINUX_MEMLST)" \
+		+UART_PASS_ECE411="$(LINUX_PASS)" \
+		+UART_FAIL_ECE411="$(LINUX_FAIL)" \
+		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/boot_uart.log" \
+		|& tee $(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/simulation.log
 
 .PHONY: freertos
 freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
