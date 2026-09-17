@@ -33,6 +33,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 BreakpointFaultM, LoadMisalignedFaultM, StoreAmoMisalignedFaultM,
   input  logic                 LoadAccessFaultM, StoreAmoAccessFaultM, EcallFaultM, InstrPageFaultM,
   input  logic                 LoadPageFaultM, StoreAmoPageFaultM,              // various trap sources
+  input  logic                 HardwareErrorFaultM,                             // IEU ECC DED — uncorrectable hardware error
   input  logic                 wfiM, wfiW,                                      // wait for interrupt instruction
   input  logic [1:0]           PrivilegeModeW,                                  // current privilege mode
   input  logic [11:0]          MIP_REGW, MIE_REGW, MIDELEG_REGW,                // interrupt pending, enabled, and delegate CSRs
@@ -69,8 +70,11 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   assign ValidIntsM    = Committed ? '0 : EnabledIntsM;
   assign InterruptM    = (|ValidIntsM) & InstrValidM & (~wfiM | wfiW); // suppress interrupt if the memory system has partially processed a request. Delay interrupt until wfi is in the W stage.
   // wfiW is to support possible but unlikely back to back wfi instructions. wfiM would be high in the M stage, while also in the W stage.
-  assign DelegateM     = P.S_SUPPORTED & (InterruptM ? MIDELEG_REGW[CauseM[3:0]] : MEDELEG_REGW[CauseM[3:0]]) &
-                     (PrivilegeModeW == P.U_MODE | PrivilegeModeW == P.S_MODE);
+  // Causes >= 16 (CauseM[4]=1) are not in MEDELEG (only 16 bits wide) — never delegate.
+  // Hardware errors (cause=19) always trap to M-mode.
+  assign DelegateM     = P.S_SUPPORTED & ~CauseM[4] &
+                         (InterruptM ? MIDELEG_REGW[CauseM[3:0]] : MEDELEG_REGW[CauseM[3:0]]) &
+                         (PrivilegeModeW == P.U_MODE | PrivilegeModeW == P.S_MODE);
 
   ///////////////////////////////////////////
   // Trigger Traps
@@ -86,7 +90,8 @@ module trap import cvw::*;  #(parameter cvw_t P) (
                       LoadMisalignedFaultM | StoreAmoMisalignedFaultM |
                       BothInstrPageFaultM | LoadPageFaultM | StoreAmoPageFaultM |
                       BreakpointFaultM | EcallFaultM |
-                      LoadAccessFaultM | StoreAmoAccessFaultM;
+                      LoadAccessFaultM | StoreAmoAccessFaultM |
+                      HardwareErrorFaultM;
   // coverage on
   assign TrapM = (ExceptionM & ~CommittedF) | InterruptM;
 
@@ -123,5 +128,6 @@ module trap import cvw::*;  #(parameter cvw_t P) (
     else if (LoadAccessFaultM)                                CauseM = 5'd5;
     else if (StoreAmoMisalignedFaultM & P.ZICCLSM_SUPPORTED)  CauseM = 5'd6; // See priority in Privileged Spec 3.1.15
     else if (LoadMisalignedFaultM & P.ZICCLSM_SUPPORTED)      CauseM = 5'd4;
+    else if (HardwareErrorFaultM)                             CauseM = 5'd19; // hardware error (ECC DED)
     else                                                      CauseM = 5'd0;
 endmodule

@@ -29,6 +29,8 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
+   // ECC inject enable (from top-level, for DFT)
+   input  logic                  ecc_inject_en,
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -45,7 +47,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    output logic [3:0]            HPROT,
    output logic [1:0]            HTRANS,
    output logic                  HMASTLOCK,
-   input  logic                  ExternalStall
+   input  logic                  ExternalStall,
+   output logic                  PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
 
   logic                          StallF, StallD, StallE, StallM, StallW;
@@ -170,6 +173,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          BranchD, BranchE, JumpD, JumpE;
   logic                          DCacheStallM, ICacheStallF;
   logic                          wfiM, IntPendingM;
+  logic                          RegEccSecErrW, RegEccDedErrW;  // ECC error aggregates from IEU
+  logic                          RegEccDedErrPipeW;               // DED from W-stage pipeline reg only
+  logic [P.XLEN-1:0]             PCW;                             // W-stage PC (PCM registered)
+  logic                          RegEccDedErrSticky;              // latched DED fault — cleared only by reset
+  logic                          PrivModeUncorrectableFaultW_priv; // from privileged unit before ECC OR
 
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
@@ -196,6 +204,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
+     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -306,15 +315,28 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .PrivilegeModeW, .SATP_REGW,
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
-      .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM);
+      .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
+      .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .PCW, .MemRWM,
+      .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
             SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
             EPCM, TrapVectorM, RetM, TrapM,
-            sfencevmaM, BigEndianM, wfiM, IntPendingM} = '0;
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, PrivModeUncorrectableFaultW_priv} = '0;
   end
+
+  // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
+  flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
+
+  // DED fault is sticky: once a double-bit error is seen it holds until reset
+  always_ff @(posedge clk)
+    if (reset) RegEccDedErrSticky <= 1'b0;
+    else       RegEccDedErrSticky <= RegEccDedErrSticky | RegEccDedErrW;
+
+  // Combine privilege-mode TMR fault with sticky IEU ECC uncorrectable (DED) fault
+  assign PrivModeUncorrectableFaultW = PrivModeUncorrectableFaultW_priv | RegEccDedErrSticky;
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
