@@ -30,6 +30,7 @@
 module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   input  logic                clk,
   input  logic                reset_ext,        // external asynchronous reset pin
+  input  logic                ecc_inject_en,    // ECC inject enable (for DFT / ECC test)
   output logic                reset,            // reset synchronized to clk to prevent races on release
   // AHB Interface
   input  logic [P.AHBW-1:0]   HRDATAEXT,
@@ -63,7 +64,8 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   input  logic                SDCIn,            // SDC DATA[0]     to     SPI DI
   output logic                SDCCmd,           // SDC CMD         from   SPI DO
   output logic [3:0]          SDCCS,            // SDC Card Detect from   SPI CS
-  output logic                SDCCLK            // SDC Clock       from   SPI Clock
+  output logic                SDCCLK,           // SDC Clock       from   SPI Clock
+  output logic                PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
 
   // Uncore signals
@@ -78,9 +80,11 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
 
   // instantiate processor and internal memories
   wallypipelinedcore #(P) core(.clk, .reset,
+    .ecc_inject_en,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
-    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall
+    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
+    .PrivModeUncorrectableFaultW
    );
 
   // instantiate uncore if a bus interface exists

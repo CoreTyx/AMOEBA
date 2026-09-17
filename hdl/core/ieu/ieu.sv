@@ -29,6 +29,12 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  // ECC inject enable (from top-level, for DFT)
+  input  logic              ecc_inject_en,
+  // ECC error aggregation outputs (correctable / uncorrectable)
+  output logic              RegEccSecErrW,
+  output logic              RegEccDedErrW,
+  output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (for precise EPC)
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
@@ -134,11 +140,13 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
+    .clk, .reset, .ecc_inject_en,
+    .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
-    .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW);
+    .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
+    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW);
 endmodule
