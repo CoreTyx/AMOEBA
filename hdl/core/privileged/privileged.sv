@@ -74,7 +74,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   // Shadow faults are aligned with normal M-stage exceptions; FTStatus is
   // diagnostic state only and does not participate in architectural execution.
   input  logic              FTUnresolvedFaultM,
-  input  logic [5:0]        FTStatus,
+  input  logic [6:0]        FTStatus,
   input  logic              IllegalIEUFPUInstrD,                            // illegal instruction from IEU or FPU
   input  logic              MTimerInt, MExtInt, SExtInt, MSwInt,            // interrupt sources
   input  logic [63:0]       MTIME_CLINT,                                    // timer value from CLINT

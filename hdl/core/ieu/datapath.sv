@@ -115,6 +115,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   ft_cmp #(.WIDTH(P.XLEN)) ftcmp(
     .clk, .reset, .flush(FlushE), .valid(InstrValidE),
     .a(ForwardedSrcAE), .b(ForwardedSrcBE), .sgnd(BranchSignedE), .flags(FlagsE),
+    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
     .stall_req(CMPStallE), .unresolved(CMPUnresolvedE), .pe_primary(CMP_PE_p), .pe_shadow(CMP_PE_r));
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
@@ -124,6 +125,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
     .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
+    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
     .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(ALUStallE),
     .unresolved(ALUUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r));
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);

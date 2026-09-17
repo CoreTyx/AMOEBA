@@ -39,7 +39,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
   input  logic [5:0]               NextCauseM,
   input  logic [P.XLEN-1:0]        CSRWriteValM,
-  input  logic [5:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
+  input  logic [6:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
   input  logic [11:0]              MIP_REGW, MIE_REGW,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
   output logic [P.XLEN-1:0]        MEPC_REGW,
@@ -270,7 +270,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MIP:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIP_REGW};
       MIE:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIE_REGW};
       // Custom CSR is intentionally read-only; writes are rejected above.
-      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-6){1'b0}}, FTStatus};
+      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, FTStatus};
       MSCRATCH:      CSRMReadValM = MSCRATCH_REGW;
       MEPC:          CSRMReadValM = MEPC_REGW;
       MCAUSE:        CSRMReadValM = MCAUSE_REGW;

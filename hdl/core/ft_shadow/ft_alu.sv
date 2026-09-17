@@ -1,4 +1,8 @@
-module ft_alu import cvw::*; #(parameter cvw_t P, parameter int TE_THRESHOLD = 3) (
+module ft_alu import cvw::*; #(
+  parameter cvw_t P,
+  parameter int TE_THRESHOLD = 3,
+  parameter bit FAULT_INJECT = 1'b0
+) (
   // Inputs are the existing E-stage ALU controls; outputs retain Wally's
   // result/address interface plus FT control and diagnosis.
   input  logic clk, reset, flush, valid,
@@ -11,11 +15,19 @@ module ft_alu import cvw::*; #(parameter cvw_t P, parameter int TE_THRESHOLD = 3
   input  logic [4:0] Rs2E,
   input  logic BMUActive,
   input  logic [1:0] CZero,
+  // Test-only replica-output fault selection; tied off by the production IEU.
+  input  logic fi_enable,
+  input  logic [1:0] fi_target,
+  input  logic [1:0] fi_kind,
+  input  logic [$clog2(P.XLEN)-1:0] fi_bit,
+  input  logic fi_channel, // 0: ALUResult, 1: Sum/address
   output logic [P.XLEN-1:0] ALUResult, Sum,
   output logic stall_req, unresolved, pe_primary, pe_shadow
 );
 
   // Live copy outputs; normal_* preserves the first mismatch for diagnosis.
+  logic [P.XLEN-1:0] primary_result_raw, primary_sum_raw;
+  logic [P.XLEN-1:0] shadow_result_raw, shadow_sum_raw;
   logic [P.XLEN-1:0] primary_result, primary_sum, shadow_result, shadow_sum;
   logic [P.XLEN-1:0] normal_primary_result, normal_primary_sum;
   logic [P.XLEN-1:0] normal_shadow_result, normal_shadow_sum;
@@ -33,10 +45,24 @@ module ft_alu import cvw::*; #(parameter cvw_t P, parameter int TE_THRESHOLD = 3
   // Keep Wally's ALU implementation intact and duplicate its complete output.
   alu #(P) primary(.A(recompute_a), .B(recompute_b), .W64, .UW64, .SubArith,
     .ALUSelect, .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl,
-    .BMUActive, .CZero, .ALUResult(primary_result), .Sum(primary_sum));
+    .BMUActive, .CZero, .ALUResult(primary_result_raw), .Sum(primary_sum_raw));
   alu #(P) shadow(.A(recompute_a), .B(recompute_b), .W64, .UW64, .SubArith,
     .ALUSelect, .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl,
-    .BMUActive, .CZero, .ALUResult(shadow_result), .Sum(shadow_sum));
+    .BMUActive, .CZero, .ALUResult(shadow_result_raw), .Sum(shadow_sum_raw));
+
+  // Inject after independent replicas, never into shared operands or controls.
+  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_result_fi(
+    .data_i(primary_result_raw), .fi_enable(fi_enable & ~fi_channel & (fi_target[0])),
+    .fi_kind, .fi_bit, .data_o(primary_result));
+  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_result_fi(
+    .data_i(shadow_result_raw), .fi_enable(fi_enable & ~fi_channel & (fi_target[1])),
+    .fi_kind, .fi_bit, .data_o(shadow_result));
+  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_sum_fi(
+    .data_i(primary_sum_raw), .fi_enable(fi_enable & fi_channel & (fi_target[0])),
+    .fi_kind, .fi_bit, .data_o(primary_sum));
+  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_sum_fi(
+    .data_i(shadow_sum_raw), .fi_enable(fi_enable & fi_channel & (fi_target[1])),
+    .fi_kind, .fi_bit, .data_o(shadow_sum));
 
   // Recompute intentionally changes the operands, so normal mismatch checking
   // is disabled until the controller finishes diagnosis.

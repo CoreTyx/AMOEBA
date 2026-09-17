@@ -38,7 +38,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        PCM,                       // program counter, next PC going to trap/return logic
   input  logic [P.XLEN-1:0]        PCSpillM,                  // program counter, next PC going to trap/return logic aligned after an instruction spill
   input  logic [P.XLEN-1:0]        SrcAM, IEUAdrxTvalM,       // SrcA and memory address from IEU
-  input  logic [5:0]               FTStatus,                  // sticky shadow/ECC bits exposed by mftstatus
+  input  logic [6:0]               FTStatus,                  // sticky shadow/ECC bits exposed by mftstatus
   input  logic                     CSRReadM, CSRWriteM,       // read or write CSR
   input  logic                     TrapM,                     // trap is occurring
   input  logic                     mretM, sretM,              // return instruction

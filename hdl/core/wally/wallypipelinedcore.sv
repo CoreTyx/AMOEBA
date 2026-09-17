@@ -29,7 +29,6 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
-   input  logic                  ecc_inject_en, // sai-ecc-csrhardening hook; tied low by this SoC
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -88,14 +87,14 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [3:0]                    ENVCFG_CBE;                      // Cache Block operation enables
   logic [3:0]                    CMOpM;                           // 1: cbo.inval; 2: cbo.flush; 4: cbo.clean; 8: cbo.zero
   logic                          IFUPrefetchE, LSUPrefetchM;      // instruction / data prefetch hints
-  // Shadow control is split by detection stage: ALU/compare in E, multiplier
-  // in M. FTStall is combined before hazard propagation; unresolved status is
+  // Shadow control is split by detection stage: ALU/compare in E, multiply/
+  // divide in M. FTStall is combined before hazard propagation; unresolved status is
   // pipelined to M so the existing precise trap machinery can consume it.
   logic                          FTStallE, FTStallM, FTStall;
-  logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MULUnresolvedM;
-  logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r;
-  logic [5:0]                    FTStatus;
-  logic [5:0]                    FTStatusSticky;
+  logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
+  logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
+  logic [6:0]                    FTStatus;
+  logic [6:0]                    FTStatusSticky;
   logic                          RegEccSecErrW, RegEccDedErrW;
 
   // floating point unit signals
@@ -289,19 +288,19 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign RegEccSecErrW = 1'b0;
   assign RegEccDedErrW = 1'b0;
 
-  // E faults advance with the instruction into M; MUL faults already occur in
+  // E faults advance with the instruction into M; MDU faults already occur in
   // M. A retry freezes all stages, while an unresolved operation is released
   // exactly once to become a precise trap.
   flopenrc #(1) FTUnresolvedERegPipe(clk, reset, FlushM, ~StallM, FTUnresolvedE, FTUnresolvedEReg);
-  assign FTUnresolvedM = FTUnresolvedEReg | MULUnresolvedM;
+  assign FTUnresolvedM = FTUnresolvedEReg | MDUUnresolvedM;
   assign FTStall = FTStallE | FTStallM;
 
   // mftstatus (custom read-only CSR) is backed by reset-sticky diagnosis bits:
-  // {shadow unresolved, ECC DED, ECC SEC, mul isolated, cmp isolated, alu isolated}.
+  // {shadow unresolved, ECC DED, ECC SEC, div isolated, mul isolated, cmp isolated, alu isolated}.
   // The ECC bits follow the sai-ecc-csrhardening W-stage aggregate interface;
   // they are tied low above until that storage implementation is merged.
-  assign FTStatus = {FTUnresolvedM, RegEccDedErrW, RegEccSecErrW, (MUL_PE_p | MUL_PE_r),
-                     (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
+  assign FTStatus = {FTUnresolvedM, RegEccDedErrW, RegEccSecErrW, (DIV_PE_p | DIV_PE_r),
+                     (MUL_PE_p | MUL_PE_r), (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
   // Sticky status survives the transient checker pulse and is read via CSR.
   always_ff @(posedge clk) begin
     if (reset) FTStatusSticky <= '0;
@@ -359,14 +358,17 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
       .ForwardedSrcAE, .ForwardedSrcBE,
       .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
-      .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MULUnresolvedM), .MUL_PE_p, .MUL_PE_r);
+      .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),
+      .MUL_PE_p, .MUL_PE_r, .DIV_PE_p, .DIV_PE_r);
   end else begin // no M instructions supported
     assign MDUResultW = '0;
     assign DivBusyE   = 1'b0;
     assign FTStallM = 1'b0;
-    assign MULUnresolvedM = 1'b0;
+    assign MDUUnresolvedM = 1'b0;
     assign MUL_PE_p = 1'b0;
     assign MUL_PE_r = 1'b0;
+    assign DIV_PE_p = 1'b0;
+    assign DIV_PE_r = 1'b0;
   end
 
   // floating point unit
