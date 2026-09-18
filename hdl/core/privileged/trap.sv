@@ -30,6 +30,7 @@
 module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 reset,
   input  logic                 InstrMisalignedFaultM, InstrAccessFaultM, HPTWInstrAccessFaultM, HPTWInstrPageFaultM, IllegalInstrFaultM,
+  input  logic                 FTUnresolvedFaultM,                              // unresolved shadow result
   input  logic                 BreakpointFaultM, LoadMisalignedFaultM, StoreAmoMisalignedFaultM,
   input  logic                 LoadAccessFaultM, StoreAmoAccessFaultM, EcallFaultM, InstrPageFaultM,
   input  logic                 LoadPageFaultM, StoreAmoPageFaultM,              // various trap sources
@@ -71,8 +72,8 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   assign ValidIntsM    = Committed ? '0 : EnabledIntsM;
   assign InterruptM    = (|ValidIntsM) & InstrValidM & (~wfiM | wfiW); // suppress interrupt if the memory system has partially processed a request. Delay interrupt until wfi is in the W stage.
   // wfiW is to support possible but unlikely back to back wfi instructions. wfiM would be high in the M stage, while also in the W stage.
-  // Causes >= 16 (CauseM[4]=1) are not in MEDELEG (only 16 bits wide) — never delegate.
-  // Hardware errors (cause=19) always trap to M-mode.
+  // Causes >= 16 (shadow cause 16 and ECC cause 19) are outside MEDELEG and
+  // therefore always trap to M-mode.
   assign DelegateM     = P.S_SUPPORTED & ~CauseM[4] &
                          (InterruptM ? MIDELEG_REGW[CauseM[3:0]] : MEDELEG_REGW[CauseM[3:0]]) &
                          (PrivilegeModeW == P.U_MODE | PrivilegeModeW == P.S_MODE);
@@ -87,7 +88,9 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   assign BothInstrPageFaultM = InstrPageFaultM | HPTWInstrPageFaultM;
   // coverage off -item e 1 -fecexprrow 2
   // excludes InstrMisalignedFaultM from coverage of this line, since misaligned instructions cannot occur in rv64gc.
-  assign ExceptionM = InstrMisalignedFaultM | BothInstrAccessFaultM | IllegalInstrFaultM |
+  // Shadow faults are synchronous exceptions: they flush younger work and
+  // reuse Wally's normal MEPC/MTVAL update path.
+  assign ExceptionM = InstrMisalignedFaultM | BothInstrAccessFaultM | IllegalInstrFaultM | FTUnresolvedFaultM |
                       LoadMisalignedFaultM | StoreAmoMisalignedFaultM |
                       BothInstrPageFaultM | LoadPageFaultM | StoreAmoPageFaultM |
                       BreakpointFaultM | EcallFaultM |
@@ -116,6 +119,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
     else if (BothInstrPageFaultM)                             CauseM = 5'd12;
     else if (BothInstrAccessFaultM)                           CauseM = 5'd1;
     else if (IllegalInstrFaultM)                              CauseM = 5'd2;
+    else if (FTUnresolvedFaultM)                              CauseM = 5'd16; // custom machine-only shadow fault
     // coverage off
     // Misaligned instructions cannot occur in rv64gc
     else if (InstrMisalignedFaultM)                           CauseM = 5'd0;

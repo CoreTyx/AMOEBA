@@ -76,7 +76,17 @@ if not all([x in j for x in required_list]):
 
 unexpected = [key for key in j if key not in required_list]
 
-if not all([x in required_list for x in j]):
+# The shared mapping file may retain optional floating-point entries while an
+# F-disabled build omits the corresponding ports.  Ignore only those entries;
+# all other mapping entries must still match the active interface exactly.
+if no_float:
+    fp_entries = {
+        "frs1_addr", "frs2_addr", "frs3_addr", "frs1_rdata",
+        "frs2_rdata", "frs3_rdata", "frd_addr", "frd_wdata"
+    }
+    unexpected = [key for key in unexpected if key.split("[")[0] not in fp_entries]
+
+if unexpected:
     print("spurious item in rvfi_reference.json", file=sys.stderr)
     print(unexpected)
     exit(1)
@@ -87,6 +97,6 @@ if not all([set(j[x]) <= allowed_char for x in j]):
 
 with open("rvfi_reference.svh", 'w') as f:
     f.write("always_comb begin\n")
-    for x in j:
+    for x in required_list:
         f.write(f"    mon_itf.{x} = {j[x]};\n")
     f.write("end\n")

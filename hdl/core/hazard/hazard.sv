@@ -33,6 +33,8 @@ module hazard (
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
   input  logic  DivBusyE, FDivBusyE,
+  // Shadow retry has the same whole-pipeline semantics as a cache/bus stall.
+  input  logic  FTStall,                           // result is not yet trusted
   input  logic  wfiM, IntPendingM,
   input  logic  InjectD,
   // Stall & flush outputs
@@ -92,7 +94,8 @@ module hazard (
   // Need to gate IFUStallF when the equivalent FlushFCause = FlushDCause = 1.
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall;
+  // Use normal backward stall propagation to freeze F through W.
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | FTStall;
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0

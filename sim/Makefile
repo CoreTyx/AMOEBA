@@ -48,6 +48,9 @@ TIMEOUT      ?= 10000000
 PROG_NAME ?= $(notdir $(basename $(PROG)))
 
 ECE411_NO_FLOAT = $(shell python3 $(CURDIR)/../bin/get_options.py no_float)
+# The compiler needs the Verilog define above; rvfi_reference.py instead
+# expects the literal token "no_float" when the F extension is absent.
+RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
 CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
@@ -73,12 +76,11 @@ LINUX_ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define
 	-CFLAGS "-O3 -flto -DNDEBUG -DECE411_NO_TRACE" -LDFLAGS "-flto" --x-assign fast --x-initial fast \
 	--cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads 1
 
-
 # ── No-Spike simulator (shared by ISA-level tests and FreeRTOS tests) ──────────
 verilator/$(NO_SPIKE_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(NO_SPIKE_DIR)
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd verilator ;\
 	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(NO_SPIKE_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(NO_SPIKE_DIR)/compile.log
 	cd verilator/$(NO_SPIKE_DIR) ;\
@@ -176,7 +178,7 @@ LINUX_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_
 verilator/$(LINUX_BUILD_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(LINUX_BUILD_DIR)
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd verilator ;\
 	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(LINUX_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(LINUX_BUILD_DIR)/compile.log
 	cd verilator/$(LINUX_BUILD_DIR) ;\
@@ -251,7 +253,7 @@ freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 vcs/top_tb: $(VCS_SRCS) $(HDRS)
 	mkdir -p vcs
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd vcs && vcs $(VCS_SRCS) $(VCS_FLAGS) -l compile.log -top top_tb -o top_tb
 	bash check_compile_error.sh
 
@@ -276,7 +278,7 @@ run_vcs_top_tb: vcs/top_tb $(PROG)
 verilator/$(BUILD_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) ../hvl/common/spike.so $(CURDIR)/Makefile
 	mkdir -p verilator/$(BUILD_DIR)
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd verilator ;\
 	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(BUILD_DIR)/compile.log
 	cd verilator/$(BUILD_DIR) ;\
@@ -336,7 +338,7 @@ generate-rtl:
 
 .PHONY: generated-files
 generated-files:
-	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd $(RISCV_FORMAL_MONITOR_DIR) && \
 	    python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $(CURDIR)/../hvl/common/rvfimon.v
 	patch -s $(CURDIR)/../hvl/common/rvfimon.v < $(RVFIMON_PATCH)
@@ -344,7 +346,7 @@ generated-files:
 .PHONY: check-generated
 check-generated:
 	@tmp=$$(mktemp -d); \
-	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT); \
+	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT); \
 	cd $(RISCV_FORMAL_MONITOR_DIR) && python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $$tmp/rvfimon.v; \
 	patch -s $$tmp/rvfimon.v < $(RVFIMON_PATCH) || (echo "ERROR: $(RVFIMON_PATCH) no longer applies to the generated monitor." && echo "The submodule moved; rebase or drop the patch if it is upstream now." && rm -rf $$tmp && exit 1); \
 	diff $(CURDIR)/../hvl/common/rvfimon.v $$tmp/rvfimon.v || (echo "ERROR: rvfimon.v is stale — run 'make generated-files'" && rm -rf $$tmp && exit 1); \
@@ -409,6 +411,35 @@ regression:
 	$(MAKE) baremetal_regression
 	$(MAKE) isa_regression
 	$(MAKE) freertos_regression
+
+# ── Standalone RTL unit tests ─────────────────────────────────────────────────
+# Self-checking testbenches live in hvl/; their build/run entry points live here
+# alongside the SoC, ECC, and ISA regression targets.
+.PHONY: ft_shadow_test
+ft_shadow_test:
+	mkdir -p verilator/ft_shadow_tb
+	verilator --binary --timing -O2 --top-module ft_recompute_fault_tb \
+	    $(CURDIR)/../pkg/types.sv \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/flop/flopenrc.sv \
+	    $(CURDIR)/../hdl/core/generic/flop/flopen.sv \
+	    $(CURDIR)/../hdl/core/ieu/shifter.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/aes/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/sha/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/bmu/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/kmu/*.sv) \
+	    $(CURDIR)/../hdl/core/ieu/alu.sv \
+	    $(CURDIR)/../hdl/core/ieu/comparator.sv \
+	    $(CURDIR)/../hdl/core/mdu/mul.sv \
+	    $(CURDIR)/../hdl/core/mdu/divstep.sv \
+	    $(CURDIR)/../hdl/core/mdu/div.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/ft_shadow/*.sv) \
+	    $(CURDIR)/../hvl/ft_shadow/ft_recompute_fault_tb.sv \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    -Mdir verilator/ft_shadow_tb -Wall -Wno-fatal --timescale 1ps/1ps \
+	    2>&1 | tee verilator/ft_shadow_tb/compile.log
+	verilator/ft_shadow_tb/Vft_recompute_fault_tb
 
 .PHONY: ecc_baremetal_regression
 ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
