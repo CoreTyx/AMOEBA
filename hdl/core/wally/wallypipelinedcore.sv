@@ -29,6 +29,8 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
+   // ECC inject enable (from top-level, for DFT)
+   input  logic                  ecc_inject_en,
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -45,7 +47,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    output logic [3:0]            HPROT,
    output logic [1:0]            HTRANS,
    output logic                  HMASTLOCK,
-   input  logic                  ExternalStall
+   input  logic                  ExternalStall,
+   output logic                  PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
 
   logic                          StallF, StallD, StallE, StallM, StallW;
@@ -95,7 +98,14 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
-  logic                          RegEccSecErrW, RegEccDedErrW;
+
+  // AMOEBA random instruction insertion
+  logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
+  logic [31:0]                   DummyInstrD;                     // dummy instruction to inject
+  logic                          InjectD;                         // inject a dummy this cycle
+  logic                          DummySelD;                       // shadow register the dummy writes
+  logic                          DummyW;                          // Writeback holds a dummy instruction
+  logic                          InsertOkD;                       // pipeline permits an insertion
 
   // floating point unit signals
   logic [2:0]                    FRM_REGW;
@@ -179,12 +189,19 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          BranchD, BranchE, JumpD, JumpE;
   logic                          DCacheStallM, ICacheStallF;
   logic                          wfiM, IntPendingM;
+  logic                          RegEccSecErrW, RegEccDedErrW;  // ECC error aggregates from IEU
+  logic                          RegEccDedErrPipeW;               // DED from W-stage pipeline reg only
+  logic [P.XLEN-1:0]             PCW;                             // W-stage PC (PCM registered)
+  logic                          EccDedFaultM, EccDedTrapTakenM; // registered DED trap record and acknowledgement
+  logic [P.XLEN-1:0]             EccDedFaultEPCM, EccDedFaultMtvalM;
+  logic                          RegEccDedErrSticky;              // latched DED fault — cleared only by reset
+  logic                          PrivModeUncorrectableFaultW_priv; // from privileged unit before ECC OR
 
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
     .InstrValidE, .InstrValidD,
-    .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF,
+    .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF, .InjectD,
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
@@ -205,6 +222,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
+     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -227,7 +245,26 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      // hazards
      .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
      .StructuralStallD, .LoadStallD, .StoreStallD, .PCSrcE,
-     .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM);
+     .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM,
+     // random instruction insertion
+     .InjectD, .DummyInstrD, .DummySelD, .DummyW);
+
+  ///////////////////////////////////////////
+  // AMOEBA: random instruction insertion
+  ///////////////////////////////////////////
+  // An insertion is blocked whenever Execute cannot accept a new instruction this cycle
+  // (a divide occupying Execute, or a stall originating in Memory/Writeback) or the
+  // pipeline is about to be flushed anyway.  All of these are Memory/Execute stage
+  // signals that do not depend on the decode-stage instruction, so qualifying the
+  // strobe with them cannot form a combinational loop through the injection mux.
+  // Structural stalls in Decode are deliberately *not* excluded: injecting into a
+  // bubble that would have been inserted anyway costs no performance.
+  assign InsertOkD = ~DivBusyE & ~FDivBusyE & ~StallM & ~RetM & ~CSRWriteFenceM;
+
+  dummygen dummygen(.clk, .reset,
+    .FreqW(RAND_INSTR_INSERT_FREQ_REGW),
+    .InstrD, .InstrValidD, .InsertOkD,
+    .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
     .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
@@ -282,12 +319,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             HWSTRB, HWRITE, HSIZE, HBURST, HPROT, HTRANS, HMASTLOCK} = '0;
   end
 
-  // ECC TODO: the sai-ecc-csrhardening injection port is structurally routed
-  // but tied low by this SoC until that storage-hardening branch is merged.
-  // Do not feed its W-stage aggregates into execute-stage shadow control.
-  assign RegEccSecErrW = 1'b0;
-  assign RegEccDedErrW = 1'b0;
-
   // E faults advance with the instruction into M; MDU faults already occur in
   // M. A retry freezes all stages, while an unresolved operation is released
   // exactly once to become a precise trap.
@@ -297,8 +328,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // mftstatus (custom read-only CSR) is backed by reset-sticky diagnosis bits:
   // {shadow unresolved, ECC DED, ECC SEC, div isolated, mul isolated, cmp isolated, alu isolated}.
-  // The ECC bits follow the sai-ecc-csrhardening W-stage aggregate interface;
-  // they are tied low above until that storage implementation is merged.
+  // The ECC bits are supplied by the IEU W-stage aggregate interface.
   assign FTStatus = {FTUnresolvedM, RegEccDedErrW, RegEccSecErrW, (DIV_PE_p | DIV_PE_r),
                      (MUL_PE_p | MUL_PE_r), (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
   // Sticky status survives the transient checker pulse and is read via CSR.
@@ -315,7 +345,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .FPUStallD, .ExternalStall,
     .DivBusyE, .FDivBusyE,
     .FTStall,
-    .wfiM, .IntPendingM,
+    .wfiM, .IntPendingM, .InjectD,
     // Stall & flush outputs
     .StallF, .StallD, .StallE, .StallM, .StallW,
     .FlushD, .FlushE, .FlushM, .FlushW);
@@ -343,15 +373,50 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .PrivilegeModeW, .SATP_REGW,
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
-      .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM);
+      .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
+      .RAND_INSTR_INSERT_FREQ_REGW,
+      .RegEccSecErrW, .RegEccDedErrW,
+      .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
+      .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
             SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
             EPCM, TrapVectorM, RetM, TrapM,
-            sfencevmaM, BigEndianM, wfiM, IntPendingM} = '0;
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
+    // Without a CSR to program it, dummy instruction insertion stays disabled.
+    assign RAND_INSTR_INSERT_FREQ_REGW = '0;
   end
+
+  // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
+  flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
+
+  // Capture an uncorrectable ECC error before presenting it to trap logic.  This
+  // breaks the combinational DED -> TrapM -> flush/bus -> DED feedback path.
+  // The existing PC attribution rule is preserved: an IFResultW error uses PCW;
+  // all other aggregated errors use the current memory-stage PC.
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      EccDedFaultM      <= 1'b0;
+      EccDedFaultEPCM   <= '0;
+      EccDedFaultMtvalM <= '0;
+    end else if (EccDedTrapTakenM) begin
+      EccDedFaultM <= 1'b0;
+    end else if (!EccDedFaultM && RegEccDedErrW) begin
+      EccDedFaultM      <= 1'b1;
+      EccDedFaultEPCM   <= RegEccDedErrPipeW ? PCW : PCM;
+      EccDedFaultMtvalM <= (|MemRWM) ? IEUAdrxTvalM : '0;
+    end
+  end
+
+  // DED fault is sticky: once a double-bit error is seen it holds until reset
+  always_ff @(posedge clk)
+    if (reset) RegEccDedErrSticky <= 1'b0;
+    else       RegEccDedErrSticky <= RegEccDedErrSticky | RegEccDedErrW;
+
+  // Combine privilege-mode TMR fault with sticky IEU ECC uncorrectable (DED) fault
+  assign PrivModeUncorrectableFaultW = PrivModeUncorrectableFaultW_priv | RegEccDedErrSticky;
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu

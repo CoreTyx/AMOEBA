@@ -14,7 +14,7 @@ wallypipelinedsoc
   `- wallypipelinedcore
        FTStall = FTStallE | FTStallM ------> hazard: stalls F/D/E/M/W
        FTUnresolvedM ----------------------> trap: synchronous cause 16
-       FTStatusSticky ---------------------> mftstatus CSR 0x7c0
+       FTStatusSticky ---------------------> mftstatus CSR 0x7c2
        |- ieu
        |    |- controller: suppresses PCSrcE while FTStall is high
        |    `- datapath (E stage)
@@ -194,7 +194,7 @@ Cause 16 is custom and machine-only: `trap.sv` excludes causes with bit 4 set
 from standard `medeleg` handling.  Normal trap flush/MEPC/MTVAL machinery is
 used; no separate FT trap pipeline exists.
 
-`mftstatus` is a custom machine read-only CSR at `0x7c0`.  Its reset-sticky
+`mftstatus` is a custom machine read-only CSR at `0x7c2`.  Its reset-sticky
 bits are:
 
 ```text
@@ -242,7 +242,7 @@ read-only implementation before merging.
 | `ieu/datapath`, `ieu/ieu`, `ieu/controller` | Replaces native ALU/comparator with wrappers, exports E-stage FT status, and suppresses redirect while validation stalls. |
 | `mdu/mdu` | Replaces native MUL and iterative DIV with redundant wrappers; DIV retry restarts its private FSMs. |
 | `hazard` | Treats `FTStall` as a whole-pipeline stall. |
-| `wallypipelinedcore`, `privileged/{trap,csr,csrm,privileged}` | Aligns unresolved faults to M, raises cause 16, and exposes sticky diagnostics at `0x7c0`. |
+| `wallypipelinedcore`, `privileged/{trap,csr,csrm,privileged}` | Aligns unresolved faults to M, raises cause 16, and exposes sticky diagnostics at `0x7c2`. |
 | `wallypipelinedsoc`, `amoalu` | Adds an AMO-protection TODO; AMO operations are not shadow-protected. ECC status placeholders remain in core, but no ECC injection port exists. |
 
 ### Ancillary branch deltas

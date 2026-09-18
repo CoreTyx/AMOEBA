@@ -1,0 +1,39 @@
+///////////////////////////////////////////
+// csrharden.sv
+//
+// Purpose: Combinational CSR hardening fault aggregator.
+//          Collects integrity violation signals from across the privileged
+//          unit and presents them as a one-hot fault bus for MSECFAULT.
+//
+// MSECFAULT bit map:
+//   [0] PrivilegeModeW TMR correctable fault (2+ copies agree, 1 corrupted)
+//   [1] STATUS_MPP reserved encoding (2'b10) detected in register
+//   [2] Illegal CSR access (wrong privilege level or nonexistent address)
+//   [3] PrivilegeModeW TMR uncorrectable fault (no majority consensus)
+//   [4] IEU ECC SEC — 1-bit flip corrected in regfile read or pipeline register
+//   [5] IEU ECC DED — 2-bit flip detected (uncorrectable); also triggers cause=19 trap
+//   [6] Reserved, hardwired 0
+//
+// A component of the AMOEBA RV64GC project.
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+module csrharden (
+  input  logic       PrivModeSecFaultW,           // from privmode: TMR correctable fault
+  input  logic       PrivModeUncorrectableFaultW, // from privmode: TMR uncorrectable fault
+  input  logic       MppReservedM,                // STATUS_MPP == 2'b10
+  input  logic       IllegalCSRAccessM,           // illegal CSR access from csr
+  input  logic       InstrValidM,                 // gate fault on flushed instructions
+  input  logic       RegEccSecErrW,               // IEU ECC: any SEC (corrected 1-bit flip)
+  input  logic       RegEccDedErrW,               // IEU ECC: any DED (uncorrectable 2-bit flip)
+  output logic [6:0] SecFaultM                    // one-hot fault causes to MSECFAULT register
+);
+
+  assign SecFaultM[0]   = PrivModeSecFaultW;
+  assign SecFaultM[1]   = MppReservedM;
+  assign SecFaultM[2]   = IllegalCSRAccessM & InstrValidM;
+  assign SecFaultM[3]   = PrivModeUncorrectableFaultW;
+  assign SecFaultM[4]   = RegEccSecErrW;
+  assign SecFaultM[5]   = RegEccDedErrW;
+  assign SecFaultM[6]   = 1'b0;
+
+endmodule

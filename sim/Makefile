@@ -54,10 +54,27 @@ RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
 CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver
+# Extra +define+... passed on the command line, e.g.
+#   make build_isa_tests EXTRA_DEFINES=+define+ECE411_DUMMY_TRACE
+# Changing this does not invalidate an existing build directory; run the matching
+# clean (or touch this Makefile) to force a recompile.
+EXTRA_DEFINES ?=
+COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(EXTRA_DEFINES)
 VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=../vcs_warn.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
 VER_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+ECC_INJECT_DIR       := build_ecc_inject
+ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
+# Same flags as the Linux boot simulator but with ECE411_SIM_INJECT to enable LFSR
+# bit-flip injection every 2^INJECT_PERIOD cycles.  Waveforms and Spike co-sim are
+# compiled out; RVFI is suppressed for the same reason as the plain Linux boot.
+LINUX_ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
+	+define+ECE411_LINUX +define+ECE411_NO_TRACE +define+ECE411_NO_RVFI +define+ECE411_SIM_INJECT \
+	+incdir+$(CURDIR)/../hvl/verilator \
+	-Wall --timescale 1ps/1ps -Mdir $(LINUX_ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 \
+	-CFLAGS "-O3 -flto -DNDEBUG -DECE411_NO_TRACE" -LDFLAGS "-flto" --x-assign fast --x-initial fast \
+	--cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads 1
 
 # ── No-Spike simulator (shared by ISA-level tests and FreeRTOS tests) ──────────
 verilator/$(NO_SPIKE_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
@@ -100,6 +117,31 @@ build_isa_tests: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 .PHONY: build_freertos
 build_freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 	@echo "FreeRTOS simulator built (ECE411_NO_SPIKE_DPI)"
+
+# ── ECC inject simulator (ECE411_SIM_INJECT enables inject_en=1 in testbench) ──
+verilator/$(ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
+	mkdir -p verilator/$(ECC_INJECT_DIR)
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	cd verilator ;\
+	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(ECC_INJECT_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(ECC_INJECT_DIR)/compile.log
+	cd verilator/$(ECC_INJECT_DIR) ;\
+	$(MAKE) --jobs=$(shell echo $(shell nproc)-2 | bc) -f Vtop_tb.mk |& tee -a compile.log
+
+.PHONY: run_ecc_inject
+run_ecc_inject: verilator/$(ECC_INJECT_DIR)/Vtop_tb $(PROG)
+	mkdir -p verilator/$(PROG_NAME)
+	find ./verilator -maxdepth 1 -type f -delete
+	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	python3 $(CURDIR)/../bin/get_options.py clock
+	python3 $(CURDIR)/../bin/get_options.py bmem_x
+	cd verilator && ./$(ECC_INJECT_DIR)/Vtop_tb \
+		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
+		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
+		|& tee $(PROG_NAME)/simulation.log
+	-cp verilator/dump.fst verilator/$(PROG_NAME)/dump.fst 2>/dev/null
 
 # ── Linux boot simulator (no waveforms, no co-simulation) ──────────────────────
 # Waveform tracing is compiled out rather than merely disabled: +NO_DUMP_ALL only
@@ -170,6 +212,38 @@ linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 		+UART_FAIL_ECE411="$(LINUX_FAIL)" \
 		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_RUN_DIR)/boot_uart.log" \
 		|& tee $(CURDIR)/$(LINUX_RUN_DIR)/simulation.log
+
+# ── Linux + ECC inject simulator ─────────────────────────────────────────────
+# Combines the Linux boot environment (ECE411_LINUX) with LFSR error injection
+# (ECE411_SIM_INJECT).  The injector fires every 2^INJECT_PERIOD cycles; the
+# ECC pipeline corrects single-bit flips transparently, so a successful boot to
+# userspace proves end-to-end ECC correction under real workloads.
+verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
+	mkdir -p verilator/$(LINUX_ECC_INJECT_DIR)
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	cd verilator ;\
+	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(LINUX_ECC_INJECT_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(LINUX_ECC_INJECT_DIR)/compile.log
+	cd verilator/$(LINUX_ECC_INJECT_DIR) ;\
+	$(MAKE) --jobs=$(shell echo $(shell nproc)-2 | bc) -f Vtop_tb.mk |& tee -a compile.log
+
+.PHONY: build_linux_ecc_inject
+build_linux_ecc_inject: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb
+	@echo "Linux+ECC inject simulator built (ECE411_LINUX + ECE411_SIM_INJECT, waveforms compiled out)"
+
+LINUX_ECC_INJECT_RUN_DIR ?= verilator/linux_ecc_inject_boot
+
+.PHONY: linux_boot_ecc_inject
+linux_boot_ecc_inject: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb $(LINUX_MEMLST)
+	mkdir -p $(LINUX_ECC_INJECT_RUN_DIR)
+	cd verilator && ./$(LINUX_ECC_INJECT_DIR)/Vtop_tb \
+		+TIMEOUT_ECE411=$(LINUX_TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+MEMLST_ECE411="$(LINUX_MEMLST)" \
+		+UART_PASS_ECE411="$(LINUX_PASS)" \
+		+UART_FAIL_ECE411="$(LINUX_FAIL)" \
+		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/boot_uart.log" \
+		|& tee $(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/simulation.log
 
 .PHONY: freertos
 freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
@@ -340,7 +414,7 @@ regression:
 
 # ── Standalone RTL unit tests ─────────────────────────────────────────────────
 # Self-checking testbenches live in hvl/; their build/run entry points live here
-# alongside the SoC and ISA regression targets.
+# alongside the SoC, ECC, and ISA regression targets.
 .PHONY: ft_shadow_test
 ft_shadow_test:
 	mkdir -p verilator/ft_shadow_tb
@@ -366,6 +440,50 @@ ft_shadow_test:
 	    -Mdir verilator/ft_shadow_tb -Wall -Wno-fatal --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_shadow_tb/compile.log
 	verilator/ft_shadow_tb/Vft_recompute_fault_tb
+
+.PHONY: ecc_baremetal_regression
+ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
+	@pass=0; fail=0; total=0; \
+	for src in $(CURDIR)/../testcode/baremetal_ecc/*.c; do \
+		total=$$((total+1)); \
+		name=$$(basename $$src .c); \
+		echo "=== [$$total] ECC inject: $$name ==="; \
+		if $(MAKE) -s run_ecc_inject PROG=$$src; then \
+			echo "  PASS: $$name"; pass=$$((pass+1)); \
+		else \
+			echo "  FAIL: $$name"; fail=$$((fail+1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== ECC Baremetal Regression: $$pass/$$total tests passed ==="; \
+	[ $$fail -eq 0 ] || exit 1
+
+# ── ECC test suite (add sub-targets here as new ECC modules are added) ────────
+.PHONY: ecc_test ecc_secded_dected_test csr_harden_test ecc_baremetal_regression
+ecc_test: ecc_secded_dected_test csr_harden_test ecc_baremetal_regression
+
+ecc_secded_dected_test:
+	mkdir -p verilator/ecc_tb
+	verilator --binary -O2 --top-module ecc_tb \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
+	    $(CURDIR)/../hvl/ecc/ecc_tb.sv \
+	    -Mdir verilator/ecc_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/ecc_tb/compile.log
+	verilator/ecc_tb/Vecc_tb
+
+csr_harden_test:
+	mkdir -p verilator/csr_harden_tb
+	verilator --binary --timing -O2 --top-module csr_harden_tb \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(CURDIR)/../hdl/core/generic/flop/flopenl.sv \
+	    $(CURDIR)/../hdl/core/privileged/privmode.sv \
+	    $(CURDIR)/../hdl/core/privileged/csrharden.sv \
+	    $(CURDIR)/../hvl/ecc/csr_harden_tb.sv \
+	    -Mdir verilator/csr_harden_tb \
+	    +incdir+$(CURDIR)/../hdl/core \
+	    +incdir+$(CURDIR)/../pkg \
+	    -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-GENUNNAMED \
+	    --timescale 1ps/1ps 2>&1 | tee verilator/csr_harden_tb/compile.log
+	verilator/csr_harden_tb/Vcsr_harden_tb
 
 .PHONY: clean
 clean:

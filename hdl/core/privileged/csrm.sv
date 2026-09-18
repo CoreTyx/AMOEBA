@@ -41,6 +41,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        CSRWriteValM,
   input  logic [6:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
   input  logic [11:0]              MIP_REGW, MIE_REGW,
+  input  logic [6:0]               SecFaultM,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
   output logic [P.XLEN-1:0]        MEPC_REGW,
   output logic [31:0]              MCOUNTEREN_REGW, MCOUNTINHIBIT_REGW,
@@ -52,7 +53,8 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   /* verilator lint_on UNDRIVEN */
   output logic                     WriteMSTATUSM, WriteMSTATUSHM,
   output logic                     IllegalCSRMAccessM, IllegalCSRMWriteReadonlyM,
-  output logic [63:0]              MENVCFG_REGW
+  output logic [63:0]              MENVCFG_REGW,
+  output logic [31:0]              RAND_INSTR_INSERT_FREQ_REGW
 );
 
   logic [P.PA_BITS-3:0]            PMPADDR_ARRAY_PREGRAIN_REGW[P.PMP_ENTRIES-1:0];
@@ -63,6 +65,10 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   logic                            WriteMTVECM, WriteMEDELEGM, WriteMIDELEGM;
   logic                            WriteMSCRATCHM, WriteMEPCM, WriteMCAUSEM, WriteMTVALM;
   logic                            WriteMCOUNTERENM, WriteMCOUNTINHIBITM;
+  logic                            WriteRANDINSTRFREQM;
+  logic                            WriteMSECFAULTM;
+  logic [6:0]                      MSECFAULT_REGW;
+  logic [6:0]                      msecfault_clr;
 
   // Machine CSRs
   localparam MVENDORID     = 12'hF11;
@@ -88,7 +94,9 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   localparam MIP           = 12'h344;
   // Custom machine read-only diagnostic CSR.  It is not part of the RISC-V
   // architectural CSR map and is reserved for shadow/ECC diagnostics.
-  localparam MFTSTATUS     = 12'h7C0;
+  // Custom machine CSR map: ECC status at 0x7C0, dummy frequency at 0x7C1,
+  // and shadow diagnostic status at 0x7C2.
+  localparam MFTSTATUS     = 12'h7C2;
   localparam PMPCFG0       = 12'h3A0;
   // .. up to 15 more at consecutive addresses
   localparam PMPADDR0      = 12'h3B0;
@@ -101,7 +109,11 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   localparam DCSR          = 12'h7B0;
   localparam DPC           = 12'h7B1;
   localparam DSCRATCH0     = 12'h7B2;
+  // AMOEBA custom M-mode CSR (0x7C0-0x7FF is the machine-mode custom read/write range).
+  // Divider period for random dummy-instruction insertion; 0 disables the feature.
+  localparam RANDINSTRFREQ = 12'h7C1;
   localparam DSCRATCH1     = 12'h7B3;
+  localparam MSECFAULT     = 12'h7C0;
   /* verilator lint_off UNUSEDPARAM */
   // Constants
   localparam ZERO = {(P.XLEN){1'b0}};
@@ -167,6 +179,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   assign WriteMTVALM         = MTrapM | (CSRMWriteM & (CSRAdrM == MTVAL));
   assign WriteMCOUNTERENM    = CSRMWriteM & (CSRAdrM == MCOUNTEREN);
   assign WriteMCOUNTINHIBITM = CSRMWriteM & (CSRAdrM == MCOUNTINHIBIT);
+  assign WriteRANDINSTRFREQM = CSRMWriteM & (CSRAdrM == RANDINSTRFREQ);
 
   assign IllegalCSRMWriteReadonlyM = UngatedCSRMWriteM &
     (CSRAdrM == MVENDORID | CSRAdrM == MARCHID | CSRAdrM == MIMPID |
@@ -185,6 +198,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   flopenr #(P.XLEN) MCAUSEreg(clk, reset, WriteMCAUSEM, {NextCauseM[5], {(P.XLEN-6){1'b0}}, NextCauseM[4:0]}, MCAUSE_REGW);
   flopenr #(P.XLEN) MTVALreg(clk, reset, WriteMTVALM, NextMtvalM, MTVAL_REGW);
   flopenr #(32)   MCOUNTINHIBITreg(clk, reset, WriteMCOUNTINHIBITM, {CSRWriteValM[31:2], 1'b0, CSRWriteValM[0]}, MCOUNTINHIBIT_REGW);
+  flopenr #(32)   RANDINSTRFREQreg(clk, reset, WriteRANDINSTRFREQM, CSRWriteValM[31:0], RAND_INSTR_INSERT_FREQ_REGW);
   if (P.U_SUPPORTED) begin : mcounteren // MCOUNTEREN only exists when user mode is supported
     flopenr #(32)   MCOUNTERENreg(clk, reset, WriteMCOUNTERENM, CSRWriteValM[31:0], MCOUNTEREN_REGW);
   end else assign MCOUNTEREN_REGW = '0;
@@ -234,6 +248,14 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       else                         PMPADDR_ARRAY_REGW[i] = {pmpaddr[P.PA_BITS-3:P.PMP_G], {P.PMP_G{1'b0}}}; // in TOR/OFF, bottom G bits read as 0s
     end
 
+  // MSECFAULT: sticky security fault register, W1C from M-mode, set by hardware
+  assign WriteMSECFAULTM = CSRMWriteM & (CSRAdrM == MSECFAULT);
+  assign msecfault_clr   = WriteMSECFAULTM ? CSRWriteValM[6:0] : 7'h00;
+
+  always_ff @(posedge clk)
+    if (reset) MSECFAULT_REGW <= 7'h00;
+    else       MSECFAULT_REGW <= (MSECFAULT_REGW | SecFaultM) & ~msecfault_clr;
+
   // Read machine mode CSRs
   // verilator lint_off WIDTH
   logic [5:0] entry;
@@ -281,6 +303,8 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MENVCFGH:      if (P.U_SUPPORTED & P.XLEN==32) CSRMReadValM = MENVCFGH_REGW;
                      else IllegalCSRMAccessM = 1'b1;
       MCOUNTINHIBIT: CSRMReadValM = {{(P.XLEN-32){1'b0}}, MCOUNTINHIBIT_REGW};
+      RANDINSTRFREQ: CSRMReadValM = {{(P.XLEN-32){1'b0}}, RAND_INSTR_INSERT_FREQ_REGW};
+      MSECFAULT:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, MSECFAULT_REGW};
       default:       IllegalCSRMAccessM = 1'b1;
     endcase
   end
