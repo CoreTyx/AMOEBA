@@ -98,12 +98,13 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic              BigEndianM,                                     // Use big endian in current privilege mode
   // Fault outputs
   output logic              wfiM, IntPendingM,                              // Stall in Memory stage for WFI until interrupt pending or timeout
+  output logic [31:0]       RAND_INSTR_INSERT_FREQ_REGW,                    // AMOEBA: dummy instruction insertion divider period
   output logic              PrivModeUncorrectableFaultW,                   // TMR uncorrectable privilege mode fault
   input  logic              RegEccSecErrW,                                 // IEU ECC SEC (correctable 1-bit flip)
-  input  logic              RegEccDedErrW,                                 // IEU ECC DED → triggers cause=19 trap
-  input  logic              RegEccDedErrPipeW,                             // DED specifically from W-stage pipeline reg (for precise MEPC)
-  input  logic [P.XLEN-1:0] PCW,                                           // W-stage PC (for DED MEPC when error is in W-stage reg)
-  input  logic [1:0]        MemRWM                                         // memory read/write in M stage (for DED mtval)
+  input  logic              RegEccDedErrW,                                 // IEU ECC DED, retained for MSECFAULT logging
+  input  logic              EccDedFaultM,                                  // registered DED fault presented to trap logic
+  input  logic [P.XLEN-1:0] EccDedFaultEPCM, EccDedFaultMtvalM,             // captured trap metadata
+  output logic              EccDedTrapTakenM                               // cause 19 was selected and consumed
 );
 
   logic [4:0]               CauseM;                                         // trap cause
@@ -144,7 +145,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   csr #(P) csr(.clk, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
     .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
-    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .PCW, .MemRWM,
+    .RegEccSecErrW, .RegEccDedErrW, .EccDedFaultEPCM, .EccDedFaultMtvalM,
     .TrapM, .mretM, .sretM, .InterruptM,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
     .MTIME_CLINT, .InstrValidM, .FRegWriteM, .LoadStallD, .StoreStallD,
@@ -158,7 +159,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .SATP_REGW, .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
     .SetFflagsM, .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE,
     .EPCM, .TrapVectorM,
-    .CSRReadValW, .IllegalCSRAccessM, .BigEndianM);
+    .CSRReadValW, .IllegalCSRAccessM, .BigEndianM, .RAND_INSTR_INSERT_FREQ_REGW);
 
   // pipeline early-arriving trap sources
   privpiperegs ppr(.clk, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
@@ -170,8 +171,9 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
-    .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(RegEccDedErrW), .PrivilegeModeW,
+    .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM), .PrivilegeModeW,
     .MIP_REGW, .MIE_REGW, .MIDELEG_REGW, .MEDELEG_REGW, .STATUS_MIE, .STATUS_SIE,
     .InstrValidM, .CommittedM, .CommittedF,
-    .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .IntPendingM, .DelegateM, .CauseM);
+    .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),
+    .IntPendingM, .DelegateM, .CauseM);
 endmodule

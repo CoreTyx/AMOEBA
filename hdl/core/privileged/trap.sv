@@ -44,6 +44,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   output logic                 TrapM,                                           // Trap is occurring
   output logic                 InterruptM,                                      // Interrupt is occurring
   output logic                 ExceptionM,                                      // exception is occurring
+  output logic                 HardwareErrorTrapM,                              // cause 19 selected and accepted
   output logic                 IntPendingM,                                     // Interrupt is pending, might occur if enabled
   output logic                 DelegateM,                                       // Delegate trap to supervisor handler
   output logic [4:0]           CauseM                                           // trap cause
@@ -94,6 +95,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
                       HardwareErrorFaultM;
   // coverage on
   assign TrapM = (ExceptionM & ~CommittedF) | InterruptM;
+  assign HardwareErrorTrapM = TrapM & ~InterruptM & (CauseM == 5'd19);
 
   ///////////////////////////////////////////
   // Cause priority defined in privileged spec

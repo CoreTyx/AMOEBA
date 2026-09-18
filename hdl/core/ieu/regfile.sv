@@ -39,13 +39,17 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   input  logic             we3,
   input  logic [4:0]       a1, a2, a3,
   input  logic [XLEN-1:0]  wd3,
+  input  logic             DummyW,
+  input  logic             DummySelW,
   output logic [XLEN-1:0]  rd1, rd2,
   input  logic             inject_en,
   output logic             sec_err_rd1, ded_err_rd1,
   output logic             sec_err_rd2, ded_err_rd2
 );
 
-  localparam NUMREGS = E_SUPPORTED ? 16 : 32;
+  localparam ARCHREGS = E_SUPPORTED ? 16 : 32;
+  localparam NUMREGS  = ARCHREGS + 2;
+  localparam logic [5:0] SHADOW0 = 6'(ARCHREGS);
 
   // SECDED check-bit count and total codeword width
   localparam int R  = (XLEN <=   1) ? 2 :
@@ -60,7 +64,12 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   // All-zeros is the valid SECDED codeword for data=0 (Hamming bits and
   // overall parity are all 0 when data is 0), so reset to '0 is correct.
   logic [CW-1:0] rf [NUMREGS-1:1];
+  logic [5:0]    WriteIdx;
   integer i;
+
+  // Dummy writes are redirected to shadow registers and cannot alter
+  // architectural register state.
+  assign WriteIdx = DummyW ? (SHADOW0 | {5'b0, DummySelW}) : {1'b0, a3};
 
   // ── Write path ────────────────────────────────────────────────────────────────
   // Encode wd3 combinationally, then latch the codeword on the falling clock edge.
@@ -69,7 +78,7 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
 
   always_ff @(negedge clk)
     if (reset) for (i = 1; i < NUMREGS; i++) rf[i] <= '0;
-    else       if (we3 & (a3 != '0))          rf[a3] <= cw_wr3;
+    else       if (we3 & (WriteIdx != '0))    rf[WriteIdx] <= cw_wr3;
 
   // ── Read port 1 ───────────────────────────────────────────────────────────────
   logic [CW-1:0] cw_rd1_raw, cw_rd1_inj;

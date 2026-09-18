@@ -79,6 +79,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] MDUResultW,              // MDU (Multiply/divide unit) result
   input  logic [P.XLEN-1:0] FIntDivResultW,          // FPU's integer divide result
   input  logic [4:0]        RdW,                     // Destination register
+  input  logic              DummyW,                  // AMOEBA: writeback is an inserted dummy instruction
+  input  logic              DummySelW,               // AMOEBA: which shadow register the dummy writes
   // ECC error aggregation outputs
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
   output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
@@ -123,6 +125,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .clk, .reset,
     .we3(RegWriteW), .a1(Rs1D), .a2(Rs2D), .a3(RdW),
     .wd3(ResultW),
+    .DummyW, .DummySelW,
     .rd1(R1D), .rd2(R2D),
     .inject_en(ecc_inject_en),
     .sec_err_rd1, .ded_err_rd1,

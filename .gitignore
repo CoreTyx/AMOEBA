@@ -1,3 +1,5 @@
 .claude/
 formal/freertos/build/
 formal/freertos/dump.fst
+*.elf
+.codex/

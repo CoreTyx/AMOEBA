@@ -91,6 +91,14 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [3:0]                    CMOpM;                           // 1: cbo.inval; 2: cbo.flush; 4: cbo.clean; 8: cbo.zero
   logic                          IFUPrefetchE, LSUPrefetchM;      // instruction / data prefetch hints
 
+  // AMOEBA random instruction insertion
+  logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
+  logic [31:0]                   DummyInstrD;                     // dummy instruction to inject
+  logic                          InjectD;                         // inject a dummy this cycle
+  logic                          DummySelD;                       // shadow register the dummy writes
+  logic                          DummyW;                          // Writeback holds a dummy instruction
+  logic                          InsertOkD;                       // pipeline permits an insertion
+
   // floating point unit signals
   logic [2:0]                    FRM_REGW;
   logic [4:0]                    RdE, RdM, RdW;
@@ -176,6 +184,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          RegEccSecErrW, RegEccDedErrW;  // ECC error aggregates from IEU
   logic                          RegEccDedErrPipeW;               // DED from W-stage pipeline reg only
   logic [P.XLEN-1:0]             PCW;                             // W-stage PC (PCM registered)
+  logic                          EccDedFaultM, EccDedTrapTakenM; // registered DED trap record and acknowledgement
+  logic [P.XLEN-1:0]             EccDedFaultEPCM, EccDedFaultMtvalM;
   logic                          RegEccDedErrSticky;              // latched DED fault — cleared only by reset
   logic                          PrivModeUncorrectableFaultW_priv; // from privileged unit before ECC OR
 
@@ -183,7 +193,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   ifu #(P) ifu(.clk, .reset,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
     .InstrValidE, .InstrValidD,
-    .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF,
+    .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF, .InjectD,
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
@@ -226,7 +236,26 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      // hazards
      .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
      .StructuralStallD, .LoadStallD, .StoreStallD, .PCSrcE,
-     .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM);
+     .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM,
+     // random instruction insertion
+     .InjectD, .DummyInstrD, .DummySelD, .DummyW);
+
+  ///////////////////////////////////////////
+  // AMOEBA: random instruction insertion
+  ///////////////////////////////////////////
+  // An insertion is blocked whenever Execute cannot accept a new instruction this cycle
+  // (a divide occupying Execute, or a stall originating in Memory/Writeback) or the
+  // pipeline is about to be flushed anyway.  All of these are Memory/Execute stage
+  // signals that do not depend on the decode-stage instruction, so qualifying the
+  // strobe with them cannot form a combinational loop through the injection mux.
+  // Structural stalls in Decode are deliberately *not* excluded: injecting into a
+  // bubble that would have been inserted anyway costs no performance.
+  assign InsertOkD = ~DivBusyE & ~FDivBusyE & ~StallM & ~RetM & ~CSRWriteFenceM;
+
+  dummygen dummygen(.clk, .reset,
+    .FreqW(RAND_INSTR_INSERT_FREQ_REGW),
+    .InstrD, .InstrValidD, .InsertOkD,
+    .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
     .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
@@ -288,7 +317,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
     .DivBusyE, .FDivBusyE,
-    .wfiM, .IntPendingM,
+    .wfiM, .IntPendingM, .InjectD,
     // Stall & flush outputs
     .StallF, .StallD, .StallE, .StallM, .StallW,
     .FlushD, .FlushE, .FlushM, .FlushW);
@@ -316,7 +345,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
       .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
-      .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .PCW, .MemRWM,
+      .RAND_INSTR_INSERT_FREQ_REGW,
+      .RegEccSecErrW, .RegEccDedErrW,
+      .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
       .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
@@ -324,11 +355,31 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
             EPCM, TrapVectorM, RetM, TrapM,
-            sfencevmaM, BigEndianM, wfiM, IntPendingM, PrivModeUncorrectableFaultW_priv} = '0;
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
+    // Without a CSR to program it, dummy instruction insertion stays disabled.
+    assign RAND_INSTR_INSERT_FREQ_REGW = '0;
   end
 
   // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
   flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
+
+  // Capture an uncorrectable ECC error before presenting it to trap logic.  This
+  // breaks the combinational DED -> TrapM -> flush/bus -> DED feedback path.
+  // The existing PC attribution rule is preserved: an IFResultW error uses PCW;
+  // all other aggregated errors use the current memory-stage PC.
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      EccDedFaultM      <= 1'b0;
+      EccDedFaultEPCM   <= '0;
+      EccDedFaultMtvalM <= '0;
+    end else if (EccDedTrapTakenM) begin
+      EccDedFaultM <= 1'b0;
+    end else if (!EccDedFaultM && RegEccDedErrW) begin
+      EccDedFaultM      <= 1'b1;
+      EccDedFaultEPCM   <= RegEccDedErrPipeW ? PCW : PCM;
+      EccDedFaultMtvalM <= (|MemRWM) ? IEUAdrxTvalM : '0;
+    end
+  end
 
   // DED fault is sticky: once a double-bit error is seen it holds until reset
   always_ff @(posedge clk)
