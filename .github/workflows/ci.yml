@@ -107,6 +107,39 @@ jobs:
           path: sim/verilator/build_no_spike
           key: no-spike-build-${{ runner.os }}-${{ github.sha }}
 
+  # ── Shadow-protected execution unit test ───────────────────────────────────
+  ci-ft-shadow:
+    name: Shadow Execution Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc g++ make autoconf flex bison libfl-dev help2man zlib1g-dev
+
+      - name: Cache Verilator v5.026
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.026-${{ runner.os }}
+
+      - name: Build Verilator v5.026 from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+          cd /tmp/verilator-src && autoconf
+          ./configure --prefix=/opt/verilator
+          make -j$(nproc)
+          make install
+
+      - name: Run shadow execution unit test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_test
+
   # ── Discover all baremetal tests ────────────────────────────────────────────
   ci-discover-tests:
     name: Discover Baremetal Tests

@@ -338,6 +338,35 @@ regression:
 	$(MAKE) isa_regression
 	$(MAKE) freertos_regression
 
+# ── Standalone RTL unit tests ─────────────────────────────────────────────────
+# Self-checking testbenches live in hvl/; their build/run entry points live here
+# alongside the SoC and ISA regression targets.
+.PHONY: ft_shadow_test
+ft_shadow_test:
+	mkdir -p verilator/ft_shadow_tb
+	verilator --binary --timing -O2 --top-module ft_recompute_fault_tb \
+	    $(CURDIR)/../pkg/types.sv \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/flop/flopenrc.sv \
+	    $(CURDIR)/../hdl/core/generic/flop/flopen.sv \
+	    $(CURDIR)/../hdl/core/ieu/shifter.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/aes/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/sha/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/bmu/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/ieu/kmu/*.sv) \
+	    $(CURDIR)/../hdl/core/ieu/alu.sv \
+	    $(CURDIR)/../hdl/core/ieu/comparator.sv \
+	    $(CURDIR)/../hdl/core/mdu/mul.sv \
+	    $(CURDIR)/../hdl/core/mdu/divstep.sv \
+	    $(CURDIR)/../hdl/core/mdu/div.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/ft_shadow/*.sv) \
+	    $(CURDIR)/../hvl/ft_shadow/ft_recompute_fault_tb.sv \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    -Mdir verilator/ft_shadow_tb -Wall -Wno-fatal --timescale 1ps/1ps \
+	    2>&1 | tee verilator/ft_shadow_tb/compile.log
+	verilator/ft_shadow_tb/Vft_recompute_fault_tb
+
 .PHONY: clean
 clean:
 	rm -rf bin vcs verdi verilator spike
