@@ -28,7 +28,7 @@
 
 #include <stdint.h>
 
-#define RAND_INSTR_INSERT_FREQ 0x7c0
+#define RAND_INSTR_INSERT_FREQ 0x7c1
 
 /* Addresses as literals, never as linker symbols (see the medlow note above).
  * tohost matches the PROVIDE in bin/link.ld. */
