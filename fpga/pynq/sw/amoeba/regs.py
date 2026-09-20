@@ -78,6 +78,18 @@ R_BUS_CAPSTAT = 0x94
 R_BUS_RSTXACT = 0x98
 R_BUS_CAPRDAT = 0x9C
 
+# ---- the off-chip link, from rtl/amoeba_link_slave.sv (DUT_ASIC builds) ------
+# Read zero in a soft-core build; CAPS.asic_link says which you have.  WDOG is
+# "cycles since the last header": a large and growing value with the core out
+# of reset means the ASIC is not talking, whatever the core counters say.
+R_LINK_XACT = 0xA0
+R_LINK_RD = 0xA4
+R_LINK_WR = 0xA8
+R_LINK_RETRAIN = 0xAC
+R_LINK_WDOG = 0xB0
+R_IRQ = 0xB4                    # RW: drives the irq[1:0] pads (PLIC sources 3 and 6)
+R_LINK_ERR = 0xB8               # {train words mismatched [31:16], HRESP beats [15:0]}
+
 CAP_VALID = 1 << 31          # amoeba_bus_probe stamps this on every written entry
 CAP_CORE_RESET = 1 << 30     # was the core held on THAT cycle -- see decode_cap
 
@@ -97,6 +109,9 @@ ST_UART_OVERFLOW = 1 << 2
 ST_TOHOST_VALID = 1 << 3
 ST_TRACE_OVERFLOW = 1 << 4
 ST_TRACE_STALLING = 1 << 5
+ST_LINK_TRAINED = 1 << 6     # DUT_ASIC: the slave echoed and then saw a header
+ST_LINK_FAILED = 1 << 7      # DUT_ASIC: the ASIC exhausted its training retries
+ST_LINK_STATUS = 1 << 8      # DUT_ASIC: the chip's status pad (trained & heartbeat)
 
 # ---- UART_DATA --------------------------------------------------------------
 UART_VALID = 1 << 8
@@ -175,6 +190,15 @@ def caps_has_trace(caps: int) -> bool:
 def caps_is_bram(caps: int) -> bool:
     """CAPS[0]: 1 = block RAM backend, 0 = AXI/DDR."""
     return bool(caps & 1)
+
+
+def caps_asic_link(caps: int) -> bool:
+    """CAPS[9]: the DUT is the ASIC top behind the 16-bit link.
+
+    Reset then takes a training step before the first fetch, the R_LINK_*
+    registers are live, and STATUS.trace_stalling can never be set.
+    """
+    return bool(caps & (1 << 9))
 
 
 def tohost_addr(mem_kb: int, is_bram: bool) -> int:

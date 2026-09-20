@@ -136,6 +136,12 @@ def main() -> int:
         if dev.uart_overflow:
             print("# WARNING: console FIFO overflowed -- log has gaps",
                   file=sys.stderr)
+        if dev.is_asic_link:
+            ls = dev.link_stats()
+            print(f"# link: {ls['xact']} transactions ({ls['rd']} rd, "
+                  f"{ls['wr']} wr), retrains={ls['retrain']}, "
+                  f"train_err={ls['train_err']}, hresp_err={ls['hresp_err']}, "
+                  f"idle={ls['wdog']} cycles", file=sys.stderr)
         missed = [n for n, _ in MILESTONES if n not in hit]
         if missed:
             print(f"# milestones not reached: {', '.join(missed)}",

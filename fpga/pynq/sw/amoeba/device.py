@@ -122,6 +122,11 @@ class Amoeba:
     def has_trace(self) -> bool:
         return R.caps_has_trace(self.caps)
 
+    @property
+    def is_asic_link(self) -> bool:
+        """The DUT is the ASIC top behind the 16-bit link (DUT=asic)."""
+        return R.caps_asic_link(self.caps)
+
     def describe(self) -> str:
         v = self.version
         kib = self.mem_bytes // 1024
@@ -129,7 +134,8 @@ class Amoeba:
         return (f"amoeba v{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}  "
                 f"mem={size}  "
                 f"backend={'BRAM' if self.is_bram else 'AXI/DDR'}  "
-                f"trace={'yes' if self.has_trace else 'no'}")
+                f"trace={'yes' if self.has_trace else 'no'}  "
+                f"dut={'asic+link' if self.is_asic_link else 'soc'}")
 
     # ---- reset and monitors ----------------------------------------------
     @property
@@ -145,8 +151,70 @@ class Amoeba:
         self.ctl.write(R.R_CTRL, keep | R.CTRL_MON_CLEAR | R.CTRL_TRACE_CLEAR)
         self.ctl.write(R.R_CTRL, keep)
 
-    def start(self) -> None:
+    def start(self, *, link_timeout: float = 2.0) -> None:
+        """Release the core.
+
+        With the ASIC DUT the release starts LINK TRAINING, and the core does
+        not fetch until it passes: about 2 x TRAIN_LEN cycles, ~0.4 ms at
+        25 MHz for the default 4096.  Block until the slave reports it, so
+        a caller that reads counters right after start() is reading a
+        running core -- and so a dead link is reported as a dead link, not
+        as "0 retired".
+        """
         self.ctl.write(R.R_CTRL, 0)
+        if self.is_asic_link:
+            self.wait_link(link_timeout)
+
+    def wait_link(self, timeout: float = 2.0) -> None:
+        """Block until STATUS.link_trained, or raise on failure/timeout.
+
+        link_trained means the slave echoed the training pattern AND then
+        received a header -- the ASIC accepted the echo, released its core,
+        and the core made its first fetch.  link_failed means the ASIC ran
+        out of retries; a timeout with neither means the ASIC never even
+        released the bus (clock? reset? power?).
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            st = self.status
+            if st & R.ST_LINK_TRAINED:
+                return
+            if st & R.ST_LINK_FAILED:
+                raise RuntimeError(
+                    "link training FAILED: the ASIC exhausted its retries "
+                    f"(retrains={self.ctl.read(R.R_LINK_RETRAIN)}, "
+                    f"err=0x{self.ctl.read(R.R_LINK_ERR):08x}).  The echo "
+                    "is reaching the chip but not matching: look at the "
+                    "io[15:0] timing, FCLK, and the train-mismatch count "
+                    "in R_LINK_ERR[31:16].")
+            time.sleep(0.001)
+        raise RuntimeError(
+            f"link not trained after {timeout:.1f} s: STATUS=0x{self.status:08x} "
+            f"retrains={self.ctl.read(R.R_LINK_RETRAIN)} "
+            f"wdog={self.ctl.read(R.R_LINK_WDOG)}.  The ASIC never released "
+            "the bus for an echo (dir stayed high), or echoed and never sent "
+            "a header: check clk, rst_n, and that the core is not held.")
+
+    def link_stats(self) -> dict:
+        """The R_LINK_* counters, as a dict.  Zero on a soft-core build."""
+        st = self.status
+        err = self.ctl.read(R.R_LINK_ERR)
+        return {
+            "trained": bool(st & R.ST_LINK_TRAINED),
+            "failed": bool(st & R.ST_LINK_FAILED),
+            "status_pad": bool(st & R.ST_LINK_STATUS),
+            "xact": self.ctl.read(R.R_LINK_XACT),
+            "rd": self.ctl.read(R.R_LINK_RD),
+            "wr": self.ctl.read(R.R_LINK_WR),
+            "retrain": self.ctl.read(R.R_LINK_RETRAIN),
+            "wdog": self.ctl.read(R.R_LINK_WDOG),
+            "train_err": err >> 16,
+            "hresp_err": err & 0xFFFF,
+        }
+
+    def set_irq(self, mask: int) -> None:
+        """Drive the irq[1:0] pads (PLIC sources 3 and 6).  ASIC DUT only."""
+        self.ctl.write(R.R_IRQ, mask & 0x3)
 
     # ---- image ------------------------------------------------------------
     @property

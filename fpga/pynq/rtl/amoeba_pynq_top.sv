@@ -61,6 +61,18 @@
 // configure the receiver to whatever divisor the guest chose, with no manual
 // tuning and no dependence on what FCLK ended up being.
 //
+// TWO DUTS, ONE SCAFFOLD.  DUT_ASIC=0 is the soft core, amoeba_soc_wrapper,
+// with its AHB brought straight out.  DUT_ASIC=1 is the ASIC top itself --
+// hdl/amoeba_top.sv, pins only -- with the FPGA end of the 16-bit link
+// (amoeba_link_slave) rebuilding the same AHB master from what crosses the
+// link.  Both are wrapped on the same port list (amoeba_asic_wrapper), so
+// everything below the DUT is common.  Three things differ, and they are the
+// things silicon differs in too (docs/impl_plan_fpga_linux.md s3): there is
+// no ExternalStall (the trace cannot back-pressure the core), reset gains a
+// link-training step before the first fetch, and the console snoop reads the
+// SoC's INTERNAL bus by hierarchical reference, because the UART is on the die
+// and its THR writes never reach the exported bus.
+//
 // THE TAPS ARE HIERARCHICAL REFERENCES, ON PURPOSE.  amoeba_soc_wrapper stays
 // byte-identical to what the utilization gate measures and to what goes to the
 // ASIC; no debug ports are cut into it.  The commit-trace signals are read out
@@ -98,7 +110,13 @@ module amoeba_pynq_top import cvw::*; #(
     // value that tcl assigns as this master's address segment.  One source,
     // so the translation below and the interconnect's decode cannot disagree.
     // Ignored when MEM_BRAM = 1.
-    parameter int unsigned DDR_CARVEOUT_BASE = 32'h1000_0000
+    parameter int unsigned DDR_CARVEOUT_BASE = 32'h1000_0000,
+    // 1: the ASIC top behind the link slave (amoeba_asic_wrapper).
+    // 0: the soft core with its AHB exported directly (amoeba_soc_wrapper).
+    parameter bit    DUT_ASIC        = 1'b0,
+    // Link training length, DUT_ASIC only.  The default is the silicon value;
+    // ~2 x TRAIN_LEN cycles between CORE_RESET release and the first fetch.
+    parameter int    TRAIN_LEN       = 4096
 )(
     input  logic                  aclk,
     input  logic                  aresetn,
@@ -269,30 +287,145 @@ module amoeba_pynq_top import cvw::*; #(
     logic                ExternalStall;
     logic                soc_reset;
 
-    amoeba_soc_wrapper dut (
-        .clk           (aclk),
-        .reset_ext     (core_reset_ext),
-        .reset         (soc_reset),
-        .ExternalStall (ExternalStall),
-        .HRDATAEXT     (HRDATAEXT),
-        .HREADYEXT     (HREADYEXT),
-        .HRESPEXT      (HRESPEXT),
-        .HSELEXT       (HSELEXT),
-        .HCLK          (HCLK),
-        .HRESETn       (HRESETn),
-        .HADDR         (HADDR),
-        .HWDATA        (HWDATA),
-        .HWSTRB        (HWSTRB),
-        .HWRITE        (HWRITE),
-        .HSIZE         (HSIZE),
-        .HBURST        (HBURST),
-        .HPROT         (HPROT),
-        .HTRANS        (HTRANS),
-        .HMASTLOCK     (HMASTLOCK),
-        .HREADY        (HREADY),
-        .UARTSin       (1'b1),         // idle-mark: nothing is driving RX
-        .UARTSout      (uart_txd_obs)
-    );
+    // Link status, DUT_ASIC only; constant otherwise.
+    logic        link_trained, link_failed, link_status;
+    logic [31:0] link_xact, link_rd, link_wr, link_retrain, link_wdog, link_err;
+    logic [1:0]  irq_drive;
+    logic        mon_clear;
+
+    // The taps.  Every downward reference into the DUT is made here, once per
+    // DUT, and the monitors below consume these wires; so the two DUTs differ
+    // in exactly one generate block.  Reads only.
+    logic        tap_StallE, tap_StallM, tap_StallW, tap_FlushE, tap_FlushM, tap_FlushW;
+    logic [63:0] tap_PCM;
+    logic        tap_InstrValidM, tap_TrapM;
+    logic [31:0] tap_InstrRawD;
+    logic [1:0]  tap_PrivilegeModeW;
+    logic        tap_GPRWen;
+    logic [4:0]  tap_GPRAddr;
+    logic [63:0] tap_GPRValue;
+    // The SoC's internal AHB, for the console/tohost snoop.  Under DUT_ASIC
+    // this is NOT the exported bus: UART writes stay on the die.
+    logic [PA-1:0]       bus_HADDR;
+    logic [P.AHBW-1:0]   bus_HWDATA;
+    logic                bus_HWRITE, bus_HREADY;
+    logic [1:0]          bus_HTRANS;
+
+    if (DUT_ASIC) begin : g_dut
+        amoeba_asic_wrapper #(
+            .TRAIN_LEN (TRAIN_LEN)
+        ) dut (
+            .clk           (aclk),
+            .reset_ext     (core_reset_ext),
+            .reset         (soc_reset),
+            .ExternalStall (ExternalStall),
+            .HRDATAEXT     (HRDATAEXT),
+            .HREADYEXT     (HREADYEXT),
+            .HRESPEXT      (HRESPEXT),
+            .HSELEXT       (HSELEXT),
+            .HCLK          (HCLK),
+            .HRESETn       (HRESETn),
+            .HADDR         (HADDR),
+            .HWDATA        (HWDATA),
+            .HWSTRB        (HWSTRB),
+            .HWRITE        (HWRITE),
+            .HSIZE         (HSIZE),
+            .HBURST        (HBURST),
+            .HPROT         (HPROT),
+            .HTRANS        (HTRANS),
+            .HMASTLOCK     (HMASTLOCK),
+            .HREADY        (HREADY),
+            .UARTSin       (1'b1),         // idle-mark: nothing is driving RX
+            .UARTSout      (uart_txd_obs),
+            .irq           (irq_drive),
+            .status        (link_status),
+            .link_clear    (mon_clear),
+            .link_trained  (link_trained),
+            .link_failed   (link_failed),
+            .link_xact     (link_xact),
+            .link_rd       (link_rd),
+            .link_wr       (link_wr),
+            .link_retrain  (link_retrain),
+            .link_wdog     (link_wdog),
+            .link_err      (link_err)
+        );
+
+        assign tap_StallE         = dut.top.chip.soc.core.StallE;
+        assign tap_StallM         = dut.top.chip.soc.core.StallM;
+        assign tap_StallW         = dut.top.chip.soc.core.StallW;
+        assign tap_FlushE         = dut.top.chip.soc.core.FlushE;
+        assign tap_FlushM         = dut.top.chip.soc.core.FlushM;
+        assign tap_FlushW         = dut.top.chip.soc.core.FlushW;
+        assign tap_PCM            = dut.top.chip.soc.core.ifu.PCM;
+        assign tap_InstrValidM    = dut.top.chip.soc.core.ieu.InstrValidM;
+        assign tap_InstrRawD      = dut.top.chip.soc.core.ifu.InstrRawD;
+        assign tap_TrapM          = dut.top.chip.soc.core.TrapM;
+        assign tap_PrivilegeModeW = dut.top.chip.soc.core.PrivilegeModeW;
+        assign tap_GPRWen         = dut.top.chip.soc.core.ieu.dp.regf.we3;
+        assign tap_GPRAddr        = dut.top.chip.soc.core.ieu.dp.regf.a3;
+        assign tap_GPRValue       = dut.top.chip.soc.core.ieu.dp.regf.wd3;
+        assign bus_HADDR          = dut.top.chip.HADDR;
+        assign bus_HWDATA         = dut.top.chip.HWDATA;
+        assign bus_HWRITE         = dut.top.chip.HWRITE;
+        assign bus_HTRANS         = dut.top.chip.HTRANS;
+        assign bus_HREADY         = dut.top.chip.HREADY;
+    end else begin : g_dut
+        amoeba_soc_wrapper dut (
+            .clk           (aclk),
+            .reset_ext     (core_reset_ext),
+            .reset         (soc_reset),
+            .ExternalStall (ExternalStall),
+            .HRDATAEXT     (HRDATAEXT),
+            .HREADYEXT     (HREADYEXT),
+            .HRESPEXT      (HRESPEXT),
+            .HSELEXT       (HSELEXT),
+            .HCLK          (HCLK),
+            .HRESETn       (HRESETn),
+            .HADDR         (HADDR),
+            .HWDATA        (HWDATA),
+            .HWSTRB        (HWSTRB),
+            .HWRITE        (HWRITE),
+            .HSIZE         (HSIZE),
+            .HBURST        (HBURST),
+            .HPROT         (HPROT),
+            .HTRANS        (HTRANS),
+            .HMASTLOCK     (HMASTLOCK),
+            .HREADY        (HREADY),
+            .UARTSin       (1'b1),         // idle-mark: nothing is driving RX
+            .UARTSout      (uart_txd_obs)
+        );
+
+        assign tap_StallE         = dut.soc.core.StallE;
+        assign tap_StallM         = dut.soc.core.StallM;
+        assign tap_StallW         = dut.soc.core.StallW;
+        assign tap_FlushE         = dut.soc.core.FlushE;
+        assign tap_FlushM         = dut.soc.core.FlushM;
+        assign tap_FlushW         = dut.soc.core.FlushW;
+        assign tap_PCM            = dut.soc.core.ifu.PCM;
+        assign tap_InstrValidM    = dut.soc.core.ieu.InstrValidM;
+        assign tap_InstrRawD      = dut.soc.core.ifu.InstrRawD;
+        assign tap_TrapM          = dut.soc.core.TrapM;
+        assign tap_PrivilegeModeW = dut.soc.core.PrivilegeModeW;
+        assign tap_GPRWen         = dut.soc.core.ieu.dp.regf.we3;
+        assign tap_GPRAddr        = dut.soc.core.ieu.dp.regf.a3;
+        assign tap_GPRValue       = dut.soc.core.ieu.dp.regf.wd3;
+        // The exported bus IS the internal bus for the soft core.
+        assign bus_HADDR          = HADDR;
+        assign bus_HWDATA         = HWDATA;
+        assign bus_HWRITE         = HWRITE;
+        assign bus_HTRANS         = HTRANS;
+        assign bus_HREADY         = HREADY;
+
+        assign link_trained = 1'b0;
+        assign link_failed  = 1'b0;
+        assign link_status  = 1'b0;
+        assign link_xact    = '0;
+        assign link_rd      = '0;
+        assign link_wr      = '0;
+        assign link_retrain = '0;
+        assign link_wdog    = '0;
+        assign link_err     = '0;
+    end
 
     // ---- THE AHB LEAVES THIS MODULE ONLY WHILE THE CORE IS RUNNING --------
     //
@@ -464,7 +597,7 @@ module amoeba_pynq_top import cvw::*; #(
     end
 
     // ---- control block -----------------------------------------------------
-    logic        mon_clear, trace_clear;
+    logic        trace_clear;
     logic [1:0]  trace_mode;
     logic [63:0] trig_start, trig_pc;
     logic [31:0] trig_count;
@@ -483,7 +616,8 @@ module amoeba_pynq_top import cvw::*; #(
     // path and waiting for records that will never arrive.
     localparam logic [31:0] CAPS_WORD = {
         16'(MEM_KB),                            // [31:16] memory size in KiB
-        7'h0,
+        6'h0,
+        DUT_ASIC,                               // [    9] ASIC top behind the link
         TRACE,                                  // [    8] trace path present
         7'h0,
         MEM_BRAM                                // [    0] 1 = BRAM, 0 = AXI/DDR
@@ -585,7 +719,19 @@ module amoeba_pynq_top import cvw::*; #(
         .trace_level   (trace_level),
         .trace_state   (trace_state),
         .trace_overflow(trace_overflow),
-        .trace_stalling(ExternalStall),
+        // Under DUT_ASIC the trace may request a stall but nothing honours
+        // it -- there is no such pad -- so STATUS must not claim one.
+        .trace_stalling(ExternalStall & ~DUT_ASIC),
+        .link_trained  (link_trained),
+        .link_failed   (link_failed),
+        .link_status   (link_status),
+        .link_xact     (link_xact),
+        .link_rd       (link_rd),
+        .link_wr       (link_wr),
+        .link_retrain  (link_retrain),
+        .link_wdog     (link_wdog),
+        .link_err      (link_err),
+        .irq_drive     (irq_drive),
         .bus_state     (bus_state),
         .bus_xact      (bus_xact),
         .bus_beat      (bus_beat),
@@ -637,11 +783,11 @@ module amoeba_pynq_top import cvw::*; #(
         .rst           (rst),
         .clear         (mon_clear),
         .core_reset    (core_reset_ext),
-        .HADDR         (HADDR),
-        .HWDATA        (HWDATA),
-        .HWRITE        (HWRITE),
-        .HTRANS        (HTRANS),
-        .HREADY        (HREADY),
+        .HADDR         (bus_HADDR),
+        .HWDATA        (bus_HWDATA),
+        .HWRITE        (bus_HWRITE),
+        .HTRANS        (bus_HTRANS),
+        .HREADY        (bus_HREADY),
         .uart_data     (uart_data),
         .uart_valid    (uart_valid),
         .uart_pop      (uart_pop),
@@ -668,25 +814,25 @@ module amoeba_pynq_top import cvw::*; #(
             .trig_pc        (trig_pc),
             .trig_count     (trig_count),
 
-            // Downward references into the DUT.  These paths match the ones
-            // hdl/rv64_core_wrapper.sv already uses for its RVFI monitor, so
-            // the FPGA trace and the simulation monitor observe the same nets
-            // and a divergence between them is a real difference, not a
-            // different definition of "retired".
-            .StallE         (dut.soc.core.StallE),
-            .StallM         (dut.soc.core.StallM),
-            .StallW         (dut.soc.core.StallW),
-            .FlushE         (dut.soc.core.FlushE),
-            .FlushM         (dut.soc.core.FlushM),
-            .FlushW         (dut.soc.core.FlushW),
-            .PCM            (dut.soc.core.ifu.PCM),
-            .InstrValidM    (dut.soc.core.ieu.InstrValidM),
-            .InstrRawD      (dut.soc.core.ifu.InstrRawD),
-            .TrapM          (dut.soc.core.TrapM),
-            .PrivilegeModeW (dut.soc.core.PrivilegeModeW),
-            .GPRWen         (dut.soc.core.ieu.dp.regf.we3),
-            .GPRAddr        (dut.soc.core.ieu.dp.regf.a3),
-            .GPRValue       (dut.soc.core.ieu.dp.regf.wd3),
+            // Downward references into the DUT, made in g_dut above.  These
+            // paths match the ones hdl/rvfi_tap.sv already uses for the RVFI
+            // monitor, so the FPGA trace and the simulation monitor observe
+            // the same nets and a divergence between them is a real
+            // difference, not a different definition of "retired".
+            .StallE         (tap_StallE),
+            .StallM         (tap_StallM),
+            .StallW         (tap_StallW),
+            .FlushE         (tap_FlushE),
+            .FlushM         (tap_FlushM),
+            .FlushW         (tap_FlushW),
+            .PCM            (tap_PCM),
+            .InstrValidM    (tap_InstrValidM),
+            .InstrRawD      (tap_InstrRawD),
+            .TrapM          (tap_TrapM),
+            .PrivilegeModeW (tap_PrivilegeModeW),
+            .GPRWen         (tap_GPRWen),
+            .GPRAddr        (tap_GPRAddr),
+            .GPRValue       (tap_GPRValue),
 
             .ExternalStall  (ExternalStall),
             .m_axis_tdata   (m_axis_trace_tdata),
@@ -718,11 +864,11 @@ module amoeba_pynq_top import cvw::*; #(
             .rst         (rst),
             .clear       (mon_clear),
             .core_reset  (core_reset_ext),
-            .StallW      (dut.soc.core.StallW),
-            .FlushW      (dut.soc.core.FlushW),
-            .PCM         (dut.soc.core.ifu.PCM),
-            .InstrValidM (dut.soc.core.ieu.InstrValidM),
-            .TrapM       (dut.soc.core.TrapM),
+            .StallW      (tap_StallW),
+            .FlushW      (tap_FlushW),
+            .PCM         (tap_PCM),
+            .InstrValidM (tap_InstrValidM),
+            .TrapM       (tap_TrapM),
             .retired     (retired),
             .traps       (traps)
         );
@@ -730,6 +876,8 @@ module amoeba_pynq_top import cvw::*; #(
 
     // soc_reset is the DUT's synchronized reset, brought out for waves only.
     logic unused;
-    assign unused = &{1'b0, soc_reset, s_axi_ctl_wstrb};
+    assign unused = &{1'b0, soc_reset, s_axi_ctl_wstrb, tap_StallE, tap_StallM,
+                      tap_FlushE, tap_FlushM, tap_InstrRawD, tap_PrivilegeModeW,
+                      tap_GPRWen, tap_GPRAddr, tap_GPRValue};
 
 endmodule

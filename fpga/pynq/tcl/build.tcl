@@ -3,7 +3,8 @@
 #
 #   vivado -mode batch -source tcl/build.tcl -tclargs \
 #          <srcs.f> <part> <board> <out_dir> <defines> <incdirs> \
-#          <fclk_mhz> <mem_backend> <mem_kb> <trace> <stage>
+#          <fclk_mhz> <mem_backend> <mem_kb> <trace> <stage> <board_repo> \
+#          <dut_asic> <train_len>
 #
 # stage is one of:
 #   bd        stop after the block design validates -- minutes, and it is where
@@ -16,12 +17,13 @@
 # is a bad way to spend an afternoon.
 ###############################################################################
 
-if {[llength $argv] < 12} {
-    puts "ERROR: expected 12 tclargs, got [llength $argv]"
+if {[llength $argv] < 14} {
+    puts "ERROR: expected 14 tclargs, got [llength $argv]"
     exit 1
 }
 lassign $argv srcs_f part board out_dir defines incdirs \
-              fclk_mhz mem_backend mem_kb trace stage board_repo
+              fclk_mhz mem_backend mem_kb trace stage board_repo \
+              dut_asic train_len
 
 if {$board eq "none" && $stage eq "bit"} {
     puts "ERROR: board=none produces a design with Vivado's default PS7 settings,"
@@ -40,6 +42,7 @@ puts "  part       : $part"
 puts "  board      : $board"
 puts "  backend    : $mem_backend  (${mem_kb} KiB)"
 puts "  trace      : $trace"
+puts "  dut        : [expr {$dut_asic ? "asic (amoeba_top + link slave, TRAIN_LEN=$train_len)" : "soc"}]"
 puts "  fclk       : $fclk_mhz MHz"
 puts "  stage      : $stage"
 puts "  out        : $out_dir"
@@ -119,7 +122,9 @@ if {![amoeba_build_bd \
         fclk_mhz    $fclk_mhz \
         mem_backend $mem_backend \
         mem_kb      $mem_kb \
-        trace       $trace]} {
+        trace       $trace \
+        dut_asic    $dut_asic \
+        train_len   $train_len]} {
     puts "ERROR: block design could not be built"
     exit 1
 }

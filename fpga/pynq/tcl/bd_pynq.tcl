@@ -67,6 +67,8 @@ proc amoeba_build_bd {args} {
         mem_backend  BRAM
         mem_kb       128
         trace        1
+        dut_asic     0
+        train_len    4096
         ctl_base     0x43C00000
         mem_base     0x44000000
         dma_base     0x40400000
@@ -141,6 +143,8 @@ proc amoeba_build_bd {args} {
         CONFIG.MEM_KB            $opt(mem_kb) \
         CONFIG.TRACE             $opt(trace) \
         CONFIG.DDR_CARVEOUT_BASE [expr {$opt(ddr_carveout)}] \
+        CONFIG.DUT_ASIC          $opt(dut_asic) \
+        CONFIG.TRAIN_LEN         $opt(train_len) \
     ] $dut
 
     connect_bd_net $aclk    [get_bd_pins dut/aclk]

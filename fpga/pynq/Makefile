@@ -45,12 +45,31 @@ else ifeq ($(CONFIG),freertos_keystone)
   CONFIG_DEFINES := AMOEBA_CONFIG_FREERTOS_KEYSTONE
 else ifeq ($(CONFIG),baremetal_linux)
   CONFIG_DEFINES := AMOEBA_CONFIG_BAREMETAL_LINUX
+else ifeq ($(CONFIG),asic)
+  CONFIG_DEFINES := AMOEBA_CONFIG_ASIC
 else
-  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, or leave it unset for pkg/config.vh)
+  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, asic, or leave it unset for pkg/config.vh)
 endif
 
-CONFIG_TAG := $(if $(CONFIG),$(CONFIG),full)
-REPORT_TAG := $(CONFIG_TAG)$(if $(filter-out amoeba_soc_wrapper,$(TOP)),-$(TOP))
+# ---- DUT -------------------------------------------------------------------
+# soc   the soft core, amoeba_soc_wrapper, AHB exported directly (today's flow)
+# asic  the ASIC top (hdl/amoeba_top.sv) behind the FPGA end of the 16-bit
+#       link, amoeba_asic_wrapper.  Same ports, same scaffold, same block
+#       design; see docs/impl_plan_fpga_linux.md.  Use with CONFIG=asic.
+DUT ?= soc
+ifeq ($(DUT),soc)
+  DUT_ASIC := 0
+else ifeq ($(DUT),asic)
+  DUT_ASIC := 1
+else
+  $(error DUT=$(DUT) is not known -- use soc or asic)
+endif
+# Link training length for DUT=asic.  The silicon default is 4096; the ASIC
+# holds the core in reset for ~2 x TRAIN_LEN cycles after CORE_RESET release.
+TRAIN_LEN ?= 4096
+
+CONFIG_TAG := $(if $(CONFIG),$(CONFIG),full)$(if $(filter asic,$(DUT)),-asic)
+REPORT_TAG := $(CONFIG_TAG)$(if $(filter-out amoeba_soc_wrapper amoeba_asic_wrapper,$(TOP)),-$(TOP))
 
 # ---- sources ---------------------------------------------------------------
 # Mirrors sim/Makefile's discovery so the two never drift.  Package files must
@@ -67,7 +86,9 @@ REPORT_TAG := $(CONFIG_TAG)$(if $(filter-out amoeba_soc_wrapper,$(TOP)),-$(TOP))
 # Running the gate at both tops separates "what does the core cost" from "what
 # does the debug plumbing cost", which are different questions with different
 # answers and only one of them goes to the ASIC.
-TOP        ?= amoeba_soc_wrapper
+#   amoeba_asic_wrapper the ASIC top plus the link slave: what DUT=asic puts
+#                       in the fabric.  Gate it to see what the link costs.
+TOP        ?= $(if $(filter asic,$(DUT)),amoeba_asic_wrapper,amoeba_soc_wrapper)
 DESIGN_TOP := $(TOP)
 
 # The two tops name their clock and reset differently, and synth_ooc.tcl needs
@@ -88,7 +109,14 @@ CORE_SRCS  := $(shell find $(REPO)/hdl/core -name '*.sv' -o -name '*.v' | grep -
 # ahb_to_memitf is shared with the Verilator tier: the FPGA's block RAM backend
 # speaks the same mem_itf protocol the simulation memory does, so the adapter is
 # not FPGA-only code that could rot.
-SHARED_SRCS := $(REPO)/hdl/ahb_to_memitf.sv
+# The ASIC top and everything under it, for DUT=asic: the link package first
+# (the slave imports it), then hdl/amoeba_*.sv -- chip, top, soc, uncore, link
+# master, training, reset sync.  Not rvfi_tap.sv or rv64_core_wrapper.sv,
+# which are the simulation DUT.  Present in every build so one filelist serves
+# both DUTs; the unused wrapper elaborates to nothing.
+SHARED_SRCS := $(REPO)/hdl/ahb_to_memitf.sv \
+               $(REPO)/pkg/amoeba_link_pkg.sv \
+               $(sort $(wildcard $(REPO)/hdl/amoeba_*.sv))
 FPGA_SRCS  := $(sort $(wildcard $(CURDIR)/rtl/*.sv) $(wildcard $(CURDIR)/rtl/*.v))
 
 ALL_SRCS   := $(PKG_SRCS) $(CORE_PKG) $(CORE_SRCS) $(SHARED_SRCS) $(FPGA_SRCS)
@@ -133,13 +161,69 @@ test-mem:
 	@$(BUILD)/tb/Vtb_mem_axi | grep -v '^-'
 	@$(BUILD)/tb/Vtb_mem_axi | grep -q 'tb_mem_axi PASS'
 
+# The link slave against the real ASIC bridge: singles, INCR8, pipelined
+# accepts, a mid-burst abort.  The monitor inside asserts that every line op
+# leaves the slave as exactly one complete INCR8, which is what the DDR path
+# (ahblite_axi_bridge) depends on and what nothing else checks.
+.PHONY: test-link
+test-link:
+	@mkdir -p $(BUILD)/tb_link
+	verilator --binary -sv --top-module tb_link_slave --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Mdir $(BUILD)/tb_link \
+	    $(REPO)/pkg/amoeba_link_pkg.sv \
+	    $(REPO)/hdl/amoeba_link_master.sv \
+	    $(REPO)/hdl/amoeba_link_train.sv \
+	    $(REPO)/fpga/pynq/rtl/amoeba_link_slave.sv \
+	    $(REPO)/fpga/pynq/rtl/amoeba_mem_bram.sv \
+	    $(REPO)/hdl/ahb_to_memitf.sv \
+	    $(REPO)/fpga/pynq/tb/tb_link_slave.sv \
+	    +incdir+$(REPO)/hdl/core +incdir+$(REPO)/pkg > $(BUILD)/tb_link/build.log 2>&1
+	@$(BUILD)/tb_link/Vtb_link_slave | grep -v '^-'
+	@$(BUILD)/tb_link/Vtb_link_slave | grep -q 'tb_link_slave PASS'
+
+# The whole PL top in Verilator, driven through the ctl registers the way the
+# PS drives it, running one FreeRTOS image from images/ (built for TARGET=pynq,
+# 128 KiB block RAM).  DUT=asic puts the ASIC top behind the link; DUT=soc is
+# the same test on the soft core.  This is the whole fabric design before
+# Vivado sees it: the DUT generate, the taps, the console snoop, the
+# reset-then-train sequence.  A few minutes to verilate, seconds to run.
+#
+#   make test-top DUT=asic CONFIG=asic TEST=tc_semaphore
+TEST ?= tc_semaphore
+# The tb models the block RAM backend, so it needs the TARGET=pynq images
+# (tohost at 0x8001F000), which live in images-bram/; images/ holds whatever
+# was last built for the board and is usually the DDR set.
+TEST_IMAGES ?= $(CURDIR)/images-bram
+TOP_TB_DIR := $(BUILD)/tb_top_$(CONFIG_TAG)
+.PHONY: test-top
+test-top: $(SRCS_F)
+	@mkdir -p $(TOP_TB_DIR)
+	@test -f $(TEST_IMAGES)/$(TEST).elf || { echo "no $(TEST_IMAGES)/$(TEST).elf -- run: make images IMAGE_TARGET=pynq"; exit 1; }
+	@riscv64-unknown-elf-nm $(TEST_IMAGES)/$(TEST).elf | grep '8001f000 A tohost' >/dev/null || \
+	  { echo "$(TEST).elf is not a TARGET=pynq (128 KiB BRAM) image: tohost is not at 0x8001F000"; exit 1; }
+	riscv64-unknown-elf-objcopy -O binary --gap-fill 0 $(TEST_IMAGES)/$(TEST).elf $(TOP_TB_DIR)/$(TEST).bin
+	python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); b+=bytes(-len(b)%8); \
+	  open(sys.argv[2],"w").write("".join("%016x\n" % int.from_bytes(b[i:i+8],"little") for i in range(0,len(b),8)))' \
+	  $(TOP_TB_DIR)/$(TEST).bin $(TOP_TB_DIR)/$(TEST).hex
+	verilator --binary -sv --top-module tb_pynq_top --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Mdir $(TOP_TB_DIR) \
+	    $(addprefix +incdir+,$(INCDIRS)) \
+	    $(addprefix +define+,$(CONFIG_DEFINES)) \
+	    -GDUT_ASIC=1\'b$(DUT_ASIC) \
+	    $(REPO)/sim/verilator_warn.vlt \
+	    -f $(SRCS_F) $(CURDIR)/tb/tb_pynq_top.sv $(CURDIR)/tb/dpi_stub.cpp > $(TOP_TB_DIR)/build.log 2>&1 \
+	    || { tail -20 $(TOP_TB_DIR)/build.log; exit 1; }
+	@$(TOP_TB_DIR)/Vtb_pynq_top +IMAGE=$(TOP_TB_DIR)/$(TEST).hex | grep -v '^-' | tee $(TOP_TB_DIR)/$(TEST).log
+	@grep -q 'tb_pynq_top PASS' $(TOP_TB_DIR)/$(TEST).log
+
 lint: $(SRCS_F)
 	verilator --lint-only -sv --top-module $(DESIGN_TOP) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
 	    $(addprefix +define+,$(CONFIG_DEFINES)) \
+	    $(if $(filter amoeba_pynq_top,$(DESIGN_TOP)),-GDUT_ASIC=1\'b$(DUT_ASIC) -GTRAIN_LEN=$(TRAIN_LEN)) \
 	    $(REPO)/sim/verilator_warn.vlt \
 	    -f $(SRCS_F)
-	@echo "lint OK: $(DESIGN_TOP) @ CONFIG=$(CONFIG_TAG)"
+	@echo "lint OK: $(DESIGN_TOP) @ CONFIG=$(CONFIG_TAG) DUT=$(DUT)"
 
 # ---- TCL dry run -----------------------------------------------------------
 # Runs tcl/synth_ooc.tcl in plain tclsh with every Vivado command stubbed.
@@ -239,7 +323,8 @@ define run_build
 	    -source $(CURDIR)/tcl/build.tcl \
 	    -tclargs $(SRCS_F) $(XILINX_PART) $(BOARD) $(BITDIR) \
 	             "$(CONFIG_DEFINES)" "$(INCDIRS)" \
-	             $(FCLK_MHZ) $(MEM_BACKEND) $(MEM_KB) $(TRACE) $(1) $(BOARD_REPO)
+	             $(FCLK_MHZ) $(MEM_BACKEND) $(MEM_KB) $(TRACE) $(1) $(BOARD_REPO) \
+	             $(DUT_ASIC) $(TRAIN_LEN)
 endef
 
 .PHONY: bd synth-bd bitstream
@@ -262,6 +347,8 @@ BOARD_HOST ?= xilinx@192.168.2.99
 IMAGES     ?= $(wildcard $(IMAGES_DIR)/*.elf)
 
 # ---- program images --------------------------------------------------------
+# CONFIG=asic runs the baremetal_linux image and device tree, exactly as
+# sim/Makefile and testcode/linux/Makefile do; nothing in testcode changes.
 # Built by hand until now, which produced six byte-identical ELFs once already:
 # `make` in testcode/freertos writes the SAME output name every time, so a
 # second build whose target is newer than its prerequisites is skipped, and

@@ -87,6 +87,19 @@ module amoeba_ctl #(
     input  logic                  trace_overflow,
     input  logic                  trace_stalling,
 
+    // ---- the off-chip link, from amoeba_asic_wrapper (DUT_ASIC builds) -----
+    // Constant zero in soft-core builds; CAPS[9] says which.
+    input  logic                  link_trained,   // echoed, then saw a header
+    input  logic                  link_failed,    // the ASIC gave up retraining
+    input  logic                  link_status,    // the status pad: trained & heartbeat
+    input  logic [31:0]           link_xact,
+    input  logic [31:0]           link_rd,
+    input  logic [31:0]           link_wr,
+    input  logic [31:0]           link_retrain,
+    input  logic [31:0]           link_wdog,      // cycles since the last header
+    input  logic [31:0]           link_err,       // {train words mismatched, HRESP beats}
+    output logic [1:0]            irq_drive,      // the irq[1:0] pads; 0 out of reset
+
     // ---- external AHB probe, from amoeba_bus_probe -------------------------
     // Read-only, and the only window onto the bus between the core and its
     // memory.  See that module's header for why this exists at all.
@@ -146,6 +159,13 @@ module amoeba_ctl #(
     localparam logic [7:0] R_BUS_RSTXACT = 8'h98;   // R: xfers during reset
     localparam logic [7:0] R_BUS_CAPRDAT = 8'h9C;   // R: HRDATA[31:0]
     localparam logic [7:0] R_BUS_XADDR   = 8'h78;
+    localparam logic [7:0] R_LINK_XACT   = 8'hA0;   // R: link transactions
+    localparam logic [7:0] R_LINK_RD     = 8'hA4;   // R: of which reads
+    localparam logic [7:0] R_LINK_WR     = 8'hA8;   // R: of which writes
+    localparam logic [7:0] R_LINK_RETRAIN = 8'hAC;  // R: echoes after the first
+    localparam logic [7:0] R_LINK_WDOG   = 8'hB0;   // R: cycles since the last header
+    localparam logic [7:0] R_IRQ         = 8'hB4;   // RW: irq[1:0] pad drive
+    localparam logic [7:0] R_LINK_ERR    = 8'hB8;   // R: {train mismatches, HRESP beats}
 
     // ---- write channel -----------------------------------------------------
     // Address and data are accepted independently; the write commits when both
@@ -186,7 +206,8 @@ module amoeba_ctl #(
             R_VERSION:       rdata_n = VERSION;
             R_CAPS:          rdata_n = CAPS;
             R_CTRL:          rdata_n = {29'h0, trace_clear, mon_clear, core_reset};
-            R_STATUS:        rdata_n = {26'h0, trace_stalling, trace_overflow,
+            R_STATUS:        rdata_n = {23'h0, link_status, link_failed, link_trained,
+                                        trace_stalling, trace_overflow,
                                         tohost_valid, uart_overflow, uart_valid, core_reset};
             // Bit 8 is the valid flag; a read with bit 8 clear means the FIFO
             // was empty and bits 7:0 are meaningless.  The read pops.
@@ -222,6 +243,13 @@ module amoeba_ctl #(
             R_BUS_CAPSTAT:   rdata_n = bus_capstat;
             R_BUS_RSTXACT:   rdata_n = bus_rstxact;
             R_BUS_CAPRDAT:   rdata_n = bus_caprdat;
+            R_LINK_XACT:     rdata_n = link_xact;
+            R_LINK_RD:       rdata_n = link_rd;
+            R_LINK_WR:       rdata_n = link_wr;
+            R_LINK_RETRAIN:  rdata_n = link_retrain;
+            R_LINK_WDOG:     rdata_n = link_wdog;
+            R_LINK_ERR:      rdata_n = link_err;
+            R_IRQ:           rdata_n = {30'h0, irq_drive};
             default:         rdata_n = 32'hDEAD_C0DE;
         endcase
     end
@@ -233,6 +261,7 @@ module amoeba_ctl #(
             awaddr_q    <= '0;
             wdata_q     <= '0;
             bus_capsel  <= '0;
+            irq_drive   <= 2'b00;
             s_axi_bvalid<= 1'b0;
             s_axi_rvalid<= 1'b0;
             s_axi_rdata <= '0;
@@ -278,6 +307,7 @@ module amoeba_ctl #(
                     R_TRIG_PC_LO:    trig_pc[31:0]     <= wr_data;
                     R_TRIG_PC_HI:    trig_pc[63:32]    <= wr_data;
                     R_BUS_CAPSEL:    bus_capsel        <= wr_data[5:0];
+                    R_IRQ:           irq_drive         <= wr_data[1:0];
                     default: ; // read-only or unmapped: writes are ignored, not errors
                 endcase
             end

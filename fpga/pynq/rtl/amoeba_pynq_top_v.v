@@ -34,7 +34,11 @@ module amoeba_pynq_top_v #(
     // Base of the DDR carve-out in the PS map.  Set from opt(ddr_carveout) in
     // tcl/bd_pynq.tcl, the same value that tcl assigns as the AXI master's
     // address segment.  See amoeba_pynq_top.sv for what it does.
-    parameter DDR_CARVEOUT_BASE = 32'h10000000
+    parameter DDR_CARVEOUT_BASE = 32'h10000000,
+    // 1: the ASIC top behind the link slave; 0: the soft core.  From
+    // opt(dut_asic) in tcl/bd_pynq.tcl.
+    parameter DUT_ASIC        = 0,
+    parameter TRAIN_LEN       = 4096
 )(
     input  wire        aclk,
     input  wire        aresetn,
@@ -108,7 +112,9 @@ module amoeba_pynq_top_v #(
         .MEM_KB            (MEM_KB),
         .TRACE             (TRACE[0]),
         .TRACE_FIFO_LOG2   (TRACE_FIFO_LOG2),
-        .PKT_RECORDS       (PKT_RECORDS)
+        .PKT_RECORDS       (PKT_RECORDS),
+        .DUT_ASIC          (DUT_ASIC[0]),
+        .TRAIN_LEN         (TRAIN_LEN)
     ) u_top (
         .aclk                (aclk),
         .aresetn             (aresetn),

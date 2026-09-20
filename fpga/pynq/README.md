@@ -103,6 +103,27 @@ make utilization                # the gate -- needs Vivado
 make utilization-all            # every config, side by side
 ```
 
+### The ASIC top as the DUT
+
+`DUT=asic` swaps the soft core for `hdl/amoeba_top.sv` -- the chip, pins
+only -- behind the FPGA end of the 16-bit link (`rtl/amoeba_link_slave.sv`),
+wrapped on the same ports (`rtl/amoeba_asic_wrapper.sv`).  Everything below
+the DUT is unchanged; see `docs/impl_plan_fpga_linux.md` for what differs
+(no `ExternalStall`, a training step in reset, the console snoop by
+hierarchical reference).  Use it with `CONFIG=asic`.
+
+```
+make test-link                                    # the slave against the ASIC bridge
+make test-top  DUT=asic CONFIG=asic TEST=tc_semaphore   # the whole PL top, in Verilator
+make lint      DUT=asic CONFIG=asic TOP=amoeba_pynq_top
+make bitstream DUT=asic CONFIG=asic MEM_BACKEND=BRAM    # stage A
+make bitstream DUT=asic CONFIG=asic MEM_BACKEND=AXI TRACE=0   # stage B: Linux
+```
+
+`test-top` needs the `TARGET=pynq` images in `images-bram/`.  `TRAIN_LEN`
+(default 4096, the silicon value) sets how long the link trains before the
+core is released; `sw/amoeba/device.py` waits for `STATUS.link_trained`.
+
 `CONFIG=` takes the same names as `sim/Makefile`, `synth/Makefile` and
 `testcode/linux/Makefile`. It defaults to `baremetal_linux`, the tapeout config.
 
