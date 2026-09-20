@@ -1,12 +1,19 @@
 SHELL=/bin/bash -o pipefail
 .SHELLFLAGS += -e
 
-export PKG_SRCS = $(PWD)/../pkg/types.sv
+# Packages first (analyze order matters), then the RTL.  The RTL is the same
+# set simulation uses: hdl/*.sv plus the hdl/core/ working copy.  hdl/cvw/
+# (pristine) and third_party/cvw/src are deliberately NOT here -- listing all
+# three analyzed every CVW module three times and synthesized whichever copy
+# won, which was not the one simulated.
+export PKG_SRCS = $(PWD)/../pkg/types.sv $(PWD)/../hdl/core/cvw.sv $(PWD)/../pkg/amoeba_link_pkg.sv
 export REPO_ROOT = $(abspath $(PWD)/..)
-CVW_SRCS       := $(shell find $(PWD)/../third_party/cvw/src -name '*.sv' -o -name '*.v' 2>/dev/null)
-export HDL_SRCS = $(shell find $(PWD)/../hdl -name '*.sv') $(CVW_SRCS)
+CORE_SRCS      := $(shell find $(PWD)/../hdl/core -name '*.sv' -o -name '*.v' 2>/dev/null | grep -v '/cvw\.sv$$' | sort)
+TOP_SRCS       := $(sort $(wildcard $(PWD)/../hdl/*.sv))
+export HDL_SRCS = $(TOP_SRCS) $(CORE_SRCS)
 export SRAM_LIB = $(shell find $(PWD)/../sram/output/ -name "*.db")
-export DESIGN_TOP = rv64_core_wrapper
+# The ASIC top.  DESIGN_TOP=rv64_core_wrapper still synthesizes the legacy DUT.
+export DESIGN_TOP ?= amoeba_top
 
 .PHONY: lint
 lint: clean

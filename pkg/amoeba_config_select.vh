@@ -14,7 +14,10 @@
 //                                    that set plus OpenSBI and the Keystone SM
 //   AMOEBA_CONFIG_BAREMETAL_LINUX    pkg/config_baremetal_linux.vh
 //                                    the smallest core that boots a soft-float
-//                                    Linux; this is the tapeout config
+//                                    Linux; the FPGA rehearsal config
+//   AMOEBA_CONFIG_ASIC               pkg/config_asic.vh
+//                                    that, with the silicon deltas; this is the
+//                                    tapeout config
 //   (none)                           pkg/config.vh -- the full RV64GC core
 ///////////////////////////////////////////////////////////////////////////////
 `ifndef AMOEBA_CONFIG_SELECT_VH
@@ -26,6 +29,8 @@
 `include "config_freertos_keystone.vh"
 `elsif AMOEBA_CONFIG_BAREMETAL_LINUX
 `include "config_baremetal_linux.vh"
+`elsif AMOEBA_CONFIG_ASIC
+`include "config_asic.vh"
 `else
 `include "config.vh"
 `endif

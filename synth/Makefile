@@ -1,12 +1,19 @@
 SHELL=/bin/bash -o pipefail
 .SHELLFLAGS += -e
 
-export PKG_SRCS = $(CURDIR)/../pkg/types.sv
+# Packages first (analyze order matters), then the RTL.  The RTL is the same
+# set simulation uses: hdl/*.sv plus the hdl/core/ working copy.  hdl/cvw/
+# (pristine) and third_party/cvw/src are deliberately NOT here -- listing all
+# three analyzed every CVW module three times and synthesized whichever copy
+# won, which was not the one simulated.
+export PKG_SRCS = $(CURDIR)/../pkg/types.sv $(CURDIR)/../hdl/core/cvw.sv $(CURDIR)/../pkg/amoeba_link_pkg.sv
 export REPO_ROOT = $(abspath $(CURDIR)/..)
-CVW_SRCS       := $(shell find $(CURDIR)/../third_party/cvw/src -name '*.sv' -o -name '*.v' 2>/dev/null)
-export HDL_SRCS = $(shell find $(CURDIR)/../hdl -name '*.sv') $(CVW_SRCS)
+CORE_SRCS      := $(shell find $(CURDIR)/../hdl/core -name '*.sv' -o -name '*.v' 2>/dev/null | grep -v '/cvw\.sv$$' | sort)
+TOP_SRCS       := $(sort $(wildcard $(CURDIR)/../hdl/*.sv))
+export HDL_SRCS = $(TOP_SRCS) $(CORE_SRCS)
 export SRAM_LIB = $(shell find $(CURDIR)/../sram/output/ -name "*.db")
-export DESIGN_TOP = rv64_core_wrapper
+# The ASIC top.  DESIGN_TOP=rv64_core_wrapper still synthesizes the legacy DUT.
+export DESIGN_TOP ?= amoeba_top
 
 # ── Pruned hardware configurations ────────────────────────────────────────────
 # Which pkg/ parameter set to synthesize, matching sim/Makefile's CONFIG:
@@ -15,6 +22,7 @@ export DESIGN_TOP = rv64_core_wrapper
 #     make synth CONFIG=freertos            pkg/config_freertos.vh
 #     make synth CONFIG=freertos_keystone   pkg/config_freertos_keystone.vh
 #     make synth CONFIG=baremetal_linux     pkg/config_baremetal_linux.vh
+#     make synth CONFIG=asic                pkg/config_asic.vh (+AMOEBA_USE_SRAM)
 #
 # No pruned config has an FPU, so ECE411_NO_FLOAT goes with them: without
 # it rv64_core_wrapper taps soc.core.fpu.fpu.fregfile, which is not elaborated.
@@ -27,8 +35,10 @@ else ifeq ($(CONFIG),freertos_keystone)
   export ECE411_CONFIG_DEFINES = AMOEBA_CONFIG_FREERTOS_KEYSTONE ECE411_NO_FLOAT
 else ifeq ($(CONFIG),baremetal_linux)
   export ECE411_CONFIG_DEFINES = AMOEBA_CONFIG_BAREMETAL_LINUX ECE411_NO_FLOAT
+else ifeq ($(CONFIG),asic)
+  export ECE411_CONFIG_DEFINES = AMOEBA_CONFIG_ASIC ECE411_NO_FLOAT AMOEBA_USE_SRAM
 else
-  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, or leave it unset)
+  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, asic, or leave it unset)
 endif
 
 export STD_CELL_LIB=$(FREEPDK45)/stdcells.db
