@@ -121,12 +121,6 @@ module rv64_core_wrapper import cvw::*; (
     assign mcycle_rmask   = '0; assign mcycle_wmask   = '0; assign mcycle_wdata   = '0;
     assign minstret_rmask = '0; assign minstret_wmask = '0; assign minstret_wdata = '0;
 
-    // Fixed monitor outputs
-    assign monitor_intr      = InterruptTakenPending & InstrValidW;
-    assign monitor_mode      = soc.core.PrivilegeModeW;
-    assign monitor_ixl       = 2'b10;  // RV64 (XLEN=64)
-    assign monitor_mem_extamo = 1'b0;  // no AMO
-
     // -------------------------------------------------------------------------
     // CVW SoC AHB-Lite signals
     // -------------------------------------------------------------------------
@@ -211,291 +205,64 @@ module rv64_core_wrapper import cvw::*; (
         .mem_rdata (mem_rdata),
         .mem_resp  (mem_resp)
     );
-
     // -------------------------------------------------------------------------
-    // RVFI signal tapping from CVW pipeline internals
+    // RVFI monitor taps -- hdl/rvfi_tap.sv, fed by hierarchical reads of the
+    // core.  The wrapper's monitor_* ports are the tap's outputs unchanged.
     // -------------------------------------------------------------------------
-    logic StallE, StallM, StallW;
-    logic FlushE, FlushM, FlushW, FlushD;
-    assign StallE = soc.core.StallE;
-    assign StallM = soc.core.StallM;
-    assign StallW = soc.core.StallW;
-    assign FlushE = soc.core.FlushE;
-    assign FlushM = soc.core.FlushM;
-    assign FlushW = soc.core.FlushW;
-    assign FlushD = soc.core.FlushD;
-
-    logic        InstrValidM, InstrValidE, InstrValidD;
-    logic [63:0] PCM, PCF, PCD, PCE, PCNextF;
-    logic [31:0] InstrRawD;
-    logic        TrapM, RetM, InterruptM;
-    logic [63:0] EPCM, TrapVectorM;
-    assign InstrValidM  = soc.core.ieu.InstrValidM;
-    assign InstrValidE  = soc.core.ieu.InstrValidE;
-    assign InstrValidD  = soc.core.ieu.InstrValidD;
-    assign InstrRawD    = soc.core.ifu.InstrRawD;
-    assign PCM          = soc.core.ifu.PCM;
-    assign PCF          = soc.core.ifu.PCF;
-    assign PCD          = soc.core.ifu.PCD;
-    assign PCE          = soc.core.ifu.PCE;
-    assign PCNextF      = soc.core.ifu.PCNextF;
-    assign TrapM        = soc.core.TrapM;
-    assign RetM         = soc.core.RetM;
-    assign EPCM         = soc.core.EPCM;
-    assign TrapVectorM  = soc.core.TrapVectorM;
-    assign InterruptM   = soc.core.priv.priv.InterruptM;
-
-    logic [63:0] rvfi_order_ctr;
-    always_ff @(posedge clk) begin
-        if (rst) rvfi_order_ctr <= '0;
-        else if (InstrValidW & ~StallW) rvfi_order_ctr <= rvfi_order_ctr + 1;
-    end
-
-    logic [4:0]  GPRAddr;
-    logic        GPRWen;
-    logic [63:0] GPRValue;
-    assign GPRAddr  = soc.core.ieu.dp.regf.a3;
-    assign GPRWen   = soc.core.ieu.dp.regf.we3;
-    assign GPRValue = soc.core.ieu.dp.regf.wd3;
-
-    logic [4:0] Rs1D, Rs2D;
-    assign Rs1D = soc.core.ieu.dp.regf.a1;
-    assign Rs2D = soc.core.ieu.dp.regf.a2;
-
-    logic [1:0]  MemRWM;
-    logic [2:0]  Funct3M;
-    logic [63:0] IEUAdrM, WriteDataM, ReadDataW;
-    assign MemRWM     = soc.core.MemRWM;
-    assign Funct3M    = soc.core.Funct3M;
-    assign IEUAdrM    = soc.core.IEUAdrM;
-    assign WriteDataM = soc.core.lsu.LSUWriteDataM[63:0];
-    assign ReadDataW  = soc.core.ReadDataW[63:0];
-
-    // Pipeline M→W registers
-    logic        InstrValidW;
-    logic [63:0] PCW;
-    logic [31:0] InstrRawW;
-    logic        TrapW;
-    logic [1:0]  MemRWW;
-    logic [2:0]  Funct3W;
-    logic [63:0] IEUAdrW, WriteDataW;
-    logic [4:0]  Rs1E, Rs2E, Rs1M, Rs2M, Rs1W, Rs2W;
-    logic [63:0] Rs1DataM, Rs2DataM, Rs1DataW, Rs2DataW;
-    // Stash for multi-cycle E-stage instructions (MDU divide/multiply).
-    // StallM=0 during divide stall so ForwardedSrc*/WriteDataM change as the
-    // previous instruction drains through M/W. Capture on the FIRST cycle of
-    // E-stage stall when forwarding is still active, then hold until E→M.
-    logic [63:0] Rs1DataE_stash, Rs2DataE_stash;
-    logic        E_stash_valid;
-    logic [31:0] InstrRawE_r, InstrRawM_r;
-    // InterruptTakenPending: set when an external interrupt fires and its
-    // interrupted instruction is suppressed from RVFI; cleared on the first
-    // committed instruction of the interrupt handler (rvfi_intr=1 for it).
-    logic        InterruptTakenPending;
-    logic        IntrReported;
-    assign IntrReported = InterruptTakenPending & InstrValidW & ~StallW;
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            InstrValidW <= '0; PCW <= '0; InstrRawW <= '0;
-            InstrRawE_r <= '0; InstrRawM_r <= '0;
-            TrapW <= '0; MemRWW <= '0; Funct3W <= '0;
-            IEUAdrW <= '0; WriteDataW <= '0;
-            Rs1E <= '0; Rs2E <= '0; Rs1M <= '0; Rs2M <= '0;
-            Rs1W <= '0; Rs2W <= '0;
-            Rs1DataM <= '0; Rs2DataM <= '0;
-            Rs1DataW <= '0; Rs2DataW <= '0;
-            Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 0;
-            InterruptTakenPending <= '0;
-        end else begin
-            // Clear intr pending when the first handler instruction is reported
-            if (IntrReported) InterruptTakenPending <= '0;
-            if (!StallE) InstrRawE_r <= FlushE ? '0 : InstrRawD;
-            if (!StallM) InstrRawM_r <= FlushM ? '0 : InstrRawE_r;
-            if (!StallW) begin
-                if (TrapM & InterruptM) begin
-                    // External interrupt: suppress the interrupted instruction (if any in M)
-                    // and set pending so the first handler instruction gets rvfi_intr=1.
-                    // No InstrValidM guard: interrupt can fire when M is a bubble; the
-                    // suppress is harmless (InstrValidW becomes 0 either way) but
-                    // InterruptTakenPending must be set regardless.
-                    InstrValidW <= '0;
-                    InterruptTakenPending <= '1;
-                end else begin
-                    InstrValidW <= (FlushW & ~TrapM) ? '0 : InstrValidM;
-                end
-                PCW         <= (FlushW & ~TrapM) ? '0 : PCM;
-                InstrRawW   <= (FlushW & ~TrapM) ? '0 : InstrRawM_r;
-                TrapW       <= TrapM & ~InterruptM;   // rvfi_trap only for exceptions
-                MemRWW      <= FlushW ? '0 : MemRWM;
-                Funct3W     <= Funct3M;
-                IEUAdrW     <= IEUAdrM;
-                WriteDataW  <= WriteDataM;
-                Rs1W        <= Rs1M;
-                Rs2W        <= Rs2M;
-                Rs1DataW    <= Rs1DataM;
-                Rs2DataW    <= Rs2DataM;
-            end
-            if (!StallE) begin
-                Rs1E <= FlushE ? '0 : Rs1D;
-                Rs2E <= FlushE ? '0 : Rs2D;
-                // Non-stalling or advancing: reset stash; stale stash no longer relevant.
-                E_stash_valid <= 0;
-            end else if (FlushE) begin
-                // E-stage instruction killed; clear stash.
-                E_stash_valid <= 0;
-            end else if (!E_stash_valid) begin
-                // First cycle of E-stage stall (MDU busy): ForwardedSrcAE/BE are
-                // correct here because R1E/R2E were loaded last cycle and the
-                // previous instruction is still in M/W providing forwarded values.
-                Rs1DataE_stash <= soc.core.ieu.ForwardedSrcAE;
-                Rs2DataE_stash <= soc.core.ieu.ForwardedSrcBE;
-                E_stash_valid  <= 1;
-            end
-            if (!StallM) begin
-                Rs1M <= FlushM ? '0 : Rs1E;
-                Rs2M <= FlushM ? '0 : Rs2E;
-                // For stalled-E instructions (MDU), use the stash captured at first
-                // stall cycle; for normal flow, capture ForwardedSrcAE/BE directly.
-                if (E_stash_valid) begin
-                    Rs1DataM <= FlushM ? '0 : Rs1DataE_stash;
-                    Rs2DataM <= FlushM ? '0 : Rs2DataE_stash;
-                end else begin
-                    Rs1DataM <= FlushM ? '0 : soc.core.ieu.ForwardedSrcAE;
-                    Rs2DataM <= FlushM ? '0 : soc.core.ieu.ForwardedSrcBE;
-                end
-            end
-        end
-    end
-
-    function automatic logic [7:0] funct3_to_mask(input logic [2:0] funct3, input logic [2:0] offset);
-        logic [7:0] m;
-        m = '0;
-        case (funct3[1:0])
-            2'b00: m = 8'h01 << offset;
-            2'b01: m = 8'h03 << {offset[2:1], 1'b0};
-            2'b10: m = 8'h0F << {offset[2], 2'b0};
-            2'b11: m = 8'hFF;
-        endcase
-        return m;
-    endfunction
-
-    assign monitor_valid      = InstrValidW & ~StallW & (|PCW);
-    assign monitor_order      = rvfi_order_ctr;
-    // For compressed instructions, only bits[15:0] are valid; zero-extend to 32 bits.
-    assign monitor_inst       = (InstrRawW[1:0] != 2'b11) ? {16'h0000, InstrRawW[15:0]} : InstrRawW;
-    assign monitor_trap       = TrapW;
-    assign monitor_rs1_addr   = Rs1W;
-    assign monitor_rs2_addr   = Rs2W;
-    assign monitor_rs1_rdata  = Rs1DataW;
-    assign monitor_rs2_rdata  = Rs2DataW;
-    assign monitor_rd_addr    = GPRWen ? GPRAddr : '0;
-    assign monitor_rd_wdata   = GPRWen ? GPRValue : '0;
-    assign monitor_pc_rdata   = PCW;
-
-    // Register RetM/TrapM and their associated target PCs at the M→W boundary.
-    // mret and traps redirect the fetch immediately, so PCM/PCE are stale by the time
-    // the instruction reaches W (pipeline bubbles fill the stages). Capture the authoritative
-    // target (EPCM for mret, TrapVectorM for traps) while they are still valid in M.
-    // For all other instructions the original W-stage lookahead (PCM/PCE/PCD) is correct
-    // because the branch/jump target propagates into M/E by the time the instruction is in W.
-    logic        RetW;
-    logic [63:0] EPCW, TrapVectorW;
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            RetW <= '0; EPCW <= '0; TrapVectorW <= '0;
-        end else if (!StallW) begin
-            RetW        <= RetM;
-            EPCW        <= EPCM;
-            TrapVectorW <= TrapVectorM;
-        end
-    end
-
-    logic [63:0] pc_wdata_seq;
-    assign pc_wdata_seq = PCW + (InstrRawW[1:0] == 2'b11 ? 64'd4 : 64'd2);
-    // Note: an interrupt taken in M must NOT redirect pc_wdata of the instruction
-    // retiring in W. RVFI requires pc_wdata to be that instruction's architectural
-    // next PC; the fetch discontinuity is expressed by rvfi_intr on the first handler
-    // instruction (see InterruptTakenPending above), which rvfimon honors when
-    // comparing the shadow PC against the next pc_rdata.
-    assign monitor_pc_wdata = RetW                 ? EPCW        :   // mret/sret: return to saved EPC
-                              TrapW                ? TrapVectorW :   // exception: jump to handler
-                              InstrValidM          ? PCM         :   // normal: lookahead to M stage
-                              InstrValidE          ? PCE         :
-                              InstrValidD          ? PCD         :
-                              pc_wdata_seq;
-
-    assign monitor_mem_addr   = IEUAdrW & ~64'h7;
-    assign monitor_mem_rmask  = MemRWW[1] ? funct3_to_mask(Funct3W, IEUAdrW[2:0]) : '0;
-    assign monitor_mem_wmask  = MemRWW[0] ? funct3_to_mask(Funct3W, IEUAdrW[2:0]) : '0;
-    assign monitor_mem_rdata  = ReadDataW << {IEUAdrW[2:0], 3'b0};
-    assign monitor_mem_wdata  = WriteDataW;
-
-    // -------------------------------------------------------------------------
-    // FP register file tapping (D-stage reads pipelined to W-stage)
-    // -------------------------------------------------------------------------
-    `ifndef ECE411_NO_FLOAT
-    // D-stage: fregfile reads are combinational from InstrD[19:15/24:20/31:27]
-    logic [4:0]  Frs1D, Frs2D, Frs3D;
-    logic [63:0] Frs1DataD, Frs2DataD, Frs3DataD;
-    assign Frs1D     = soc.core.fpu.fpu.fregfile.a1;
-    assign Frs2D     = soc.core.fpu.fpu.fregfile.a2;
-    assign Frs3D     = soc.core.fpu.fpu.fregfile.a3;
-    assign Frs1DataD = soc.core.fpu.fpu.fregfile.rd1;
-    assign Frs2DataD = soc.core.fpu.fpu.fregfile.rd2;
-    assign Frs3DataD = soc.core.fpu.fpu.fregfile.rd3;
-
-    // Pipeline D→E→M→W using same stall/flush as integer path
-    logic [4:0]  Frs1E, Frs2E, Frs3E, Frs1M, Frs2M, Frs3M, Frs1W, Frs2W, Frs3W;
-    logic [63:0] Frs1DataE, Frs2DataE, Frs3DataE;
-    logic [63:0] Frs1DataM, Frs2DataM, Frs3DataM;
-    logic [63:0] Frs1DataW, Frs2DataW, Frs3DataW;
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            Frs1E <= '0; Frs2E <= '0; Frs3E <= '0;
-            Frs1M <= '0; Frs2M <= '0; Frs3M <= '0;
-            Frs1W <= '0; Frs2W <= '0; Frs3W <= '0;
-            Frs1DataE <= '0; Frs2DataE <= '0; Frs3DataE <= '0;
-            Frs1DataM <= '0; Frs2DataM <= '0; Frs3DataM <= '0;
-            Frs1DataW <= '0; Frs2DataW <= '0; Frs3DataW <= '0;
-        end else begin
-            if (!StallE) begin
-                Frs1E     <= FlushE ? '0 : Frs1D;
-                Frs2E     <= FlushE ? '0 : Frs2D;
-                Frs3E     <= FlushE ? '0 : Frs3D;
-                Frs1DataE <= FlushE ? '0 : Frs1DataD;
-                Frs2DataE <= FlushE ? '0 : Frs2DataD;
-                Frs3DataE <= FlushE ? '0 : Frs3DataD;
-            end
-            if (!StallM) begin
-                Frs1M     <= FlushM ? '0 : Frs1E;
-                Frs2M     <= FlushM ? '0 : Frs2E;
-                Frs3M     <= FlushM ? '0 : Frs3E;
-                Frs1DataM <= FlushM ? '0 : Frs1DataE;
-                Frs2DataM <= FlushM ? '0 : Frs2DataE;
-                Frs3DataM <= FlushM ? '0 : Frs3DataE;
-            end
-            if (!StallW) begin
-                Frs1W     <= (FlushW & ~TrapM) ? '0 : Frs1M;
-                Frs2W     <= (FlushW & ~TrapM) ? '0 : Frs2M;
-                Frs3W     <= (FlushW & ~TrapM) ? '0 : Frs3M;
-                Frs1DataW <= (FlushW & ~TrapM) ? '0 : Frs1DataM;
-                Frs2DataW <= (FlushW & ~TrapM) ? '0 : Frs2DataM;
-                Frs3DataW <= (FlushW & ~TrapM) ? '0 : Frs3DataM;
-            end
-        end
-    end
-
-    // W-stage FP write port (fregfile commits on negedge; we4/a4/wd4 are set by W-stage)
-    assign monitor_frs1_addr  = {1'b0, Frs1W};
-    assign monitor_frs2_addr  = {1'b0, Frs2W};
-    assign monitor_frs3_addr  = {1'b0, Frs3W};
-    assign monitor_frs1_rdata = Frs1DataW;
-    assign monitor_frs2_rdata = Frs2DataW;
-    assign monitor_frs3_rdata = Frs3DataW;
-    assign monitor_frd_addr   = soc.core.fpu.fpu.fregfile.we4 ? {1'b0, soc.core.fpu.fpu.fregfile.a4} : 6'b0;
-    assign monitor_frd_wdata  = soc.core.fpu.fpu.fregfile.wd4;
-    `endif
+    rvfi_tap tap (
+        .clk, .rst,
+        .StallE         (soc.core.StallE),
+        .StallM         (soc.core.StallM),
+        .StallW         (soc.core.StallW),
+        .FlushE         (soc.core.FlushE),
+        .FlushM         (soc.core.FlushM),
+        .FlushW         (soc.core.FlushW),
+        .InstrValidM    (soc.core.ieu.InstrValidM),
+        .InstrValidE    (soc.core.ieu.InstrValidE),
+        .InstrValidD    (soc.core.ieu.InstrValidD),
+        .InstrRawD      (soc.core.ifu.InstrRawD),
+        .PCM            (soc.core.ifu.PCM),
+        .PCD            (soc.core.ifu.PCD),
+        .PCE            (soc.core.ifu.PCE),
+        .TrapM          (soc.core.TrapM),
+        .RetM           (soc.core.RetM),
+        .InterruptM     (soc.core.priv.priv.InterruptM),
+        .EPCM           (soc.core.EPCM),
+        .TrapVectorM    (soc.core.TrapVectorM),
+        .PrivilegeModeW (soc.core.PrivilegeModeW),
+        .GPRAddr        (soc.core.ieu.dp.regf.a3),
+        .GPRWen         (soc.core.ieu.dp.regf.we3),
+        .GPRValue       (soc.core.ieu.dp.regf.wd3),
+        .Rs1D           (soc.core.ieu.dp.regf.a1),
+        .Rs2D           (soc.core.ieu.dp.regf.a2),
+        .ForwardedSrcAE (soc.core.ieu.ForwardedSrcAE),
+        .ForwardedSrcBE (soc.core.ieu.ForwardedSrcBE),
+        .MemRWM         (soc.core.MemRWM),
+        .Funct3M        (soc.core.Funct3M),
+        .IEUAdrM        (soc.core.IEUAdrM),
+        .WriteDataM     (soc.core.lsu.LSUWriteDataM[63:0]),
+        .ReadDataW      (soc.core.ReadDataW[63:0]),
+`ifndef ECE411_NO_FLOAT
+        .Frs1D_i        (soc.core.fpu.fpu.fregfile.a1),
+        .Frs2D_i        (soc.core.fpu.fpu.fregfile.a2),
+        .Frs3D_i        (soc.core.fpu.fpu.fregfile.a3),
+        .Frs1DataD_i    (soc.core.fpu.fpu.fregfile.rd1),
+        .Frs2DataD_i    (soc.core.fpu.fpu.fregfile.rd2),
+        .Frs3DataD_i    (soc.core.fpu.fpu.fregfile.rd3),
+        .Frd_we4_i      (soc.core.fpu.fpu.fregfile.we4),
+        .Frd_a4_i       (soc.core.fpu.fpu.fregfile.a4),
+        .Frd_wd4_i      (soc.core.fpu.fpu.fregfile.wd4),
+        .monitor_frs1_addr, .monitor_frs2_addr, .monitor_frs3_addr,
+        .monitor_frs1_rdata, .monitor_frs2_rdata, .monitor_frs3_rdata,
+        .monitor_frd_addr, .monitor_frd_wdata,
+`endif
+        .monitor_valid, .monitor_order, .monitor_inst, .monitor_trap,
+        .monitor_intr, .monitor_mode, .monitor_ixl,
+        .monitor_rs1_addr, .monitor_rs2_addr, .monitor_rs1_rdata, .monitor_rs2_rdata,
+        .monitor_rd_addr, .monitor_rd_wdata,
+        .monitor_pc_rdata, .monitor_pc_wdata,
+        .monitor_mem_addr, .monitor_mem_rmask, .monitor_mem_wmask,
+        .monitor_mem_rdata, .monitor_mem_wdata, .monitor_mem_extamo
+    );
 
 endmodule
