@@ -38,6 +38,11 @@ ifeq ($(CONFIG),)
 else ifeq ($(CONFIG),baremetal_linux)
   CONFIG_FRAG := configs/linux_amoeba_baremetal_linux.config
   DTS_SRC     := dts/amoeba_baremetal_linux.dts
+else ifeq ($(CONFIG),asic)
+  # Same image as baremetal_linux: the silicon deltas in pkg/config_asic.vh are
+  # decode-only (PLIC region reachable but absent from this dts) and USE_SRAM.
+  CONFIG_FRAG := configs/linux_amoeba_baremetal_linux.config
+  DTS_SRC     := dts/amoeba_baremetal_linux.dts
   OUT         := $(CURDIR)/build/baremetal_linux
   # Pin OpenSBI to the core's actual ISA.  Without this the firmware is compiled
   # against the toolchain default (rv64gc/lp64d); it would still not execute an
@@ -45,7 +50,7 @@ else ifeq ($(CONFIG),baremetal_linux)
   # not worth leaving to chance.
   SBI_ISA     := PLATFORM_RISCV_ISA=rv64imac_zicsr_zifencei PLATFORM_RISCV_ABI=lp64
 else
-  $(error CONFIG=$(CONFIG) is not a known configuration -- use baremetal_linux, or leave it unset)
+  $(error CONFIG=$(CONFIG) is not a known configuration -- use baremetal_linux, asic, or leave it unset)
 endif
 
 LINUX_VERSION   := 6.6

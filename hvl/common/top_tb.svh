@@ -32,7 +32,11 @@
         .ILEN(ILEN)
     ) monitor(.itf(mon_itf));
 
+`ifdef ECE411_DUT_AMOEBA
+    amoeba_dut_wrap dut (
+`else
     rv64_core_wrapper dut (
+`endif
         .clk      (clk),
         .rst      (rst),
         .mem_addr  (mem_itf.addr [0]),
@@ -50,9 +54,9 @@
     // has already masked to an 8-byte boundary and so cannot reveal
     // misalignment.  Funct3W[1:0] encodes the access size as log2(bytes).
 `ifdef ECE411_LINUX
-    wire [63:0] acc_size_mask = (64'd1 << dut.Funct3W[1:0]) - 64'd1;
-    assign mon_itf.mem_misaligned[0] = mon_itf.valid[0] && (|dut.MemRWW) &&
-                                       ((dut.IEUAdrW & acc_size_mask) != 64'd0);
+    wire [63:0] acc_size_mask = (64'd1 << dut.tap.Funct3W[1:0]) - 64'd1;
+    assign mon_itf.mem_misaligned[0] = mon_itf.valid[0] && (|dut.tap.MemRWW) &&
+                                       ((dut.tap.IEUAdrW & acc_size_mask) != 64'd0);
 `else
     assign mon_itf.mem_misaligned[0] = 1'b0;
 `endif
@@ -155,14 +159,19 @@
     // holds PENABLE an extra cycle; that is why the CVW model's own $write
     // prints every character twice.  Taking the rising edge yields exactly one
     // byte per store.
-    wire       uart_we_level = ~dut.soc.uncoregen.uncore.uartgen.uart.uartPC.MEMWb &
-                               (dut.soc.uncoregen.uncore.uartgen.uart.uartPC.A == 3'b000) &
-                               ~dut.soc.uncoregen.uncore.uartgen.uart.uartPC.DLAB;
+`ifdef ECE411_DUT_AMOEBA
+    `define UARTPC dut.top.chip.soc.uncore.onchip.uart.uartPC
+`else
+    `define UARTPC dut.soc.uncoregen.uncore.uartgen.uart.uartPC
+`endif
+    wire       uart_we_level = ~`UARTPC.MEMWb &
+                               (`UARTPC.A == 3'b000) &
+                               ~`UARTPC.DLAB;
     logic      uart_we_level_q;
     always @(posedge clk) uart_we_level_q <= rst ? 1'b0 : uart_we_level;
 
     wire       uart_ch_valid = uart_we_level & ~uart_we_level_q;
-    wire [7:0] uart_ch_data  = dut.soc.uncoregen.uncore.uartgen.uart.uartPC.Din;
+    wire [7:0] uart_ch_data  = `UARTPC.Din;
 `else
     wire       uart_ch_valid = mon_itf.valid[0] && mon_itf.mem_wmask[0][0] &&
                                mon_itf.mem_addr[0] == UART_THR_ADDR;
