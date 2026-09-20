@@ -90,6 +90,81 @@ RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
 
+# ── Pruned hardware configurations ────────────────────────────────────────────
+# CONFIG selects which pkg/ parameter set the no-Spike testbench is built
+# against, in place of the full RV64GC pkg/config.vh:
+#
+#     CONFIG=freertos           pkg/config_freertos.vh
+#                               only what the FreeRTOS images execute
+#     CONFIG=freertos_keystone  pkg/config_freertos_keystone.vh
+#                               that, plus what the Keystone SM and OpenSBI need
+#     CONFIG=baremetal_linux    pkg/config_baremetal_linux.vh
+#     CONFIG=asic               pkg/config_asic.vh (tapeout: baremetal_linux + silicon deltas)
+#                               smallest core that boots a soft-float Linux
+#
+#     make freertos_regression CONFIG=freertos
+#     make linux_boot          CONFIG=baremetal_linux
+#
+# None of them has an FPU, so those builds must also drop the RVFI float channel:
+# without ECE411_NO_FLOAT the wrapper taps soc.core.fpu.fpu.fregfile, which is
+# no longer elaborated.  hvl/common/rvfi_reference.svh is generated per build
+# and is shared, so switching CONFIG rewrites it and the other Verilator
+# binaries rebuild on their next invocation.  The binaries themselves live in
+# separate -Mdir trees and coexist.
+# DUT selects the device under test.  legacy is rv64_core_wrapper
+# (wallypipelinedsoc + ahb_to_memitf, the CI reference); amoeba is the ASIC
+# top behind hvl/common/amoeba_dut_wrap.sv, talking to memory over the
+# 16-bit link through amoeba_link_model.  Same testbench, same checkers.
+#
+#     make run_isa_level DUT=amoeba CONFIG=asic PROG=...
+#     make linux_boot    DUT=amoeba CONFIG=asic
+#
+# Run-time link knobs (amoeba only): +LINK_GAPS=1 withholds ready/rvalid at
+# random, +LINK_SEED=<n> picks the pattern.  Pass via LINK_ARGS.
+DUT ?= legacy
+ifeq ($(DUT),legacy)
+  DUT_DEF :=
+  DUT_TAG :=
+else ifeq ($(DUT),amoeba)
+  DUT_DEF := +define+ECE411_DUT_AMOEBA
+  DUT_TAG := _amoeba
+else
+  $(error DUT=$(DUT) is not known -- use legacy or amoeba)
+endif
+LINK_ARGS ?=
+
+CONFIG ?=
+ifeq ($(CONFIG),)
+  CONFIG_DEF   :=
+else ifeq ($(CONFIG),freertos)
+  CONFIG_DEF   := +define+AMOEBA_CONFIG_FREERTOS +define+ECE411_NO_FLOAT
+  RVFI_NO_FLOAT := no_float
+  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_freertos
+else ifeq ($(CONFIG),freertos_keystone)
+  CONFIG_DEF   := +define+AMOEBA_CONFIG_FREERTOS_KEYSTONE +define+ECE411_NO_FLOAT
+  RVFI_NO_FLOAT := no_float
+  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_freertos_keystone
+else ifeq ($(CONFIG),baremetal_linux)
+  CONFIG_DEF   := +define+AMOEBA_CONFIG_BAREMETAL_LINUX +define+ECE411_NO_FLOAT
+  RVFI_NO_FLOAT := no_float
+  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_baremetal_linux
+else ifeq ($(CONFIG),asic)
+  CONFIG_DEF   := +define+AMOEBA_CONFIG_ASIC +define+ECE411_NO_FLOAT
+  RVFI_NO_FLOAT := no_float
+  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_asic
+else
+  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, asic, or leave it unset)
+endif
+BUILD_DIR    := $(BUILD_DIR)$(DUT_TAG)
+NO_SPIKE_DIR := $(NO_SPIKE_DIR)$(DUT_TAG)
+
+export VCS_ARCH_OVERRIDE=linux
+CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
+COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver
+VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=../vcs_warn.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
+VER_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) $(CONFIG_DEF) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+
 # Standalone --binary unit testbenches (ft_shadow_test, ecc_secded_dected_test,
 # csr_harden_test).  Like the SoC builds they need the repo's FindBin.pm, and
 # --binary pulls in Verilator's coroutine-based timing runtime, which GCC 10/11
@@ -138,7 +213,7 @@ run_verilator_top_tb_no_spike: verilator/$(NO_SPIKE_DIR)/Vtop_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(NO_SPIKE_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -166,7 +241,7 @@ build_freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 verilator/$(ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(ECC_INJECT_DIR)
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd verilator ;\
 	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(ECC_INJECT_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(ECC_INJECT_DIR)/compile.log
 	cd verilator/$(ECC_INJECT_DIR) ;\
@@ -209,8 +284,17 @@ else
   LINUX_BUILD_DIR := build_linux
   LINUX_RVFI_DEF  := +define+ECE411_NO_RVFI
 endif
+# CONFIG applies to the Linux simulator too, into its own -Mdir.  Note for
+# CONFIG=baremetal_linux: that config sets ZICCLSM_SUPPORTED = 0, so misaligned
+# accesses trap exactly as the generated monitor assumes, and LINUX_RVFI=1 is
+# expected to work there without the false mismatch that forces it off on the
+# main config.
+ifneq ($(CONFIG),)
+  LINUX_BUILD_DIR := $(LINUX_BUILD_DIR)_$(CONFIG)
+endif
+LINUX_BUILD_DIR := $(LINUX_BUILD_DIR)$(DUT_TAG)
 
-LINUX_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
+LINUX_VER_FLAGS = $(COMMON_FLAGS) $(CONFIG_DEF) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
 	+define+ECE411_LINUX +define+ECE411_NO_TRACE $(LINUX_RVFI_DEF) +incdir+$(CURDIR)/../hvl/verilator \
 	-Wall --timescale 1ps/1ps -Mdir $(LINUX_BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 \
 	-CFLAGS "-O3 -flto -DNDEBUG -DECE411_NO_TRACE" -LDFLAGS "-flto" --x-assign fast --x-initial fast \
@@ -236,6 +320,13 @@ build_linux: verilator/$(LINUX_BUILD_DIR)/Vtop_tb
 # LINUX_PASS selects the milestone: override it to stop at an earlier point in
 # the boot, e.g. LINUX_PASS='Linux version 6.6' for a ~5M-cycle smoke test.
 LINUX_DIR     ?= $(CURDIR)/../testcode/linux
+# NOTE: one Linux image, built from testcode/linux's hardcoded config and dts.
+# Per-CONFIG images (a soft-float build for baremetal_linux/asic) are NOT
+# supported on this branch: they need per-config dts and kernel fragments that
+# came with the commits dropped as redundant during the rebase onto
+# Making_HDL_Synthesizable.  `linux_boot CONFIG=<pruned>` therefore boots the
+# full RV64GC image, which will not match a pruned core.  Reinstating it belongs
+# with whoever owns the Linux images.
 LINUX_MEMLST  ?= $(LINUX_DIR)/build/boot.lst
 LINUX_TIMEOUT ?= 2000000000
 LINUX_PASS    ?= AMOEBA_LINUX_BOOT_OK
@@ -249,7 +340,7 @@ $(LINUX_MEMLST):
 linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 	mkdir -p $(LINUX_RUN_DIR)
 	cd verilator && ./$(LINUX_BUILD_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(LINUX_TIMEOUT) \
+		+TIMEOUT_ECE411=$(LINUX_TIMEOUT) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+MEMLST_ECE411="$(LINUX_MEMLST)" \
 		+UART_PASS_ECE411="$(LINUX_PASS)" \
@@ -264,7 +355,7 @@ linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(LINUX_ECC_INJECT_DIR)
 	python3 check_sus.py
-	python3 ../bin/rvfi_reference.py 1 $(ECE411_NO_FLOAT)
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd verilator ;\
 	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(LINUX_ECC_INJECT_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(LINUX_ECC_INJECT_DIR)/compile.log
 	cd verilator/$(LINUX_ECC_INJECT_DIR) ;\
@@ -327,7 +418,7 @@ run_vcs_top_tb: vcs/top_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd vcs && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
-		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -369,7 +460,7 @@ run_verilator_top_tb: verilator/$(BUILD_DIR)/Vtop_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(BUILD_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -397,6 +488,12 @@ interactive_spike: $(ELF)
 
 REGRESSION_TESTS  ?= $(shell find $(CURDIR)/../testcode/baremetal -name '*.c')
 ISA_LEVEL_TESTS   ?= $(shell find $(CURDIR)/../testcode/isa_level_testing -name '*.c' ! -name 'test_utils.h')
+# The pruned configs have no hardware counters (ZICNTR=0: rdcycle traps, and
+# bare metal has no OpenSBI to emulate it) and no B/K extensions, so the two
+# tests that need them cannot run there.
+ifneq ($(filter $(CONFIG),asic baremetal_linux freertos freertos_keystone),)
+  ISA_LEVEL_TESTS := $(filter-out %tc_branch_prediction.c %tc_zbkb_and_smc.c,$(ISA_LEVEL_TESTS))
+endif
 FREERTOS_TESTS    ?= $(shell find $(CURDIR)/../testcode/freertos -name 'tc_*.c')
 
 RISCV_FORMAL_MONITOR_DIR = $(CURDIR)/../third_party/riscv-formal/monitor
@@ -482,6 +579,19 @@ freertos_regression: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 	echo ""; \
 	echo "=== FreeRTOS Regression Summary: $$pass/$$total tests passed ==="; \
 	[ $$fail -eq 0 ] || exit 1
+
+# Abort torture for the link bridge: tc_link_abort must pass AND the bridge
+# must have finished at least one transfer after the core abandoned it
+# (amoeba_dut_wrap prints the count at the end of every run).  The core does
+# not abort bursts on its own in bare metal (see amoeba_dut_wrap.sv), so the
+# wrapper injects a flush into every 3rd I-fetch burst with +LINK_FORCE_ABORT.
+.PHONY: link_abort
+link_abort:
+	@[ "$(DUT)" = "amoeba" ] || { echo "link_abort needs DUT=amoeba"; exit 1; }
+	$(MAKE) run_verilator_top_tb_no_spike PROG=$(CURDIR)/../testcode/isa_level_testing/tc_link_abort.c LINK_ARGS="+LINK_FORCE_ABORT=3 $(LINK_ARGS)"
+	@line=$$(grep -E '^\[LINK\] transactions' verilator/tc_link_abort/simulation.log); echo "$$line"; \
+	case "$$line" in *"aborted=0 "*) echo "link_abort: no aborted transfers observed -- the abort path was not exercised"; exit 1;; esac
+	@grep -q 'test PASSED' verilator/tc_link_abort/simulation.log
 
 .PHONY: regression
 regression:
