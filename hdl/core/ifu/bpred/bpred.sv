@@ -28,7 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 `define INSTR_CLASS_PRED 1
-`include "BranchPredictorType.vh"
+`include "../../../../pkg/BranchPredictorType.vh"
 
 
 module bpred import cvw::*;  #(parameter cvw_t P) (
