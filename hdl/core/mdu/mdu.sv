@@ -36,10 +36,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              IntDivE, W64E,                  // Integer division/remainder, and W-type instructions
   input  logic              MDUActiveE,                     // Mul/Div instruction being executed
   output logic [P.XLEN-1:0] MDUResultW,                     // multiply/divide result
-  output logic              DivBusyE,                       // busy signal to stall pipeline in Execute stage
-  // M-stage retry/fault status; PE outputs are diagnostic only.
-  output logic              FTStallM, FTUnresolvedM,
-  output logic              MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r
+  output logic              DivBusyE                        // busy signal to stall pipeline in Execute stage
 );
 
   logic [P.XLEN*2-1:0]      ProdM;                          // double-width product from mul
@@ -47,45 +44,19 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]        PrelimResultM;                  // selected result before W truncation
   logic [P.XLEN-1:0]        MDUResultM;                     // result after W truncation
   logic                     W64M;                           // W-type instruction
-  logic                     MulActiveE;
-  logic                     MulFTStallM, MulUnresolvedM;
-  logic                     DivFTStallM, DivUnresolvedM;
 
-  // Multiplier.  The shadow wrapper preserves the original E->M PP register
-  // timing and retries only a held MUL transaction.
-  // MUL and DIV resolve in M but have different retry mechanisms: MUL reloads
-  // its PP registers, while the iterative DIV wrapper restarts both FSMs.
-  assign MulActiveE = MDUActiveE & ~IntDivE;
-  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
-    .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
-    .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
-    .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
+  mul #(P.XLEN) multiplier(.clk, .reset, .StallM, .FlushM,
+    .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .ProdM);
 
-  // Divider
-  // Start a divide when a new division instruction is received and the divider isn't already busy or finishing
-  // When IDIV_ON_FPU is set, use the FPU divider instead
-  // In ZMMUL, with M_SUPPORTED = 0, omit the divider
   if ((P.IDIV_ON_FPU & P.F_SUPPORTED) | (!P.M_SUPPORTED)) begin : nodiv
-    assign QuotM = '0;
-    assign RemM = '0;
+    assign QuotM    = '0;
+    assign RemM     = '0;
     assign DivBusyE = 1'b0;
-    assign DivFTStallM = 1'b0;
-    assign DivUnresolvedM = 1'b0;
-    assign DIV_PE_p = 1'b0;
-    assign DIV_PE_r = 1'b0;
-  end else begin : div
-    // The production injection controls are tied off.  The direct FT test
-    // enables them only on its local wrapper instance.
-    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
+  end else begin : intdiv
+    div #(P) intdivider(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
-        .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
-        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedM),
-        .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
+        .DivBusyE, .QuotM, .RemM);
   end
-
-  assign FTStallM      = MulFTStallM | DivFTStallM;
-  assign FTUnresolvedM = MulUnresolvedM | DivUnresolvedM;
 
   // Result multiplexer
   // For ZMMUL, QuotM and RemM are tied to 0, so the mux automatically simplifies

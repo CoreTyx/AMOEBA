@@ -255,9 +255,13 @@ module rv64_core_wrapper import cvw::*; (
     logic [4:0]  GPRAddr;
     logic        GPRWen;
     logic [63:0] GPRValue;
-    assign GPRAddr  = soc.core.ieu.dp.regf.a3;
-    assign GPRWen   = soc.core.ieu.dp.regf.we3;
-    assign GPRValue = soc.core.ieu.dp.regf.wd3;
+    // SHARD: shadow_pipeline now drives regf.we3/a3/wd3 at sW timing (N=3 cycles after
+    // main's W-stage).  RVFI monitor_valid fires at main's W-stage, so the regfile write
+    // port is misaligned.  Use main's W-stage signals instead: these report the
+    // architectural result at exactly the cycle the instruction retires in main.
+    assign GPRAddr  = soc.core.RdW;
+    assign GPRWen   = soc.core.RegWriteW_s;
+    assign GPRValue = soc.core.ResultW_s;
 
     logic [4:0] Rs1D, Rs2D;
     assign Rs1D = soc.core.ieu.dp.regf.a1;
