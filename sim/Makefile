@@ -459,8 +459,8 @@ ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
 	[ $$fail -eq 0 ] || exit 1
 
 # ── ECC test suite (add sub-targets here as new ECC modules are added) ────────
-.PHONY: ecc_test ecc_secded_dected_test csr_harden_test ecc_baremetal_regression
-ecc_test: ecc_secded_dected_test csr_harden_test ecc_baremetal_regression
+.PHONY: ecc_test ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_harden_test ecc_baremetal_regression
+ecc_test: ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_harden_test ecc_baremetal_regression
 
 ecc_secded_dected_test:
 	mkdir -p verilator/ecc_tb
@@ -469,6 +469,46 @@ ecc_secded_dected_test:
 	    $(CURDIR)/../hvl/ecc/ecc_tb.sv \
 	    -Mdir verilator/ecc_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/ecc_tb/compile.log
 	verilator/ecc_tb/Vecc_tb
+
+# The cache's own SECDED (cacheeccbits/enc/dec, hdl/core/cache/) is deliberately independent of
+# hdl/core/generic/ecc/ above -- kept as its own test so the two mechanisms never share a
+# pass/fail signal either.
+cache_ecc_unit_test:
+	mkdir -p verilator/cache_ecc_unit_tb
+	verilator --binary -O2 --top-module cache_ecc_unit_tb \
+	    $(CURDIR)/../hdl/core/cache/cacheeccbits.sv \
+	    $(CURDIR)/../hdl/core/cache/cacheeccenc.sv \
+	    $(CURDIR)/../hdl/core/cache/cacheeccdec.sv \
+	    $(CURDIR)/../hvl/cache/cache_ecc_unit_tb.sv \
+	    -Mdir verilator/cache_ecc_unit_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/cache_ecc_unit_tb/compile.log
+	verilator/cache_ecc_unit_tb/Vcache_ecc_unit_tb
+
+# Integration-level check: the real cache.sv/cacheway.sv/cachefsm.sv/cachescrubber.sv wired
+# together (not just the standalone ECC modules above), driven like a simple LSU against a
+# behavioral bus/memory model, with faults injected directly into the internal SRAM arrays via
+# hierarchical access. See hvl/cache/cache_integration_tb.sv header for what it covers.
+#
+# Links hvl/common/getenvval_stub.cpp -- see that file's header for why: an existing, unrelated gap
+# in hdl/core/generic/mem/ram1p1rwe.sv (a Verilator-only DPI-C import with no C++ implementation
+# checked in anywhere) that standalone -O2 testbenches pulling in that file hit at link time.
+cache_integration_test:
+	mkdir -p verilator/cache_integration_tb
+	verilator --binary -O2 --top-module cache_integration_tb \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    $(wildcard $(CURDIR)/../pkg/*.sv) \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/cache/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/flop/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x128.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x44.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x22.sv \
+	    $(CURDIR)/../hvl/common/getenvval_stub.cpp \
+	    $(CURDIR)/../hvl/cache/cache_integration_tb.sv \
+	    -Mdir verilator/cache_integration_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/cache_integration_tb/compile.log
+	verilator/cache_integration_tb/Vcache_integration_tb
 
 csr_harden_test:
 	mkdir -p verilator/csr_harden_tb

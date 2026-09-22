@@ -132,6 +132,11 @@ localparam ICACHE_NUMWAYS = 32'd4;
 localparam ICACHE_WAYSIZEINBYTES = 32'd4096;
 localparam ICACHE_LINELENINBITS = 32'd512;
 localparam CACHE_SRAMLEN = 32'd128;
+// SECDED background scrubber: cycles between round-robin (set,way) steps. 0 = step as fast as
+// arbitration grants allow (safe default -- never silently disables scrubbing). TODO: tune once
+// the scrub's bus/power impact has been characterized; this value is deliberately left unset by
+// the ECC implementation itself.
+localparam CACHE_SCRUB_INTERVAL = 32'd0;
 
 // Integer Divider Configuration
 // IDIV_BITSPERCYCLE must be 1, 2, or 4

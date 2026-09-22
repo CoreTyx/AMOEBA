@@ -35,6 +35,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 LoadAccessFaultM, StoreAmoAccessFaultM, EcallFaultM, InstrPageFaultM,
   input  logic                 LoadPageFaultM, StoreAmoPageFaultM,              // various trap sources
   input  logic                 HardwareErrorFaultM,                             // IEU ECC DED — uncorrectable hardware error
+  input  logic                 DCacheEccDedFaultM,                              // D$ SECDED DED on a dirty line — own cause, not shared with HardwareErrorFaultM
   input  logic                 wfiM, wfiW,                                      // wait for interrupt instruction
   input  logic [1:0]           PrivilegeModeW,                                  // current privilege mode
   input  logic [11:0]          MIP_REGW, MIE_REGW, MIDELEG_REGW,                // interrupt pending, enabled, and delegate CSRs
@@ -46,6 +47,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   output logic                 InterruptM,                                      // Interrupt is occurring
   output logic                 ExceptionM,                                      // exception is occurring
   output logic                 HardwareErrorTrapM,                              // cause 19 selected and accepted
+  output logic                 DCacheEccDedTrapTakenM,                          // cause 20 selected and accepted
   output logic                 IntPendingM,                                     // Interrupt is pending, might occur if enabled
   output logic                 DelegateM,                                       // Delegate trap to supervisor handler
   output logic [4:0]           CauseM                                           // trap cause
@@ -95,10 +97,11 @@ module trap import cvw::*;  #(parameter cvw_t P) (
                       BothInstrPageFaultM | LoadPageFaultM | StoreAmoPageFaultM |
                       BreakpointFaultM | EcallFaultM |
                       LoadAccessFaultM | StoreAmoAccessFaultM |
-                      HardwareErrorFaultM;
+                      HardwareErrorFaultM | DCacheEccDedFaultM;
   // coverage on
   assign TrapM = (ExceptionM & ~CommittedF) | InterruptM;
   assign HardwareErrorTrapM = TrapM & ~InterruptM & (CauseM == 5'd19);
+  assign DCacheEccDedTrapTakenM = TrapM & ~InterruptM & (CauseM == 5'd20);
 
   ///////////////////////////////////////////
   // Cause priority defined in privileged spec
@@ -134,6 +137,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
     else if (LoadAccessFaultM)                                CauseM = 5'd5;
     else if (StoreAmoMisalignedFaultM & P.ZICCLSM_SUPPORTED)  CauseM = 5'd6; // See priority in Privileged Spec 3.1.15
     else if (LoadMisalignedFaultM & P.ZICCLSM_SUPPORTED)      CauseM = 5'd4;
-    else if (HardwareErrorFaultM)                             CauseM = 5'd19; // hardware error (ECC DED)
+    else if (HardwareErrorFaultM)                             CauseM = 5'd19; // hardware error (ECC DED) -- IEU regfile
+    else if (DCacheEccDedFaultM)                              CauseM = 5'd20; // hardware error (ECC DED) -- D$ dirty line
     else                                                      CauseM = 5'd0;
 endmodule
