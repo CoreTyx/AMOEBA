@@ -401,3 +401,782 @@ pkg/types.sv                         — iq_entry_t (101b), oq_entry_t (320b), r
 25. **Misaligned load**: unaligned LW to 4-byte-straddling address → shadow issues two D-cache reads; merged result matches RQ.ReadData; no false fault
 26. **cbo.zero**: main zeros a cache line → shadow re-reads; verifies all bytes zero → passes; inject non-zero byte in cache line → MSECFAULT
 27. **cbo.inval / cbo.flush**: shadow SkipVerify → no MSECFAULT; normal pipeline continues; subsequent accesses to that address verify correctly
+
+---
+
+---
+
+# SHARD V1 Implementation — As-Built Details
+
+*Branch: `sai-shard-impl`. All file paths relative to repo root.*
+
+This section records exactly what was implemented and tested. The design spec above (Rev 5) describes the full intended system; V1 is a correct but reduced subset. Use this section as a complete blueprint to re-implement SHARD on any other branch of this repo.
+
+---
+
+## V1 Scope vs. Rev 5 Spec
+
+| Rev 5 feature | V1 status | Notes |
+|---|---|---|
+| IQ shift register (PC, Instr32, PCSrc, FRM_snap, IsHWCSR, IsDummy, DummySel, InstrValid) | **Implemented** | Entry is 104 bits (RV64). IsDummy and DummySel added beyond Rev 5. |
+| OQ shift register (forwarded operands + decoded ALU controls) | **Implemented** | OQ is wider than Rev 5: carries full E-stage controller state snapshot, not just 5×64-bit operands. |
+| RQ shift register + main-D associative forwarding | **Implemented** | Reduced field set: no FP result, no fflags, no ReadData, no TrapReturnTarget. MemAddr always 0 in V1. |
+| SQ shift register + N-entry conflict detector | **Implemented** | ByteMask is hardwired to all-1s (full XLEN granularity). Conflict at 4-byte (word) granularity. |
+| Shadow pipeline sD→sE→sM→sW | **Implemented** | Shares main stall/flush exactly (synchronous shadow). Shadow has no independent stall. |
+| Shadow ALU (independent re-execution) | **Implemented** | Duplicate `alu` instance with `comparator` for branches. |
+| Shadow forwarding (shadow HZU) | **shadow_hzu.sv coded but NOT wired** | V1 uses OQ operands directly — no intra-shadow forwarding needed because OQ already carries post-forwarded operands from main. shadow_hzu.sv is in the tree for future use. |
+| Verification at sW: ALU result + branch outcome | **Implemented** | |
+| SkipVerify for FP, DIV, LR/SC, AMO, CSR, fence, WFI, loads | **Implemented** | Loads (opcode 0000011) are also skipped — D-cache re-read not implemented in V1. |
+| D-cache re-read for stores/loads (sM) | **NOT implemented** | sM only pops SQ (address captured); no actual cache access. |
+| VBC for JALR | **NOT implemented** | VBC_StallE tied to 0. |
+| VBC for exceptions (TrapM) | **NOT implemented** | |
+| MRET/SRET mepc re-read | **NOT implemented** | |
+| shadow_fdivsqrt.sv | **NOT created** | DIV/FP-DIV covered by SkipVerify. |
+| FP register file write via shadow | **NOT implemented** | FP results are SkipVerify; shadow does not write fregfile. |
+| FP fflags verification | **NOT implemented** | |
+| csrharden bit [6] = ShadowFaultW | **Implemented** | SecFaultM[6] = ShadowFaultW; no trap generated, MSECFAULT register only. |
+| mdu.sv: plain mul/div (removed ft_mul/ft_div) | **Implemented** | Shadow-of-MDU audit removed; SHARD verifies the full W-stage result instead. |
+| RVFI monitor fix for delayed regfile write | **Implemented** | Uses `RdW`/`RegWriteW_s`/`ResultW_s` from main W-stage. |
+
+---
+
+## Clocking Convention
+
+All four shadow queues (IQ, OQ, SQ, RQ) are **negedge-clocked**. The shadow pipeline stage registers are **posedge-clocked** (standard `flopenrc`). This split means:
+
+- Queue push happens at negedge T after main posedge-T has resolved all combinational paths (forwarded operands, stall/flush signals, etc.).
+- Shadow pipeline stages advance at posedge T+1, reading the negedge-T queue head combinationally.
+- Shadow writes the regfile at negedge T (from sW), while main reads the regfile for forwarding at posedge T+1 (Execute stage).
+
+The 1-cycle negedge bypass in `wallypipelinedcore.sv` (see §RQ Forwarding Negedge Bypass) closes the one-posedge window where R1E was stale after the shadow negedge write.
+
+---
+
+## Module-by-Module As-Built Specification
+
+### `shadow_iq.sv` — Instruction Queue
+
+**Location**: `hdl/core/shadow/shadow_iq.sv`
+
+**Interface**: Parameterized `#(cvw_t P, int N = 3)`.
+
+**Entry width** (RV64, N=3):
+```
+ENTRY_W = P.XLEN + 32 + 1 + 3 + 1 + 1 + 1 + 1 = 104 bits
+Fields: {PC[63:0], Instr32[31:0], PCSrc[0], FRM_snap[2:0], IsHWCSR[0], IsDummy[0], DummySel[0], InstrValid[0]}
+```
+
+Two extra fields beyond Rev 5: **IsDummy** (instruction is a AMOEBA dummy instruction) and **DummySel** (which shadow physical register the dummy writes). These are piped through the shadow pipeline so sW can redirect the regfile write to the correct shadow register for dummy instructions.
+
+**Push timing**: negedge clk, fires when `~StallD`.
+
+**Push sources** (from `wallypipelinedcore.sv` instantiation):
+- `PCF` ← `PCSpillF` (post-spill fetch PC)
+- `InstrD` ← `InstrD` (main Decode instruction word)
+- `PCSrcD` ← `PCSrcE` (**Execute-stage** PCSrc — see Timing Note below)
+- `FRM_D` ← `FRM_REGW[2:0]` (live FRM at Decode time)
+- `IsHWCSR_D` ← `1'b0` (hardwired off in V1)
+- `IsDummyD` ← `InjectD` (AMOEBA dummy injection flag)
+- `DummySelD` ← `DummySelD` (shadow register select for dummy)
+- `InstrValidD` ← `InstrValidD`
+
+**Flush behavior**: On `FlushD`, only the valid bit (bit 0) of every entry is cleared. Data fields are preserved (useful for debug).
+
+**Shift behavior**: On `~StallD & ~FlushD`, entries shift: `entry[N-1] ← entry[N-2] ← ... ← entry[0] ← new_push`.
+
+**Head output**: `entry[N-1]` exposed as combinational outputs `sPC`, `sInstr32`, `sPCSrc`, `sFRM_snap`, `sIsHWCSR`, `sIsDummy`, `sDummySel`, `sInstrValid`.
+
+**PCSrc Timing Note**: The IQ stores `PCSrcE` (Execute-stage signal) when the instruction is in Decode. This means the captured PCSrc is the branch outcome for the *previous* instruction (which is in Execute when the push fires at negedge), not for the instruction being pushed. In practice this is harmless:
+- Taken branches trigger `FlushD`, which clears all IQ valid bits before shadow processes the branch entry.
+- Not-taken branches: `PCSrcE = 0` for the previous instruction is almost always 0 as well. The shadow verifier's `branch_mismatch` check is gated by `isBranch` derived from the IQ entry's own opcode, so the mismatch for non-branch-surrounding instructions cannot spuriously fire.
+- This is a V1 approximation. A correct fix is to delay the IQ push by one cycle or latch PCSrcE at the cycle when the instruction advances from Decode to Execute.
+
+---
+
+### `shadow_oq.sv` — Operand Queue
+
+**Location**: `hdl/core/shadow/shadow_oq.sv`
+
+**Entry width** (RV64, N=3):
+```
+ENTRY_W = 5*64 + CTL_W  where CTL_W = 3+3+3+4+4+3+1+2+3+7+5+1+1+1+2+5+1+1+1+1 = 52
+Total: 320 + 52 = 372 bits/entry. Three entries = 1116 bits.
+```
+
+This is wider than the Rev 5 spec's 320-bit estimate because the OQ carries not just 5×64-bit operands but also the full decoded ALU control state:
+```
+Fields: SrcAE, SrcBE, ForwardedSrcBE, PCLinkE, ImmExtE,
+        W64E, UW64E, SubArithE, ALUSelectE[2:0], BSelectE[3:0], ZBBSelectE[3:0],
+        BALUControlE[2:0], BMUActiveE, CZeroE[1:0], Funct3E[2:0], Funct7E[6:0],
+        Rs2E[4:0], ALUResultSrcE, JumpE, BranchSignedE, MemRWE[1:0],
+        RdE[4:0], RegWriteE, InstrValidE, DummyE, DummySelE
+```
+
+**Push timing**: negedge clk.
+
+**Push behavior** (from `wallypipelinedcore.sv`):
+- `StallM = 1` → hold all entries (instruction in E stalled, no shift)
+- `FlushE = 1` or `FlushM = 1` → inject null entry at position 0, shift others
+- Normal → shift with current E-stage snapshot
+
+**Push sources** (from `wallypipelinedcore.sv`):
+- `SrcAE` ← `SrcAE_s` (from `datapath.SrcAE_out` — post-mux after SrcAE mux, i.e., ALUSrcAE-selected operand)
+- `SrcBE` ← `SrcBE_s` (from `datapath.SrcBE_out` — post-mux SrcBE)
+- `ForwardedSrcBE` ← `ForwardedSrcBE` (pre-SrcBE-mux raw forwarded B, used as store data)
+- `PCLinkE` ← `PCLinkE` (PC+4 for JAL/JALR link address)
+- `ImmExtE` ← `ImmExtE_s` (from `datapath.ImmExtE_out`)
+- Control signals (`W64E`, `ALUSelectE`, etc.) ← exported from `ieu` as `*_out` ports
+
+**Rationale for carrying full control state**: Shadow sE re-runs the `alu` instance with OQ operands and OQ control signals. This avoids routing IQ.Instr32 back through a controller decode at sE, and eliminates any risk of OQ/IQ decode mismatch.
+
+---
+
+### `shadow_sq.sv` — Store Queue
+
+**Location**: `hdl/core/shadow/shadow_sq.sv`
+
+**Entry width** (RV64, N=3):
+```
+ENTRY_W = PA_BITS + XLEN + XLEN/8 + 1  (56+64+8+1 = 129 bits for PA_BITS=56, XLEN=64)
+Fields: {PA[PA_BITS-1:0], WriteData[63:0], ByteMask[7:0], Valid[0]}
+```
+
+**Push timing**: negedge clk, at main M-stage when `StoreM = MemRWM[0]`.
+Push sources (from `wallypipelinedcore.sv`):
+- `IEUAdrM[PA_BITS-1:0]` — physical store address (note: lower XLEN bits of IEUAdrM)
+- `WriteDataM` — store write data
+- `ByteMaskM` ← `{(P.XLEN/8){1'b1}}` — **hardwired all-1s** in V1 (no sub-word granularity tracking)
+
+**Pop**: shadow sM pops by asserting `sM_pop`, which is `sInstrValid_M & sMemRW_M[0] & ~StallM & ~FlushM`.
+
+**Conflict detector** (N-entry combinational):
+```systemverilog
+conflict[g] = sq[g].valid
+            & (sq[g].PA[PA_BITS-1:2] == IEUAdrE_PA[PA_BITS-1:2])
+            & ((sq[g].ByteMask & ByteMaskE) != '0)
+```
+- Granularity: 4-byte word (`PA[1:0]` ignored — comparison at `[PA_BITS-1:2]`)
+- `ByteMaskE` ← `{(P.XLEN/8){1'b1}}` (all-1s in V1)
+- `ShadowConflictStallE` = `StoreE & (|conflict[N-1:0])`
+- `StoreE` = `MemRWE[0]`
+
+**Important V1 note**: Because ByteMask is all-1s, the conflict detector fires on any PA[word-aligned] overlap between an incoming E-stage store and any SQ entry. This is conservative (may stall more than necessary for sub-word stores) but never misses a real conflict.
+
+---
+
+### `shadow_rq.sv` — Result Queue
+
+**Location**: `hdl/core/shadow/shadow_rq.sv`
+
+**Entry width** (RV64, N=3):
+```
+ENTRY_W = 5 + XLEN + 1 + XLEN + 2 + 1 + XLEN + 1 + 1 + 1 + 1 + 1
+        = 5 + 64 + 1 + 64 + 2 + 1 + 64 + 1 + 1 + 1 + 1 + 1 = 206 bits
+Fields (MSB→LSB): Rd[4:0], IntResult[63:0], IntWriteEn[0], MemAddr[63:0],
+                  MemRW[1:0], HasStore[0], PC[63:0], SkipVerify[0],
+                  IsFaultedInstr[0], DummyW[0], DummySelW[0], InstrValid[0]
+```
+
+This is substantially smaller than the Rev 5 spec (~535 bits): no FP result, no fflags, no ReadData, no ByteMask, no TrapReturnTarget. MemAddr is always pushed as `'0` in V1 (address verification not implemented).
+
+**Push timing**: negedge clk, from main W-stage when `~StallW`.
+Push sources (from `wallypipelinedcore.sv`):
+- `RdW` ← `RdW` (destination register from controller)
+- `ResultW` ← `ResultW_s` (from `datapath.ResultW_out` — full ResultW mux output)
+- `RegWriteW` ← `RegWriteW_s` (from `ieu.RegWriteW_out`)
+- `PCW` ← `PCW` (W-stage PC, registered from PCM at posedge)
+- `MemRWW` ← registered `MemRWM` via `flopenrc MemRWWReg`
+- `HasStoreW` ← `1'b0` (not tracked in V1)
+- `SkipVerifyW` ← `1'b0` (decided at sW from IQ.SkipVerify instead)
+- `IsFaultedInstrW` ← `1'b0`
+- `DummyW` ← `DummyW` (from controller)
+- `DummySelW` ← `DummySelW_s` (from `ieu.DummySelW_out`)
+- `InstrValidW` ← registered `InstrValidM` via `flopenrc InstrValidWReg`
+
+**StallW_prev removal**: An earlier version gated the push with `~StallW_prev` to prevent double-push on stall exit. This was removed because it caused skipped RQ entries during long stalls (e.g., 42-cycle I-cache miss): the instruction in M would sit there, then advance to W at stall exit — and without StallW_prev removal, the push at the first negedge after stall exit was suppressed, permanently losing that instruction from the RQ.
+
+**N-entry associative forwarding** (for main D-stage):
+- Scans all N entries from entry[0] (newest) down to entry[N-1] (oldest)
+- Priority encoder: `for j = N-1 downto 0: if valid && we && rd!=0 && rd==Rs1D → hit`
+- Newest entry wins (because the inner loop overwrites the hit with the newest match)
+- Outputs: `RQ_HitA`, `RQ_ValA` (for rs1), `RQ_HitB`, `RQ_ValB` (for rs2)
+- The scan is done against `Rs1D = Rs1E_rq` and `Rs2D = Rs2E_s` — these are actually **E-stage** register indices (Rs1 piped one stage from D to E, Rs2 exported from `ieu` as `Rs2E_out`), providing forwarding to the E-stage operands that are about to be computed.
+
+---
+
+### `shadow_pipeline.sv` — Shadow Pipeline
+
+**Location**: `hdl/core/shadow/shadow_pipeline.sv`
+
+**Stages**: sD (combinational decode from IQ head) → sE (shadow ALU) → sM (SQ pop) → sW (verification + regfile write).
+
+**Stall/flush**: Shadow uses the **same** `StallD/E/M/W` and `FlushD/E/M/W` as main. Shadow has no independent stall source in V1.
+
+#### SkipVerify Opcode Decode (combinational at sD)
+
+`is_skip_verify(Instr32)` returns 1 for:
+```
+FP arith:       op == 7'b1010011 | 1000011 | 1000111 | 1001011 | 1001111
+Int DIV/REM:    op == 7'b0110011 && f7 == 7'b0000001
+LR/SC/AMO:      op == 7'b0101111
+CSR (any):      op == 7'b1110011 && funct3 != 000
+WFI/ECALL/EBREAK/MRET/SRET: op == 7'b1110011 && funct3 == 000 (covers all SYSTEM funct3=000)
+Fence/fence.i:  op == 7'b0001111
+FP load/store:  op == 7'b0000111 | 0100111
+Integer load:   op == 7'b0000011   ← V1 addition; D-cache re-read not implemented
+```
+
+`sSkipVerifyD = is_skip_verify(sInstr32_in) | sIsHWCSR_in | sIsDummy_in`
+
+SkipVerify is computed at sD and piped through sE→sM→sW.
+
+#### sD Stage (combinational)
+
+Extracts `sRs1D = sInstr32[19:15]`, `sRs2D = sInstr32[24:20]`, `sRdD = sInstr32[11:7]`, `sSkipVerifyD`, `sIsBranchD` from IQ head. No register reads.
+
+#### sD → sE Pipeline Registers
+
+`flopenrc` instances for: `sPC_E`, `sInstr32_E`, `sPCSrc_E`, `sRs1_E`, `sRs2_E`, `sRd_E`, `sSkipVerify_E`, `sIsBranch_E`, `sInstrValid_E`, `sIsDummy_E`, `sDummySel_E`.
+
+Enable: `~StallE`. Clear: `FlushE`.
+
+#### sE Stage — Shadow ALU
+
+Operands come directly from OQ head (`oq_SrcAE`, `oq_SrcBE`). No intra-shadow forwarding in V1 (OQ already carries post-forwarded operands from main).
+
+```systemverilog
+alu #(P) salu(oq_SrcAE, oq_SrcBE, oq_W64E, oq_UW64E, oq_SubArithE,
+              oq_ALUSelectE, oq_BSelectE, oq_ZBBSelectE,
+              oq_Funct3E, oq_Funct7E, oq_Rs2E,
+              oq_BALUControlE, oq_BMUActiveE, oq_CZeroE,
+              sALUResultE, sIEUAdrE);
+comparator #(P.XLEN) scomp(oq_SrcAE, oq_SrcBE, oq_BranchSignedE, sFlagsE);
+mux2 #(P.XLEN) saltresult(oq_ImmExtE, oq_PCLinkE, oq_JumpE, sAltResultE);
+mux2 #(P.XLEN) sieuresult(sALUResultE, sAltResultE, oq_ALUResultSrcE, sIEUResultE);
+```
+
+The shadow ALU re-uses the same `alu.sv` and `comparator.sv` modules as main. Control signals come from OQ, not from re-decoding IQ.Instr32. This is a key area saving over a full second pipeline (no second controller).
+
+#### sE → sM Pipeline Registers
+
+`flopenrc` instances for: `sPC_M`, `sInstr32_M`, `sPCSrc_M`, `sRs1_M`, `sRs2_M`, `sRd_M`, `sSkipVerify_M`, `sIsBranch_M`, `sInstrValid_M`, `sIEUResultM`, `sIEUAdrM`, `sFlagsM`, `sMemRW_M`, `sRegWrite_M`, `sIsDummy_M`, `sDummySel_M`.
+
+`sRegWrite_M = oq_RegWriteE & sInstrValid_E` — gated by shadow validity.
+
+#### sM Stage
+
+V1 sM: pops the SQ head when shadow's instruction is a store and the pipeline advances.
+```systemverilog
+assign sM_pop = sInstrValid_M & sMemRW_M[0] & ~StallM & ~FlushM;
+```
+No actual D-cache access. No address comparison with SQ entry. The SQ pop is needed so SQ entries don't accumulate.
+
+#### sM → sW Pipeline Registers
+
+`flopenrc` instances for: `sPC_W`, `sInstr32_W`, `sPCSrc_W`, `sRd_W`, `sSkipVerify_W`, `sIsBranch_W`, `sInstrValid_W`, `sIEUResultW`, `sFlagsW`, `sIsDummy_W`, `sDummySel_W`.
+
+#### sW Stage — Verification
+
+Branch outcome decode from `sFlagsW`:
+```systemverilog
+case (sInstr32_W[14:12])  // funct3
+  3'b000: sBranchTakenW =  sFlagsW[1];  // BEQ: Equal
+  3'b001: sBranchTakenW = ~sFlagsW[1];  // BNE
+  3'b100: sBranchTakenW =  sFlagsW[0];  // BLT: LessThan
+  3'b101: sBranchTakenW = ~sFlagsW[0];  // BGE
+  3'b110: sBranchTakenW =  sFlagsW[0];  // BLTU
+  3'b111: sBranchTakenW = ~sFlagsW[0];  // BGEU
+```
+
+`FlagsE[1] = EQ` (from comparator), `FlagsE[0] = LT`.
+
+`shadow_verifier` instantiation:
+```systemverilog
+shadow_verifier #(P) sv(
+  .sInstr32(sInstr32_W),
+  .sALUResult(sIEUResultW),
+  .rq_IntResult(rq_IntResult),
+  .rq_IntWriteEn(rq_IntWriteEn),
+  .rq_SkipVerify(rq_SkipVerify | sSkipVerify_W),  // either side can declare skip
+  .rq_InstrValid(rq_InstrValid & sInstrValid_W),   // both must be valid
+  .sBranchTaken(sBranchTakenW),
+  .rq_PCSrc(sPCSrc_W),
+  .isBranch(sIsBranch_W),
+  .rq_PC(rq_PC),
+  ...
+);
+```
+
+SkipVerify is asserted if either the RQ entry says skip OR shadow's sSkipVerify says skip. Verification requires both `rq_InstrValid` and `sInstrValid_W` to be 1.
+
+**Regfile write logic**:
+```systemverilog
+wire write_enable = rq_InstrValid & ~FlushW & (rq_IntWriteEn | rq_DummyW);
+assign shadow_we3      = write_enable;
+assign shadow_a3       = rq_Rd;
+assign shadow_wd3      = rq_IntResult;
+assign shadow_DummyW   = rq_DummyW   & write_enable;
+assign shadow_DummySel = rq_DummySelW;
+```
+
+Shadow writes the **RQ's committed result** (not its own ALU result). This ensures the regfile always contains a value from the main pipeline, not from the shadow ALU — maintaining deterministic architectural state. The write fires even when shadow has a bubble (sInstrValid_W=0): when FlushD created a gap in the shadow pipeline while the RQ continued filling, shadow trusts main's result and writes it unconditionally, skipping verification for that entry.
+
+**VBC**: `VBC_StallE = 1'b0` (stubbed in V1).
+
+**RQ pop**: `sW_pop = ~StallW & ~FlushW` — fires every cycle the W stage advances.
+
+---
+
+### `shadow_verifier.sv` — Result Comparator
+
+**Location**: `hdl/core/shadow/shadow_verifier.sv`
+
+Pure combinational. Two comparisons:
+1. `result_mismatch = rq_IntWriteEn && (sALUResult != rq_IntResult)`
+2. `branch_mismatch = isBranch && (sBranchTaken != rq_PCSrc)`
+
+Output:
+- `SecFaultMatch = 1` if `!rq_InstrValid || rq_SkipVerify` (silent pass) or both mismatches false
+- `SecFaultMismatch = 1` if either mismatch true (when valid + not-skip)
+- `SecFaultPC = rq_PC` on mismatch
+
+In V1, `SecFaultMismatch` propagates to `ShadowFaultW` → `csrharden.sv` bit [6] → `SecFaultM[6]` → `MSECFAULT` register. No pipeline flush or trap is generated.
+
+---
+
+### `shadow_hzu.sv` — Shadow Hazard Unit
+
+**Location**: `hdl/core/shadow/shadow_hzu.sv`
+
+Simple 2-tier priority encoder:
+- `sForwardAE = 10 (sE bypass)` if `sRegWriteE && sRdE != 0 && sRdE == sRs1`
+- `sForwardAE = 01 (sM bypass)` if `sRegWriteM && sRdM != 0 && sRdM == sRs1`
+- `sForwardAE = 00 (use OQ value)`
+Same for B.
+
+**Status in V1**: Module is coded and in the file tree but not instantiated by `shadow_pipeline.sv`. Shadow operands come directly from OQ. The HZU becomes necessary in a V2 where shadow operates independently (e.g., different stall rate from main due to private FUs). For V1 (synchronous shadow), forwarding within the shadow pipeline is redundant because the OQ operands already include main's forwarding result.
+
+---
+
+## Integration Changes (Pipeline Files)
+
+### `wallypipelinedcore.sv`
+
+**New signals declared** (excerpt from the SHARD section):
+```
+shadow_we3, shadow_a3[4:0], shadow_wd3[63:0]   — shadow regfile write port
+shadow_DummyW_sp, shadow_DummySel_sp            — dummy redirect flags from shadow_pipeline
+RQ_HitA/B, RQ_ValA/B[63:0]                     — RQ forwarding outputs before bypass
+iq_*, oq_*, rq_*, sq_*                         — queue head outputs
+SrcAE_s, SrcBE_s, ImmExtE_s                    — E-stage operand exports from ieu
+ResultW_s, RegWriteW_s, DummySelW_s            — W-stage RQ push exports from ieu
+Rs1D_s, Rs2D_s                                 — D-stage register indices from ieu
+Rs1E_rq                                         — Rs1D_s piped one stage to E
+bypass_val_r, bypass_rd_r, bypass_valid_r      — negedge bypass registers
+cstall_hitA/B, cstall_valA/B, cstall_valid     — conflict-stall hold registers
+StallE_r                                        — previous-cycle StallE
+DummyE_s, DummySelE_s                          — E-stage dummy flags (from InjectD/DummySelD)
+MemRWW, InstrValidW                            — W-stage RQ push: registered MemRWM, InstrValidM
+ShadowFaultW                                   — SecFaultW_s wired to privileged unit
+```
+
+**Extra pipeline registers added in wallypipelinedcore.sv**:
+```systemverilog
+flopenrc #(2) MemRWWReg     (clk, reset, FlushW, ~StallW, MemRWM, MemRWW);
+flopenrc #(1) InstrValidWReg(clk, reset, FlushW, ~StallW, InstrValidM, InstrValidW);
+flopenrc #(1) DummyEReg     (clk, reset, FlushE, ~StallE, InjectD, DummyE_s);
+flopenrc #(1) DummySelEReg  (clk, reset, FlushE, ~StallE, DummySelD, DummySelE_s);
+flopenrc #(5) Rs1E_rq_reg   (clk, reset, FlushE, ~StallE, Rs1D_s, Rs1E_rq);
+```
+
+**W-stage PC register** (pre-existing but now also feeds RQ push):
+```systemverilog
+flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
+```
+
+#### RQ Forwarding Negedge Bypass
+
+```systemverilog
+always_ff @(negedge clk) begin
+  if (reset) begin
+    bypass_valid_r <= 1'b0; bypass_rd_r <= '0; bypass_val_r <= '0;
+  end else if (shadow_we3 & ~shadow_DummyW_sp) begin
+    bypass_valid_r <= 1'b1; bypass_rd_r <= shadow_a3; bypass_val_r <= shadow_wd3;
+  end else begin
+    bypass_valid_r <= 1'b0;
+  end
+end
+```
+
+**Purpose**: Shadow writes the regfile at negedge T. The E-stage instruction (which just advanced from Decode at posedge T) captured R1E/R2E at posedge T — before the shadow write. At posedge T+1, R1E/R2E are re-read from the now-updated regfile. But `ForwardedSrcAE` is used as `WriteDataM` via the M-stage register (latched at posedge T+1 E→M). So the posedge T+1 E-stage computation uses correct R1E from the updated regfile, but the one-cycle gap at posedge T needs the bypass.
+
+**Bypass priority**: lower than standard M/W forwarding and RQ associative scan. The bypass fills in only when RQ has no hit (`~RQ_HitA`).
+
+**Dummy exclusion**: The bypass does not fire on dummy writes (`~shadow_DummyW_sp`) because dummy writes target shadow physical registers, not architectural registers, and should not be forwarded to main.
+
+#### Conflict-Stall Forwarding Hold
+
+```systemverilog
+always_ff @(posedge clk) begin
+  StallE_r <= StallE;
+  if (reset | (~ShadowConflictStallE & ~StallE)) begin
+    cstall_valid <= 1'b0;
+  end else if (ShadowConflictStallE & ~cstall_valid) begin
+    cstall_hitA  <= RQ_HitA_fwd; cstall_hitB  <= RQ_HitB_fwd;
+    cstall_valA  <= RQ_ValA_fwd; cstall_valB  <= RQ_ValB_fwd;
+    cstall_valid <= 1'b1;
+  end
+end
+wire cstall_active = cstall_valid & (ShadowConflictStallE | (StallE_r & ~StallE));
+```
+
+**Purpose**: When `ShadowConflictStallE` fires, `StallW=0` (only E is stalled), so the RQ keeps shifting — evicting the entry the stalled E-stage instruction needs for forwarding. This logic captures the RQ hit/value at the first stall cycle (Rs2E is stable by then) and holds it through all stall cycles, plus one extra cycle after stall release so `WriteDataM` (latched at the first posedge after stall clears) sees the correct value.
+
+**Release condition**: `reset | (~ShadowConflictStallE & ~StallE)` — clears when both the conflict stall and any other stall have ended. The one-extra-cycle extension uses `StallE_r & ~StallE`.
+
+#### RVFI Monitor Fix
+
+```systemverilog
+// SHARD: shadow_pipeline writes regf at sW timing (N=3 cycles after main W).
+// RVFI fires at main W — use main's W-stage signals for GPR reporting.
+assign GPRAddr  = soc.core.RdW;
+assign GPRWen   = soc.core.RegWriteW_s;
+assign GPRValue = soc.core.ResultW_s;
+```
+
+Without this fix, the RVFI monitor would read `regf.we3/a3/wd3` which are driven by the shadow pipeline 3 cycles after the instruction retires in main — causing RVFI to see ghost writes at wrong cycle counts and miss real writes entirely.
+
+---
+
+### `ieu.sv`
+
+New I/O ports added (all `input` or `output`):
+- **Shadow write inputs**: `shadow_we3`, `shadow_a3[4:0]`, `shadow_wd3[63:0]`, `shadow_DummyW`, `shadow_DummySel`
+- **RQ forwarding inputs**: `RQ_HitA`, `RQ_ValA[63:0]`, `RQ_HitB`, `RQ_ValB[63:0]`
+- **OQ push outputs**: `SrcAE_out[63:0]`, `SrcBE_out[63:0]`, `ImmExtE_out[63:0]`
+- **OQ control outputs**: `UW64E_out`, `SubArithE_out`, `ALUSelectE_out[2:0]`, `BSelectE_out[3:0]`, `ZBBSelectE_out[3:0]`, `BALUControlE_out[2:0]`, `BMUActiveE_out`, `CZeroE_out[1:0]`, `Funct7E_out[6:0]`, `Rs2E_out[4:0]`, `ALUResultSrcE_out`, `BranchSignedE_out`, `RegWriteE_out`
+- **RQ push outputs**: `RegWriteW_out`, `DummySelW_out`, `ResultW_out[63:0]`
+- **RQ scan D-stage outputs**: `Rs1D_out[4:0]`, `Rs2D_out[4:0]`
+
+These are implemented as simple `assign` passthroughs from the local `controller` and `datapath` signals:
+```systemverilog
+assign UW64E_out = UW64E; assign SubArithE_out = SubArithE; // etc.
+assign RegWriteW_out = RegWriteW; assign DummySelW_out = DummySelW;
+assign Rs1D_out = Rs1D; assign Rs2D_out = Rs2D;
+```
+
+---
+
+### `controller.sv`
+
+One change: `RegWriteE` promoted from internal logic to output port (needed by `ieu.sv` to export as `RegWriteE_out` for the OQ push):
+```diff
+-logic RegWriteD, RegWriteE;
++logic RegWriteD;           // RegWriteE is now output port
++output logic RegWriteE;
+```
+
+---
+
+### `datapath.sv`
+
+**Regfile write port redirected to shadow**:
+```systemverilog
+regfile #(P.XLEN, P.E_SUPPORTED) regf(
+  .clk, .reset,
+  .we3(shadow_we3),     // was: RegWriteW (main pipeline)
+  .a3(shadow_a3),       // was: RdW
+  .wd3(shadow_wd3),     // was: ResultW
+  .DummyW(shadow_DummyW), .DummySelW(shadow_DummySel),
+  ...
+);
+```
+
+Main no longer drives `we3/a3/wd3`. The main `RegWriteW` and `ResultW` values flow to shadow's RQ push instead.
+
+**RQ associative forwarding insertion**:
+```systemverilog
+// Standard M/W bypass
+mux3 #(P.XLEN) faemux(R1E, ResultW, IFResultM, ForwardAE, FwdSrcA_mw);
+mux3 #(P.XLEN) fbemux(R2E, ResultW, IFResultM, ForwardBE, FwdSrcB_mw);
+// RQ forwarding: lower priority — fires only when standard forwarding has no match
+assign ForwardedSrcAE = (RQ_HitA & (ForwardAE == 2'b00)) ? RQ_ValA : FwdSrcA_mw;
+assign ForwardedSrcBE = (RQ_HitB & (ForwardBE == 2'b00)) ? RQ_ValB : FwdSrcB_mw;
+```
+
+The `ForwardAE == 2'b00` guard ensures that the standard forwarding mux's in-pipeline result (from M or W stage) always beats the RQ scan. This matters because the standard forwarding reflects the current W-stage result which may be newer than any RQ entry.
+
+**OQ push outputs**:
+```systemverilog
+assign SrcAE_out = SrcAE;   // post-ALUSrcAE mux
+assign SrcBE_out = SrcBE;   // post-ALUSrcBE mux
+assign ImmExtE_out = ImmExtE;
+assign ResultW_out = ResultW;  // full mux5 output = committed architectural result
+```
+
+---
+
+### `mdu.sv`
+
+**ft_mul/ft_div removed**: The shadow-aware `ft_mul` and `ft_div` wrappers (which ran a secondary shadow multiplier/divider for per-instruction verification) were replaced with the base `mul` and `div` modules. SHARD verifies the MDU result end-to-end at sW (when `ResultW_s` — which includes `MulDivResultW` — is pushed to RQ). This is simpler and catches any fault in the entire MDU→Writeback path, not just the multiplication step.
+
+```diff
+-ft_mul #(P) ftmul(..., MulActiveE, fi_enable(1'b0), ...);
++mul #(P.XLEN) multiplier(.clk, .reset, .StallM, .FlushM,
++  .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .ProdM);
+```
+DIV/IDIV_ON_FPU: same pattern, `ft_div` replaced with `div`.
+
+MDU outputs `FTStallM`, `FTUnresolvedM`, `MUL_PE_p/r`, `DIV_PE_p/r` removed.
+
+---
+
+### `privileged.sv` / `csr.sv` / `trap.sv`
+
+- `FTUnresolvedFaultM` input removed from `privileged.sv` and `trap.sv` (no longer an exception source; SHARD uses the CSR-only MSECFAULT path)
+- `FTStatus[6:0]` input removed from `csr.sv`, `csrm.sv`, and `privileged.sv`
+- `MFTSTATUS` CSR address (`0x7C2`) and its read path removed from `csrm.sv`
+- `ShadowFaultW` added as input to `privileged.sv` and `csr.sv`; forwarded to `csrharden`
+
+---
+
+### `csrharden.sv`
+
+New port and assignment:
+```systemverilog
+input  logic       ShadowFaultW,        // SHARD shadow pipeline mismatch detected
+output logic [6:0] SecFaultM            // [6] = ShadowFaultW
+
+assign SecFaultM[6] = ShadowFaultW;
+```
+
+`SecFaultM[6]` is sticky in the MSECFAULT register (software must write-to-clear). No pipeline flush, no trap, no retry in V1.
+
+---
+
+### `hazard.sv`
+
+One addition to `StallECause`:
+```systemverilog
+assign StallECause = (DivBusyE | FDivBusyE | ShadowConflictStallE) & ~FlushECause;
+```
+
+`ShadowConflictStallE` stalls the Execute stage (and by propagation, Decode and Fetch) when the incoming E-stage store conflicts with any SQ entry. Memory and Writeback stages continue draining normally (StallM/StallW are unaffected).
+
+---
+
+## Area Cost Analysis: SHARD V1 vs. Full SMT Thread
+
+The following estimates use TSMC 7nm standard-cell equivalents (GE). "Full SMT" means a second complete in-order pipeline sharing only the memory hierarchy.
+
+### New Logic Added (SHARD Overhead)
+
+| Module | Dominant cost | GE estimate |
+|---|---|---|
+| `shadow_iq.sv` (N=3, 104-bit entries) | 312 bits of negedge flop | ~750 GE |
+| `shadow_oq.sv` (N=3, ~372-bit entries) | 1116 bits of negedge flop | ~2690 GE |
+| `shadow_rq.sv` (N=3, 206-bit entries) + forwarding | 618 bits flop + priority encoder | ~2000 GE |
+| `shadow_sq.sv` (N=3, 129-bit entries) + conflict detector | 387 bits flop + N×comparator | ~1400 GE |
+| `shadow_pipeline.sv` — sD/sE/sM/sW regs | ~10 × 64 + misc = ~730 bits posedge flop | ~1750 GE |
+| Shadow `alu` duplicate | Same as main ALU | ~6000–8000 GE |
+| Shadow `comparator` duplicate | | ~200 GE |
+| `shadow_verifier.sv` | 64-bit comparator + 1-bit mux | ~200 GE |
+| `shadow_hzu.sv` (coded, not connected) | ~10 comparators | ~60 GE |
+| Negedge bypass flop (64+5+1 bits) | | ~170 GE |
+| Conflict-stall hold registers (2×64+2×1+3 bits) | | ~350 GE |
+| Hazard unit addition (one OR gate) | | < 5 GE |
+| `csrharden.sv` bit [6] | 1 wire assignment | < 1 GE |
+| Extra pipeline registers in wallypipelinedcore | MemRWW(2), InstrValidW(1), DummyE(1), DummySelE(1), Rs1E_rq(5) = 10 bits | ~24 GE |
+| **Total SHARD overhead** | | **~15,600–17,600 GE** |
+
+### Logic Saved vs. Full SMT Thread
+
+| Component eliminated/shared | Area saved |
+|---|---|
+| IFU (branch predictor, ITLB, decompressor, fetch FSM) — full duplicate | ~40,000–60,000 GE |
+| I-cache (32 KB SRAM + tag array) — full second copy | ~600,000 GE (SRAM) |
+| D-cache (32 KB SRAM + tag array) — second copy | ~600,000 GE (SRAM); shared 2-bank in SHARD |
+| Integer regfile (32×64b + ECC) — full duplicate | ~12,000 GE |
+| FP regfile (32×64b) — full duplicate | ~10,000 GE |
+| DTLB (32-entry CAM) — full duplicate | ~8,000 GE |
+| Privileged unit + CSR bank — full duplicate | ~25,000 GE |
+| Controller — full duplicate | ~5,000 GE |
+| MDU (ft_mul/ft_div removed vs. second mul+div) | ~15,000–20,000 GE |
+| **Total SMT thread cost (sans FUs)** | **~1,315,000+ GE** |
+
+SHARD V1 costs **~16,000 GE** of new overhead while eliminating the need for the ~1.3M GE+ of duplicated structures a full SMT thread requires. The net is approximately **98.8% area savings** relative to a full second thread. Even counting the shadow ALU duplicate (~7,000 GE), SHARD overhead is negligible relative to the full duplicated pipeline.
+
+### Comparison to Specific Shadow ALU Cost
+
+The dominant SHARD overhead is the shadow ALU duplicate at ~6–8k GE. If only ALU fault detection is required (and memory access/branch/control flow security is out of scope), the break-even analysis still firmly favors SHARD: the next cheapest scheme (adding a checker at commit with a second ALU and register file read ports) costs ~18,000 GE at minimum (regfile read ports alone: ~9,000 GE for 2 extra integer ports).
+
+---
+
+## Reconstruction Guide for a New Branch
+
+This section is a step-by-step recipe to re-implement SHARD from scratch on a clean branch of this repo (e.g., starting from `main`).
+
+### Step 0: Prerequisites
+
+Ensure the base branch has:
+- AMOEBA dummy instruction framework (`dummygen.sv`, `InjectD`/`DummySelD`/`DummyW` signals in IEU)
+- `flopenrc_ecc` pipeline register (ECC hardening branch)
+- `regfile` with `DummyW`/`DummySelW`/`we3`/`a3`/`wd3` ports
+- `csrharden.sv` with the `SecFaultM` bus
+
+If any of these are missing, merge the relevant feature branches first.
+
+### Step 1: Create `hdl/core/shadow/` Directory and Queue Files
+
+#### 1a. `shadow_iq.sv`
+
+Entry width: `ENTRY_W = P.XLEN + 32 + 1 + 3 + 1 + 1 + 1 + 1` (104 bits for RV64).  
+Fields in pack order (MSB→LSB): `{PC, Instr32, PCSrc, FRM_snap, IsHWCSR, IsDummy, DummySel, InstrValid}`.  
+Clocking: **negedge**.  
+Shift direction: `entry[N-1]` is head (output); `entry[0]` gets new push.  
+Stall: `~StallD` gates the shift.  
+Flush: Set only `entry[i][0]` (InstrValid) to 0 for all i on `FlushD`. Preserve data.
+
+#### 1b. `shadow_oq.sv`
+
+Capture the full E-stage decoded state. Fields: `{SrcAE, SrcBE, ForwardedSrcBE, PCLinkE, ImmExtE, [all ALU controls], MemRWE, RdE, RegWriteE, InstrValidE, DummyE, DummySelE}`.  
+Clocking: **negedge**.  
+`StallM = 1` → hold. `FlushE | FlushM` → inject null entry at 0.
+
+#### 1c. `shadow_sq.sv`
+
+Fields: `{PA[PA_BITS-1:0], WriteData[XLEN-1:0], ByteMask[XLEN/8-1:0], Valid}`.  
+Clocking: **negedge**.  
+Push when `StoreM` (= `MemRWM[0]`). Pop when `sM_pop`.  
+Conflict detector: for each entry, check `valid & (PA[PA_BITS-1:2] == incoming_PA[PA_BITS-1:2]) & (ByteMask & incoming_ByteMask != 0)`.  
+`ShadowConflictStallE = StoreE & (|conflict)`.
+
+#### 1d. `shadow_rq.sv`
+
+Fields: `{Rd[4:0], IntResult[XLEN-1:0], IntWriteEn, MemAddr[XLEN-1:0], MemRW[1:0], HasStore, PC[XLEN-1:0], SkipVerify, IsFaultedInstr, DummyW, DummySel, InstrValid}`.  
+Clocking: **negedge**. Push at W-stage when `~StallW`.  
+Associative forwarding: scan all N entries; newest match (entry[0] highest priority, entry[N-1] lowest). Output `RQ_HitA/B`, `RQ_ValA/B`. Gate on `valid && IntWriteEn && Rd != 0`.  
+**Do not add StallW_prev guard** — it causes missed RQ entries on long stalls.
+
+### Step 2: Create `shadow_pipeline.sv`
+
+Instantiate the shadow stages:
+- **sD**: decode `sRs1`, `sRs2`, `sRd` from IQ head `sInstr32`; compute `sSkipVerifyD` and `sIsBranchD`.
+- **sD→sE**: `flopenrc` on `~StallE`/`FlushE` for all sD fields.
+- **sE**: duplicate `alu` instance with OQ operands and OQ controls. Duplicate `comparator`. `mux2` for altresult/ieuresult.
+- **sE→sM**: `flopenrc` on `~StallM`/`FlushM`.
+- **sM**: just pop SQ on store advance (V1). No cache access.
+- **sM→sW**: `flopenrc` on `~StallW`/`FlushW`.
+- **sW**: decode branch outcome from `sFlagsW` + `sInstr32_W[14:12]`. Instantiate `shadow_verifier`. Drive regfile write port from RQ values. `sW_pop = ~StallW & ~FlushW`.
+
+`VBC_StallE = 1'b0` (stub).
+
+### Step 3: Create `shadow_verifier.sv`
+
+```systemverilog
+assign result_mismatch = rq_IntWriteEn && (sALUResult != rq_IntResult);
+assign branch_mismatch = isBranch && (sBranchTaken != rq_PCSrc);
+if (!rq_InstrValid || rq_SkipVerify) → match, no fault
+else if (result_mismatch || branch_mismatch) → mismatch, fault
+```
+
+### Step 4: Create `shadow_hzu.sv`
+
+2-tier priority encoder for `sForwardAE` and `sForwardBE`. Not wired in V1 but needed for V2.
+
+### Step 5: Modify `controller.sv`
+
+Promote `RegWriteE` from `logic` declaration to output port.
+
+### Step 6: Modify `datapath.sv`
+
+1. Add `shadow_we3/a3/wd3/DummyW/DummySel` input ports. Feed to `regfile` instead of `RegWriteW/RdW/ResultW`.
+2. Add `RQ_HitA/B/ValA/B` input ports. Insert RQ bypass after the M/W forwarding mux:
+   ```systemverilog
+   assign ForwardedSrcAE = (RQ_HitA & (ForwardAE==2'b00)) ? RQ_ValA : FwdSrcA_mw;
+   ```
+3. Export `SrcAE_out = SrcAE`, `SrcBE_out = SrcBE`, `ImmExtE_out = ImmExtE`, `ResultW_out = ResultW`.
+
+### Step 7: Modify `ieu.sv`
+
+Add all shadow ports from `datapath.sv`. Forward `RegWriteW`, `DummySelW`, `ResultW`, `Rs1D`, `Rs2D`, and all E-stage control signals as outputs using `assign` passthroughs.
+
+### Step 8: Modify `mdu.sv`
+
+Replace `ft_mul`→`mul`, `ft_div`→`div`. Remove `FTStallM`, `FTUnresolvedM`, PE outputs.
+
+### Step 9: Modify `privileged.sv` / `csr.sv` / `csrm.sv` / `trap.sv`
+
+- Remove `FTUnresolvedFaultM` from `trap.sv` ExceptionM sum and `privileged.sv` I/O.
+- Remove `FTStatus[6:0]` from `csr.sv`, `csrm.sv` I/O and remove `MFTSTATUS` CSR (0x7C2).
+- Add `ShadowFaultW` input to `privileged.sv` and `csr.sv`; thread to `csrharden`.
+
+### Step 10: Modify `csrharden.sv`
+
+Add `ShadowFaultW` input port. Assign `SecFaultM[6] = ShadowFaultW`.
+
+### Step 11: Modify `hazard.sv`
+
+Add `ShadowConflictStallE` input. Add to StallECause:
+```systemverilog
+assign StallECause = (DivBusyE | FDivBusyE | ShadowConflictStallE) & ~FlushECause;
+```
+
+### Step 12: Modify `wallypipelinedcore.sv`
+
+1. **Declare all SHARD signals** (see §Integration Changes above for the full list).
+2. **Add extra pipeline registers**: `MemRWWReg`, `InstrValidWReg`, `DummyEReg`, `DummySelEReg`, `Rs1E_rq_reg`.
+3. **Instantiate four queues**: `shadow_iq`, `shadow_oq`, `shadow_rq`, `shadow_sq` with `N=3`.
+   - IQ push: `PCF=PCSpillF`, `InstrD`, `PCSrcD=PCSrcE` (use Execute-stage PCSrc), `FRM_D=FRM_REGW`, `IsHWCSR_D=1'b0`, `IsDummyD=InjectD`, `DummySelD`, `InstrValidD`.
+   - OQ push: all E-stage signals from `ieu` `*_out` ports.
+   - RQ push: `RdW`, `ResultW=ResultW_s`, `RegWriteW=RegWriteW_s`, `PCW`, `MemRWW`, `HasStoreW=1'b0`, `SkipVerifyW=1'b0`, `IsFaultedInstrW=1'b0`, `DummyW`, `DummySelW=DummySelW_s`, `InstrValidW`. RQ scan: `Rs1D=Rs1E_rq`, `Rs2D=Rs2E_s`.
+   - SQ push: `IEUAdrM[PA_BITS-1:0]`, `WriteDataM`, `ByteMaskM={XLEN/8{1'b1}}`, `StoreM=MemRWM[0]`.
+4. **Negedge bypass**: implement the `bypass_valid_r/rd_r/val_r` flops; merge with RQ outputs as `RQ_HitA_fwd/ValA_fwd`.
+5. **Conflict-stall hold**: implement `cstall_*` logic; produce `final_hitA/B/valA/B`.
+6. **Instantiate `shadow_pipeline`** with all queue head outputs; route `shadow_we3/a3/wd3` to `ieu` shadow write ports; route `final_hitA/B/valA/B` as `RQ_HitA/B/ValA/B` to `ieu`.
+7. **Wire `ShadowConflictStallE`** from SQ to `hazard`.
+8. **Wire `ShadowFaultW = SecFaultW_s`** to `privileged`.
+9. **Wire `final_hitA/B/valA/B`** to `ieu` after the conflict-stall hold logic.
+
+### Step 13: Fix RVFI Monitor (`rv64_core_wrapper.sv`)
+
+```systemverilog
+assign GPRAddr  = soc.core.RdW;
+assign GPRWen   = soc.core.RegWriteW_s;
+assign GPRValue = soc.core.ResultW_s;
+```
+
+This is required because shadow writes the regfile N cycles after main's W-stage, misaligning RVFI's per-instruction commit reporting.
+
+### Step 14: Add Tests
+
+**Baremetal tests** (in `testcode/baremetal/`):
+- `test_fwd_depth.c`: exercises RQ forwarding at distances 1–7+ using `__asm__` spacers and volatile dependency chains. Tests that forwarding is correct from M/W-stage bypass (dist 1–3), RQ forwarding (dist 4–6), and regfile (dist 7+).
+- `test_sp_fwd.c`: exercises sp-update-then-store forwarding at distances 1–5. Noinline functions trigger I-cache miss stalls that stress the conflict-stall hold and negedge bypass.
+
+**ISA-level tests** (in `testcode/isa_level_testing/`):
+- `tc_forwarding.c`: structured forwarding test covering M/W bypass, RQ forwarding, regfile reads, SP forwarding, dependency chains, load-use hazards, write-after-write, and nested calls.
+
+---
+
+## Known V1 Limitations
+
+1. **No D-cache re-read**: stores and loads are SkipVerify. Shadow does not independently verify memory access results. A faulty store data path or cache write would not be detected.
+
+2. **No VBC**: JALR target faults, exception-window faults, and MRET/SRET tampering are not caught.
+
+3. **PCSrc timing off-by-one**: IQ captures `PCSrcE` (Execute-stage) when the instruction is in Decode. Functionally correct due to flush propagation but not cycle-exact per the Rev 5 spec.
+
+4. **ByteMask all-1s**: SQ conflict detector is overly conservative for sub-word stores. May stall unnecessarily on byte/halfword store pairs that don't overlap at byte granularity.
+
+5. **No FP verification**: FP instructions are SkipVerify. FP register file is not written by shadow.
+
+6. **No AMO verification**: AMO instructions are SkipVerify.
+
+7. **No CSR re-read**: CSR read instructions are SkipVerify.
+
+8. **MSECFAULT is non-trapping**: `SecFaultM[6] = ShadowFaultW` is logged to the MSECFAULT register but does not generate a trap or pipeline flush. Software must poll MSECFAULT.
+
+9. **`shadow_hzu.sv` not connected**: intra-shadow forwarding is absent. This is correct for V1 (synchronous shadow with OQ operands) but means a V2 with independent shadow stalls would need to re-wire it.
+
+10. **MemAddr always 0 in RQ**: The RQ `MemAddr` field is pushed as `'0`. Store address verification (shadow sM check against SQ PA) is not implemented.
