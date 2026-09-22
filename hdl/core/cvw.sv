@@ -34,7 +34,7 @@
 
 package cvw;
 
-  `include "BranchPredictorType.vh"
+  `include "../BranchPredictorType.vh"
 
 typedef struct packed {
   int           XLEN;     // Machine width (32 or 64)
