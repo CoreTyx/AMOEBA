@@ -38,12 +38,12 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        PCM,                       // program counter, next PC going to trap/return logic
   input  logic [P.XLEN-1:0]        PCSpillM,                  // program counter, next PC going to trap/return logic aligned after an instruction spill
   input  logic [P.XLEN-1:0]        SrcAM, IEUAdrxTvalM,       // SrcA and memory address from IEU
-  input  logic [6:0]               FTStatus,                  // sticky shadow/ECC bits exposed by mftstatus
   input  logic                     CSRReadM, CSRWriteM,       // read or write CSR
   input  logic                     PrivModeSecFaultW,         // TMR correctable fault from privmode
   input  logic                     PrivModeUncorrectableFaultW, // TMR uncorrectable fault from privmode
   input  logic                     RegEccSecErrW,             // IEU ECC SEC (correctable)
   input  logic                     RegEccDedErrW,             // IEU ECC DED, retained for MSECFAULT logging
+  input  logic                     ShadowFaultW,              // SHARD shadow pipeline mismatch
   input  logic [P.XLEN-1:0]        EccDedFaultEPCM, EccDedFaultMtvalM, // captured DED trap metadata
   input  logic                     TrapM,                     // trap is occurring
   input  logic                     mretM, sretM,              // return instruction
@@ -231,7 +231,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////////////////////
 
   csrharden csrharden(.PrivModeSecFaultW, .PrivModeUncorrectableFaultW, .MppReservedM,
-    .IllegalCSRAccessM, .InstrValidM, .RegEccSecErrW, .RegEccDedErrW, .SecFaultM);
+    .IllegalCSRAccessM, .InstrValidM, .RegEccSecErrW, .RegEccDedErrW, .ShadowFaultW, .SecFaultM);
 
   ///////////////////////////////////////////
   // CSRs
@@ -254,7 +254,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   csrm #(P) csrm(.clk, .reset,
     .UngatedCSRMWriteM, .CSRMWriteM, .MTrapM, .CSRAdrM,
     .NextEPCM, .NextCauseM, .NextMtvalM, .MSTATUS_REGW, .MSTATUSH_REGW,
-    .CSRWriteValM, .FTStatus, .CSRMReadValM, .MTVEC_REGW,
+    .CSRWriteValM, .CSRMReadValM, .MTVEC_REGW,
     .MEPC_REGW, .MCOUNTEREN_REGW, .MCOUNTINHIBIT_REGW,
     .MEDELEG_REGW, .MIDELEG_REGW,.PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
     .MIP_REGW, .MIE_REGW, .SecFaultM, .WriteMSTATUSM, .WriteMSTATUSHM,

@@ -71,10 +71,6 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   input  logic              LoadPageFaultM, StoreAmoPageFaultM,             // page faults
   input  logic              InstrMisalignedFaultM,                          // misaligned instruction fault
   input  logic              LoadMisalignedFaultM, StoreAmoMisalignedFaultM, // misaligned data fault
-  // Shadow faults are aligned with normal M-stage exceptions; FTStatus is
-  // diagnostic state only and does not participate in architectural execution.
-  input  logic              FTUnresolvedFaultM,
-  input  logic [6:0]        FTStatus,
   input  logic              IllegalIEUFPUInstrD,                            // illegal instruction from IEU or FPU
   input  logic              MTimerInt, MExtInt, SExtInt, MSwInt,            // interrupt sources
   input  logic [63:0]       MTIME_CLINT,                                    // timer value from CLINT
@@ -106,6 +102,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic              PrivModeUncorrectableFaultW,                   // TMR uncorrectable privilege mode fault
   input  logic              RegEccSecErrW,                                 // IEU ECC SEC (correctable 1-bit flip)
   input  logic              RegEccDedErrW,                                 // IEU ECC DED, retained for MSECFAULT logging
+  input  logic              ShadowFaultW,                                  // SHARD shadow pipeline mismatch
   input  logic              EccDedFaultM,                                  // registered DED fault presented to trap logic
   input  logic [P.XLEN-1:0] EccDedFaultEPCM, EccDedFaultMtvalM,             // captured trap metadata
   output logic              EccDedTrapTakenM                               // cause 19 was selected and consumed
@@ -148,9 +145,8 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   // Control and Status Registers
   csr #(P) csr(.clk, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
     .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
-    .FTStatus,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
-    .RegEccSecErrW, .RegEccDedErrW, .EccDedFaultEPCM, .EccDedFaultMtvalM,
+    .RegEccSecErrW, .RegEccDedErrW, .ShadowFaultW, .EccDedFaultEPCM, .EccDedFaultMtvalM,
     .TrapM, .mretM, .sretM, .InterruptM,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
     .MTIME_CLINT, .InstrValidM, .FRegWriteM, .LoadStallD, .StoreStallD,
@@ -173,7 +169,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
 
   // trap logic
   trap #(P) trap(.reset,
-    .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM, .FTUnresolvedFaultM,
+    .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
     .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM), .PrivilegeModeW,

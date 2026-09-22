@@ -39,7 +39,6 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
   input  logic [5:0]               NextCauseM,
   input  logic [P.XLEN-1:0]        CSRWriteValM,
-  input  logic [6:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
   input  logic [11:0]              MIP_REGW, MIE_REGW,
   input  logic [6:0]               SecFaultM,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
@@ -96,7 +95,6 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   // architectural CSR map and is reserved for shadow/ECC diagnostics.
   // Custom machine CSR map: ECC status at 0x7C0, dummy frequency at 0x7C1,
   // and shadow diagnostic status at 0x7C2.
-  localparam MFTSTATUS     = 12'h7C2;
   localparam PMPCFG0       = 12'h3A0;
   // .. up to 15 more at consecutive addresses
   localparam PMPADDR0      = 12'h3B0;
@@ -183,7 +181,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
 
   assign IllegalCSRMWriteReadonlyM = UngatedCSRMWriteM &
     (CSRAdrM == MVENDORID | CSRAdrM == MARCHID | CSRAdrM == MIMPID |
-     CSRAdrM == MHARTID | CSRAdrM == MCONFIGPTR | CSRAdrM == MFTSTATUS);
+     CSRAdrM == MHARTID | CSRAdrM == MCONFIGPTR);
 
   // CSRs
   assign TVECWriteValM = CSRWriteValM[0] ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00};
@@ -291,8 +289,6 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MIDELEG:       CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIDELEG_REGW};
       MIP:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIP_REGW};
       MIE:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIE_REGW};
-      // Custom CSR is intentionally read-only; writes are rejected above.
-      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, FTStatus};
       MSCRATCH:      CSRMReadValM = MSCRATCH_REGW;
       MEPC:          CSRMReadValM = MEPC_REGW;
       MCAUSE:        CSRMReadValM = MCAUSE_REGW;

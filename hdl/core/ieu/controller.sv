@@ -91,6 +91,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        FWriteIntM,              // FPU controller writes integer register file
   // Writeback stage control signals
   input  logic        StallW, FlushW,          // Stall, flush Writeback stage
+  output logic        RegWriteE,               // E-stage register write enable (for SHARD OQ push)
   output logic        RegWriteW, IntDivW,      // Instruction writes a register, is an integer divide
   output logic [2:0]  ResultSrcW,              // Select source of result to write back to register file
   // Stall during CSRs
@@ -112,7 +113,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   `define CTRLW 24
 
   // pipelined control signals
-  logic        RegWriteD, RegWriteE;           // RegWrite (register will be written)
+  logic        RegWriteD;                      // RegWrite (register will be written; RegWriteE is output port)
   logic [2:0]  ResultSrcD, ResultSrcE, ResultSrcM; // Select which result to write back to register file
   logic [2:0]  PreImmSrcD;                     // Immediate source format (before amending for prefetches)
   logic [1:0]  MemRWD;                         // Store (write to memory)

@@ -25,6 +25,7 @@ module csrharden (
   input  logic       InstrValidM,                 // gate fault on flushed instructions
   input  logic       RegEccSecErrW,               // IEU ECC: any SEC (corrected 1-bit flip)
   input  logic       RegEccDedErrW,               // IEU ECC: any DED (uncorrectable 2-bit flip)
+  input  logic       ShadowFaultW,                // SHARD shadow pipeline mismatch detected
   output logic [6:0] SecFaultM                    // one-hot fault causes to MSECFAULT register
 );
 
@@ -34,6 +35,6 @@ module csrharden (
   assign SecFaultM[3]   = PrivModeUncorrectableFaultW;
   assign SecFaultM[4]   = RegEccSecErrW;
   assign SecFaultM[5]   = RegEccDedErrW;
-  assign SecFaultM[6]   = 1'b0;
+  assign SecFaultM[6]   = ShadowFaultW;
 
 endmodule
