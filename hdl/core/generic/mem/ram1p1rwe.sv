@@ -44,7 +44,25 @@ module ram1p1rwe import cvw::* ; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44) (
   //////////////////////////////////////////////////////////////////////////////
   // TRUE SRAM macro
   //////////////////////////////////////////////////////////////////////////////
-  if ((USE_SRAM == 1) & (WIDTH == 128) & (DEPTH == 64)) begin // Cache data subarray
+  if ((USE_SRAM == 1) & (WIDTH == 512) & (DEPTH == 16)) begin // Cache data array, full line width
+    // 16 x 512-bit SRAM
+    ram1p1rwbe_16x512 sram1E (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 16)) begin // RV64 cache tag
+    // 16 x 46-bit SRAM
+    ram1p1rwbe_16x46 sram1F (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 512) & (DEPTH == 64)) begin // Cache data array, full line width
+    // 64 x 512-bit SRAM
+    ram1p1rwbe_64x512 sram1D (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 128) & (DEPTH == 64)) begin // Cache data subarray
     // 64 x 128-bit SRAM
     ram1p1rwbe_64x128 sram1A (.CLK(clk), .CEB(~ce), .WEB(~we),
       .A(addr), .D(din),
