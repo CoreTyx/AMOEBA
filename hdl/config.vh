@@ -282,10 +282,10 @@ localparam DTLB_ENTRIES = 32'd8;
 // Reviewed - pending area estimates (each is 8KB = 2KB * 4)
 localparam DCACHE_NUMWAYS = 32'd4;
 localparam DCACHE_WAYSIZEINBYTES = 32'd1024;
-localparam DCACHE_LINELENINBITS = 32'd512;
+localparam DCACHE_LINELENINBITS = 32'd128;
 localparam ICACHE_NUMWAYS = 32'd4;
 localparam ICACHE_WAYSIZEINBYTES = 32'd1024;
-localparam ICACHE_LINELENINBITS = 32'd512;
+localparam ICACHE_LINELENINBITS = 32'd128;
 localparam CACHE_SRAMLEN = 32'd128;
 
 // Integer Divider Configuration
