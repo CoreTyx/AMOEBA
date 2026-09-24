@@ -86,6 +86,12 @@ module ram1p1rwe import cvw::* ; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44) (
       .A(addr), .D(din),
       .BWEB('0), .Q(dout));
 
+  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 64)) begin // RV64 cache tag
+    // 64 x 46-bit SRAM
+    ram1p1rwbe_64x46 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
     //////////////////////////////////////////////////////////////////////////////
     // READ first SRAM model
     //////////////////////////////////////////////////////////////////////////////
