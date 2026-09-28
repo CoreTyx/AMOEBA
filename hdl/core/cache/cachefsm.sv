@@ -28,7 +28,7 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module cachefsm #(parameter READ_ONLY_CACHE = 0) (
+module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   input  logic       clk,
   input  logic       reset,
   // hazard and privilege unit

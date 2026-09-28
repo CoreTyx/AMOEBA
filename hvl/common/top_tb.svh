@@ -124,7 +124,7 @@
     // Declared here rather than with the other counters below: the console
     // printer cycle-stamps each line, and SystemVerilog needs the declaration
     // before that use.
-    longint unsigned sim_cycle = 0;
+    longint unsigned sim_cycle = '0;
 
     // ---- UART-driven pass/fail (Linux tier) --------------------------------
     // A Linux userland runs in U-mode with the MMU on, so it cannot reach the
@@ -241,13 +241,13 @@
 
     logic [XLEN-1:0]  pc_hist [PC_HIST_DEPTH];
     int               pc_hist_wr = 0;
-    longint unsigned  pc_hist_order = 0;
+    longint unsigned  pc_hist_order = '0;
 
     // Interrupt/trap accounting: distinguishes "the program deadlocked" from
     // "the timer tick never arrived", which look identical from the PC trace.
-    longint unsigned  intr_count      = 0;
-    longint unsigned  trap_count      = 0;
-    longint unsigned  last_intr_cycle = 0;
+    longint unsigned  intr_count      = '0;
+    longint unsigned  trap_count      = '0;
+    longint unsigned  last_intr_cycle = '0;
     logic [XLEN-1:0]  last_intr_pc    = '0;
 
     always @(posedge clk) begin

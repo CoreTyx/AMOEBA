@@ -38,6 +38,6 @@ module lzc #(parameter WIDTH = 1) (
     while ((i < WIDTH) && (!num[WIDTH-1-i])) begin
       i = i + 1;
     end
-    ZeroCnt = i[$clog2(WIDTH+1)-1:0];
+    ZeroCnt = ($clog2(WIDTH+1))'(i);
   end
 endmodule

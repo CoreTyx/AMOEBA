@@ -241,7 +241,7 @@ module plic_apb import cvw::*;  #(parameter cvw_t P) (
     always_comb begin
       intClaim[ctx] = 6'b0;
       for (k=P.PLIC_NUM_SRC; k>0; k--) begin
-        if (irqs_at_max_priority[ctx][k]) intClaim[ctx] = k[5:0];
+        if (irqs_at_max_priority[ctx][k]) intClaim[ctx] = 6'(k);
       end
     end
 

@@ -29,5 +29,5 @@ module decoder #(parameter BINARY_BITS = 3) (
   output logic [(2**BINARY_BITS)-1:0] onehot
 );
 
-  assign onehot = 1 << binary;
+  assign onehot = {{(2**BINARY_BITS-1){1'b0}}, 1'b1} << binary;
 endmodule

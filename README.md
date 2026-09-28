@@ -246,11 +246,17 @@ Outputs per run:
 cd sim
 make vcs/top_tb
 make run_vcs_top_tb PROG=../testcode/baremetal/basic_arith.elf
+make run_vcs_top_tb_no_spike PROG=../testcode/isa_level_testing/tc_mul_div.c
+make vcs_regression    # baremetal (Spike DPI) + ISA-level tests under VCS
 make verdi &           # opens Verdi on the last FSDB dump
 make covrep            # generate coverage report from top_tb.vdb
 ```
 
-Output: `sim/vcs/simulation.log`, `sim/vcs/dump.fsdb`
+Output: `sim/vcs/simulation.log`, `sim/vcs/dump.fsdb` (no-Spike builds use `sim/vcs_no_spike/`)
+
+The VCS compile runs with `+lint=all` and fails on any lint warning (`check_compile_error.sh`).
+Waivers live in `sim/vcs_warn.config`; the width-lint waiver for the CVW-derived `hdl/core`
+sources is appended per build (as `vcs_warn_gen.config`), mirroring `verilator_warn.vlt`.
 
 ---
 
@@ -378,7 +384,8 @@ Outputs: `sim/verilator/freertos_wally/simulation.log`, `sim/verilator/dump.fst`
 | `run_isa_level` | Alias for `run_verilator_top_tb_no_spike` |
 | `run_verilator_top_tb_freertos` | Alias for `run_verilator_top_tb_no_spike` |
 | `freertos` | Build + run default FreeRTOS workload (`sorting_algo_app.c`) |
-| `run_vcs_top_tb` | Run VCS simulation (`PROG=` required) |
+| `run_vcs_top_tb` | Run VCS simulation with Spike DPI (`PROG=` required) |
+| `run_vcs_top_tb_no_spike` | Run VCS ISA/FreeRTOS simulation without co-sim (`PROG=` required) |
 
 **Regression targets**
 
@@ -388,12 +395,16 @@ Outputs: `sim/verilator/freertos_wally/simulation.log`, `sim/verilator/dump.fst`
 | `isa_regression` | All `testcode/isa_level_testing/*.c` without co-sim |
 | `freertos_regression` | All `testcode/freertos/tc_*.c` without co-sim |
 | `regression` | Runs all three tiers in order |
+| `vcs_baremetal_regression` | Baremetal tier under VCS (EWS only) |
+| `vcs_isa_regression` | ISA-level tier under VCS (EWS only) |
+| `vcs_regression` | Both VCS tiers in order |
 
 **Utility targets**
 
 | Target | Description |
 |---|---|
-| `vcs/top_tb` | Compile VCS binary |
+| `vcs/top_tb` | Compile VCS binary (Spike DPI) |
+| `vcs_no_spike/top_tb` | Compile VCS binary without Spike DPI |
 | `spike` | Run Spike ISA sim, dump commit log (`ELF=` required) |
 | `interactive_spike` | Run Spike interactive debugger (`ELF=` required) |
 | `generate-rtl` | Run `bin/generate_rtl.sh` (refreshes hdl/cvw/ and creates hdl/core/) |
@@ -401,7 +412,7 @@ Outputs: `sim/verilator/freertos_wally/simulation.log`, `sim/verilator/dump.fst`
 | `check-generated` | Verify generated files match current scripts (CI gate) |
 | `verdi` | Open Verdi on last VCS waveform dump |
 | `covrep` | Generate coverage report from `vcs/top_tb.vdb` |
-| `clean` | Remove all build artifacts (`bin/`, `vcs/`, `verdi/`, `verilator/`, `spike/`) |
+| `clean` | Remove all build artifacts (`bin/`, `vcs/`, `vcs_no_spike/`, `verdi/`, `verilator/`, `spike/`) |
 
 ---
 
