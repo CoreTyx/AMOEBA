@@ -146,8 +146,8 @@ module plic_apb import cvw::*;  #(parameter cvw_t P) (
       // Read synchronously because a read can have side effect of changing intInProgress
       if (memread) begin
         casez(entry)
-          PLIC_INTPRIORITY0: Dout <= 32'b0;  // there is no intPriority[0]
-          24'h0000??:        Dout <= {29'b0,intPriority[entry[7:2]]};
+          // PLIC_INTPRIORITY0 reads 0: there is no intPriority[0]
+          24'h0000??:        Dout <= (entry[7:2] == 6'd0) ? 32'b0 : {29'b0,intPriority[entry[7:2]]};
           PLIC_INTPENDING0:  Dout <= {{(31-PLIC_NUM_SRC_MIN_32){1'b0}},intPending[PLIC_NUM_SRC_MIN_32:1],1'b0};
           PLIC_INTEN00:      Dout <= {{(31-PLIC_NUM_SRC_MIN_32){1'b0}},intEn[0][PLIC_NUM_SRC_MIN_32:1],1'b0};
           PLIC_INTPENDING1:  if (P.PLIC_NUM_SRC >= 32) Dout <= {{(PLIC_SRC_EXT){1'b0}},intPending[PLIC_SRC_TOP:PLIC_SRC_BOT]};

@@ -8,3 +8,6 @@ waive -rule {{W287b}}            -comment {output of a instance not connected}
 waive -rule {{W415a}}            -comment {multiple assignment in always_comb}
 waive -rule {{ErrorAnalyzeBBox}} -comment {Design Unit '%s' has no definition; black-box behavior assumed and module interface inferred}
 waive -rule {{SYNTH_5166}}       -comment {Non-synthesizable statement ignored}
+waive -du {{rom1p1r}} -rule {{W123}}                -comment {ROM contents are only loaded by readmemh in an initial block}
+waive -du {{rv64_core_wrapper}} -rule {{SYNTH_132}} -comment {RVFI monitor taps into the core through hierarchical references}
+waive -rule {{W123}} -msg {Please refer to 'SignalUsageReport.rpt' for details of violating bits} -comment {Summary pointer; each W123 is also reported individually}

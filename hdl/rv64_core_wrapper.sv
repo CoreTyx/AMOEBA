@@ -120,6 +120,11 @@ module rv64_core_wrapper import cvw::*; (
     assign mcycle_rmask   = '0; assign mcycle_wmask   = '0; assign mcycle_wdata   = '0;
     assign minstret_rmask = '0; assign minstret_wmask = '0; assign minstret_wdata = '0;
 
+    // Declared ahead of first use (SpyGlass rejects forward references);
+    // driven by the M->W pipeline registers further down.
+    logic        InstrValidW;
+    logic        InterruptTakenPending;
+
     // Fixed monitor outputs
     assign monitor_intr      = InterruptTakenPending & InstrValidW;
     assign monitor_mode      = soc.core.PrivilegeModeW;
@@ -283,8 +288,7 @@ module rv64_core_wrapper import cvw::*; (
     assign WriteDataM = soc.core.lsu.LSUWriteDataM[63:0];
     assign ReadDataW  = soc.core.ReadDataW[63:0];
 
-    // Pipeline M→W registers
-    logic        InstrValidW;
+    // Pipeline M→W registers (InstrValidW is declared near the top of the module)
     logic [63:0] PCW;
     logic [31:0] InstrRawW;
     logic        TrapW;
@@ -303,7 +307,7 @@ module rv64_core_wrapper import cvw::*; (
     // InterruptTakenPending: set when an external interrupt fires and its
     // interrupted instruction is suppressed from RVFI; cleared on the first
     // committed instruction of the interrupt handler (rvfi_intr=1 for it).
-    logic        InterruptTakenPending;
+    // Declared near the top of the module.
     logic        IntrReported;
     assign IntrReported = InterruptTakenPending & InstrValidW & ~StallW;
 

@@ -127,6 +127,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   end else begin : clint
     assign MTIME_CLINT = '0;
     assign MTimerInt = 1'b0; assign MSwInt = 1'b0;
+    assign PRDATA[1] = '0; assign PREADY[1] = 1'b1;
   end
 
   if (P.PLIC_SUPPORTED == 1) begin : plic
@@ -135,6 +136,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   end else begin : plic
     assign MExtInt = 1'b0;
     assign SExtInt = 1'b0;
+    assign PRDATA[2] = '0; assign PREADY[2] = 1'b1;
   end
 
   if (P.GPIO_SUPPORTED == 1) begin : gpio
@@ -144,6 +146,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
       .iof0(), .iof1(), .GPIOIN, .GPIOOUT, .GPIOEN, .GPIOIntr);
   end else begin : gpio
     assign GPIOOUT = '0; assign GPIOEN = '0; assign GPIOIntr = 1'b0;
+    assign PRDATA[0] = '0; assign PREADY[0] = 1'b1;
   end
 
   if (P.UART_SUPPORTED == 1) begin : uartgen // Hack to work around Verilator bug https://github.com/verilator/verilator/issues/4769
@@ -155,6 +158,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
       .OUT1b(), .OUT2b(), .INTR(UARTIntr), .TXRDYb(), .RXRDYb());       // to CPU
   end else begin : uart
     assign UARTSout = 1'b0; assign UARTIntr = 1'b0;
+    assign PRDATA[3] = '0; assign PREADY[3] = 1'b1;
   end
 
   if (P.SPI_SUPPORTED == 1) begin : spi
@@ -164,6 +168,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
       .SPIOut, .SPIIn, .SPICS, .SPICLK, .SPIIntr);
   end else begin : spi
     assign SPIOut = 1'b0; assign SPICS = '0; assign SPIIntr = 1'b0; assign SPICLK = 1'b0;
+    assign PRDATA[4] = '0; assign PREADY[4] = 1'b1;
   end
 
   if (P.SDC_SUPPORTED == 1) begin : sdc
@@ -173,6 +178,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
       .SPIOut(SDCCmd), .SPIIn(SDCIn), .SPICS(SDCCS), .SPICLK(SDCCLK), .SPIIntr(SDCIntr));
   end else begin : sdc
     assign SDCCmd = '0; assign SDCCS = 4'b0; assign SDCIntr = 1'b0; assign SDCCLK = 1'b0;
+    assign PRDATA[5] = '0; assign PREADY[5] = 1'b1;
   end
 
 
