@@ -2,7 +2,8 @@
 
 set -e
 
-cd vcs
+# Build directory to check (vcs or vcs_no_spike); defaults to vcs.
+cd "${1:-vcs}"
 
 if [ ! -f compile.log ] || grep -q 'Error-' compile.log; then
     echo -e "\033[0;31mCompile failed \033[0m"

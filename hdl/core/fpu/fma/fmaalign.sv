@@ -58,7 +58,7 @@ module fmaalign import cvw::*;  #(parameter cvw_t P) (
 
   assign ZmPreshifted = {Zm,(P.FMALEN-1)'(0)};
   assign KillProd     = (ACnt[P.NE+1]&~ZZero)|XZero|YZero;
-  assign KillZ        = $signed(ACnt)>$signed((P.NE+2)'(3)*(P.NE+2)'(P.NF)+(P.NE+2)'(5));
+  assign KillZ        = $signed(ACnt)>(P.NE+2)'(3)*(P.NE+2)'(P.NF)+(P.NE+2)'(5);
 
   always_comb begin
     // If the product is too small to effect the sum, kill the product

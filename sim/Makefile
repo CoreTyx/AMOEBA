@@ -53,6 +53,13 @@ ECE411_NO_FLOAT = $(shell python3 $(CURDIR)/../bin/get_options.py no_float)
 RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
+
+# Standalone --binary unit testbenches (ft_shadow_test, ecc_secded_dected_test,
+# csr_harden_test).  Like the SoC builds they need the repo's FindBin.pm, and
+# --binary pulls in Verilator's coroutine-based timing runtime, which GCC 10/11
+# only compile with -fcoroutines.  The flag is probed so other compilers are unaffected.
+UNIT_TB_CFLAGS    := $(shell echo | $(CXX) -std=c++20 -fcoroutines -x c++ -E - >/dev/null 2>&1 && echo -CFLAGS -fcoroutines)
+UNIT_TB_VERILATOR  = PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(UNIT_TB_CFLAGS)
 CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
 # Extra +define+... passed on the command line, e.g.
 #   make build_isa_tests EXTRA_DEFINES=+define+ECE411_DUMMY_TRACE
@@ -60,7 +67,7 @@ CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(
 # clean (or touch this Makefile) to force a recompile.
 EXTRA_DEFINES ?=
 COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(EXTRA_DEFINES)
-VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=../vcs_warn.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
+VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=vcs_warn_gen.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
 VER_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 ECC_INJECT_DIR       := build_ecc_inject
@@ -250,12 +257,31 @@ freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 	$(MAKE) -C $(CURDIR)/../testcode/freertos build
 	$(MAKE) run_verilator_top_tb_no_spike PROG=$(CURDIR)/../testcode/freertos/freertos_wally.elf
 
-vcs/top_tb: $(VCS_SRCS) $(HDRS)
+# vcs_warn.config plus the generated hdl/core width-lint waiver (see that file).
+# One entry per file: VCS truncates long lines in a message config file.
+define vcs_msg_config
+	cp vcs_warn.config $(1)/vcs_warn_gen.config
+	printf '{ +lint=noCAWM-L,noWMIA-L,noULCO; +file=%s; }\n' $(CORE_SV) $(CORE_SRCS) >> $(1)/vcs_warn_gen.config
+endef
+
+vcs/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
 	mkdir -p vcs
+	$(call vcs_msg_config,vcs)
 	python3 check_sus.py
 	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd vcs && vcs $(VCS_SRCS) $(VCS_FLAGS) -l compile.log -top top_tb -o top_tb
-	bash check_compile_error.sh
+	bash check_compile_error.sh vcs
+
+# No-Spike VCS build: the VCS counterpart of verilator/$(NO_SPIKE_DIR), for the
+# ISA-level and FreeRTOS tests (they touch MMIO, which Spike's commit log omits).
+VCS_NO_SPIKE_DIR := vcs_no_spike
+$(VCS_NO_SPIKE_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
+	mkdir -p $(VCS_NO_SPIKE_DIR)
+	$(call vcs_msg_config,$(VCS_NO_SPIKE_DIR))
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
+	cd $(VCS_NO_SPIKE_DIR) && vcs $(VCS_SRCS) $(VCS_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER -l compile.log -top top_tb -o top_tb
+	bash check_compile_error.sh $(VCS_NO_SPIKE_DIR)
 
 .PHONY: run_vcs_top_tb
 run_vcs_top_tb: vcs/top_tb $(PROG)
@@ -270,6 +296,18 @@ run_vcs_top_tb: vcs/top_tb $(PROG)
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
 		+ELF_ECE411="$(CURDIR)/bin/spike_dpi.elf"
+
+.PHONY: run_vcs_top_tb_no_spike
+run_vcs_top_tb_no_spike: $(VCS_NO_SPIKE_DIR)/top_tb $(PROG)
+	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	rm -f $(VCS_NO_SPIKE_DIR)/dump.fsdb
+	python3 $(CURDIR)/../bin/get_options.py clock
+	python3 $(CURDIR)/../bin/get_options.py bmem_x
+	cd $(VCS_NO_SPIKE_DIR) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
+		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
+		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst"
 
 ../hvl/common/spike.so: ../hvl/common/spike_dpi.cpp
 	g++ -shared -fPIC -O2 $< -o $@
@@ -328,9 +366,10 @@ FREERTOS_TESTS    ?= $(shell find $(CURDIR)/../testcode/freertos -name 'tc_*.c')
 RISCV_FORMAL_MONITOR_DIR = $(CURDIR)/../third_party/riscv-formal/monitor
 RISCV_FORMAL_MONITOR     = $(RISCV_FORMAL_MONITOR_DIR)/generate.py
 RVFIMON_ISA          ?= rv64imafdc_zb
-# Local fix on top of the generated monitor.  Applied by generated-files and
-# re-applied by check-generated, so regenerating cannot silently drop it.
-RVFIMON_PATCH        = $(CURDIR)/../patches/rvfimon-clz-ctz.patch
+# Local fixes on top of the generated monitor, applied in order.  Applied by
+# generated-files and re-applied by check-generated, so regenerating cannot
+# silently drop them.
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch
 
 .PHONY: generate-rtl
 generate-rtl:
@@ -341,14 +380,16 @@ generated-files:
 	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd $(RISCV_FORMAL_MONITOR_DIR) && \
 	    python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $(CURDIR)/../hvl/common/rvfimon.v
-	patch -s $(CURDIR)/../hvl/common/rvfimon.v < $(RVFIMON_PATCH)
+	for p in $(RVFIMON_PATCHES); do patch -s $(CURDIR)/../hvl/common/rvfimon.v < $$p; done
 
 .PHONY: check-generated
 check-generated:
 	@tmp=$$(mktemp -d); \
 	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT); \
 	cd $(RISCV_FORMAL_MONITOR_DIR) && python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $$tmp/rvfimon.v; \
-	patch -s $$tmp/rvfimon.v < $(RVFIMON_PATCH) || (echo "ERROR: $(RVFIMON_PATCH) no longer applies to the generated monitor." && echo "The submodule moved; rebase or drop the patch if it is upstream now." && rm -rf $$tmp && exit 1); \
+	for p in $(RVFIMON_PATCHES); do \
+		patch -s $$tmp/rvfimon.v < $$p || { echo "ERROR: $$p no longer applies to the generated monitor."; echo "The submodule moved; rebase or drop the patch if it is upstream now."; rm -rf $$tmp; exit 1; }; \
+	done; \
 	diff $(CURDIR)/../hvl/common/rvfimon.v $$tmp/rvfimon.v || (echo "ERROR: rvfimon.v is stale — run 'make generated-files'" && rm -rf $$tmp && exit 1); \
 	rm -rf $$tmp; \
 	echo "Generated files are up to date."
@@ -412,13 +453,53 @@ regression:
 	$(MAKE) isa_regression
 	$(MAKE) freertos_regression
 
+# ── VCS regressions (EWS only): same test lists, 4-state simulation with X-prop ─
+.PHONY: vcs_baremetal_regression
+vcs_baremetal_regression: vcs/top_tb
+	@pass=0; fail=0; total=0; \
+	for test in $(REGRESSION_TESTS); do \
+		total=$$((total+1)); \
+		echo "=== [$$total] VCS: $$test ==="; \
+		if $(MAKE) -s run_vcs_top_tb PROG=$$test > /dev/null 2>&1 && grep -q "test PASSED" vcs/simulation.log; then \
+			echo "  PASS: $$test"; pass=$$((pass+1)); \
+		else \
+			echo "  FAIL: $$test (see sim/vcs/simulation.log)"; fail=$$((fail+1)); \
+			cp vcs/simulation.log vcs/$$(basename $$test .c).fail.log 2>/dev/null || true; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== VCS Baremetal Regression Summary: $$pass/$$total tests passed ==="; \
+	[ $$fail -eq 0 ] || exit 1
+
+.PHONY: vcs_isa_regression
+vcs_isa_regression: $(VCS_NO_SPIKE_DIR)/top_tb
+	@pass=0; fail=0; total=0; \
+	for test in $(ISA_LEVEL_TESTS); do \
+		total=$$((total+1)); \
+		echo "=== [$$total] VCS: $$test ==="; \
+		if $(MAKE) -s run_vcs_top_tb_no_spike PROG=$$test > /dev/null 2>&1 && grep -q "test PASSED" $(VCS_NO_SPIKE_DIR)/simulation.log; then \
+			echo "  PASS: $$test"; pass=$$((pass+1)); \
+		else \
+			echo "  FAIL: $$test (see sim/$(VCS_NO_SPIKE_DIR)/simulation.log)"; fail=$$((fail+1)); \
+			cp $(VCS_NO_SPIKE_DIR)/simulation.log $(VCS_NO_SPIKE_DIR)/$$(basename $$test .c).fail.log 2>/dev/null || true; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== VCS ISA Regression Summary: $$pass/$$total tests passed ==="; \
+	[ $$fail -eq 0 ] || exit 1
+
+.PHONY: vcs_regression
+vcs_regression:
+	$(MAKE) vcs_baremetal_regression
+	$(MAKE) vcs_isa_regression
+
 # ── Standalone RTL unit tests ─────────────────────────────────────────────────
 # Self-checking testbenches live in hvl/; their build/run entry points live here
 # alongside the SoC, ECC, and ISA regression targets.
 .PHONY: ft_shadow_test
 ft_shadow_test:
 	mkdir -p verilator/ft_shadow_tb
-	verilator --binary --timing -O2 --top-module ft_recompute_fault_tb \
+	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module ft_recompute_fault_tb \
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
@@ -464,7 +545,7 @@ ecc_test: ecc_secded_dected_test csr_harden_test ecc_baremetal_regression
 
 ecc_secded_dected_test:
 	mkdir -p verilator/ecc_tb
-	verilator --binary -O2 --top-module ecc_tb \
+	$(UNIT_TB_VERILATOR) --binary -O2 --top-module ecc_tb \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
 	    $(CURDIR)/../hvl/ecc/ecc_tb.sv \
 	    -Mdir verilator/ecc_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/ecc_tb/compile.log
@@ -472,7 +553,7 @@ ecc_secded_dected_test:
 
 csr_harden_test:
 	mkdir -p verilator/csr_harden_tb
-	verilator --binary --timing -O2 --top-module csr_harden_tb \
+	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module csr_harden_tb \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(CURDIR)/../hdl/core/generic/flop/flopenl.sv \
 	    $(CURDIR)/../hdl/core/privileged/privmode.sv \
@@ -487,4 +568,4 @@ csr_harden_test:
 
 .PHONY: clean
 clean:
-	rm -rf bin vcs verdi verilator spike
+	rm -rf bin vcs $(VCS_NO_SPIKE_DIR) verdi verilator spike

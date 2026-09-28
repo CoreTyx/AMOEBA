@@ -29,8 +29,9 @@ module ft_shadow_ctrl #(
   state_t state;
   logic [COUNT_W-1:0] mismatch_count;
 
-  initial begin
-    if (TE_THRESHOLD < 1) $error("TE_THRESHOLD must be positive");
+  // Elaboration-time parameter check (not an initial block, so synthesis sees it too).
+  if (TE_THRESHOLD < 1) begin : g_bad_te_threshold
+    $error("TE_THRESHOLD must be positive");
   end
 
   assign recompute_mode = (state == RECOMPUTE);

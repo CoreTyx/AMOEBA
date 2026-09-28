@@ -112,9 +112,6 @@ module spi_apb import cvw::*; #(parameter cvw_t P) (
   logic        ReceiveFIFOReadInc;
   logic        ReceiveFIFOFull, ReceiveFIFOEmpty;
 
-  /* verilator lint_off UNDRIVEN */
-  logic [2:0]  TransmitWriteWatermarkLevel, ReceiveReadWatermarkLevel; // unused generic FIFO outputs
-  /* verilator lint_on UNDRIVEN */
   logic [7:0]  ReceiveShiftRegEndian;              // Reverses ReceiveShiftReg if Format[2] set (little endian transmission)
 
   // Shift reg signals
@@ -277,7 +274,7 @@ module spi_apb import cvw::*; #(parameter cvw_t P) (
   spi_fifo #(3,8) txFIFO(PCLK, 1'b1, SCLKenable, PRESETn,
                          TransmitFIFOWriteInc, TransmitFIFOReadInc,
                          TransmitData[7:0],
-                         TransmitWriteWatermarkLevel, TransmitWatermark[2:0],
+                         3'b0, TransmitWatermark[2:0],       // write watermark unused
                          TransmitReadData[7:0],
                          TransmitFIFOFull,
                          TransmitFIFOEmpty,
@@ -298,7 +295,7 @@ module spi_apb import cvw::*; #(parameter cvw_t P) (
   spi_fifo #(3,8) rxFIFO(PCLK, SCLKenable, 1'b1, PRESETn,
                          ReceiveFIFOWriteInc, ReceiveFIFOReadInc,
                          ReceiveShiftRegEndian, ReceiveWatermark[2:0],
-                         ReceiveReadWatermarkLevel,
+                         3'b0,                          // read watermark unused
                          ReceiveData[7:0],
                          ReceiveFIFOFull,
                          ReceiveFIFOEmpty,

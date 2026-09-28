@@ -32,7 +32,7 @@
 module buscachefsm #(
   parameter BeatCountThreshold,                      // Largest beat index
   parameter AHBWLOGBWPL,                             // Log2 of BEATSPERLINE
-  parameter READ_ONLY_CACHE,                         // 1 for read-only instruction cache
+  parameter logic READ_ONLY_CACHE,                   // 1 for read-only instruction cache
   parameter BURST_EN                                 // burst mode supported
 )(
   input  logic                   HCLK,

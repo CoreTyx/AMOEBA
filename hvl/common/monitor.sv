@@ -559,7 +559,7 @@ module monitor #(
 
         logic [CHANNELS*1 -1:0] rvfi_valid;
         logic [CHANNELS*64-1:0] rvfi_order;
-        logic [CHANNELS*XLEN-1:0] rvfi_insn;
+        logic [CHANNELS*ILEN-1:0] rvfi_insn;
         logic [CHANNELS*1 -1:0] rvfi_trap;
         logic [CHANNELS*1 -1:0] rvfi_halt;
         logic [CHANNELS*1 -1:0] rvfi_intr;
@@ -586,7 +586,7 @@ module monitor #(
             assign rvfi_mem_extamo[channel]          = itf.mem_extamo[channel];
             assign rvfi_valid    [channel*1  +: 1 ] =   itf.valid    [channel];
             assign rvfi_order    [channel*64 +: 64] =   itf.order    [channel];
-            assign rvfi_insn     [channel*32 +: 32] =   itf.inst     [channel];
+            assign rvfi_insn     [channel*ILEN +: ILEN] =   itf.inst     [channel];
             assign rvfi_halt     [channel*1  +: 1 ] =   itf.halt              ;
             assign rvfi_rs1_addr [channel*5  +: 5 ] =   itf.rs1_addr [channel];
             assign rvfi_rs2_addr [channel*5  +: 5 ] =   itf.rs2_addr [channel];
@@ -658,7 +658,7 @@ module monitor #(
                                      itf.mem_misaligned[0]};
         end
 
-        longint unsigned rvfi_waived_count = 0;
+        longint unsigned rvfi_waived_count = '0;
 
         always @(posedge itf.clk iff !itf.rst) begin
             if (errcode != 0) begin
@@ -681,7 +681,7 @@ module monitor #(
     // Unconditional heartbeat: prints every 100K cycles so simulation progress is visible.
     longint sim_heartbeat_cycle;
     logic [XLEN-1:0] heartbeat_last_pc = '0;
-    initial sim_heartbeat_cycle = 0;
+    initial sim_heartbeat_cycle = '0;
     always @(posedge itf.clk iff !itf.rst) begin
         sim_heartbeat_cycle = sim_heartbeat_cycle + 1;
         if (itf.valid[0]) heartbeat_last_pc <= itf.pc_rdata[0];
