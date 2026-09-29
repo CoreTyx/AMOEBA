@@ -244,6 +244,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       localparam            LLENPOVERAHBW = P.LLEN / P.AHBW; // Number of AHB beats in a LLEN word. AHBW cannot be larger than LLEN. (implementation limitation)
       logic [P.PA_BITS-1:0] ICacheBusAdr;
       logic                 ICacheBusAck;
+      logic                 UnusedICacheEccDedDirtyFault;
+      logic [P.PA_BITS-1:0] UnusedICacheEccDedDirtyFaultAdr;
       logic [1:0]           CacheBusRW, BusRW, CacheRWF;
 
       assign BusRW = ~ITLBMissF & ~CacheableF & ~SelIROM ? IFURWF : '0;
@@ -265,7 +267,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .FlushCache('0),
              .NextSet(PCSpillNextF[11:0]),
              .PAdr(PCPF),
-             .CacheCommitted(CacheCommittedF), .InvalidateCache(InvalidateICacheM), .InvalidateFlushStage(FlushW), .CMOpM('0));
+             .CacheCommitted(CacheCommittedF), .InvalidateCache(InvalidateICacheM), .InvalidateFlushStage(FlushW), .CMOpM('0),
+             .EccDedDirtyFault(UnusedICacheEccDedDirtyFault),
+             .EccDedDirtyFaultAdr(UnusedICacheEccDedDirtyFaultAdr));
 
       ahbcacheinterface #(P, BEATSPERLINE, AHBWLOGBWPL, LINELEN, LLENPOVERAHBW, 1)
       ahbcacheinterface(.HCLK(clk), .HRESETn(~reset),

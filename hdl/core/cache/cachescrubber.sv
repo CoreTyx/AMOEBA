@@ -86,7 +86,8 @@ module cachescrubber #(
 
   scrubstatetype CurrState, NextState;
 
-  logic [$clog2(SCRUB_INTERVAL_CYCLES == 0 ? 1 : SCRUB_INTERVAL_CYCLES)-1:0] IntervalCount;
+  localparam int INTERVAL_COUNT_WIDTH = (SCRUB_INTERVAL_CYCLES > 1) ? $clog2(SCRUB_INTERVAL_CYCLES) : 1;
+  logic [INTERVAL_COUNT_WIDTH-1:0] IntervalCount;
   logic IntervalExpired;
   logic [SETLEN-1:0]  SetCount;
   logic [WAYLOG2-1:0] WayCount;
