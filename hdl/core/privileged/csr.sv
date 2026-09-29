@@ -45,6 +45,8 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic                     RegEccSecErrW,             // IEU ECC SEC (correctable)
   input  logic                     RegEccDedErrW,             // IEU ECC DED, retained for MSECFAULT logging
   input  logic [P.XLEN-1:0]        EccDedFaultEPCM, EccDedFaultMtvalM, // captured DED trap metadata
+  input  logic [P.XLEN-1:0]        DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM, // D$ dirty-line DED captured trap metadata
+  input  logic                     DCacheEccDedDirtyFaultM,   // raw pulse (unregistered), for MSECFAULT logging
   input  logic                     TrapM,                     // trap is occurring
   input  logic                     mretM, sretM,              // return instruction
   input  logic                     InterruptM,                // interrupt is occurring
@@ -154,7 +156,8 @@ module csr import cvw::*;  #(parameter cvw_t P) (
       2:                      NextFaultMtvalM = {{(P.XLEN-32){1'b0}}, InstrOrigM}; // Illegal instruction fault
       0, 4, 6, 13, 15, 5, 7:  NextFaultMtvalM = IEUAdrxTvalM; // Instruction misaligned, Load/Store Misaligned/page/access faults
       // Hardware error (ECC DED): use metadata captured when the error was detected.
-      19:                     NextFaultMtvalM = EccDedFaultMtvalM;
+      19:                     NextFaultMtvalM = EccDedFaultMtvalM;      // IEU regfile
+      20:                     NextFaultMtvalM = DCacheEccDedFaultMtvalM; // D$ dirty line
       default:                NextFaultMtvalM = '0; // Ecall, interrupts
     endcase
 
@@ -211,8 +214,9 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////////////////////
 
   assign CSRAdrM = InstrM[31:20];
-  // A registered DED record supplies MEPC only when cause 19 actually wins trap priority.
-  assign UnalignedNextEPCM = TrapM ? ((CauseM == 5'd19) ? EccDedFaultEPCM : PCM) : CSRWriteValM;
+  // A registered DED record supplies MEPC only when its cause actually wins trap priority.
+  assign UnalignedNextEPCM = TrapM ? ((CauseM == 5'd19) ? EccDedFaultEPCM :
+                                       (CauseM == 5'd20) ? DCacheEccDedFaultEPCM : PCM) : CSRWriteValM;
   assign NextEPCM = P.ZCA_SUPPORTED ? {UnalignedNextEPCM[P.XLEN-1:1], 1'b0} : {UnalignedNextEPCM[P.XLEN-1:2], 2'b00}; // 3.1.15 alignment
   assign NextCauseM = TrapM ? {InterruptM, CauseM}: {CSRWriteValM[P.XLEN-1], CSRWriteValM[4:0]};
   assign NextMtvalM = TrapM ? NextFaultMtvalM : CSRWriteValM;
@@ -231,7 +235,8 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////////////////////
 
   csrharden csrharden(.PrivModeSecFaultW, .PrivModeUncorrectableFaultW, .MppReservedM,
-    .IllegalCSRAccessM, .InstrValidM, .RegEccSecErrW, .RegEccDedErrW, .SecFaultM);
+    .IllegalCSRAccessM, .InstrValidM, .RegEccSecErrW, .RegEccDedErrW,
+    .DCacheEccDedErrW(DCacheEccDedDirtyFaultM), .SecFaultM);
 
   ///////////////////////////////////////////
   // CSRs

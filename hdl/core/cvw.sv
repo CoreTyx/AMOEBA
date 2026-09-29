@@ -91,6 +91,7 @@ typedef struct packed {
   int           ICACHE_WAYSIZEINBYTES;
   int           ICACHE_LINELENINBITS;
   int           CACHE_SRAMLEN;
+  int           CACHE_SCRUB_INTERVAL;  // SECDED background scrubber: cycles between round-robin steps (0 = as fast as grants allow)
 
 // Integer Divider Configuration
 // IDIV_BITSPERCYCLE must be 1, 2, or 4
