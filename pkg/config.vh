@@ -414,10 +414,10 @@ localparam RADIX = 32'd4;
 localparam DIVCOPIES = 32'd4;
 
 // Memory synthesis configuration
-`ifdef AMOEBA_SYNTH
-localparam logic USE_SRAM = 1;
-`else
+//`ifdef AMOEBA_SYNTH
+//localparam logic USE_SRAM = 1;
+//`else
 localparam logic USE_SRAM = 0;
-`endif
+//`endif
 
 `include "../pkg/config-shared.vh"
