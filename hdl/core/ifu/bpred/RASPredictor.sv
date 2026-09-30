@@ -78,8 +78,8 @@ module RASPredictor import cvw::*;  #(parameter cvw_t P)(
   mux2 #(Depth) PtrMux(P1, M1, DecPtr, IncDecPtr);
   logic [Depth-1:0] Sum;
   assign Sum = Ptr + IncDecPtr;
-  if(|P.RAS_SIZE[Depth-1:0])
-    assign NextPtr = Sum >= P.RAS_SIZE[Depth-1:0] ? 0 : Sum; // wrap back around if our stack is not a power of 2
+  if(|(Depth)'(P.RAS_SIZE))
+    assign NextPtr = Sum >= (Depth)'(P.RAS_SIZE) ? 0 : Sum; // wrap back around if our stack is not a power of 2
   else
     assign NextPtr = Sum;
   //assign NextPtr = Ptr + IncDecPtr;

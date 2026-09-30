@@ -1,5 +1,6 @@
 bin
 vcs
+vcs_no_spike
 verdi
 verilator
 spike

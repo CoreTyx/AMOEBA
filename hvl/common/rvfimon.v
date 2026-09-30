@@ -14705,7 +14705,9 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_div (
 
   // DIV instruction
   wire signed [64-1:0] div_rs1_s = rvfi_rs1_rdata;
-  wire signed [64-1:0] div_rs2_s = rvfi_rs2_rdata;
+  // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
+  // to 1 for INT_MIN / -1, whose result comes from the special case below.
+  wire signed [64-1:0] div_rs2_s = rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? 64'sd1 : rvfi_rs2_rdata;
   wire signed [64-1:0] div_result_s = div_rs1_s / div_rs2_s;
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? {64{1'b1}} :
                                          rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? {1'b1, {64-1{1'b0}}} :
@@ -14865,7 +14867,9 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_divw (
 
   // DIVW instruction
   wire signed [31:0] divw_rs1_s = rvfi_rs1_rdata[31:0];
-  wire signed [31:0] divw_rs2_s = rvfi_rs2_rdata[31:0];
+  // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
+  // to 1 for INT_MIN / -1, whose result comes from the special case below.
+  wire signed [31:0] divw_rs2_s = rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? 32'sd1 : rvfi_rs2_rdata[31:0];
   wire signed [31:0] divw_result_s = divw_rs1_s / divw_rs2_s;
   wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? {32{1'b1}} :
                        rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {1'b1, {31{1'b0}}} :
@@ -19283,7 +19287,9 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_rem (
 
   // REM instruction
   wire signed [64-1:0] rem_rs1_s = rvfi_rs1_rdata;
-  wire signed [64-1:0] rem_rs2_s = rvfi_rs2_rdata;
+  // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
+  // to 1 for INT_MIN / -1, whose result comes from the special case below.
+  wire signed [64-1:0] rem_rs2_s = rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? 64'sd1 : rvfi_rs2_rdata;
   wire signed [64-1:0] rem_result_s = rem_rs1_s % rem_rs2_s;
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? rvfi_rs1_rdata :
                                          rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? {64{1'b0}} :
@@ -19443,7 +19449,9 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remw (
 
   // REMW instruction
   wire signed [31:0] remw_rs1_s = rvfi_rs1_rdata[31:0];
-  wire signed [31:0] remw_rs2_s = rvfi_rs2_rdata[31:0];
+  // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
+  // to 1 for INT_MIN / -1, whose result comes from the special case below.
+  wire signed [31:0] remw_rs2_s = rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? 32'sd1 : rvfi_rs2_rdata[31:0];
   wire signed [31:0] remw_result_s = remw_rs1_s % remw_rs2_s;
   wire [31:0] result = rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdata :
                        rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {32{1'b0}} :

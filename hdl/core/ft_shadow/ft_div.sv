@@ -36,8 +36,9 @@ module ft_div import cvw::*; #(
   logic [P.XLEN-1:0] shadow_quot_raw, shadow_rem_raw;
   logic [P.XLEN-1:0] primary_quot, primary_rem, shadow_quot, shadow_rem;
 
-  initial begin
-    if (TE_THRESHOLD < 1) $error("TE_THRESHOLD must be positive");
+  // Elaboration-time parameter check (not an initial block, so synthesis sees it too).
+  if (TE_THRESHOLD < 1) begin : g_bad_te_threshold
+    $error("TE_THRESHOLD must be positive");
   end
 
   // A retry owns both divider FSMs while the architectural pipeline remains
