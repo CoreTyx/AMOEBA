@@ -41,7 +41,7 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-`include "BranchPredictorType.vh"
+`include "../pkg/BranchPredictorType.vh"
 
 // RV32 or RV64: XLEN = 32 or 64
 localparam XLEN = 32'd64;   // required: lp64 ABI
@@ -276,4 +276,4 @@ localparam DIVCOPIES = 32'd4;
 // Memory synthesis configuration
 localparam logic USE_SRAM = 0;
 
-`include "config-shared.vh"
+`include "../pkg/config-shared.vh"

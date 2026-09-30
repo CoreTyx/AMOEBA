@@ -53,7 +53,7 @@ ECE411_NO_FLOAT = $(shell python3 $(CURDIR)/../bin/get_options.py no_float)
 RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
-CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../hdl/ +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
+CVW_INCDIRS  = +incdir+$(CURDIR)/ +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
 # Extra +define+... passed on the command line, e.g.
 #   make build_isa_tests EXTRA_DEFINES=+define+ECE411_DUMMY_TRACE
 # Changing this does not invalidate an existing build directory; run the matching
