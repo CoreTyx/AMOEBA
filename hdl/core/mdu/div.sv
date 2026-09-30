@@ -37,6 +37,7 @@ module div import cvw::*;  #(parameter cvw_t P) (
   input  logic              W64E,                           // W-type instructions (divw, divuw, remw, remuw)
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // Forwarding mux outputs for Source A and B
   output logic              DivBusyE,                       // Divide is busy - stall pipeline
+  output logic              DivDoneE,                       // Divide result is valid
   output logic [P.XLEN-1:0] QuotM, RemM                     // Quotient and remainder outputs
  );
 
@@ -68,6 +69,7 @@ module div import cvw::*;  #(parameter cvw_t P) (
   // Divider control signals
   assign DivStartE = IntDivE & (state == IDLE) & ~StallM;
   assign DivBusyE = (state == BUSY) | DivStartE;
+  assign DivDoneE = (state == DONE);
 
   // Handle sign extension for W-type instructions
   if (P.XLEN == 64) begin : rv64 // RV64 has W-type instructions
