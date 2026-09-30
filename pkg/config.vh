@@ -1,5 +1,5 @@
 //////////////////////////////////////////
-// config_baremetal_linux.vh
+// config.vh
 //
 // Written: David_Harris@hmc.edu 4 January 2021
 // Modified: Jordan Carlin jcarlin@hmc.edu 14 May 2024
@@ -414,7 +414,7 @@ localparam RADIX = 32'd4;
 localparam DIVCOPIES = 32'd4;
 
 // Memory synthesis configuration
-`ifdef AMOEBA_SYNTH
+`ifdef SYNTHESIS
 localparam logic USE_SRAM = 1;
 `else
 localparam logic USE_SRAM = 0;
