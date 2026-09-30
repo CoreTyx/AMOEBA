@@ -119,19 +119,37 @@ beat replaced by the `wr`/`burst` pins: one cycle shorter and readable on a
 scope.
 
 ```
-req=1, cycle 0   io[15:0] = HADDR[31:16]   bits 30:29 carry HSIZE[1:0] (always zero
-req=1, cycle 1   io[15:0] = HADDR[15:0]    in every configured region); bits 2:0 = byte offset
+req=1, cycle 0   io[15:0] = HADDR[31:16]   the whole address; no bits are stolen
+req=1, cycle 1   io[15:0] = HADDR[15:0]
+req=1, cycle 2   io[15:0] = {HWSTRB[7:0], 5'b0, HSIZE[2:0]}   SINGLES ONLY (burst=0)
 otherwise        io[15:0] = data word       64-bit beat as 4 words, least significant first
 wr, burst        held from req until the last word
 ```
 
-`ready` means "may start": the ASIC issues `req` only after sampling
-`ready=1`, and the FPGA, having said so, accepts the whole transaction —
-it holds ≥ 32 words of write buffer. There is no mid-transaction handshake
-in either direction, so the ASIC never stalls once started. The FPGA
-regenerates byte strobes from size + offset with the same `size_to_mask` as
-`ahb_to_memitf.sv`; the ASIC lane-selects reads itself. Beat *n* of a burst
-is at `base + 8n` (CVW is INCR8 from an aligned base); the FPGA increments.
+**The attribute word.** A burst is eight aligned 64-bit beats with every lane
+live, so it needs neither size nor strobes and skips the third header word —
+line fills are ~100 % of the traffic and pay nothing. A single spends one
+extra cycle and carries the real `HWSTRB`. This replaced an earlier encoding
+that rode `HSIZE[1:0]` in address bits 30:29: that constrained every region to
+have those bits clear (enforced only by a `ifndef SYNTHESIS` assertion, so in
+silicon `0x2000_0000`/`0x4000_0000`/`0x6000_0000` would have aliased silently),
+and it left the FPGA rebuilding byte strobes from size + offset — correct only
+because Wally's `swbytemask` derives `HWSTRB` from the same two signals, an
+equivalence nothing checked. Sending the strobes costs one cycle on a transfer
+type the primary config barely issues and removes both hazards. The slave still
+rebuilds the mask for *reads* (`HWSTRB` is a write signal) and the link model
+asserts the two agree, so a CVW bump that changes the relationship is loud.
+
+`ready` means **"may start, and I have one more transaction in reserve."** It
+is a hint with a guard band, not a handshake: the ASIC samples it through two
+input registers and asserts `req` a cycle later, so a `req` may legally arrive
+up to `GUARD` = 3 cycles after the slave dropped `ready`. **A slave must
+therefore deassert `ready` while a whole transaction still fits — never when it
+is actually full.** Sizing for two outstanding lines instead of one deletes the
+race; the testbench model is four lines deep and asserts on overflow, and the
+FPGA slave must do the same. There is no mid-transaction handshake in either
+direction, so the ASIC never stalls once started. Beat *n* of a burst is at
+`base + 8n` (CVW is INCR8 from an aligned base); the FPGA increments.
 `HADDR[55:32]` is never nonzero on the bus because the PMA faults undefined
 regions first (sim assertion).
 
@@ -145,12 +163,21 @@ ASIC guarantees >= TA idle cycles after dir falls before the FPGA may drive,
 and >= TA idle cycles after the last rvalid before it raises dir and drives.
 ```
 
+**Training is not exempt.** A retry is the one moment the ASIC wants the bus
+back while the FPGA is still using it — the FPGA sweeps its output phase blind
+and its only feedback is that the pattern restarted, so it cannot know to stop
+echoing. `amoeba_link_train` therefore holds `dir=0` for a whole `TRAIN_LEN`
+after a mismatch (state `RETRY_TA`) before taking the bus; the longest echo
+still in flight is `TRAIN_LEN - k` words. `+LINK_TRAIN_ERR=n` in the testbench
+corrupts word *n* of the first echo so this path is exercised, and the model's
+"driving io while dir=1" check is what proves there is no overlap.
+
 | Transaction | Sequence | Cycles |
 |---|---|---|
 | Line read | `req`×2 · `dir`↓ · TA · 32 × `rvalid` words · TA · `dir`↑ | 34 + 2·TA (38 @ TA=2) |
 | Line write | `req`×2 · 32 words | 34 |
-| Single read | `req`×2 · TA · 4 words · TA | 6 + 2·TA |
-| Single write | `req`×2 · 4 words | 6 |
+| Single read | `req`×3 · TA · 4 words · TA | 7 + 2·TA |
+| Single write | `req`×3 · 4 words | 7 |
 
 Plus FPGA memory latency as `rvalid` gaps. 38 link cycles + L2/MIG latency is
 a ~50–70 cycle miss at 1:1 clocks — the same range as a DRAM miss on a
@@ -179,7 +206,7 @@ into a bit bucket and return to IDLE.**
   delayed select is "none") is latched and started next. No `HREADYOUT` is
   ever asserted while it is pending, or its stalled data phase would complete
   with garbage.
-- Address phase: latched (`HADDR[31:0]`, `HWRITE`, `HSIZE[1:0]`, `HBURST==INCR8`; 36 flops) when it completes on the *uncore's* `HREADY` with `HTRANS==NONSEQ` — SEQ beats belong to the burst in flight, and the previous data phase may be the APB bridge's. A latch is unavoidable: in AHB the data phase of beat 0 overlaps the address phase of beat 1, so `HADDR` has moved on by the time the header is driven.
+- Address phase: latched (`HADDR[31:0]`, `HWRITE`, `HSIZE[2:0]`, `HWSTRB[7:0]`, `HBURST==INCR8`; 45 flops) when it completes on the *uncore's* `HREADY` with `HTRANS==NONSEQ` — SEQ beats belong to the burst in flight, and the previous data phase may be the APB bridge's. A latch is unavoidable: in AHB the data phase of beat 0 overlaps the address phase of beat 1, so `HADDR` has moved on by the time the header is driven.
 - Write: drive `HWDATA` as four words, least significant first; pulse `HREADYEXT` on the fourth. AHB holds the beat.
 - Read: assemble four words into a 64-bit beat register; pulse `HREADYEXT`. No FIFO — an AHB-Lite master cannot back-pressure read data.
 - Ignore `HADDR` after the first beat (the ebu re-presents it per beat; the FPGA increments).
@@ -249,7 +276,7 @@ Cost: a 12-bit counter and a 32-bit LFSR.
 | VCU118 bank / FMC pins for the link | One bank for the whole link; match pad-library I/O voltage to it |
 | Link clock target | <= 50 MHz; above that, add `clk_out`. The 2.10× above is at link clk = core clk; a faster link clock is the second lever after cache size (stage C of `impl_plan_fpga_linux.md`) |
 | Linux rootfs | Initramfs in the 256 MB window |
-| `size[1:0]` on dedicated pads instead of address bits 30:29? | No; assertion covers it |
+| ~~`size[1:0]` on dedicated pads instead of address bits 30:29?~~ | **Settled 2026-09-30: neither.** A third header word on singles costs 0 pads and ~0 cycles (bursts skip it) and carries the real `HWSTRB` as well, so the address goes over whole. §4. |
 | Power/ground count (BRINGUP.md open item 6) | Eats the spare pads first; 11 is a placeholder |
 | Scan: 1 or 2 chains, CSRs stitched to the front, chain map generated (BRINGUP.md open items 2–3) | 2 chains, CSRs first, map generated by the DFT flow |
 | `halt_req` pad (+1) | Skip for v1 |

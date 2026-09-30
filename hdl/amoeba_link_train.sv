@@ -12,6 +12,18 @@
 // the timeout, retries; after TRAIN_RETRIES failures the core is held in
 // reset and status stays low so a dead link is visible on the LED.
 //
+// RETRY_TA.  A retry is the one moment the ASIC wants the bus back while the
+// FPGA is still using it: the FPGA is sweeping its output phase blind, its
+// only feedback is that the pattern restarted, so it has no way to know it
+// should stop echoing.  Taking the bus immediately would put both sides'
+// drivers on io -- a crowbar through the pad ring, not just an X in
+// simulation.  So a retry stays off the bus for a whole TRAIN_LEN before
+// raising dir: the longest echo that can still be in flight is the
+// TRAIN_LEN - k words left when the mismatch was seen at word k, and the
+// mismatch is seen two cycles after the word was driven, so TRAIN_LEN is
+// always more than enough.  This is the general TA rule applied to the one
+// path that used to skip it.
+//
 // The FPGA needs only dir to frame this: it never sees req during training,
 // and a falling dir without a preceding req means "echo now".
 ///////////////////////////////////////////////////////////////////////////////
@@ -44,7 +56,7 @@ module amoeba_link_train import amoeba_link_pkg::*; #(
   always_ff @(negedge clk) {io_n, rvalid_n} <= {io_i, rvalid};
   always_ff @(posedge clk) {io_s, rvalid_s} <= {io_n, rvalid_n};
 
-  typedef enum logic [2:0] {TX, TA1, RX, TA2, DONE, FAIL} st_t;
+  typedef enum logic [2:0] {TX, TA1, RX, RETRY_TA, TA2, DONE, FAIL} st_t;
   st_t st;
 
   logic [15:0]       lfsr;
@@ -82,13 +94,22 @@ module amoeba_link_train import amoeba_link_pkg::*; #(
           timeout <= timeout + 1'b1;
           if (rvalid_s) begin
             lfsr <= lfsr_next(lfsr); cnt <= cnt + 1'b1;
-            if (io_s != lfsr)                   st <= (retries == RTRY_W'(RETRIES)) ? FAIL : TX;
+            if (io_s != lfsr)                   st <= (retries == RTRY_W'(RETRIES)) ? FAIL : RETRY_TA;
             else if (cnt == CNT_W'(TRAIN_LEN - 1)) begin ta_cnt <= '0; st <= TA2; end
-          end else if (timeout == '1)           st <= (retries == RTRY_W'(RETRIES)) ? FAIL : TX;
-          // retry bookkeeping
+          end else if (timeout == '1)           st <= (retries == RTRY_W'(RETRIES)) ? FAIL : RETRY_TA;
+          // Retry bookkeeping.  Note what is NOT here: the bus is not taken
+          // back.  io_oe and dir stay low through RETRY_TA.
           if ((rvalid_s & io_s != lfsr) | (~rvalid_s & timeout == '1)) begin
             retries <= retries + 1'b1; lfsr <= TRAIN_SEED; cnt <= '0;
+          end
+        end
+
+        RETRY_TA: begin
+          cnt <= cnt + 1'b1;
+          if (cnt == CNT_W'(TRAIN_LEN - 1)) begin
+            cnt <= '0; timeout <= '0;
             io_o <= TRAIN_SEED; io_oe <= 1'b1; dir <= 1'b1;
+            st <= TX;
           end
         end
 

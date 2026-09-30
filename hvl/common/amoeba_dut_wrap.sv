@@ -149,8 +149,8 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     // cycles where the master shows IDLE mid-burst (what the bridge keys on).
     longint unsigned n_flush_rd = 0, n_idle_midburst = 0;
     always @(posedge clk) begin
-        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.link.st inside {5, 6, 7})) n_flush_rd <= n_flush_rd + 1;
-        if ((top.chip.link.st == 6) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat & top.chip.link.burst_r)
+        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.link.st inside {LM_RD_TA, LM_RD_DATA, LM_RD_TA2})) n_flush_rd <= n_flush_rd + 1;
+        if ((top.chip.link.st == LM_RD_DATA) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat & top.chip.link.burst_r)
             n_idle_midburst <= n_idle_midburst + 1;
     end
     final $display("[LINK] transactions=%0d reads=%0d writes=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
@@ -174,7 +174,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
             if (forcing) begin
                 release top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush;
                 forcing <= 1'b0;
-            end else if (top.chip.link.st == 6 && top.chip.link.wcnt == 5 && top.chip.link.rvalid_s &&
+            end else if (top.chip.link.st == LM_RD_DATA && top.chip.link.wcnt == 5 && top.chip.link.rvalid_s &&
                          top.chip.link.burst_r && top.chip.soc.core.ebu.ebu.IFUSelect) begin
                 if (force_cnt + 1 >= force_abort_n) begin
                     force top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush = 1'b1;
@@ -200,10 +200,10 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
                          top.chip.link.st, top.chip.link.pending);
             if (top.chip.link.req & ~top.chip.link.dir)
                 $display("[LINK %0t] req while dir=0", $time);
-            if (top.chip.link.HREADYOUT & top.chip.link.st != 0)
+            if (top.chip.link.HREADYOUT & top.chip.link.st != LM_IDLE)
                 $display("[LINK %0t] beat    st=%0d wcnt=%0d hrdata=%h", $time,
                          top.chip.link.st, top.chip.link.wcnt, top.chip.link.HRDATA);
-            if (model.lst == 4 /* L_HDR1 */)
+            if (model.lst == LS_HDR1)
                 $display("[LINK %0t] model   header hi=%h lo=%h wr=%b burst=%b", $time,
                          model.hdr_hi, model.io_i, model.wr, model.burst);
             if (model.mem_busy & model.mem_resp)
