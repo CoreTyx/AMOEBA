@@ -17,7 +17,7 @@ static uint64_t alu_chain(uint64_t seed) {
     int i;
     for (i = 0; i < 64; i++) {
         a = (a ^ (a << 7)) + 0x9E3779B97F4A7C15ULL;
-        a = (a >> 13) | (a << 51);
+        a = (a >> 13) | (a << 19); // Avoid a rotate instruction; this test targets the configured base ISA.
         a ^= a >> 17;
         a += a << 3;
     }
