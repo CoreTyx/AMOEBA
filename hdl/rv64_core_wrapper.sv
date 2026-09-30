@@ -120,6 +120,11 @@ module rv64_core_wrapper import cvw::*; (
     assign mcycle_rmask   = '0; assign mcycle_wmask   = '0; assign mcycle_wdata   = '0;
     assign minstret_rmask = '0; assign minstret_wmask = '0; assign minstret_wdata = '0;
 
+    // Declared ahead of first use (SpyGlass rejects forward references);
+    // driven by the M->W pipeline registers further down.
+    logic        InstrValidW;
+    logic        InterruptTakenPending;
+
     // Fixed monitor outputs
     assign monitor_intr      = InterruptTakenPending & InstrValidW;
     assign monitor_mode      = soc.core.PrivilegeModeW;
@@ -146,6 +151,12 @@ module rv64_core_wrapper import cvw::*; (
     logic            HMASTLOCK;
     logic            HREADY;
     logic            reset_soc;
+    // The SoC runs on reset_soc, a synchronized copy of rst that releases a few
+    // cycles after rst does; until then its pipeline controls are X in 4-state
+    // simulation. Hold the wrapper's RVFI registers in reset for as long as the
+    // SoC is, so they never capture those Xs.
+    logic            rst_rvfi;
+    assign rst_rvfi = rst | reset_soc;
 
     // -------------------------------------------------------------------------
     // CVW SoC instantiation
@@ -248,7 +259,7 @@ module rv64_core_wrapper import cvw::*; (
 
     logic [63:0] rvfi_order_ctr;
     always_ff @(posedge clk) begin
-        if (rst) rvfi_order_ctr <= '0;
+        if (rst_rvfi) rvfi_order_ctr <= '0;
         else if (InstrValidW & ~StallW) rvfi_order_ctr <= rvfi_order_ctr + 1;
     end
 
@@ -283,8 +294,7 @@ module rv64_core_wrapper import cvw::*; (
     assign WriteDataM = soc.core.lsu.LSUWriteDataM[63:0];
     assign ReadDataW  = soc.core.ReadDataW[63:0];
 
-    // Pipeline M→W registers
-    logic        InstrValidW;
+    // Pipeline M→W registers (InstrValidW is declared near the top of the module)
     logic [63:0] PCW;
     logic [31:0] InstrRawW;
     logic        TrapW;
@@ -303,12 +313,12 @@ module rv64_core_wrapper import cvw::*; (
     // InterruptTakenPending: set when an external interrupt fires and its
     // interrupted instruction is suppressed from RVFI; cleared on the first
     // committed instruction of the interrupt handler (rvfi_intr=1 for it).
-    logic        InterruptTakenPending;
+    // Declared near the top of the module.
     logic        IntrReported;
     assign IntrReported = InterruptTakenPending & InstrValidW & ~StallW;
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             InstrValidW <= '0; PCW <= '0; InstrRawW <= '0;
             InstrRawE_r <= '0; InstrRawM_r <= '0;
             TrapW <= '0; MemRWW <= '0; Funct3W <= '0;
@@ -318,7 +328,7 @@ module rv64_core_wrapper import cvw::*; (
             Rs1W <= '0; Rs2W <= '0;
             Rs1DataM <= '0; Rs2DataM <= '0;
             Rs1DataW <= '0; Rs2DataW <= '0;
-            Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 0;
+            Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 1'b0;
             InterruptTakenPending <= '0;
             DummyW <= '0;
         end else begin
@@ -359,17 +369,17 @@ module rv64_core_wrapper import cvw::*; (
                 Rs1E <= FlushE ? '0 : Rs1D;
                 Rs2E <= FlushE ? '0 : Rs2D;
                 // Non-stalling or advancing: reset stash; stale stash no longer relevant.
-                E_stash_valid <= 0;
+                E_stash_valid <= 1'b0;
             end else if (FlushE) begin
                 // E-stage instruction killed; clear stash.
-                E_stash_valid <= 0;
+                E_stash_valid <= 1'b0;
             end else if (!E_stash_valid) begin
                 // First cycle of E-stage stall (MDU busy): ForwardedSrcAE/BE are
                 // correct here because R1E/R2E were loaded last cycle and the
                 // previous instruction is still in M/W providing forwarded values.
                 Rs1DataE_stash <= soc.core.ieu.ForwardedSrcAE;
                 Rs2DataE_stash <= soc.core.ieu.ForwardedSrcBE;
-                E_stash_valid  <= 1;
+                E_stash_valid  <= 1'b1;
             end
             if (!StallM) begin
                 Rs1M <= FlushM ? '0 : Rs1E;
@@ -426,7 +436,7 @@ module rv64_core_wrapper import cvw::*; (
     logic        RetW;
     logic [63:0] EPCW, TrapVectorW;
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             RetW <= '0; EPCW <= '0; TrapVectorW <= '0;
         end else if (!StallW) begin
             RetW        <= RetM;
@@ -490,7 +500,7 @@ module rv64_core_wrapper import cvw::*; (
     logic [63:0] Frs1DataW, Frs2DataW, Frs3DataW;
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             Frs1E <= '0; Frs2E <= '0; Frs3E <= '0;
             Frs1M <= '0; Frs2M <= '0; Frs3M <= '0;
             Frs1W <= '0; Frs2W <= '0; Frs3W <= '0;

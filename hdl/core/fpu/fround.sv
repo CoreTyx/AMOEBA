@@ -48,7 +48,7 @@ module fround import cvw::*;  #(parameter cvw_t P) (
   logic Elt0, Eeqm1, Lnonneg, Lp, Rnonneg, Rp, Tp, RoundUp, Two, EgeNf;
 
   // Unbiased exponent
-  assign E = Xe - P.BIAS[P.NE-1:0];
+  assign E = Xe - (P.NE)'(P.BIAS);
   assign Xep1 = Xe + 1'b1;
 
   //////////////////////////////////////////
@@ -115,9 +115,7 @@ module fround import cvw::*;  #(parameter cvw_t P) (
   ///////////////////////////
 
   // Exact logic
-  /* verilator lint_off WIDTHEXPAND */
-  assign EgeNf = (E >= Nf) & Xe[P.NE-1]; // Check if E >= Nf.  Also check that Xe is positive to avoid wraparound problems
-  /* verilator lint_on WIDTHEXPAND */
+  assign EgeNf = (E >= (P.NE)'(Nf)) & Xe[P.NE-1]; // Check if E >= Nf.  Also check that Xe is positive to avoid wraparound problems
 
   // Rounding logic: determine whether to round up in magnitude
   always_comb begin
@@ -134,7 +132,7 @@ module fround import cvw::*;  #(parameter cvw_t P) (
     if (XNaN)            W = {1'b0, {P.NE{1'b1}}, 1'b1, {(P.NF-1){1'b0}}};  // Canonical NaN
     else if (EgeNf)      W = {Xs, Xe, Xm[P.NF-1:0]};                        // Exact, no rounding needed
     else if (Elt0)                                                          // 0 <= |X| < 1 rounds to 0 or 1
-      if (RoundUp)       W = {Xs, P.BIAS[P.NE-1:0], {P.NF{1'b0}}};          //   round to +/- 1
+      if (RoundUp)       W = {Xs, (P.NE)'(P.BIAS), {P.NF{1'b0}}};          //   round to +/- 1
       else               W = {Xs, {(P.FLEN-1){1'b0}}};                      //   round to +/- 0
     else begin                                                              // |X| >= 1 rounds to an integer
       if (RoundUp & Two) W = {Xs, Xep1, {(P.NF){1'b0}}};                    //   Round up to 2.0
