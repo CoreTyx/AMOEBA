@@ -59,13 +59,9 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        BALUControlE,            // ALU Control signals for B instructions in Execute Stage
   input  logic              BMUActiveE,              // Bit manipulation instruction being executed
   input  logic [1:0]        CZeroE,                  // {czero.nez, czero.eqz} instructions active
-  input  logic              InstrValidE,             // current execute-stage instruction is valid
   output logic [1:0]        FlagsE,                  // Comparison flags ({eq, lt})
   output logic [P.XLEN-1:0] IEUAdrE,                 // Address computed by ALU
   output logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // ALU sources before the mux chooses between them and PCE to put in srcA/B
-  // FT control feeds hazard/trap handling; PE bits are diagnostic only.
-  output logic              FTStallE, FTUnresolvedE,
-  output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r,
   // Memory stage signals
   input  logic              StallM, FlushM,          // Stall, flush Memory stage
   input  logic              FWriteIntM, FCvtIntW,    // FPU writes integer register file, FPU converts float to int
@@ -83,13 +79,27 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] MDUResultW,              // MDU (Multiply/divide unit) result
   input  logic [P.XLEN-1:0] FIntDivResultW,          // FPU's integer divide result
   input  logic [4:0]        RdW,                     // Destination register
-  input  logic              DummyW,                  // AMOEBA: writeback is an inserted dummy instruction
-  input  logic              DummySelW,               // AMOEBA: which shadow register the dummy writes
+  // Shadow write port — shadow pipeline drives regfile exclusively
+  input  logic              shadow_we3,
+  input  logic [4:0]        shadow_a3,
+  input  logic [P.XLEN-1:0] shadow_wd3,
+  input  logic              shadow_DummyW,
+  input  logic              shadow_DummySel,
+  // RQ associative forwarding — N-entry scan result from shadow_rq
+  input  logic              RQ_HitA,
+  input  logic [P.XLEN-1:0] RQ_ValA,
+  input  logic              RQ_HitB,
+  input  logic [P.XLEN-1:0] RQ_ValB,
+  // Outputs needed by shadow OQ push (main E-stage post-mux values)
+  output logic [P.XLEN-1:0] SrcAE_out,
+  output logic [P.XLEN-1:0] SrcBE_out,
+  output logic [P.XLEN-1:0] ImmExtE_out,
+  // Output needed by shadow RQ push (main W-stage result)
+  output logic [P.XLEN-1:0] ResultW_out,
   // ECC error aggregation outputs
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
   output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
   output logic              RegEccDedErrPipeW        // DED from W-stage pipeline reg only (IFResultM→IFResultW)
-  // Hazard Unit signals
 );
 
   // Fetch stage signals
@@ -110,7 +120,6 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] IFResultW;                      // Result from either IEU or single-cycle FPU op writing an integer register
   logic [P.XLEN-1:0] IFCvtResultW;                   // Result from IEU, signle-cycle FPU op, or 2-cycle FCVT float to int
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
-  logic ALUStallE, CMPStallE, ALUUnresolvedE, CMPUnresolvedE;
 
   // ECC error signals from register file read ports
   logic sec_err_rd1, ded_err_rd1;
@@ -125,12 +134,12 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic sec_wdm,  ded_wdm;    // ForwardedSrcBE → WriteDataM
   logic sec_ifrw, ded_ifrw;   // IFResultM → IFResultW
 
-  // Decode stage
+  // Decode stage — regfile write port driven exclusively by shadow pipeline
   regfile #(P.XLEN, P.E_SUPPORTED) regf(
     .clk, .reset,
-    .we3(RegWriteW), .a1(Rs1D), .a2(Rs2D), .a3(RdW),
-    .wd3(ResultW),
-    .DummyW, .DummySelW,
+    .we3(shadow_we3), .a1(Rs1D), .a2(Rs2D), .a3(shadow_a3),
+    .wd3(shadow_wd3),
+    .DummyW(shadow_DummyW), .DummySelW(shadow_DummySel),
     .rd1(R1D), .rd2(R2D),
     .inject_en(ecc_inject_en),
     .sec_err_rd1, .ded_err_rd1,
@@ -143,30 +152,21 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R2D,             R2E,        sec_rd2e,  ded_rd2e);
   flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ecc_inject_en, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
 
-  mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
-  mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
-  // Comparator output controls branches; duplicate it before branch decode.
-  ft_cmp #(.WIDTH(P.XLEN)) ftcmp(
-    .clk, .reset, .flush(FlushE), .valid(InstrValidE),
-    .a(ForwardedSrcAE), .b(ForwardedSrcBE), .sgnd(BranchSignedE), .flags(FlagsE),
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
-    .stall_req(CMPStallE), .unresolved(CMPUnresolvedE), .pe_primary(CMP_PE_p), .pe_shadow(CMP_PE_r));
+  // Standard M/W bypass forwarding mux
+  logic [P.XLEN-1:0] FwdSrcA_mw, FwdSrcB_mw;
+  mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, FwdSrcA_mw);
+  mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, FwdSrcB_mw);
+  // RQ associative forwarding: only fires when standard M/W forwarding has no match.
+  // Standard forwarding (ForwardAE/BE != 00) always takes priority — it reflects the
+  // current W-stage result and is newer than any RQ entry.
+  assign ForwardedSrcAE = (RQ_HitA & (ForwardAE == 2'b00)) ? RQ_ValA : FwdSrcA_mw;
+  assign ForwardedSrcBE = (RQ_HitB & (ForwardBE == 2'b00)) ? RQ_ValB : FwdSrcB_mw;
+  comparator #(P.XLEN) comp(ForwardedSrcAE, ForwardedSrcBE, BranchSignedE, FlagsE);
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
-  // ALU drives both the architectural result and LSU address.
-  ft_alu #(P) ftalu(
-    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .A(SrcAE), .B(SrcBE),
-    .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
-    .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
-    .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
-    .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(ALUStallE),
-    .unresolved(ALUUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r));
+  alu   #(P)       alu(SrcAE, SrcBE, W64E, UW64E, SubArithE, ALUSelectE, BSelectE, ZBBSelectE, Funct3E, Funct7E, Rs2E, BALUControlE, BMUActiveE, CZeroE, ALUResultE, IEUAdrE);
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
-  // Either E-stage checker holds the complete pipeline or reports a fault.
-  assign FTStallE = ALUStallE | CMPStallE;
-  assign FTUnresolvedE = ALUUnresolvedE | CMPUnresolvedE;
 
   // Memory stage pipeline registers (ECC-protected)
   flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, ecc_inject_en, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
@@ -205,5 +205,12 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
                        | ded_srcam | ded_ieumm | ded_wdm | ded_ifrw;
   // Separate W-stage pipeline reg DED: instruction in W when this fires, so MEPC should use PCW
   assign RegEccDedErrPipeW = ded_ifrw;
+
+  // Shadow OQ push: export post-mux E-stage values for shadow_oq in wallypipelinedcore
+  assign SrcAE_out   = SrcAE;
+  assign SrcBE_out   = SrcBE;
+  assign ImmExtE_out = ImmExtE;
+  // RQ push: export main W-stage result before regfile (shadow reads from RQ)
+  assign ResultW_out = ResultW;
 
 endmodule
