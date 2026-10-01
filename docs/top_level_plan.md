@@ -247,10 +247,12 @@ The ~83 MHz ceiling this section derives is below the 100 MHz `options.json`
 already targets, so the negedge scheme as it stands does not meet the
 configured clock. That document compares three fixes (negedge as-is, an early
 clock-tree tap for the inbound flops, and a separate link clock domain with
-async FIFOs), and reframes what training is for: phase calibration is
-deletable, the LFSR is not a better fault detector than a directed memory
-test but is the only check that can run before the core can fetch, and the
-core-reset gate is the part that must survive.
+async FIFOs). It also retires training: phase calibration is deletable, and
+the LFSR is unnecessary because the first fetch is deterministic and `rst_n`
+is an FPGA output, so the gate can live on the FPGA. Controlled lane coverage
+comes from a loopback mode instead -- less silicon than the LFSR and more
+capable, since the FPGA picks the pattern. `hdl/amoeba_link_train.sv` is
+slated for deletion.
 
 **Reset / training sequence**
 

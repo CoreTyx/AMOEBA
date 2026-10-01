@@ -221,7 +221,7 @@ know the die is receiving and distributing a clock before anything else has to
 work — strictly better than §6's "`status` heartbeat is the clock-alive
 indicator", which only moves once the link trains *and* transactions flow.
 
-## 7. What training is actually for
+## 7. What training is actually for — and why it goes away
 
 Three jobs were being run together under one word. Separating them:
 
@@ -236,29 +236,93 @@ reduces what remains to a measurement. The sweeps, the retries, and the
 `RETRY_TA` state added in `6ad99fe` all exist only to serve a *search*, and a
 search is only needed when *ins* is unknown at run time.
 
-**Job B does not need an LFSR, and the LFSR is not there for fault coverage.**
-A directed memory test — write patterns, read back, compare — covers *more*
-than the LFSR does: it exercises the address path, `req`/`wr`/`burst` framing,
+**Job B does not need an LFSR at all.** Two arguments retire it.
+
+*First, a directed memory test covers strictly more.* Write patterns, read
+back, compare: that exercises the address path, `req`/`wr`/`burst` framing,
 real `dir` turnarounds, the FPGA's decode and memory, and the abort path. The
-LFSR sends no address and tests no turnaround. Walking-ones is also a *better*
-stuck-at pattern than pseudo-random. On coverage, the directed test wins.
+LFSR sends no address and tests no turnaround. Walking-ones is also a better
+stuck-at pattern than pseudo-random. On coverage the directed test wins.
 
-The LFSR's one irreducible advantage is the **bootstrap problem**: a directed
-memory test must be *issued by something*. The FPGA cannot issue it — the link
-is ASIC-master-only. The core could, but `config_asic.vh` has `BOOTROM`,
-`UNCORE_RAM`, `DTIM` and `IROM` all at 0, so every instruction the core
-executes arrives over the link being tested. **The core cannot test the link
-because it needs the link to fetch the test.**
+*Second -- and this is what kills the LFSR -- there is no bootstrap problem.*
+The earlier version of this section argued that a directed test must be issued
+by something, that the FPGA cannot issue it (the link is ASIC-master-only) and
+the core cannot either (`BOOTROM`/`UNCORE_RAM`/`DTIM`/`IROM` are all 0 in
+`config_asic.vh`, so every instruction arrives over the link under test). That
+reasoning is wrong, because it ignores two facts:
 
-So the LFSR is not a better detector. It is the cheapest check the hardware can
-perform *with no core, no code and no memory*: 16 flops and 4 XORs, both sides
-generating the sequence from a seed with nothing stored. Its secondary virtues
-are that a failure is unambiguous (no memory, decode or address map involved)
-and that a long run gives crude per-lane bit-error evidence.
+1. **The first transaction is fully deterministic.** `RESET_VECTOR =
+   0x8000_0000`, so it is an `INCR8` read with header words `0x8000`, `0x0000`,
+   `wr=0`, `burst=1`, `dir=1`. The FPGA knows all of it in advance, and knows
+   exactly what it loaded at that address.
+2. **`rst_n` is under FPGA control.** The FPGA does not need the link proven
+   before releasing the core. It releases it, judges the first header, and
+   re-asserts `rst_n` within microseconds if the header is wrong -- killing a
+   trap storm before it starts.
 
-**Implication worth stating plainly:** if the die had even 1 KiB of boot ROM,
-a directed self-test would be strictly better and the LFSR would be redundant.
-It is a consequence of having no on-chip memory, not a virtue of its own.
+So the gate survives but moves to the FPGA, where there is a CPU, Python and an
+ILA, rather than sitting behind a one-bit `status` pin. The inbound direction is
+covered indirectly too: a stuck lane FPGA -> ASIC corrupts an instruction, the
+next fetch address is not the expected one, and the FPGA sees that one
+transaction later.
+
+### 7.1 What the deterministic check does not cover
+
+Two real gaps remain, and they are what the replacement must address:
+
+- **Lane coverage of the first header is dreadful.** `0x8000` then `0x0000` is
+  one lane high and thirty-one bit-positions low. A stuck-at-0 on `io[15]` is
+  caught; a stuck-at-0 on `io[3]`, or a short between `io[2]` and `io[3]`, is
+  not. Returned instruction data exercises more lanes but uncontrolled -- you
+  are relying on the boot image's entropy. This is an excellent *smoke test*,
+  not a *wiring verification*.
+- **Nothing on the ASIC checks the inbound direction bit-exactly.** The core
+  checks it by executing it, which detects corruption only when it yields an
+  illegal instruction or a wrong branch, and reports via a trap storm. The
+  FPGA's inference from the next fetch address handles gross faults and is weak
+  for a marginal lane erroring ~1 in 10^4 bits -- that one boots and crashes
+  mysteriously later.
+
+### 7.2 Loopback, not an LFSR
+
+The minimal ASIC-side structure for controlled bidirectional lane coverage is
+**loopback**: a test mode in which the ASIC registers its inbound `io` word and
+drives it back out on the next cycle, alternating `dir` per cycle.
+
+| | LFSR training | Loopback |
+|---|---|---|
+| ASIC logic | FSM, 16-bit LFSR, comparator, 3 counters, retry path (~107 lines) | 16 flops, a mux, one control bit |
+| Pattern | fixed at tapeout | **anything, chosen at run time by the FPGA** |
+| Checking | on the ASIC, reported as 1 bit | fabric/BRAM/Python, fully visible |
+| Both directions | yes | yes -- a word that returns correct proves both paths |
+| Walking-ones, adjacent-lane shorts, custom BER runs | no | yes |
+
+Strictly less silicon and strictly more capable, because pattern generation and
+checking move to the side with memory, a CPU and the debug tooling. Re-runnable
+at any time with any pattern, with no new bitstream.
+
+Entry costs no pad: the link is idle while `rst_n` is asserted, so a pin's
+meaning can be stolen in that window -- e.g. `rvalid` high at reset release
+means "enter loopback". Unambiguous, because nothing else uses `rvalid` then.
+
+### 7.3 Consequence
+
+`hdl/amoeba_link_train.sv` is deleted, along with the LFSR, the retry path and
+the `RETRY_TA` state added in `6ad99fe`. The bus-contention hazard that state
+exists to prevent goes with it: no path reclaims the bus mid-transfer any more.
+`amoeba_chip.sv` loses the training/link-master ownership mux and the
+`trained`-gated `reset_ext`, and `status` becomes a pure link-activity and
+fault indicator.
+
+The replacement, in four parts:
+
+1. **FPGA-side first-header check** -- the deterministic smoke test, plus
+   plausibility checks (in range, line-aligned) on every subsequent address.
+2. **`rst_n` as the abort** -- the gate, on the FPGA.
+3. **Loopback mode** -- controlled lane verification and BER, run before reset
+   release on first silicon and whenever wanted afterwards.
+4. **A software memory test over the link** once boot works -- the broadest
+   coverage of all, and the only one that exercises the abort path.
 
 **Job C is the one that must survive.** `RESET_VECTOR = 0x8000_0000 =
 EXT_MEM_BASE`, so the first instruction fetch crosses the link. A broken link
@@ -269,37 +333,32 @@ and looks like a core fault. The gate is also basic bring-up hygiene: after
 power-on the chip should sit quietly with `status` reporting link state, before
 anyone commits to running software.
 
-## 8. The training setup, concretely
+## 8. Bring-up sequence, concretely
 
-Post-`clk_out`, with Option 2 or 3. Runs **once**, automatically, after every
-`rst_n` release, before the core leaves reset. It does not re-run during
-normal operation (`amoeba_link_train` reaches `DONE` and stays).
+With `clk_out` and §7.3's replacement for training. Nothing on the ASIC
+sequences this any more -- the FPGA drives it, which is why each step names an
+owner.
 
 | # | Who | What | Duration @50 MHz |
 |---|---|---|---|
 | 0 | FPGA | Drives `clk` (and `link_clk`), holds `rst_n` low, loads memory | — |
 | 1 | FPGA | `clk_out` is already toggling — the clock tree runs regardless of reset. Measure its phase against the reference, derive *ins*, set capture shift (90° off `clk_out`) and launch ODELAY. **No ASIC cooperation; chip still in reset.** | µs |
 | 2 | FPGA | Release `rst_n` | — |
-| 3 | ASIC | `amoeba_rst_sync` releases; `amoeba_link_train` enters `TX`. Drives `TRAIN_LEN` LFSR words, `dir=1`, `req=0`. `status` low | 82 µs @4096 |
-| 4 | FPGA | Checks every word against its own LFSR. A mismatch is a wiring fault — report it, do not sweep | — |
-| 5 | ASIC | `dir=0`, releases the bus, waits `TA` | 40 ns |
-| 6 | FPGA | Echoes the same `TRAIN_LEN` words with `rvalid=1` | 82 µs |
-| 7 | ASIC | Compares each word. All match → `TA2` → `DONE` | — |
-| 8 | ASIC | `trained=1`: `reset_ext` deasserts, core leaves reset 2 cycles later, link master takes the bus, first fetch issues at `0x8000_0000` | — |
-| — | ASIC | Any mismatch or echo timeout → `FAIL`. Core held in reset, `status` reports it. **One attempt, no retries** | — |
+| 3 | FPGA | *First silicon / board change only:* assert loopback (`rvalid` high at reset release), drive walking-ones, adjacent-lane and pseudo-random patterns, check what returns. Proves every lane in both directions. Skipped on a known-good board | as long as wanted |
+| 4 | FPGA | Release `rst_n` | — |
+| 5 | ASIC | `amoeba_rst_sync` releases, core leaves reset, first fetch issues: `req` 2 cycles, `io = 0x8000, 0x0000`, `wr=0`, `burst=1` | ~10 cycles |
+| 6 | FPGA | **Check that header against the known expected value.** Wrong → re-assert `rst_n`, report which lanes disagreed | 1 transaction |
+| 7 | FPGA | Return the loaded line. Then check every subsequent address for plausibility (in range, line-aligned); a corrupted inbound lane shows up as an unexpected next fetch | continuous |
+| 8 | core | Boot proceeds. Early software runs a memory test over the link for the broadest coverage | — |
 
-Total ~165 µs. Both directions are verified: step 4 proves ASIC → FPGA, step 6
-proves FPGA → ASIC — which is the *only* test of that direction, so the echo
-cannot be dropped even though its sweep role is gone.
+The ASIC contributes no sequencing at all, which is the point: every judgement
+happens on the side with observability. Loopback (step 3) covers the lane
+verification the LFSR used to claim; the header check (step 6) covers the gate.
 
-Why no retries once *ins* is known before step 3: a failure then means
-something structural — an open lane, a shorted pair, a mis-wired FMC, an
-unbonded pad. Nine more attempts fix none of those. This also makes `RETRY_TA`
-unreachable, which retires the bus-contention hazard structurally rather than
-handling it with a wait state.
-
-Optional: make training re-runnable from a bench trigger for debugging. Not
-needed for boot.
+Why no retries anywhere: once *ins* is known from `clk_out` before step 4, a
+failure means something structural — an open lane, a shorted pair, a mis-wired
+FMC, an unbonded pad. Retrying fixes none of them, and the FPGA is a far better
+place to decide what to do next than a 9-deep counter on the die.
 
 ## 9. Recommendation
 
@@ -319,9 +378,11 @@ penalty, and it only pays above ~1.2× link:core. If the plan is a link clock
 managing with a proven FIFO. If the link stays at the core clock, it is
 significant new tapeout risk buying nothing.
 
-**Keep the LFSR and the gate in all three** — not for phase, and not because
-the LFSR detects more than a directed test would, but because nothing else can
-run before the core does.
+**Drop the LFSR and `amoeba_link_train` in all three; keep the gate but move it
+to the FPGA.** See §7. The first fetch is deterministic and `rst_n` is an FPGA
+output, so the gate needs no on-die self-test. Controlled lane coverage comes
+from a loopback mode that is less silicon and more capable than the LFSR, and
+the broadest coverage comes from a software memory test after boot.
 
 ## 10. Open items
 
@@ -332,5 +393,7 @@ run before the core does.
 | Link:core ratio target | **The decision that picks Option 3** |
 | `TA` in absolute time, not cycles | Required before any link-clock increase |
 | Async FIFO choice and licence | Evaluate PULP / OpenTitan; confirm maturity and reset scheme |
+| Loopback entry encoding | `rvalid` high at reset release is free; confirm no conflict with the FPGA slave's own reset behaviour |
+| First-header checker in fabric | ~20 LUTs; decide whether it also re-asserts `rst_n` automatically or only flags |
 | Non-integer clock-ratio regression | Required if Option 3 proceeds |
 | Pad budget | Option 2: 42. +`clk_out`: 43. +Option 3: 44. Spare 8, power/ground still a placeholder |
