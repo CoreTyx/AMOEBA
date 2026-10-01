@@ -242,6 +242,16 @@ If the link ever needs to run faster than ~50 MHz, add one `clk_out` pad
 (core clock forwarded from the same pad ring as `io`) and lock the FPGA's
 capture and launch to it; then *ins* drops out of both paths.
 
+**Superseded in part — see `docs/impl_plan_link_clocking.md` (2026-10-01).**
+The ~83 MHz ceiling this section derives is below the 100 MHz `options.json`
+already targets, so the negedge scheme as it stands does not meet the
+configured clock. That document compares three fixes (negedge as-is, an early
+clock-tree tap for the inbound flops, and a separate link clock domain with
+async FIFOs), and reframes what training is for: phase calibration is
+deletable, the LFSR is not a better fault detector than a directed memory
+test but is the only check that can run before the core can fetch, and the
+core-reset gate is the part that must survive.
+
 **Reset / training sequence**
 
 1. FPGA loads kernel + initramfs; `rst_n` low.
