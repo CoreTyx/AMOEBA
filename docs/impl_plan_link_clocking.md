@@ -1,6 +1,27 @@
 # Link Clocking: Three Architectures
 
-**Rev 0.1 · 2026-10-01 · Decision document, no RTL committed**
+**Rev 0.2 · 2026-10-02 · DECIDED: Option 3 + `clk_out`, training removed, loopback deferred**
+
+> **Decisions (2026-10-02).**
+> 1. **Option 3** — separate link clock domain with async FIFOs (§4). Chosen on
+>    *robustness*, not frequency: the packaging is non-standard, so pad and
+>    package parasitics — and the uncertainty on them — are uncharacterised.
+>    Shrinking the capture domain buys margin that does not depend on knowing
+>    those numbers. The frequency decoupling in §4.4 is then a second dividend
+>    rather than the justification.
+> 2. **`clk_out`** (§6), so the FPGA consumes outbound data source-synchronously
+>    and constrains its input delay as a *skew* against `clk_out` (ASIC pad +
+>    package + board + FPGA pin) rather than an absolute flight time. It
+>    forwards the **link** clock — see §6.1.
+> 3. **Training removed** (§7). `hdl/amoeba_link_train.sv` is deleted; the gate
+>    moves to the FPGA.
+> 4. **Loopback deferred** (§7.2), pending the DFT/debug discussion: `io[15:0]`
+>    currently doubles as the scan/debug port, so loopback's mode encoding and
+>    the scan-pin proposal in §11 are coupled and must be settled together.
+>
+> Option 2 (§3) is therefore superseded for the inbound path — Option 3
+> subsumes it — but the early-tap *concept* still governs where `clk_out` is
+> tapped from.
 
 The off-chip link (`docs/top_level_plan.md` §4, `hdl/amoeba_link_master.sv`)
 currently shares one clock with the core and compensates for on-die clock-tree
@@ -174,8 +195,10 @@ frequency decision are one decision, not two.
 
 ### 4.5 Costs
 
-- **+1 pad** for the link clock (42 → 43 used; 9 spare). Power/ground remains
-  spare-pad priority #1 per §3.
+- **+1 pad** for the link clock, **+1 for `clk_out`** → 44 used, 8 spare.
+  Power/ground remains spare-pad priority #1 per §3, and the 11 currently
+  budgeted are a placeholder that non-standard packaging makes *more* likely to
+  grow, not less.
 - **Area:** §5 budgets the current bridge at ~400–500 GE. Two line-deep FIFOs
   plus pointers and synchronisers is ~5–10 k GE (less with a RAM macro) — a
   10–20× increase in a block whose stated philosophy was minimality.
@@ -215,6 +238,20 @@ the data so it cancels. It also makes *ins* directly measurable: the FPGA reads
 the phase of `clk_out` against its own reference and gets the number, instead
 of searching for it. That is worth having independently of this decision, and
 it replaces the phase-sweep half of training (§7) with arithmetic.
+
+### 6.1 With Option 3, `clk_out` forwards the LINK clock
+
+This matters and is easy to get wrong. The `io` output registers live in the
+**link** domain, so `clk_out` must forward the **link** clock. Forwarding the
+core clock would have the FPGA capturing link-domain data with a core-domain
+clock, which cancels nothing.
+
+Option 3 also makes `clk_out`'s matching constraint nearly free. In Options 1
+and 2 it had to be tapped from a leaf of the big core tree, balanced against the
+`io` output flops across the die. In Option 3 the `clk_out` driver and the `io`
+output flops are both inside the small link domain, a few hundred microns apart
+— the skew between them is small by placement rather than by constraint. The
+two decisions reinforce each other.
 
 It is also the best bring-up instrument on the chip. Scope `clk_out` and you
 know the die is receiving and distributing a clock before anything else has to
@@ -360,31 +397,34 @@ failure means something structural — an open lane, a shorted pair, a mis-wired
 FMC, an unbonded pad. Retrying fixes none of them, and the FPGA is a far better
 place to decide what to do next than a 9-deep counter on the die.
 
-## 9. Recommendation
+## 9. Decision and sequencing
 
-**Take Option 2 now, unconditionally.** It is required to meet the 100 MHz
-`options.json` already targets, and it costs a CTS constraint and a floorplan
-note — no pads, no RTL, no CDC, no new risk. It also retires the negedge stage
-as load-bearing, which is worth having on its own.
+Decided as recorded at the head of this document. What remains is the order of
+work, because two of the four decisions interact.
 
-**Take `clk_out` (+1 pad).** It fixes the outbound direction in every option,
-makes *ins* measurable instead of searchable, deletes the phase-sweep half of
-training, and is the best first-silicon diagnostic available.
+**The gate has no home yet.** Deleting `amoeba_link_train.sv` removes the
+on-die gate, and its replacement — the first-header checker and `rst_n` abort
+policy — lives on the FPGA. But `fpga/pynq/` instantiates
+`amoeba_soc_wrapper`, not `amoeba_top`, so there is currently no FPGA build
+that speaks the link at all. **Delete training as part of the Option 3 change,
+not before it**, so the design is never simultaneously without an on-die gate
+and without an off-die one.
 
-**Decide Option 3 on the frequency target, not on the timing hazard.** The
-hazard has a free fix (Option 2). Option 3's case is the 2.10× serialization
-penalty, and it only pays above ~1.2× link:core. If the plan is a link clock
-≥ 1.5× the core, it is the right architecture and the CDC risk is worth
-managing with a proven FIFO. If the link stays at the core clock, it is
-significant new tapeout risk buying nothing.
+Suggested order:
 
-**Drop the LFSR and `amoeba_link_train` in all three; keep the gate but move it
-to the FPGA.** See §7. The first fetch is deterministic and `rst_n` is an FPGA
-output, so the gate needs no on-die self-test. Controlled lane coverage comes
-from a loopback mode that is less silicon and more capable than the LFSR, and
-the broadest coverage comes from a software memory test after boot.
+1. **Choose and vendor the async FIFO** (§4.2). Blocks everything else in
+   Option 3 and is a licence/submodule decision for the team, not a
+   unilateral one.
+2. **`clk_out` + `link_clk` pad-table update** (§3 of `top_level_plan.md`),
+   together with the §11 scan-pin question since both change the pad table.
+3. **Split the bridge** across the crossing: core-side AHB front end,
+   link-side serializer/deserializer, two FIFOs, abort rule re-derived (§4.5).
+4. **Delete `amoeba_link_train.sv`** and its wiring in the same change, plus
+   the FPGA-side header checker.
+5. **Loopback**, once the DFT/debug-pin question is settled.
 
-## 10. Open items
+Steps 3 and 4 are the ones that touch RTL verified by the regression, so they
+want the non-integer-ratio sweep (§4.2) standing up first.## 10. Open items
 
 | Item | Needs |
 |---|---|
@@ -396,4 +436,84 @@ the broadest coverage comes from a software memory test after boot.
 | Loopback entry encoding | `rvalid` high at reset release is free; confirm no conflict with the FPGA slave's own reset behaviour |
 | First-header checker in fabric | ~20 LUTs; decide whether it also re-asserts `rst_n` automatically or only flags |
 | Non-integer clock-ratio regression | Required if Option 3 proceeds |
-| Pad budget | Option 2: 42. +`clk_out`: 43. +Option 3: 44. Spare 8, power/ground still a placeholder |
+| Pad budget | 44 used (42 + `link_clk` + `clk_out`), 8 spare. Power/ground placeholder more likely to grow with non-standard packaging |
+| **SDC carries no package term** | `constraints.sdc` input/output delays are PLACEHOLDER and do not name pad or package delay at all. With packaging as the stated risk, the budget must break out package explicitly |
+| **DFT/debug vs `io[15:0]`** | `io` currently doubles as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |
+| Who runs CTS, and can they express a skew group | Reduced by Option 3 but not eliminated — `clk_out`'s tap still needs it |
+
+## 11. Coupled open question: `io[15:0]` as the scan/debug port
+
+**Status: for the team. Decides §7.2 (loopback) and the pad table together.**
+
+`amoeba_chip.sv:96-108` muxes scan onto the link bus today — `io[7:0]` become
+`scan_in[7:0]` and `io[15:8]` become `scan_out[7:0]` when `test_mode=1`:
+
+```systemverilog
+  assign io_o  = test_mode ? {scan_q, 8'h00} : fn_io_o;
+  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{fn_oe}};
+```
+
+That was chosen because `top_level_plan.md` §3 could not spare pads for a
+dedicated scan port. Two consequences now collide with other decisions:
+
+1. **It gives the bidirectional pads two behaviours and two direction-control
+   sources.** The `dir` flop is on the scan chain, so during shift it toggles
+   pseudo-randomly; anything deriving `io_oe` from `dir` in test mode would flip
+   all sixteen pad directions every shift cycle. The test-mode override is
+   therefore load-bearing, not cosmetic — and the behavioural pad in
+   `amoeba_top.sv:49` uses `io_oe[0]` for the whole bus, so with
+   `io_oe = {8'hFF, 8'h00}` it tristates everything and **scan-out is
+   unobservable even in simulation.**
+2. **Loopback (§7.2) wants the same pins in a different mode.** Its entry
+   encoding and the DFT mode encoding must not collide.
+
+### 11.1 Proposal — move scan off the bus at zero pad cost
+
+Scan does not need *new* pins, it needs pins that are functionally idle in test
+mode. Four exist:
+
+| Pad | Functional | `test_mode=1` |
+|---|---|---|
+| `uart_rx` (in) | UART receive | `scan_in[0]` |
+| `irq[0]` (in) | PLIC source | `scan_in[1]` |
+| `status` (out) | link LED | `scan_out[0]` |
+| `uart_tx` (out) | UART transmit | `scan_out[1]` |
+| `io[15:0]` | link | **functional only** |
+
+Net pad change: **zero.** This gives the two chains §9 of `top_level_plan.md`
+asks for; `ready`/`rvalid` and `dir`/`req`/`wr`/`burst` offer five more
+`scan_in` and six more `scan_out` if DFT wants them, still at zero pads.
+
+With scan off the bus, the ownership logic becomes:
+
+```systemverilog
+  // Test mode: the ASIC claims the bus and parks it at zero.  The override is
+  // not cosmetic -- dir is a scanned flop, so without it the sixteen
+  // bidirectional pads would flip direction every shift cycle.  Parking at zero
+  // rather than releasing avoids sixteen floating pad inputs and any reliance
+  // on the pad library's pull-downs.
+  assign dir   = test_mode ? 1'b1           : lk_dir;
+  assign io_o  = test_mode ? '0             : lk_io_o;
+  assign io_oe = test_mode ? {LINK_W{1'b1}} : {LINK_W{lk_oe}};
+```
+
+`dir=1` in test mode means a protocol-obeying slave stays off the bus, which
+matters if `test_mode` is ever asserted with the FPGA attached. The cost is that
+`io` cannot be used for parametric pad tests while `test_mode` is high; a flow
+with boundary scan would revisit that.
+
+Also fix `scan_en` qualification — `amoeba_chip.sv:99` clocks the chain on
+`scan_en` alone, so a stray assertion during normal operation clocks it. It
+should be `test_mode & scan_en`.
+
+### 11.2 If the team keeps scan on `io[15:0]`
+
+Then two things are required rather than optional:
+
+- **Per-bit output enables in the behavioural pad.** `amoeba_top.sv:49` must
+  become a genvar loop over `io_oe[i]`, or test mode remains unsimulatable.
+- **A mode encoding that accommodates loopback**, or loopback is dropped
+  permanently rather than deferred — §7.1's gaps (lane coverage of a
+  deterministic header is one lane high and thirty-one bit-positions low; no
+  bit-exact inbound check) then stand unaddressed, and the software memory test
+  after boot becomes the only wiring verification.
