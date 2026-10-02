@@ -134,6 +134,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     // aborted counts transfers the bridge finished after the core had left:
     // the abort path is only proven if this is nonzero on a branchy workload.
     longint unsigned n_txn = 0, n_rd = 0, n_wr = 0, n_abort = 0, n_pending = 0;
+    longint unsigned n_burst = 0, n_single = 0;   // is the 3-word header path ever taken?
     logic aborted_q, pending_q;
     always @(posedge clk) begin
         aborted_q <= top.chip.link.aborted;
@@ -141,6 +142,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
         if (top.chip.link.txn_done) begin
             n_txn <= n_txn + 1;
             if (top.chip.link.wr_r) n_wr <= n_wr + 1; else n_rd <= n_rd + 1;
+            if (top.chip.link.burst_r) n_burst <= n_burst + 1; else n_single <= n_single + 1;
         end
         if (top.chip.link.aborted & ~aborted_q) n_abort   <= n_abort + 1;
         if (top.chip.link.pending & ~pending_q) n_pending <= n_pending + 1;
@@ -153,8 +155,8 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
         if ((top.chip.link.st == LM_RD_DATA) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat & top.chip.link.burst_r)
             n_idle_midburst <= n_idle_midburst + 1;
     end
-    final $display("[LINK] transactions=%0d reads=%0d writes=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
-                   n_txn, n_rd, n_wr, n_abort, n_pending, n_flush_rd, n_idle_midburst);
+    final $display("[LINK] transactions=%0d reads=%0d writes=%0d burst=%0d single=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
+                   n_txn, n_rd, n_wr, n_burst, n_single, n_abort, n_pending, n_flush_rd, n_idle_midburst);
 
     // ---- +LINK_FORCE_ABORT=n: abort every n-th I-fetch burst mid-flight ----
     // In this core a flush cause that exists when the fetch stalls resolves in
@@ -182,6 +184,39 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
                     force_cnt <= 0;
                 end else force_cnt <= force_cnt + 1;
             end
+        end
+    end
+
+    // ---- +LINK_PINS=n: cycle-by-cycle pin trace of the first n cycles after
+    //      the first accept.  This is the ground truth for
+    //      docs/top_level_plan.md s4's timing tables -- hand-deriving the
+    //      cycle alignment from the FSM is how off-by-ones get into specs.
+    int  pins_n = 0;
+    int  pins_cnt = 0;
+    bit  pins_armed = 0;
+    bit  pins_wr_only = 0;        // +LINK_PINS_WR arms on the first WRITE accept
+    initial void'($value$plusargs("LINK_PINS=%d", pins_n));
+    initial if ($test$plusargs("LINK_PINS_WR")) pins_wr_only = 1;
+    always @(posedge clk) if (pins_n > 0) begin
+        if (!pins_armed && top.chip.link.accept
+                        && (!pins_wr_only || top.chip.link.HWRITE)) begin
+            pins_armed <= 1'b1;
+            $display("# cyc st           io    dir req wr bst rdy rvld  drv  pnd hro hr/hsel note");
+        end
+        if (pins_armed && pins_cnt < pins_n) begin
+            pins_cnt <= pins_cnt + 1;
+            $display("P %4d %-10s %4h   %b   %b   %b  %b   %b   %b   %-5s %b %b %b%b %s",
+                pins_cnt,
+                top.chip.link.st.name(),
+                io,
+                dir, req, wr, burst, ready, rvalid,
+                (top.chip.io_oe[0] && !model.io_oe) ? "ASIC" :
+                (!top.chip.io_oe[0] && model.io_oe) ? "fpga" :
+                (!top.chip.io_oe[0] && !model.io_oe) ? "--"   : "BOTH!",
+                top.chip.link.pending, top.chip.link.HREADYOUT,
+                top.chip.link.HREADY, top.chip.link.HSEL,
+                top.chip.link.accept ? "accept" :
+                top.chip.link.HREADYOUT && top.chip.link.st != amoeba_link_pkg::LM_IDLE ? "HREADY pulse" : "");
         end
     end
 
