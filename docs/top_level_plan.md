@@ -85,7 +85,7 @@ wait states are inherited for free (there is no error path; `HRESPEXT` is tied l
 | # | Pad | Dir | Function |
 |---|---|---|---|
 | 1–11 | VDD core ×3, VDD IO ×3, GND ×5 | — | BRINGUP.md §2 placeholder until PDK IO cells and current draw are known. Spare pads below go here first. |
-| 12 | `clk` | in | Single clock from FPGA. Core and link. No PLL. |
+| 12 | `core_clk` | in | Single clock from FPGA. Core and link. No PLL. Renamed from `clk` 2026-10-02: once the link has its own domain (`docs/impl_plan_link_clocking.md`) an unqualified `clk` is the thing that gets miswired. |
 | 13 | `rst_n` | in | Async assert, sync release. FPGA holds low until memory loaded. |
 | 14–29 | `io[15:0]` | bidir | Address words when `req=1`, else data words. Scan I/O in test mode. |
 | 30 | `dir` | out | **1 = ASIC drives `io`, 0 = ASIC has released it.** Single source of truth for bus ownership; TA idle cycles guaranteed on every change. |

@@ -66,7 +66,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     logic dir, req, wr, burst, ready, rvalid, status, uart_tx;
 
     amoeba_top #(.TRAIN_LEN(TRAIN_LEN)) top (
-        .clk, .rst_n(~rst), .io, .dir, .req, .wr, .burst, .ready, .rvalid,
+        .core_clk(clk), .rst_n(~rst), .io, .dir, .req, .wr, .burst, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 
     amoeba_link_model #(.TRAIN_LEN(TRAIN_LEN)) model (

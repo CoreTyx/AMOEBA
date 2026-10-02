@@ -11,7 +11,7 @@
 # clock was safe (docs/impl_plan_onchip_periph.md tier 3).
 
 set period_ns [expr [getenv ECE411_CLOCK_PERIOD_PS] / 1000.0]
-create_clock -period $period_ns -name my_clk [get_ports clk]
+create_clock -period $period_ns -name my_clk [get_ports core_clk]
 set_clock_uncertainty 0.15 [get_clocks my_clk]                     ;# PLACEHOLDER: jitter + skew budget
 set_fix_hold [get_clocks my_clk]
 
@@ -21,7 +21,7 @@ set_false_path -from [get_ports {irq[*] uart_rx test_mode scan_en}]
 
 # ---- link ---------------------------------------------------------------
 # FPGA launches on the rising edge; delays are FPGA clock-to-out + board
-# trace (max) and the minimum of the same (min), relative to clk at our pad.
+# trace (max) and the minimum of the same (min), relative to core_clk at our pad.
 set link_in  [get_ports {io[*] ready rvalid}]
 set link_out [get_ports {io[*] dir req wr burst}]
 set_input_delay  -clock my_clk -max 4.0  $link_in                  ;# PLACEHOLDER: Tco_fpga(max) + trace

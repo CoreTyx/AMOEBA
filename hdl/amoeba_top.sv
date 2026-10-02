@@ -3,7 +3,7 @@
 //
 // The ASIC: amoeba_chip plus pads.  DESIGN_TOP for synthesis and lint.
 //
-// Pad list (docs/top_level_plan.md s3): clk, rst_n, io[15:0] bidir, dir, req,
+// Pad list (docs/top_level_plan.md s3): core_clk, rst_n, io[15:0] bidir, dir, req,
 // wr, burst, ready, rvalid, irq[1:0], uart_tx, uart_rx, test_mode, scan_en,
 // status.  Power and ground are the pad library's business.
 //
@@ -16,7 +16,7 @@ module amoeba_top import amoeba_link_pkg::*; #(
   parameter TRAIN_LEN     = TRAIN_LEN_DEFAULT,
   parameter logic PERIPH_ONCHIP = 1'b1
 )(
-  input  wire              clk,
+  input  wire              core_clk,
   input  wire              rst_n,
   inout  wire [LINK_W-1:0] io,
   output wire              dir,
@@ -36,7 +36,7 @@ module amoeba_top import amoeba_link_pkg::*; #(
   logic [LINK_W-1:0] io_o, io_oe, io_i;
 
   amoeba_chip #(.TRAIN_LEN(TRAIN_LEN), .PERIPH_ONCHIP(PERIPH_ONCHIP)) chip(
-    .clk, .rst_n, .io_o, .io_oe, .io_i, .dir, .req, .wr, .burst, .ready, .rvalid,
+    .core_clk, .rst_n, .io_o, .io_oe, .io_i, .dir, .req, .wr, .burst, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .status);
 
 `ifdef AMOEBA_PADLIB

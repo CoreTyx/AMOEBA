@@ -17,7 +17,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   parameter logic PERIPH_ONCHIP = 1'b1,
   parameter HB_BIT        = 15          // status heartbeat: link-transaction counter tap
 )(
-  input  logic              clk,
+  input  logic              core_clk,
   input  logic              rst_n,
   // link
   output logic [LINK_W-1:0] io_o,
@@ -44,7 +44,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
 
   // ---- reset ----------------------------------------------------------------
   logic rst_n_s;
-  amoeba_rst_sync rstsync(.clk, .rst_n_in(rst_n), .rst_n_out(rst_n_s));
+  amoeba_rst_sync rstsync(.clk(core_clk), .rst_n_in(rst_n), .rst_n_out(rst_n_s));
 
   // ---- link training / core-reset gate --------------------------------------
   logic [LINK_W-1:0] tr_io_o, lm_io_o;
@@ -52,7 +52,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic              trained, failed;
 
   amoeba_link_train #(.TRAIN_LEN(TRAIN_LEN)) train(
-    .clk, .rst_n(rst_n_s),
+    .clk(core_clk), .rst_n(rst_n_s),
     .io_o(tr_io_o), .io_oe(tr_io_oe), .io_i, .dir(tr_dir), .rvalid,
     .trained, .failed);
 
@@ -72,12 +72,12 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
 
   assign reset_ext = ~rst_n_s | ~trained;
 
-  synchronizer irq0sync(.clk, .d(irq[0]),  .q(irq_s[0]));
-  synchronizer irq1sync(.clk, .d(irq[1]),  .q(irq_s[1]));
-  synchronizer rxsync  (.clk, .d(uart_rx), .q(uart_rx_s));
+  synchronizer irq0sync(.clk(core_clk), .d(irq[0]),  .q(irq_s[0]));
+  synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
+  synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
 
   amoeba_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
-    .clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0),
+    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0),
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
     .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HREADY,
     .UARTSin(uart_rx_s), .UARTSout(uart_tx),
@@ -96,7 +96,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   // Scan: io[7:0] are scan_in, io[15:8] are scan_out.  The one-flop chain
   // stubs below reserve the structure; DFT insertion replaces them.
   logic [7:0] scan_q;
-  always_ff @(posedge clk) if (scan_en) scan_q <= io_i[7:0];
+  always_ff @(posedge core_clk) if (scan_en) scan_q <= io_i[7:0];
 
   logic [LINK_W-1:0] fn_io_o;
   logic              fn_oe;
@@ -109,7 +109,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
 
   // ---- status ---------------------------------------------------------------
   logic [HB_BIT:0] hb;
-  always_ff @(posedge clk or negedge rst_n_s)
+  always_ff @(posedge core_clk or negedge rst_n_s)
     if (!rst_n_s) hb <= '0; else if (txn_done) hb <= hb + 1'b1;
   assign status = trained & hb[HB_BIT];
 

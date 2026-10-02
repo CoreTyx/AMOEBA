@@ -13,9 +13,9 @@ module amoeba_soc import cvw::*; #(
   parameter cvw_t P,
   parameter logic   PERIPH_ONCHIP = 1'b1
 )(
-  input  logic                  clk,
+  input  logic                  core_clk,
   input  logic                  reset_ext,        // external asynchronous reset
-  output logic                  reset,            // reset synchronised to clk
+  output logic                  reset,            // reset synchronised to core_clk
   input  logic                  ExternalStall,
   // external AHB-Lite port
   input  logic [P.AHBW-1:0]     HRDATAEXT,
@@ -46,9 +46,9 @@ module amoeba_soc import cvw::*; #(
   logic                       MExtInt, SExtInt;
 
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
-  synchronizer resetsync(.clk, .d(reset_ext), .q(reset));
+  synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
 
-  wallypipelinedcore #(P) core(.clk, .reset,
+  wallypipelinedcore #(P) core(.clk(core_clk), .reset,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall);
