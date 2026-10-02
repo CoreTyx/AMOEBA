@@ -5,10 +5,17 @@
  * It prints nothing itself; all output comes from the RTL trace, which keeps the
  * log free of UART polling loops.
  *
- * Build the simulator with +define+ECE411_RETIRE_TRACE to get one line per retired
- * instruction, real and dummy interleaved in retirement order.  Add
- * +define+ECE411_DUMMY_TRACE as well to also see captures and injections at the
- * point they happen in Decode.
+ * Captures and injections ([dummy]/[dmask], logged at the point they happen in
+ * Decode) are on by default -- ECE411_DUMMY_TRACE is defined by sim/Makefile and
+ * only prints while insertion is enabled.  For one line per *retired*
+ * instruction instead, real and dummy interleaved in retirement order, build
+ * with RETIRE_TRACE=1:
+ *
+ *   make -C sim run_verilator_top_tb_no_spike RETIRE_TRACE=1 \
+ *        PROG=../testcode/isa_level_testing/tc_insert_trace.c
+ *
+ * That one is opt-in because it prints every retirement whether or not insertion
+ * is enabled, and it builds into its own directory.
  *
  * Insertion is enabled only inside main, so the startup code retires clean first
  * and the dummies start appearing partway down the trace.
@@ -25,7 +32,7 @@
 
 #include <stdint.h>
 
-#define RAND_INSTR_INSERT_FREQ 0x7c0
+#define RAND_INSTR_INSERT_FREQ 0x7c1
 #define TOHOST (*(volatile uint64_t *)0x80800000UL)
 
 static inline void set_insert_freq(uint64_t n) {

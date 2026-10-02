@@ -1,6 +1,6 @@
 /* Random dummy-instruction insertion (AMOEBA).
  *
- * rand_instr_insert_freq (CSR 0x7c0) holds the divider period N: a strobe every N
+ * rand_instr_insert_freq (CSR 0x7c1) holds the divider period N: a strobe every N
  * cycles, injected with probability 1/2, so a dummy lands every 2N cycles on average.
  * Writing 0 disables the feature.
  *
@@ -11,8 +11,9 @@
  *   D  mcycle advances MORE with insertion on -- the evidence that dummies were
  *      actually inserted rather than the feature silently doing nothing
  *
- * Build the simulator with +define+ECE411_DUMMY_TRACE for a log line per capture
- * and per insertion.
+ * ECE411_DUMMY_TRACE is defined by default in sim/Makefile, so a run logs a line
+ * per capture, per insertion, and per masked operand read.  Pass DUMMY_TRACE=0 to
+ * suppress it.
  *
  * Deliberately self-contained: no test_utils.h, no string literals, no globals.
  * Every address here is a literal integer constant rather than a linker symbol, so
