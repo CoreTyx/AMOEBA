@@ -11,11 +11,17 @@
 //
 //   req=1, cycle 0   io = HADDR[31:16]   the full address; no bits are stolen
 //   req=1, cycle 1   io = HADDR[15:0]
-//   req=1, cycle 2   io = attributes     SINGLES ONLY (burst=0): the byte
-//                    strobes and HSIZE (attr_pack below).  A burst is always
-//                    eight aligned 64-bit beats with every lane live, so it
-//                    needs neither and skips this word.
 //   otherwise        io = data word      64-bit beat as 4 words, LSW first
+//
+// INCR8 ONLY.  Every transfer is eight aligned 64-bit beats with all eight
+// lanes live, so the link carries no size and no byte strobes.  Measured:
+// across the whole ISA regression, 4032 transactions, zero singles -- with
+// PERIPH_ONCHIP=1 the only off-chip region is EXT_MEM, which the PMA marks
+// cacheable, so every access is a line fill or a writeback.  A single transfer
+// used to cost a third header word carrying {HWSTRB, HSIZE}; that path existed
+// for a configuration nothing exercises, and untested logic does not go to
+// silicon.  `burst` is consequently always 1 -- the pin is kept so a future
+// single path needs no pad, not because it carries information today.
 //   wr, burst        held from req until the last word
 //   ready            see "the ready guard band" below
 //   rvalid           read data word on io this cycle; gaps allowed
@@ -39,7 +45,6 @@ package amoeba_link_pkg;
 
   localparam int LINK_W          = 16;      // io[LINK_W-1:0]
   localparam int ADDR_WORDS      = 2;       // 32-bit address on a 16-bit bus
-  localparam int ATTR_WORDS      = 1;       // one more on a single
   localparam int WORDS_PER_BEAT  = 64 / LINK_W;              // 4
   localparam int BEATS_PER_LINE  = 8;                        // INCR8, AHBW=64
   localparam int WORDS_PER_LINE  = WORDS_PER_BEAT * BEATS_PER_LINE;  // 32
@@ -63,17 +68,16 @@ package amoeba_link_pkg;
   // state silently repointed every one of them at its neighbour, and the abort
   // injection stopped firing with no error anywhere.
   typedef enum logic [3:0] {
-    LM_IDLE, LM_START, LM_HDR0, LM_HDR1, LM_HDR2,
+    LM_IDLE, LM_START, LM_HDR0, LM_HDR1,
     LM_WDATA, LM_RD_TA, LM_RD_DATA, LM_RD_TA2
   } link_st_t;
 
   typedef enum logic [3:0] {
-    LS_TRAIN, LS_ECHO_TA, LS_ECHO, LS_IDLE, LS_HDR1, LS_HDR2,
+    LS_TRAIN, LS_ECHO_TA, LS_ECHO, LS_IDLE, LS_HDR1,
     LS_WDATA, LS_RD_TA, LS_RD
   } link_slave_st_t;
 
-  // AHB HBURST encodings the bridge cares about.
-  localparam logic [2:0] HBURST_SINGLE = 3'b000;
+  // The only HBURST encoding the link can express.
   localparam logic [2:0] HBURST_INCR8  = 3'b101;
 
   // 16-bit Fibonacci LFSR, taps 16,14,13,11 (x^16 + x^14 + x^13 + x^11 + 1).
@@ -81,32 +85,6 @@ package amoeba_link_pkg;
     logic fb;
     fb = s[15] ^ s[13] ^ s[12] ^ s[10];
     return {s[14:0], fb};
-  endfunction
-
-  // The attribute word of a single transfer.  Strobes in the high byte so a
-  // scope trace reads them off io[15:8]; HSIZE in the low three bits.
-  function automatic logic [15:0] attr_pack(input logic [7:0] hwstrb, input logic [2:0] hsize);
-    return {hwstrb, 5'b0, hsize};
-  endfunction
-
-  function automatic logic [7:0] attr_strb(input logic [15:0] w);
-    return w[15:8];
-  endfunction
-
-  function automatic logic [2:0] attr_size(input logic [15:0] w);
-    return w[2:0];
-  endfunction
-
-  // Byte strobes for a single beat from size + offset, as ahb_to_memitf does.
-  // A slave uses this for reads (HWSTRB is a write signal) and the transmitted
-  // strobes for writes.
-  function automatic logic [7:0] size_to_mask(input logic [2:0] hsize, input logic [2:0] offset);
-    case (hsize)
-      3'b000:  return 8'h01 << offset;
-      3'b001:  return 8'h03 << {offset[2:1], 1'b0};
-      3'b010:  return 8'h0F << {offset[2], 2'b0};
-      default: return 8'hFF;
-    endcase
   endfunction
 
 endpackage

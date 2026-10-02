@@ -11,13 +11,7 @@
 //   LM_START     wait for ready (see "ready" in pkg/amoeba_link_pkg.sv: it is a
 //             hint with a guard band, not a handshake)
 //   LM_HDR0/1    req=1, io = A[31:16], A[15:0] -- the whole address, no bits stolen
-//   LM_HDR2      req=1, io = {HWSTRB, HSIZE}, SINGLES ONLY.  A burst is eight
-//             aligned 64-bit beats with every lane live, so it skips this word
-//             and pays no cycle for it -- and line fills are ~100 % of the
-//             traffic.  Sending the real HWSTRB instead of having the slave
-//             rebuild it from size + offset removes an unchecked equivalence
-//             between this bridge and Wally's swbytemask.
-//   LM_WDATA     32 (burst) or 4 words of HWDATA, LSW first, back to back.
+//   LM_WDATA     32 words of HWDATA, LSW first, back to back.
 //             HREADYEXT pulses on the 4th word of each beat so the core
 //             presents the next beat exactly when it is needed.
 //   LM_RD_TA     dir=0, TA idle cycles
@@ -46,6 +40,12 @@
 // clock-to-out is shorter than this die's clock-tree insertion, at no cost
 // in latency.
 //
+// INCR8 ONLY (pkg/amoeba_link_pkg.sv): the wire carries no size and no byte
+// strobes, because with PERIPH_ONCHIP=1 every off-chip access is a cacheable
+// line fill or writeback -- measured zero singles in 4032 transactions across
+// the ISA regression.  HSIZE and HBURST survive as ports only so the assertions
+// at the bottom can catch a transfer this link cannot express.
+//
 // Reset: from HRESETn, the core's synchronised reset -- wallypipelinedcore
 // parks nothing on its AHB while held in reset (fpga/pynq/rtl/amoeba_pynq_top.sv),
 // and `run` additionally gates every accept on link training having passed.
@@ -65,7 +65,6 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   input  logic [2:0]         HSIZE,
   input  logic [2:0]         HBURST,
   input  logic [63:0]        HWDATA,
-  input  logic [7:0]         HWSTRB,       // lane strobes, forwarded on singles
   input  logic               HREADY,       // the uncore's mux: address phase completes on this
   output logic [63:0]        HRDATA,
   output logic               HREADYOUT,
@@ -86,6 +85,11 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
 );
 
   localparam logic [1:0] HTRANS_IDLE = 2'b00, HTRANS_NONSEQ = 2'b10, HTRANS_SEQ = 2'b11;
+
+  // HSIZE and HBURST feed assertions only now that INCR8 is implicit on the
+  // wire.  Sink them so the synthesis flow does not warn about unread inputs.
+  logic unused_attrs;
+  assign unused_attrs = ^{HSIZE, HBURST};
   localparam TA_W = (TA < 2) ? 1 : $clog2(TA + 1);
 
   // ---- inbound capture: negedge, then posedge ------------------------------
@@ -98,9 +102,7 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   link_st_t st;                        // states in pkg/amoeba_link_pkg.sv
 
   logic [31:0] addr_r, nxt_addr;
-  logic [2:0]  size_r, nxt_size;
-  logic [7:0]  strb_r, nxt_strb;
-  logic        wr_r, burst_r, nxt_wr, nxt_burst, pending;
+  logic        wr_r, nxt_wr, pending;
   logic [4:0]  wcnt;                 // word within the transaction
   logic [47:0] beat_r;               // first three words of the beat being assembled
   logic [TA_W-1:0] ta_cnt;
@@ -111,14 +113,10 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   logic        last_word, beat_end, last_beat, beat_ok, accept;
   always_ff @(posedge HCLK) htrans_q <= HTRANS;
 
-  // The attribute word as it goes on the bus.  A wire, not a select on the
-  // function call: Vivado does not parse `f(x)[31:16]`.
-  logic [15:0] attr;
-  assign attr      = attr_pack(strb_r, size_r);
   assign sub       = wcnt[1:0];
   assign beat_end  = (sub == 2'd3);
-  assign last_word = burst_r ? (wcnt == 5'd31) : (wcnt == 5'd3);
-  assign last_beat = burst_r ? (wcnt[4:2] == 3'd7) : 1'b1;
+  assign last_word = (wcnt == 5'd31);          // INCR8: 8 beats x 4 words
+  assign last_beat = (wcnt[4:2] == 3'd7);
   // Complete this AHB beat only if the master is still here for it.  HTRANS
   // is looked at through a register: Wally's HTRANS mux depends on HREADY,
   // so a combinational look would loop.  The master holds SEQ for the whole
@@ -149,8 +147,8 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   always_ff @(posedge HCLK) begin
     if (!HRESETn) begin
       st <= LM_IDLE; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1; req <= 1'b0; wr <= 1'b0; burst <= 1'b0;
-      addr_r <= '0; size_r <= '0; strb_r <= '0; wr_r <= 1'b0; burst_r <= 1'b0;
-      nxt_addr <= '0; nxt_size <= '0; nxt_strb <= '0; nxt_wr <= 1'b0; nxt_burst <= 1'b0; pending <= 1'b0;
+      addr_r <= '0; wr_r <= 1'b0;
+      nxt_addr <= '0; nxt_wr <= 1'b0; pending <= 1'b0;
       wcnt <= '0; beat_r <= '0; ta_cnt <= '0; aborted <= 1'b0;
     end else begin
       case (st)
@@ -158,8 +156,7 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
           req <= 1'b0; wr <= 1'b0; burst <= 1'b0; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
           aborted <= 1'b0;
           if (pending) begin
-            addr_r <= nxt_addr; size_r <= nxt_size; strb_r <= nxt_strb;
-            wr_r <= nxt_wr; burst_r <= nxt_burst;
+            addr_r <= nxt_addr; wr_r <= nxt_wr;
             pending <= 1'b0;
             st <= LM_START;
           end
@@ -167,7 +164,7 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
 
         LM_START: begin
           if (ready_s) begin
-            io_o <= addr_r[31:16]; req <= 1'b1; wr <= wr_r; burst <= burst_r;
+            io_o <= addr_r[31:16]; req <= 1'b1; wr <= wr_r; burst <= 1'b1;
             st <= LM_HDR0;
           end
         end
@@ -177,30 +174,10 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
           st <= LM_HDR1;
         end
 
-        // A burst ends its header here; a single drives one more word.  The
-        // payload start is spelled out in both arms rather than factored into
-        // a task: a task with non-blocking assignments inside an always_ff is
-        // legal but trips the lint rules this repo runs.
         LM_HDR1: begin
-          if (burst_r) begin
-            req <= 1'b0;
-            if (wr_r) begin
-              io_o <= HWDATA[15:0]; wcnt <= 5'd1; // word 0 is on the pins next cycle
-              st <= LM_WDATA;
-            end else begin
-              io_o <= '0; io_oe <= 1'b0; dir <= 1'b0; ta_cnt <= '0; wcnt <= '0;
-              st <= LM_RD_TA;
-            end
-          end else begin
-            io_o <= attr;                          // req stays high over it
-            st <= LM_HDR2;
-          end
-        end
-
-        LM_HDR2: begin
           req <= 1'b0;
           if (wr_r) begin
-            io_o <= HWDATA[15:0]; wcnt <= 5'd1;
+            io_o <= HWDATA[15:0]; wcnt <= 5'd1;   // word 0 is on the pins next cycle
             st <= LM_WDATA;
           end else begin
             io_o <= '0; io_oe <= 1'b0; dir <= 1'b0; ta_cnt <= '0; wcnt <= '0;
@@ -251,12 +228,10 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
       // Accept, wherever the address phase completes (see above).
       if (accept) begin
         if (st == LM_IDLE & ~pending) begin
-          addr_r <= HADDR[31:0]; size_r <= HSIZE; strb_r <= HWSTRB; wr_r <= HWRITE;
-          burst_r <= (HBURST == HBURST_INCR8);
+          addr_r <= HADDR[31:0]; wr_r <= HWRITE;
           st <= LM_START;
         end else begin
-          nxt_addr <= HADDR[31:0]; nxt_size <= HSIZE; nxt_strb <= HWSTRB; nxt_wr <= HWRITE;
-          nxt_burst <= (HBURST == HBURST_INCR8); pending <= 1'b1;
+          nxt_addr <= HADDR[31:0]; nxt_wr <= HWRITE; pending <= 1'b1;
         end
       end
     end
@@ -271,10 +246,13 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   // The address is sent whole, so the only remaining constraint is 32 bits.
   always_ff @(posedge HCLK) if (HRESETn & accept) begin
     assert (HADDR[HADDR_W-1:32] == '0) else $fatal(1, "link: HADDR above 4 GB: %h", HADDR);
-    assert (HBURST == HBURST_SINGLE | HBURST == HBURST_INCR8) else $fatal(1, "link: HBURST %b unsupported", HBURST);
-    // A burst carries no attribute word, so it had better be a full beat.
-    assert (HBURST != HBURST_INCR8 | (HSIZE == 3'b011 & HADDR[2:0] == 3'b000))
-      else $fatal(1, "link: INCR8 with HSIZE %b at %h -- no attribute word to describe it", HSIZE, HADDR);
+    // INCR8 only: the wire carries no size and no strobes, so anything else is
+    // a transfer this link cannot express.  With PERIPH_ONCHIP=1 nothing can
+    // generate one; these fire the day that stops being true.
+    assert (HBURST == HBURST_INCR8)
+      else $fatal(1, "link: HBURST %b -- the link is INCR8 only", HBURST);
+    assert (HSIZE == 3'b011 & HADDR[2:0] == 3'b000)
+      else $fatal(1, "link: INCR8 with HSIZE %b at %h is not a full aligned beat", HSIZE, HADDR);
   end
   // Writes are never aborted (D-cache Flush is tied low); if that changes,
   // junk goes to memory and this is the first thing to fire.

@@ -134,7 +134,6 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     // aborted counts transfers the bridge finished after the core had left:
     // the abort path is only proven if this is nonzero on a branchy workload.
     longint unsigned n_txn = 0, n_rd = 0, n_wr = 0, n_abort = 0, n_pending = 0;
-    longint unsigned n_burst = 0, n_single = 0;   // is the 3-word header path ever taken?
     logic aborted_q, pending_q;
     always @(posedge clk) begin
         aborted_q <= top.chip.link.aborted;
@@ -142,7 +141,6 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
         if (top.chip.link.txn_done) begin
             n_txn <= n_txn + 1;
             if (top.chip.link.wr_r) n_wr <= n_wr + 1; else n_rd <= n_rd + 1;
-            if (top.chip.link.burst_r) n_burst <= n_burst + 1; else n_single <= n_single + 1;
         end
         if (top.chip.link.aborted & ~aborted_q) n_abort   <= n_abort + 1;
         if (top.chip.link.pending & ~pending_q) n_pending <= n_pending + 1;
@@ -152,11 +150,11 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     longint unsigned n_flush_rd = 0, n_idle_midburst = 0;
     always @(posedge clk) begin
         if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.link.st inside {LM_RD_TA, LM_RD_DATA, LM_RD_TA2})) n_flush_rd <= n_flush_rd + 1;
-        if ((top.chip.link.st == LM_RD_DATA) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat & top.chip.link.burst_r)
+        if ((top.chip.link.st == LM_RD_DATA) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat)
             n_idle_midburst <= n_idle_midburst + 1;
     end
-    final $display("[LINK] transactions=%0d reads=%0d writes=%0d burst=%0d single=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
-                   n_txn, n_rd, n_wr, n_burst, n_single, n_abort, n_pending, n_flush_rd, n_idle_midburst);
+    final $display("[LINK] transactions=%0d reads=%0d writes=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
+                   n_txn, n_rd, n_wr, n_abort, n_pending, n_flush_rd, n_idle_midburst);
 
     // ---- +LINK_FORCE_ABORT=n: abort every n-th I-fetch burst mid-flight ----
     // In this core a flush cause that exists when the fetch stalls resolves in
@@ -177,7 +175,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
                 release top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush;
                 forcing <= 1'b0;
             end else if (top.chip.link.st == LM_RD_DATA && top.chip.link.wcnt == 5 && top.chip.link.rvalid_s &&
-                         top.chip.link.burst_r && top.chip.soc.core.ebu.ebu.IFUSelect) begin
+                         top.chip.soc.core.ebu.ebu.IFUSelect) begin
                 if (force_cnt + 1 >= force_abort_n) begin
                     force top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush = 1'b1;
                     forcing   <= 1'b1;

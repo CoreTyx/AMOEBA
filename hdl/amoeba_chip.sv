@@ -87,7 +87,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic txn_done;
   amoeba_link_master #(.HADDR_W(P.PA_BITS)) link(
     .HCLK, .HRESETn, .run(trained),
-    .HSEL(HSELEXT), .HADDR, .HTRANS, .HWRITE, .HSIZE, .HBURST, .HWDATA, .HWSTRB, .HREADY,
+    .HSEL(HSELEXT), .HADDR, .HTRANS, .HWRITE, .HSIZE, .HBURST, .HWDATA, .HREADY,
     .HRDATA(HRDATAEXT), .HREADYOUT(HREADYEXT), .HRESP(HRESPEXT),
     .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .burst, .ready, .rvalid,
     .txn_done);

@@ -8,14 +8,11 @@
 //
 //   training   after reset, a falling dir with no req pending means "echo":
 //              wait TA, drive TRAIN_LEN LFSR words with rvalid=1, release
-//   header     req=1 for two cycles (burst) or three (single): A[31:16],
-//              A[15:0], then {HWSTRB, HSIZE} on a single.  wr/burst come off
-//              the pins.  A burst is eight aligned full beats and carries no
-//              attribute word
-//   write      4 (single) or 32 (burst) words, contiguous, LSW first; beats
-//              are queued and written to mem_itf in order.  Byte strobes for a
-//              single come off the wire; for a read they are rebuilt from the
-//              transmitted size, as ahb_to_memitf did
+//   header     req=1 for two cycles: A[31:16] then A[15:0].  wr comes off the
+//              pins; burst is always 1 -- the link is INCR8 only, so there is
+//              no size and no byte strobes on the wire
+//   write      32 words, contiguous, LSW first; beats are queued and written
+//              to mem_itf in order with every lane live
 //   read       beats are fetched from mem_itf in order into a line buffer
 //              and streamed as they arrive, after dir has fallen and TA has
 //              elapsed; the bus is released after the last word
@@ -104,9 +101,7 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
   link_slave_st_t lst;                 // states in pkg/amoeba_link_pkg.sv
   logic [15:0] hdr_hi;
   logic [31:0] taddr;
-  logic [2:0]  tsize;
-  logic [7:0]  tstrb;
-  logic        tburst, twr;
+  logic        twr;
   logic [5:0]  wcnt;                      // words in this transaction
   logic [47:0] wacc;
   logic [15:0] lfsr;
@@ -115,27 +110,21 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
   logic        dir_q;
   logic        read_pending;              // header seen, bus not yet returned
   logic [3:0]  rd_queue_idx;              // beats queued so far (0..8)
-  logic [2:0]  rd_beats;                  // beats in this read - 1
   logic        gap_ready, gap_rvalid;
   logic [3:0]  echo_try;                  // which echo attempt this is
 
   wire [63:0] taddr_al  = 64'({taddr[31:3], 3'b000});
   wire [63:0] beat_addr = taddr_al + 64'(wcnt[5:2]) * 8;
-  // Writes use the strobes the ASIC sent; reads rebuild them from the size,
-  // because HWSTRB is a write signal.  A burst is a full beat either way.
-  wire [7:0]  beat_mask = tburst ? 8'hFF :
-                          twr    ? tstrb : size_to_mask(tsize, taddr[2:0]);
-  wire        last_word = tburst ? (wcnt == 6'd31) : (wcnt == 6'd3);
-  wire        rd_more   = (rd_queue_idx <= 4'(rd_beats));
+  wire        last_word = (wcnt == 6'd31);   // INCR8 only: 8 beats x 4 words
+  wire        rd_more   = (rd_queue_idx <= 4'd7);
 
   always_ff @(posedge clk) begin
     if (rst) begin
       lst <= LS_TRAIN; io_o <= '0; io_oe <= 1'b0; ready <= 1'b0; rvalid <= 1'b0;
       q_tail <= '0; rd_start <= 1'b0;
       wcnt <= '0; wacc <= '0; lfsr <= TRAIN_SEED; tcnt <= '0; ta_cnt <= '0; dir_q <= 1'b1;
-      read_pending <= 1'b0; hdr_hi <= '0; taddr <= '0; tsize <= '0; tstrb <= '0;
-      tburst <= 1'b0; twr <= 1'b0;
-      rd_queue_idx <= 4'd8; rd_beats <= '0; gap_ready <= 1'b0; gap_rvalid <= 1'b0;
+      read_pending <= 1'b0; hdr_hi <= '0; taddr <= '0; twr <= 1'b0;
+      rd_queue_idx <= 4'd8; gap_ready <= 1'b0; gap_rvalid <= 1'b0;
       echo_try <= '0;
     end else begin
       dir_q <= dir;
@@ -153,9 +142,9 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
       // Read beats are queued one per cycle from the header on, whenever the
       // queue has room; writes and reads never push in the same cycle because
       // the ASIC cannot be sending write words during a read.
-      if (rd_more & ~q_full & lst != LS_WDATA & lst != LS_HDR1 & lst != LS_HDR2) begin
+      if (rd_more & ~q_full & lst != LS_WDATA & lst != LS_HDR1) begin
         q[q_tail[4:0]] <= '{is_wr: 1'b0, addr: taddr_al + 64'(rd_queue_idx) * 8,
-                            data: '0, mask: beat_mask};
+                            data: '0, mask: 8'hFF};
         q_tail <= q_tail + 1'b1;
         rd_queue_idx <= rd_queue_idx + 1'b1;
       end
@@ -200,22 +189,10 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
         end
         LS_HDR1: begin
           taddr  <= {hdr_hi, io_i};                // the whole address, unpacked
-          twr    <= wr; tburst <= burst; wcnt <= '0; wacc <= '0;
-          if (burst) begin
-            tsize <= 3'b011; tstrb <= 8'hFF;       // eight aligned full beats
-            if (wr) lst <= LS_WDATA;
-            else begin
-              rd_queue_idx <= '0; rd_beats <= 3'd7; rd_start <= 1'b1;
-              read_pending <= 1'b1; ta_cnt <= '0; lst <= LS_RD_TA;
-            end
-          end else lst <= LS_HDR2;                  // one attribute word follows
-        end
-
-        LS_HDR2: begin
-          tsize <= attr_size(io_i); tstrb <= attr_strb(io_i);
-          if (twr) lst <= LS_WDATA;
+          twr    <= wr; wcnt <= '0; wacc <= '0;
+          if (wr) lst <= LS_WDATA;
           else begin
-            rd_queue_idx <= '0; rd_beats <= 3'd0; rd_start <= 1'b1;
+            rd_queue_idx <= '0; rd_start <= 1'b1;
             read_pending <= 1'b1; ta_cnt <= '0; lst <= LS_RD_TA;
           end
         end
@@ -228,7 +205,7 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
             2'd2: wacc[47:32] <= io_i;
             default: begin
               if (q_full) $fatal(1, "link model: op queue overflow -- the ready guard band was violated");
-              q[q_tail[4:0]] <= '{is_wr: 1'b1, addr: beat_addr, data: {io_i, wacc}, mask: beat_mask};
+              q[q_tail[4:0]] <= '{is_wr: 1'b1, addr: beat_addr, data: {io_i, wacc}, mask: 8'hFF};
               q_tail <= q_tail + 1'b1;
             end
           endcase
@@ -286,14 +263,13 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
   // ---- protocol checks -------------------------------------------------------
   always_ff @(posedge clk) if (!rst) begin
     if (req & ~dir)                         $error("link model: req while dir=0");
-    if (req & lst != LS_IDLE & lst != LS_HDR1 & lst != LS_HDR2) $error("link model: header while busy (state %0d)", lst);
+    if (req & lst != LS_IDLE & lst != LS_HDR1) $error("link model: header while busy (state %0d)", lst);
     if (io_oe & dir)                        $error("link model: driving io while dir=1");
     if (mem_wmask != '0 & mem_addr[2:0] != 3'b000) $error("link model: unaligned write to memory: %h", mem_addr);
-    // Wally derives HWSTRB from HSIZE and the offset (swbytemask).  The link
-    // now sends the strobes rather than trusting that, so this is the check
-    // that a future CVW bump did not quietly change the relationship.
-    if (lst == LS_WDATA & ~tburst & tstrb != size_to_mask(tsize, taddr[2:0]))
-      $error("link model: HWSTRB %b != size_to_mask(%b, %b)", tstrb, tsize, taddr[2:0]);
+    // The link is INCR8 only.  A single arriving here means the ASIC issued a
+    // transfer the protocol cannot describe -- the mirror of the HBURST
+    // assertion in amoeba_link_master.
+    if (lst == LS_HDR1 & ~burst) $error("link model: single transfer -- the link is INCR8 only");
   end
 
 endmodule
