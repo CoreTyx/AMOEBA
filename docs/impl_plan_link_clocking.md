@@ -3,7 +3,8 @@
 **Rev 0.2 · 2026-10-02 · DECIDED: Option 3 + `clk_out`, training removed, loopback deferred**
 
 > **Decisions (2026-10-02).**
-> 1. **Option 3** — separate link clock domain with async FIFOs (§4). Chosen on
+> 1. **Option 3** — separate link clock domain with async FIFOs (§4), using
+>    OpenTitan `prim_fifo_async` (§4.2). Chosen on
 >    *robustness*, not frequency: the packaging is non-standard, so pad and
 >    package parasitics — and the uncertainty on them — are uncharacterised.
 >    Shrinking the capture domain buys margin that does not depend on knowing
@@ -147,28 +148,69 @@ and which a 1:1-ratio simulation will never expose.
   exactly what `wr_r` does today, delivered across the boundary.
 - Depth: one line each way (32 × 16 b = 512 b) plus slack.
 
-### 4.2 Use a proven FIFO
+### 4.2 FIFO: OpenTitan `prim_fifo_async` (DECIDED 2026-10-02)
 
-Do not write the Gray-pointer logic. Silicon-proven, permissively licensed
-options worth evaluating (**verify current licence and maturity before
-adopting — listed from general knowledge, not from inspection**):
+Chosen over PULP `common_cells`/`cdc_fifo_gray` and the Cummings SNUG reference
+on the grounds that it is already proven through a tapeout, carries formal CDC
+properties, and is Apache 2.0. Do not write Gray-pointer logic by hand.
 
-| Source | Notes |
-|---|---|
-| PULP `common_cells` — `cdc_fifo_gray` | Silicon-proven across many PULP tapeouts; ships CDC assertions |
-| OpenTitan — `prim_fifo_async` | Heavily verified, formal CDC properties included |
-| Cummings' SNUG reference FIFO | The canonical design; a paper, not a maintained repo |
+**Confirm the following against the version actually vendored** — the shape is
+OpenTitan's standard `prim` convention, but port names and parameter
+constraints must be read off the source, not assumed:
 
-Integration points that bite regardless of which you pick:
+- Parameters `Width` and `Depth`; **`Depth` must be a power of two** for the
+  Gray-coded pointers.
+- Independent clock and reset per side (`clk_wr_i`/`rst_wr_ni`,
+  `clk_rd_i`/`rst_rd_ni`), valid/ready on both sides, and occupancy outputs
+  (`wdepth_o`/`rdepth_o`) — the occupancy output is load-bearing here, see
+  below.
+- Crossings use `prim_flop_2sync`, which brings its own SDC expectations.
 
-1. **Reset.** Both domains must be reset consistently; async-FIFO reset is a
-   classic bug source. Decide whether reset is asserted asynchronously to both
-   and released synchronously in each.
+#### Depth, and why the outbound FIFO must hold a whole transaction
+
+`top_level_plan.md` §4 states the invariant: *"There is no mid-transaction
+handshake in either direction, so the ASIC never stalls once started."* The
+FPGA has no way to absorb an ASIC underrun — there is no pin for it and adding
+one would be a protocol change.
+
+Therefore **the link side must not begin a transaction until the entire thing is
+buffered.** For a burst write that is 1 descriptor + 2 address + 32 data = **35
+words**, so `Depth = 64` outbound. The start condition is not "descriptor
+present" but "descriptor present **and** `rdepth_o >= word_count`", which is why
+the occupancy output matters rather than just `rvalid_o`.
+
+Inbound, a burst read delivers 32 words back to back with no backpressure
+available, so the FIFO must hold a full line: `Depth = 32` is the arithmetic
+minimum and is sufficient only because transactions are strictly one at a time
+and the core drains before the next starts. `Depth = 64` costs little and
+removes the dependency on that argument.
+
+| FIFO | Direction | Width | Depth | Worst case |
+|---|---|---|---|---|
+| outbound | core → link | 16 | 64 | burst write: 1 + 2 + 32 = 35 |
+| inbound | link → core | 16 | 64 (32 minimum) | burst read: 32 |
+
+Consequence for writes: the core-side front end pulls all eight beats into the
+FIFO before the link side transmits, so a burst write pays its fill latency up
+front. Writebacks are not latency-critical, and burst *reads* push only 3 words
+outbound, so the hot path is unaffected.
+
+#### Integration points that bite
+
+1. **Reset.** Each side needs its own reset, asserted asynchronously but
+   released **synchronously in its own domain**. One `rst_n` pad still
+   suffices — two `amoeba_rst_sync` instances, one per clock. A single reset
+   released asynchronously to both sides can leave the two pointers mutually
+   inconsistent, which is the classic failure of this structure.
 2. **SDC.** Pointer synchronisers need `set_false_path` or
-   `set_max_delay -datapath_only`, and DC must not optimise across them.
+   `set_max_delay -datapath_only`, and DC must not optimise across them. Use
+   the constraints OpenTitan ships rather than writing them.
 3. **Verification.** The regression must sweep **non-integer** clock ratios.
-   A 1:1 or 2:1 simulation hides the crossing bugs that 1:1.37 exposes
-   immediately.
+   1:1 and 2:1 hide the crossing bugs that 1:1.37 exposes immediately.
+4. **DFT.** Two clock domains means two scan clocks or one shared slow scan
+   clock, plus a decision on the FIFO storage array.
+5. Do not reimplement full/empty. That is the part that is subtly wrong when
+   hand-written, and the reason for picking a proven module.
 
 ### 4.3 Where the link clock comes from
 
@@ -432,7 +474,7 @@ want the non-integer-ratio sweep (§4.2) standing up first.## 10. Open items
 | Core Fmax at the target library | Measure — it bounds Options 1 and 2, and sets the useful *R* for Option 3 |
 | Link:core ratio target | **The decision that picks Option 3** |
 | `TA` in absolute time, not cycles | Required before any link-clock increase |
-| Async FIFO choice and licence | Evaluate PULP / OpenTitan; confirm maturity and reset scheme |
+| ~~Async FIFO choice~~ | **Decided: OpenTitan `prim_fifo_async`.** Remaining: vendor it, confirm port names and the power-of-two depth constraint against the actual source |
 | Loopback entry encoding | `rvalid` high at reset release is free; confirm no conflict with the FPGA slave's own reset behaviour |
 | First-header checker in fabric | ~20 LUTs; decide whether it also re-asserts `rst_n` automatically or only flags |
 | Non-integer clock-ratio regression | Required if Option 3 proceeds |
