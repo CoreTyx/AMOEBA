@@ -11,10 +11,15 @@ COMM_HVL  := $(shell find $(CURDIR)/../hvl/common                -name '*.sv' -o
 VCS_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/vcs       -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VER_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/verilator -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so' -o -name '*.cpp')
 SRAM_SRCS := $(shell find $(CURDIR)/../sram/output -name '*.v')
+# Vendored OpenTitan primitives for the link's clock-domain crossing
+# (third_party/opentitan/README.md).  prim_assert.sv is a macro header, included
+# by prim_fifo_async rather than compiled, so it is an incdir and not a source.
+PRIM_SRCS := $(CURDIR)/../third_party/opentitan/prim_flop_2sync.sv $(CURDIR)/../third_party/opentitan/prim_fifo_async.sv
+PRIM_INC  := +incdir+$(CURDIR)/../third_party/opentitan
 HDRS      := $(shell find $(CURDIR)/../hvl -name '*.svh') $(CURDIR)/../hvl/common/rvfi_reference.json
 DW_IP     := $(shell python3 $(CURDIR)/../bin/get_options.py dw_ip)
-VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
-VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
+VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
+VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
 
 # ── Waveform tracing for the baremetal / ISA / FreeRTOS tiers ─────────────────
 # Off by default.  Verilator's trace hooks cost roughly 50x in wall time -- the
@@ -160,7 +165,7 @@ NO_SPIKE_DIR := $(NO_SPIKE_DIR)$(DUT_TAG)
 
 export VCS_ARCH_OVERRIDE=linux
 CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver
+COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver
 VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=../vcs_warn.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
 VER_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) $(CONFIG_DEF) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
