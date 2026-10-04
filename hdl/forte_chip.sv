@@ -1,9 +1,9 @@
 ///////////////////////////////////////////////////////////////////////////////
-// amoeba_chip.sv
+// forte_chip.sv
 //
 // The die minus its pads: two reset synchronisers, the SoC, the link bridge
 // across a clock-domain crossing, the scan mux.  This is the boundary DFT
-// insertion and gate-level simulation see.  amoeba_top adds the pad cells.
+// insertion and gate-level simulation see.  forte_top adds the pad cells.
 //
 // TWO CLOCK DOMAINS (docs/impl_plan_link_clocking.md s4).  core_clk runs the
 // core and the AHB side of the bridge; link_clk runs the pin side.  The reason
@@ -12,24 +12,32 @@
 // on them are uncharacterised, and a small capture domain next to the pads buys
 // margin that does not depend on knowing those numbers.
 //
-// amoeba_top ties link_clk to the single core_clk pad.  The port exists at THIS
+// forte_top ties link_clk to the single core_clk pad.  The port exists at THIS
 // level so a testbench can drive the two domains at a non-integer ratio: with
 // one clock port, RTL simulation sees zero skew between the domains and the
 // Gray-coded pointer logic in the FIFOs is never exercised at all.
 //
-// Bus ownership: amoeba_link_phy is the only driver.  There is no training FSM
+// Bus ownership: forte_link_phy is the only driver.  There is no training FSM
 // to arbitrate with -- the core leaves reset as soon as rst_n is released, and
-// it is the FPGA that decides when that happens (pkg/amoeba_link_pkg.sv).
+// it is the FPGA that decides when that happens (pkg/forte_link_pkg.sv).
+//
+// THE BURST LENGTH IS DECIDED HERE.  This is the only module that sees both the
+// core config and the link, so it is where DCACHE_LINELENINBITS / AHBW becomes
+// the link's beat count, and it threads that one expression to both halves of
+// the bridge and to the FIFO sizing.  Nothing downstream hardcodes 8 any more:
+// the link was INCR8-only, which was correct at a 512-bit line and became
+// quietly wrong when the line shrank to 128 bits for area.  See "ONE BURST
+// LENGTH PER BUILD" in pkg/forte_link_pkg.sv.
 ///////////////////////////////////////////////////////////////////////////////
 
-`include "amoeba_config_select.vh"
+`include "config.vh"
 
-module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
+module forte_chip import cvw::*; import forte_link_pkg::*; #(
   parameter logic PERIPH_ONCHIP = 1'b1,
   parameter HB_BIT        = 15          // status heartbeat: link-transaction counter tap
 )(
   input  logic              core_clk,
-  input  logic              link_clk,       // tied to the core_clk pad in amoeba_top
+  input  logic              link_clk,       // tied to the core_clk pad in forte_top
   input  logic              rst_n,
   // link
   output logic [LINK_W-1:0] io_o,
@@ -48,11 +56,25 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   // test
   input  logic              test_mode,
   input  logic              scan_en,
+  // ECC inject enable for the register-file ECC path.  wallypipelinedcore gained
+  // this input on Making_HDL_Synthesizable; forte_soc instantiates that module
+  // directly, so leaving it unconnected would drive X into the ECC logic.
+  input  logic              ecc_inject_en,
   // status
   output logic              status
 );
 
   `include "parameter-defs.vh"
+
+  // ---- link geometry, from the core config ----------------------------------
+  // A cache line is moved as LINK_BEATS AHBW-wide beats, which is exactly what
+  // buscachefsm's BeatCountThreshold counts, so this is the burst length the
+  // link sees.  The I-cache and D-cache must agree: the link commits to one
+  // length for every transaction, and there is no field on the wire to say
+  // otherwise.
+  localparam LINK_BEATS  = P.DCACHE_LINELENINBITS / P.AHBW;
+  localparam LINK_FIFO_D = fifo_depth(LINK_BEATS);
+  localparam LINK_FIFO_W = fifo_depth_w(LINK_FIFO_D);
 
   // ---- reset ----------------------------------------------------------------
   // One pad, one synchroniser per domain: asserted asynchronously to both,
@@ -61,8 +83,8 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   // mutually inconsistent, which is the classic failure of that structure
   // (third_party/opentitan/README.md).
   logic rst_n_s, link_rst_n_s;
-  amoeba_rst_sync rstsync    (.clk(core_clk), .rst_n_in(rst_n), .rst_n_out(rst_n_s));
-  amoeba_rst_sync linkrstsync(.clk(link_clk), .rst_n_in(rst_n), .rst_n_out(link_rst_n_s));
+  forte_rst_sync rstsync    (.clk(core_clk), .rst_n_in(rst_n), .rst_n_out(rst_n_s));
+  forte_rst_sync linkrstsync(.clk(link_clk), .rst_n_in(rst_n), .rst_n_out(link_rst_n_s));
 
   logic [LINK_W-1:0] lm_io_o;
   logic              lm_io_oe, lm_dir;
@@ -87,8 +109,8 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
   synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
 
-  amoeba_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
-    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0),
+  forte_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
+    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0), .ecc_inject_en,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
     .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HREADY,
     .UARTSin(uart_rx_s), .UARTSout(uart_tx),
@@ -96,8 +118,8 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
 
   // ---- link bridge, across the crossing -------------------------------------
   // core domain          |  link domain
-  //   amoeba_link_core   |
-  //     cmd + beats  --> | ofifo --> amoeba_link_phy --> pads
+  //   forte_link_core   |
+  //     cmd + beats  --> | ofifo --> forte_link_phy --> pads
   //     read beats   <-- | ififo <--      (assembles beats from 16-bit words)
   //
   // The crossing carries transactions and 64-bit beats, never 16-bit link
@@ -106,38 +128,44 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic [FLIT_W-1:0]   oc_data;
   logic                op_valid, op_ready;     // ofifo -> phy  (read side)
   logic [FLIT_W-1:0]   op_data;
-  logic [FIFO_DW-1:0]  op_depth;               // load-bearing: see the phy
-  logic [FIFO_DW-1:0]  oc_depth_unused;
+  logic [LINK_FIFO_W-1:0] op_depth;            // load-bearing: see the phy
+  logic [LINK_FIFO_W-1:0] oc_depth_unused;
 
   logic                ip_valid, ip_ready;     // phy -> ififo  (write side)
   logic [63:0]         ip_data;
   logic                ic_valid, ic_ready;     // ififo -> core (read side)
   logic [63:0]         ic_data;
-  logic [FIFO_DW-1:0]  ip_depth_unused, ic_depth_unused;
+  logic [LINK_FIFO_W-1:0] ip_depth_unused, ic_depth_unused;
 
-  amoeba_link_core #(.HADDR_W(P.PA_BITS)) linkcore(
+  // The phy takes one fixed occupancy width (DEPTH_W) whatever the FIFO's own
+  // DepthW is, so the padding happens once, here, instead of the phy having to
+  // know how deep the FIFO it is reading happens to be.
+  logic [DEPTH_W-1:0]  op_depth_w;
+  assign op_depth_w = DEPTH_W'(op_depth);
+
+  forte_link_core #(.HADDR_W(P.PA_BITS), .BEATS(LINK_BEATS)) linkcore(
     .HCLK, .HRESETn,
     .HSEL(HSELEXT), .HADDR, .HTRANS, .HWRITE, .HSIZE, .HBURST, .HWDATA, .HREADY,
     .HRDATA(HRDATAEXT), .HREADYOUT(HREADYEXT), .HRESP(HRESPEXT),
     .ocmd_valid(oc_valid), .ocmd_ready(oc_ready), .ocmd_data(oc_data),
     .ibeat_valid(ic_valid), .ibeat_ready(ic_ready), .ibeat_data(ic_data));
 
-  prim_fifo_async #(.Width(FLIT_W), .Depth(FIFO_D)) ofifo(
+  prim_fifo_async #(.Width(FLIT_W), .Depth(LINK_FIFO_D)) ofifo(
     .clk_wr_i(core_clk), .rst_wr_ni(rst_n_s),
     .wvalid_i(oc_valid), .wready_o(oc_ready), .wdata_i(oc_data), .wdepth_o(oc_depth_unused),
     .clk_rd_i(link_clk), .rst_rd_ni(link_rst_n_s),
     .rvalid_o(op_valid), .rready_i(op_ready), .rdata_o(op_data), .rdepth_o(op_depth));
 
-  prim_fifo_async #(.Width(64), .Depth(FIFO_D)) ififo(
+  prim_fifo_async #(.Width(64), .Depth(LINK_FIFO_D)) ififo(
     .clk_wr_i(link_clk), .rst_wr_ni(link_rst_n_s),
     .wvalid_i(ip_valid), .wready_o(ip_ready), .wdata_i(ip_data), .wdepth_o(ip_depth_unused),
     .clk_rd_i(core_clk), .rst_rd_ni(rst_n_s),
     .rvalid_o(ic_valid), .rready_i(ic_ready), .rdata_o(ic_data), .rdepth_o(ic_depth_unused));
 
   logic txn_done;
-  amoeba_link_phy phy(
+  forte_link_phy #(.BEATS(LINK_BEATS)) phy(
     .link_clk, .link_rst_n(link_rst_n_s),
-    .ocmd_valid(op_valid), .ocmd_ready(op_ready), .ocmd_data(op_data), .ocmd_depth(op_depth),
+    .ocmd_valid(op_valid), .ocmd_ready(op_ready), .ocmd_data(op_data), .ocmd_depth(op_depth_w),
     .ibeat_valid(ip_valid), .ibeat_ready(ip_ready), .ibeat_data(ip_data),
     .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .burst, .ready, .rvalid,
     .txn_done);
@@ -148,11 +176,27 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   assign unused_depths = ^{oc_depth_unused, ip_depth_unused, ic_depth_unused};
 
   // ---- bus ownership and scan mux -------------------------------------------
-  // Scan: io[7:0] are scan_in, io[15:8] are scan_out.  The one-flop chain
-  // stubs below reserve the structure; DFT insertion replaces them.
+  // EIGHT PARALLEL SCAN CHAINS EACH WAY (docs/impl_plan_link_clocking.md s11):
+  // io[7:0] are scan_in[7:0] and io[15:8] are scan_out[7:0] when test_mode=1.
+  // CSRs go on chain 0, registers from the other subsystems on 1..7; shift time
+  // is set by the LONGEST chain, so DFT insertion should balance them.
+  //
+  // The shift clock is core_clk, not a pin.  Standard scan shifts on the
+  // functional clock, which the tester already drives through its own pad; a
+  // dedicated scan clock would cost two of the sixteen bus pins and leave seven
+  // chains each way instead of eight, for nothing.
+  //
+  // The one-flop chain stubs below reserve the structure; DFT insertion replaces
+  // them.  scan_en is qualified with test_mode: on its own it would shift the
+  // chains under a running core if it ever glitched in functional mode.
   logic [7:0] scan_q;
-  always_ff @(posedge core_clk) if (scan_en) scan_q <= io_i[7:0];
+  always_ff @(posedge core_clk) if (test_mode & scan_en) scan_q <= io_i[7:0];
 
+  // The test-mode override on dir and io_oe is load-bearing, not cosmetic: dir
+  // is itself a scanned flop, so during shift it toggles pseudo-randomly, and
+  // anything deriving the pad directions from it would reverse all sixteen pads
+  // every shift cycle.  In test mode the directions are fixed by the scan
+  // mapping instead -- the low half driven in, the high half driven out.
   assign dir   = lm_dir;
   assign io_o  = test_mode ? {scan_q, 8'h00} : lm_io_o;
   assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
@@ -166,5 +210,15 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   always_ff @(posedge link_clk or negedge link_rst_n_s)
     if (!link_rst_n_s) hb <= '0; else if (txn_done) hb <= hb + 1'b1;
   assign status = hb[HB_BIT];
+
+`ifndef SYNTHESIS
+  // One length for every transaction, so a build whose two caches disagree has
+  // no correct LINK_BEATS at all.  Checked here rather than left to the HBURST
+  // assertion in forte_link_core, which would catch only whichever cache went
+  // second.
+  initial if (P.ICACHE_LINELENINBITS != P.DCACHE_LINELENINBITS)
+    $fatal(1, "forte_chip: ICACHE line %0d b != DCACHE line %0d b; the link carries one burst length for both",
+           P.ICACHE_LINELENINBITS, P.DCACHE_LINELENINBITS);
+`endif
 
 endmodule

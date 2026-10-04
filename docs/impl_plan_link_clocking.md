@@ -14,7 +14,7 @@
 >    and constrains its input delay as a *skew* against `clk_out` (ASIC pad +
 >    package + board + FPGA pin) rather than an absolute flight time. It
 >    forwards the **link** clock — see §6.1.
-> 3. **Training removed** (§7). `hdl/amoeba_link_train.sv` is deleted; the gate
+> 3. **Training removed** (§7). `hdl/forte_link_train.sv` is deleted; the gate
 >    moves to the FPGA.
 > 4. **Loopback deferred** (§7.2), pending the DFT/debug discussion: `io[15:0]`
 >    currently doubles as the scan/debug port, so loopback's mode encoding and
@@ -24,7 +24,7 @@
 > subsumes it — but the early-tap *concept* still governs where `clk_out` is
 > tapped from.
 
-The off-chip link (`docs/top_level_plan.md` §4, `hdl/amoeba_link_master.sv`)
+The off-chip link (`docs/top_level_plan.md` §4, `hdl/forte_link_master.sv`)
 currently shares one clock with the core and compensates for on-die clock-tree
 delay by capturing inbound pins on the falling edge. That costs half a period
 of setup budget and caps the link at ~83 MHz by §6's own arithmetic — **below
@@ -57,7 +57,7 @@ to "how do we stop caring what it turns out to be."
 
 ## 2. Option 1 — single domain, negedge capture (status quo)
 
-`hdl/amoeba_link_master.sv:94-95`. Inbound pins are captured on the falling
+`hdl/forte_link_master.sv:94-95`. Inbound pins are captured on the falling
 edge, then re-registered on the rising edge.
 
 This is the minimal correct structure for a **same-frequency, static-unknown-
@@ -199,7 +199,7 @@ outbound, so the hot path is unaffected.
 
 1. **Reset.** Each side needs its own reset, asserted asynchronously but
    released **synchronously in its own domain**. One `rst_n` pad still
-   suffices — two `amoeba_rst_sync` instances, one per clock. A single reset
+   suffices — two `forte_rst_sync` instances, one per clock. A single reset
    released asynchronously to both sides can leave the two pointers mutually
    inconsistent, which is the classic failure of this structure.
 2. **SDC.** Pointer synchronisers need `set_false_path` or
@@ -253,7 +253,7 @@ frequency decision are one decision, not two.
   transaction completes because it drives the pins. Once a descriptor is
   queued across a crossing, the core-side half must track outstanding
   transactions, and the `beat_ok`/`htrans_q` reasoning in
-  `amoeba_link_master.sv:120-129` does not survive intact. In-order FIFOs give
+  `forte_link_master.sv:120-129` does not survive intact. In-order FIFOs give
   response matching for free, so this is a re-derivation, not a redesign.
 - **CDC verification.** §6's "no CDC on the ASIC" is a deliberate
   simplification. Crossings are where tapeouts die.
@@ -331,7 +331,7 @@ the core cannot either (`BOOTROM`/`UNCORE_RAM`/`DTIM`/`IROM` are all 0 in
 reasoning is wrong, because it ignores two facts:
 
 1. **The first transaction is fully deterministic.** `RESET_VECTOR =
-   0x8000_0000`, so it is an `INCR8` read with header words `0x8000`, `0x0000`,
+   0x8000_0000`, so it is a full-line read with header words `0x8000`, `0x0000`,
    `wr=0`, `burst=1`, `dir=1`. The FPGA knows all of it in advance, and knows
    exactly what it loaded at that address.
 2. **`rst_n` is under FPGA control.** The FPGA does not need the link proven
@@ -386,10 +386,10 @@ means "enter loopback". Unambiguous, because nothing else uses `rvalid` then.
 
 ### 7.3 Consequence
 
-`hdl/amoeba_link_train.sv` is deleted, along with the LFSR, the retry path and
+`hdl/forte_link_train.sv` is deleted, along with the LFSR, the retry path and
 the `RETRY_TA` state added in `6ad99fe`. The bus-contention hazard that state
 exists to prevent goes with it: no path reclaims the bus mid-transfer any more.
-`amoeba_chip.sv` loses the training/link-master ownership mux and the
+`forte_chip.sv` loses the training/link-master ownership mux and the
 `trained`-gated `reset_ext`, and `status` becomes a pure link-activity and
 fault indicator.
 
@@ -425,7 +425,7 @@ owner.
 | 2 | FPGA | Release `rst_n` | — |
 | 3 | FPGA | *First silicon / board change only:* assert loopback (`rvalid` high at reset release), drive walking-ones, adjacent-lane and pseudo-random patterns, check what returns. Proves every lane in both directions. Skipped on a known-good board | as long as wanted |
 | 4 | FPGA | Release `rst_n` | — |
-| 5 | ASIC | `amoeba_rst_sync` releases, core leaves reset, first fetch issues: `req` 2 cycles, `io = 0x8000, 0x0000`, `wr=0`, `burst=1` | ~10 cycles |
+| 5 | ASIC | `forte_rst_sync` releases, core leaves reset, first fetch issues: `req` 2 cycles, `io = 0x8000, 0x0000`, `wr=0`, `burst=1` | ~10 cycles |
 | 6 | FPGA | **Check that header against the known expected value.** Wrong → re-assert `rst_n`, report which lanes disagreed | 1 transaction |
 | 7 | FPGA | Return the loaded line. Then check every subsequent address for plausibility (in range, line-aligned); a corrupted inbound lane shows up as an unexpected next fetch | continuous |
 | 8 | core | Boot proceeds. Early software runs a memory test over the link for the broadest coverage | — |
@@ -444,10 +444,10 @@ place to decide what to do next than a 9-deep counter on the die.
 Decided as recorded at the head of this document. What remains is the order of
 work, because two of the four decisions interact.
 
-**The gate has no home yet.** Deleting `amoeba_link_train.sv` removes the
+**The gate has no home yet.** Deleting `forte_link_train.sv` removes the
 on-die gate, and its replacement — the first-header checker and `rst_n` abort
 policy — lives on the FPGA. But `fpga/pynq/` instantiates
-`amoeba_soc_wrapper`, not `amoeba_top`, so there is currently no FPGA build
+`amoeba_soc_wrapper`, not `forte_top`, so there is currently no FPGA build
 that speaks the link at all. **Delete training as part of the Option 3 change,
 not before it**, so the design is never simultaneously without an on-die gate
 and without an off-die one.
@@ -461,7 +461,7 @@ Suggested order:
    together with the §11 scan-pin question since both change the pad table.
 3. **Split the bridge** across the crossing: core-side AHB front end,
    link-side serializer/deserializer, two FIFOs, abort rule re-derived (§4.5).
-4. **Delete `amoeba_link_train.sv`** and its wiring in the same change, plus
+4. **Delete `forte_link_train.sv`** and its wiring in the same change, plus
    the FPGA-side header checker.
 5. **Loopback**, once the DFT/debug-pin question is settled.
 
@@ -471,7 +471,7 @@ want the non-integer-ratio sweep (§4.2) standing up first.## 9a. REQUIRED: the 
 **Status: not done. This is the highest-value outstanding item, because without
 it the architecture chosen in §4 has no coverage.**
 
-`amoeba_top` ties `link_clk` to the `core_clk` pad, so the ISA regression runs
+`forte_top` ties `link_clk` to the `core_clk` pad, so the ISA regression runs
 both domains from one clock. RTL has no clock tree, so simulation sees **zero
 skew** between them: `prim_fifo_async`'s Gray-coded pointers always cross at the
 same phase, the synchronisers never resolve anything marginal, and the entire
@@ -483,13 +483,13 @@ What exists today:
 - `third_party/opentitan/tb/run.sh` — the FIFO alone at Width=65, Depth=16,
   ratio 1:1.37, 2000 words with backpressure. Proves the vendored module, not
   its integration.
-- The `[FLIT]` balance line in `amoeba_dut_wrap` (`cmd_push`/`cmd_pop`/
+- The `[FLIT]` balance line in `forte_dut_wrap` (`cmd_push`/`cmd_pop`/
   `beat_push`/`beat_pop`) plus the stale-beat and 8-beats-per-read assertions.
   These are the checks that caught the reset-gating bug in `a76988e`, and they
   are what a two-clock run should be gated on.
 
-What is needed: a testbench that instantiates **`amoeba_chip` directly** (not
-`amoeba_top`, which ties the clocks) and drives `core_clk` and `link_clk` from
+What is needed: a testbench that instantiates **`forte_chip` directly** (not
+`forte_top`, which ties the clocks) and drives `core_clk` and `link_clk` from
 independent generators at a non-integer ratio — 1:1.37 as in the FIFO bench, and
 ideally a sweep. Then run the existing ISA programmes through it and require the
 flit balance to be exact and the assertions silent.
@@ -517,79 +517,79 @@ Also still owed: a non-integer-ratio sweep in CI, per §4.2 point 3.
 | **DFT/debug vs `io[15:0]`** | `io` currently doubles as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |
 | Who runs CTS, and can they express a skew group | Reduced by Option 3 but not eliminated — `clk_out`'s tap still needs it |
 
-## 11. Coupled open question: `io[15:0]` as the scan/debug port
+## 11. `io[15:0]` as the scan port: 8 chains in, 8 chains out
 
-**Status: for the team. Decides §7.2 (loopback) and the pad table together.**
+**Status: decided 2026-10-04. Scan stays on the link bus. Loopback is ruled
+out (§7.2), which closes the mode-collision question this section used to
+carry.**
 
-`amoeba_chip.sv:96-108` muxes scan onto the link bus today — `io[7:0]` become
-`scan_in[7:0]` and `io[15:8]` become `scan_out[7:0]` when `test_mode=1`:
-
-```systemverilog
-  assign io_o  = test_mode ? {scan_q, 8'h00} : fn_io_o;
-  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{fn_oe}};
-```
-
-That was chosen because `top_level_plan.md` §3 could not spare pads for a
-dedicated scan port. Two consequences now collide with other decisions:
-
-1. **It gives the bidirectional pads two behaviours and two direction-control
-   sources.** The `dir` flop is on the scan chain, so during shift it toggles
-   pseudo-randomly; anything deriving `io_oe` from `dir` in test mode would flip
-   all sixteen pad directions every shift cycle. The test-mode override is
-   therefore load-bearing, not cosmetic — and the behavioural pad in
-   `amoeba_top.sv:49` uses `io_oe[0]` for the whole bus, so with
-   `io_oe = {8'hFF, 8'h00}` it tristates everything and **scan-out is
-   unobservable even in simulation.**
-2. **Loopback (§7.2) wants the same pins in a different mode.** Its entry
-   encoding and the DFT mode encoding must not collide.
-
-### 11.1 Proposal — move scan off the bus at zero pad cost
-
-Scan does not need *new* pins, it needs pins that are functionally idle in test
-mode. Four exist:
-
-| Pad | Functional | `test_mode=1` |
-|---|---|---|
-| `uart_rx` (in) | UART receive | `scan_in[0]` |
-| `irq[0]` (in) | PLIC source | `scan_in[1]` |
-| `status` (out) | link LED | `scan_out[0]` |
-| `uart_tx` (out) | UART transmit | `scan_out[1]` |
-| `io[15:0]` | link | **functional only** |
-
-Net pad change: **zero.** This gives the two chains §9 of `top_level_plan.md`
-asks for; `ready`/`rvalid` and `dir`/`req`/`wr`/`burst` offer five more
-`scan_in` and six more `scan_out` if DFT wants them, still at zero pads.
-
-With scan off the bus, the ownership logic becomes:
+`io[7:0]` are `scan_in[7:0]` and `io[15:8]` are `scan_out[7:0]` when
+`test_mode=1` — eight parallel chains each way, which is what `forte_chip.sv`
+already muxes:
 
 ```systemverilog
-  // Test mode: the ASIC claims the bus and parks it at zero.  The override is
-  // not cosmetic -- dir is a scanned flop, so without it the sixteen
-  // bidirectional pads would flip direction every shift cycle.  Parking at zero
-  // rather than releasing avoids sixteen floating pad inputs and any reliance
-  // on the pad library's pull-downs.
-  assign dir   = test_mode ? 1'b1           : lk_dir;
-  assign io_o  = test_mode ? '0             : lk_io_o;
-  assign io_oe = test_mode ? {LINK_W{1'b1}} : {LINK_W{lk_oe}};
+  assign io_o  = test_mode ? {scan_q, 8'h00} : lm_io_o;
+  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
 ```
 
-`dir=1` in test mode means a protocol-obeying slave stays off the bus, which
-matters if `test_mode` is ever asserted with the FPGA attached. The cost is that
-`io` cannot be used for parametric pad tests while `test_mode` is high; a flow
-with boundary scan would revisit that.
+The eight one-flop `scan_q` stubs reserve the structure; DFT insertion replaces
+them with the real chains.
 
-Also fix `scan_en` qualification — `amoeba_chip.sv:99` clocks the chain on
-`scan_en` alone, so a stray assertion during normal operation clocks it. It
-should be `test_mode & scan_en`.
+**Chain allocation.** CSRs on chain 0, registers from the other subsystems
+spread across 1–7. Shift time per pattern is set by the *longest* chain, not by
+the total flop count, so the eight should come out close to equal length —
+balance is worth asking the DFT flow for explicitly rather than taking whatever
+the default stitching produces.
 
-### 11.2 If the team keeps scan on `io[15:0]`
+### 11.1 The shift clock is `core_clk`, not a pin
 
-Then two things are required rather than optional:
+Standard scan shifts on the functional clock. The tester drives `core_clk`
+through its own pad, so a dedicated scan clock buys nothing and costs two of the
+sixteen bus pins, leaving seven chains each way instead of eight — a 14 % longer
+shift for no gain. It would also put the chains in a second clock domain whose
+relationship to the functional one has to be constrained and verified.
 
-- **Per-bit output enables in the behavioural pad.** `amoeba_top.sv:49` must
-  become a genvar loop over `io_oe[i]`, or test mode remains unsimulatable.
-- **A mode encoding that accommodates loopback**, or loopback is dropped
-  permanently rather than deferred — §7.1's gaps (lane coverage of a
-  deterministic header is one lane high and thirty-one bit-positions low; no
-  bit-exact inbound check) then stand unaddressed, and the software memory test
-  after boot becomes the only wiring verification.
+What test mode *does* need is controllability of the things scan assumes it
+owns:
+
+- **`core_clk`** — already a pad, already tester-driven.
+- **Reset** — the chains must not be held in reset while shifting, and the two
+  reset synchronisers (`forte_chip.sv`) are themselves flops on the chain.
+  Whether `test_mode` bypasses them or DFT inserts its own control is an open
+  question for whoever runs the scan insertion.
+- **Clock gating** — any gate between the `core_clk` tree and a scanned flop has
+  to be forced transparent while `scan_en` is high. There is no deliberate
+  gating in the RTL today, so this is a constraint on insertion rather than a
+  change here.
+
+### 11.2 Consequences that are now mandatory
+
+Keeping scan on the bus makes three things required rather than optional:
+
+1. **Per-bit output enables in the behavioural pad.** `forte_top.sv` drives all
+   sixteen pads from `io_oe[0]`, and test mode sets `io_oe = {8'hFF, 8'h00}` —
+   bit 0 is *low*, so the pad tristates the whole bus and **scan-out is
+   unobservable even in simulation.** It must become a genvar loop over
+   `io_oe[i]`.
+2. **The `dir`/`io_oe` test-mode override stays.** `dir` is a scanned flop, so
+   during shift it toggles pseudo-randomly; anything deriving `io_oe` from `dir`
+   in test mode would flip all sixteen pad directions every shift cycle. The
+   override is load-bearing, not cosmetic.
+3. **`scan_en` must be qualified with `test_mode`.** `forte_chip.sv` clocks the
+   chain on `scan_en` alone, so a stray assertion during normal operation
+   shifts the chain under a running core.
+
+A fourth, non-blocking: while `test_mode` is high the link is unusable, since
+`io` is the scan port. Scan and functional traffic are mutually exclusive by
+construction, which is fine — but it does mean `io` cannot be used for
+parametric pad tests in test mode. A flow with boundary scan would revisit that.
+
+### 11.3 Withdrawn: moving scan onto the idle functional pads
+
+An earlier revision of this section proposed putting scan on `uart_rx`,
+`irq[0]`, `status` and `uart_tx` — pins that are functionally idle in test mode
+— to get scan off the bidirectional bus at zero pad cost. That is a *two*-chain
+scheme, and it was the wrong trade: it solves a pad-sharing problem the design
+does not have while cutting observability by a factor of four and giving up the
+ability to put CSRs on a chain of their own. Recorded here so it is not
+re-proposed.

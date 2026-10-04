@@ -1,5 +1,5 @@
-// amoeba_rst_sync.sv -- asynchronous assert, synchronous (2-flop) release.
-module amoeba_rst_sync (
+// forte_rst_sync.sv -- asynchronous assert, synchronous (2-flop) release.
+module forte_rst_sync (
   input  logic clk,
   input  logic rst_n_in,
   output logic rst_n_out

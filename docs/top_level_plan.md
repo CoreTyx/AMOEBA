@@ -15,13 +15,39 @@ agrees with its settled decisions and closes its open item 1 (the protocol).
 
 | Fact | Source | Consequence |
 |---|---|---|
-| No on-chip memory (`UNCORE_RAM`, `DTIM`, `IROM` all 0) | `pkg/config_asic.vh` | Every L1 miss crosses the link; the link *is* the memory system |
-| `RESET_VECTOR = 0x8000_0000` = `EXT_MEM_BASE` | `pkg/config_asic.vh` | First instruction fetch is off-chip; link must be trained before the core leaves reset |
-| Line = 512 b, `AHBW = 64`, `BURST_EN = 1` | `pkg/config_asic.vh`, `buscachefsm.sv:153` | Off-chip traffic is ~100 % 64 B **INCR8 from a line-aligned base** (no wrap, no critical-word-first) |
-| All regions < 4 GB, bits 30:29 zero | `pkg/config_asic.vh` | Address is two 16-bit words; `HSIZE` rides in bits 30:29 of the high word |
+| No on-chip memory (`UNCORE_RAM`, `DTIM`, `IROM` all 0) | `pkg/config.vh` | Every L1 miss crosses the link; the link *is* the memory system |
+| `RESET_VECTOR = 0x8000_0000` = `EXT_MEM_BASE` | `pkg/config.vh` | First instruction fetch is off-chip; the FPGA holds `rst_n` until it is ready to serve it |
+| Line = 128 b, `AHBW = 64`, `BURST_EN = 1` | `pkg/config.vh`, `buscachefsm.sv:147` | Off-chip traffic is ~100 % **full-line bursts from a line-aligned base** (no wrap, no critical-word-first). **The beat count is 2, not 8** — see "the burst length is a parameter" below |
+| All regions < 4 GB, bits 30:29 zero | `pkg/config.vh` | Address is two 16-bit words; the address goes over whole |
 | Linux is a silicon deliverable | — | Miss penalty is the chip's performance; every spare pad wants to be bus width |
 | 52 pads **total** incl. 11 power/ground | `fpga/asic/BRINGUP.md` §2 | 32-bit bus does not fit; 16-bit bidir with scan muxed onto it |
 | CVW aborts bursts on `FlushD` | `ebu`, prior FPGA debug | Bridge must never abort an off-chip transfer (§5) |
+
+**The burst length is a parameter, not 8.** `buscachefsm` derives `HBURST` from
+`BeatCountThreshold = LINELEN/AHBW - 1`, and only 1, 4, 8 and 16 beats have a
+named AHB encoding; every other count falls through to `3'b001`, INCR with
+undefined length. At the 512-bit line this design started from that was
+`INCR8`, and the link hardcoded it in three places. The line was then shrunk to
+128 bits for area, making it two beats and `3'b001`, and nothing caught it: the
+core asked for 2 beats, the link insisted on 8, and the DUT hung on the second
+transaction with no assertion and no diagnostic.
+
+The link now takes the count as a parameter. `hdl/forte_chip.sv` is the single
+place it is decided — `DCACHE_LINELENINBITS / AHBW` — and it threads that one
+expression to both halves of the bridge, to the FIFO sizing and (from the same
+`config.vh`) to the testbench slave. `forte_link_core` asserts `HBURST` against
+`forte_link_pkg::hburst_for(BEATS)`, which is a copy of `buscachefsm`'s
+`LocalBurstType`, so the next line resize either propagates or fails on the
+first transaction. A one-beat line is rejected at elaboration: on the wire it
+would be indistinguishable from an uncached single, and a single is the one case
+that needs the `{HWSTRB, HSIZE}` header word the link does not carry.
+
+The *cost* of the shorter line is on the link, not in the link's logic: the
+fixed per-transaction overhead is 2 header cycles + 2·`TA`, which at 2 beats is
+6 cycles of overhead against 8 of payload. Per byte moved the 128-bit line is
+about 32 % worse than the 512-bit one (1.14 vs 1.68 B/cycle at `TA=2`). That is
+a consequence of the area decision, not a defect, but it belongs next to the
+miss-penalty numbers in §4.
 | `ZICNTR=0`, `SSTC=0` in the ASIC config | `pkg/config_asic.vh` | Core never consumes `MTIME_CLINT`; CLINT stays on-die anyway (~2 k GE, `mtime` = core cycles, BRINGUP.md §2) |
 | `USE_SRAM` = `ifdef AMOEBA_USE_SRAM` | `pkg/config_asic.vh` | Sim/netlist mismatch risk; regress with macros before freeze |
 
@@ -34,7 +60,7 @@ agrees with its settled decisions and closes its open item 1 (the protocol).
 Note on hierarchy: `wallypipelinedcore` is the pipeline + AHB master + interrupt
 inputs; it has no peripherals. UART/CLINT/PLIC/decoder live in `uncore`, which
 `wallypipelinedsoc` wraps. The plan instantiates `wallypipelinedcore` directly
-under a new `amoeba_uncore` (§10), so the peripheral set is ours to choose and
+under a new `forte_uncore` (§10), so the peripheral set is ours to choose and
 no CVW file is edited.
 
 | | A: PLIC + UART on-chip | B: only CLINT on-chip | **C: CLINT + UART on-chip, PLIC off** |
@@ -47,7 +73,7 @@ no CVW file is edited.
 | UART interrupt | internal to PLIC | n/a | `uart_irq` pad (+1) or polled 8250 |
 | PLIC claim/complete | 3 cycles | ~100–150 cycles | ~100–150 cycles |
 | Pads used of 52 | 42 | 40 | **42** (43 with `uart_irq`) |
-| CVW changes | none | `amoeba_uncore` | `amoeba_uncore` |
+| CVW changes | none | `forte_uncore` | `forte_uncore` |
 
 **Recommendation: B**, which is also what `fpga/asic/BRINGUP.md` settles on.
 The case for an on-chip UART (a console independent of the FPGA parser,
@@ -71,8 +97,8 @@ wrong for MMIO. Instead:
 | File | Change |
 |---|---|
 | `pkg/config_asic.vh` | **Done.** `PLIC_SUPPORTED=1`, `UART_SUPPORTED=1` (decode only, so `adrdecs`/PMA treat them as uncached peripherals); `GPIO/SPI/SDC/BOOTROM=0`; `USE_SRAM` define-driven. Derived from `config_baremetal_linux.vh`. Selectable as `CONFIG=asic` in `sim/`, `synth/`, `fpga/pynq/`, `testcode/linux/`; builds and passes `tc_mul_div` in Verilator after the `bpred.sv` `BPDirWrongM` fix (`ZIHPM=0` left it undriven — no pruned config had ever been elaborated by Verilator). |
-| `hdl/amoeba_uncore.sv` (new, from `uncore.sv`) | Keep `adrdecs`, CLINT, `ahbapbbridge`, ext port, `HRDATA`/`HREADY`/`HRESP` muxes, `hseldelayreg`. Keep UART (C) or drop it (B). No PLIC: fold `HSELPLIC` (and `HSELUART` for B) into `HSELEXT` and its delayed copy. `MExtInt`/`SExtInt` become inputs. |
-| `hdl/amoeba_soc.sv` (new, from `wallypipelinedsoc.sv`) | `wallypipelinedcore` + `amoeba_uncore`. Ports: AHB ext port, `meip`/`seip`, `UARTSin`/`UARTSout` (C). |
+| `hdl/forte_uncore.sv` (new, from `uncore.sv`) | Keep `adrdecs`, CLINT, `ahbapbbridge`, ext port, `HRDATA`/`HREADY`/`HRESP` muxes, `hseldelayreg`. Keep UART (C) or drop it (B). No PLIC: fold `HSELPLIC` (and `HSELUART` for B) into `HSELEXT` and its delayed copy. `MExtInt`/`SExtInt` become inputs. |
+| `hdl/forte_soc.sv` (new, from `wallypipelinedsoc.sv`) | `wallypipelinedcore` + `forte_uncore`. Ports: AHB ext port, `meip`/`seip`, `UARTSin`/`UARTSout` (C). |
 | ASIC top | Tie off removed ports; 2-flop synchronisers on `meip`/`seip`. |
 | Testbench link model | Instantiate CVW `plic_apb` + `uartPC16550D` behind it so CI runs unchanged. |
 | Untouched | Every file under `hdl/core/`, `cvw_t`, `parameter-defs.vh`, Linux DTS (except dropping `interrupts` on the UART node for polled mode), OpenSBI. |
@@ -91,7 +117,7 @@ wait states are inherited for free (there is no error path; `HRESPEXT` is tied l
 | 30 | `dir` | out | **1 = ASIC drives `io`, 0 = ASIC has released it.** Single source of truth for bus ownership; TA idle cycles guaranteed on every change. |
 | 31 | `req` | out | `io` carries the address: high half, then low half, on consecutive cycles. Held for both. |
 | 32 | `wr` | out | Held for the transaction. 1 = write. |
-| 33 | `burst` | out | Held. 1 = 8 beats (32 words), 0 = 1 beat (4 words). |
+| 33 | `burst` | out | Held. 1 = a full `BEATS`-beat line (4·`BEATS` words), 0 = 1 beat (4 words). Always 1 today; the single path does not exist. |
 | 34 | `ready` | in | **"May start."** ASIC begins `req` only when `ready=1` was sampled; once started the FPGA is committed. Registered on FPGA side. |
 | 35 | `rvalid` | in | Read data word on `io` this cycle. Gaps allowed. |
 | 36–37 | `meip`, `seip` | in | M/S external interrupt from the FPGA. Level, 2-flop sync. (Option A: `irq[1:0]` into on-chip PLIC IDs 3, 6.) |
@@ -126,7 +152,7 @@ otherwise        io[15:0] = data word       64-bit beat as 4 words, least signif
 wr, burst        held from req until the last word
 ```
 
-**The attribute word.** A burst is eight aligned 64-bit beats with every lane
+**The attribute word.** A burst is `BEATS` aligned 64-bit beats with every lane
 live, so it needs neither size nor strobes and skips the third header word —
 line fills are ~100 % of the traffic and pay nothing. A single spends one
 extra cycle and carries the real `HWSTRB`. This replaced an earlier encoding
@@ -149,7 +175,8 @@ is actually full.** Sizing for two outstanding lines instead of one deletes the
 race; the testbench model is four lines deep and asserts on overflow, and the
 FPGA slave must do the same. There is no mid-transaction handshake in either
 direction, so the ASIC never stalls once started. Beat *n* of a burst is at
-`base + 8n` (CVW is INCR8 from an aligned base); the FPGA increments.
+`base + 8n` (CVW bursts from a line-aligned base, incrementing, for `BEATS`
+beats); the FPGA increments.
 `HADDR[55:32]` is never nonzero on the bus because the PMA faults undefined
 regions first (sim assertion).
 
@@ -166,29 +193,37 @@ and >= TA idle cycles after the last rvalid before it raises dir and drives.
 **Training is not exempt.** A retry is the one moment the ASIC wants the bus
 back while the FPGA is still using it — the FPGA sweeps its output phase blind
 and its only feedback is that the pattern restarted, so it cannot know to stop
-echoing. `amoeba_link_train` therefore holds `dir=0` for a whole `TRAIN_LEN`
+echoing. `forte_link_train` therefore holds `dir=0` for a whole `TRAIN_LEN`
 after a mismatch (state `RETRY_TA`) before taking the bus; the longest echo
 still in flight is `TRAIN_LEN - k` words. `+LINK_TRAIN_ERR=n` in the testbench
 corrupts word *n* of the first echo so this path is exercised, and the model's
 "driving io while dir=1" check is what proves there is no overlap.
 
-| Transaction | Sequence | Cycles |
-|---|---|---|
-| Line read | `req`×2 · `dir`↓ · TA · 32 × `rvalid` words · TA · `dir`↑ | 34 + 2·TA (38 @ TA=2) |
-| Line write | `req`×2 · 32 words | 34 |
-| Single read | `req`×3 · TA · 4 words · TA | 7 + 2·TA |
-| Single write | `req`×3 · 4 words | 7 |
+`W = 4·BEATS` is the word count on the wire; at the current 128-bit line
+`BEATS = 2` and `W = 8`.
 
-Plus FPGA memory latency as `rvalid` gaps. 38 link cycles + L2/MIG latency is
-a ~50–70 cycle miss at 1:1 clocks — the same range as a DRAM miss on a
-commodity part (BRINGUP.md §2 reaches the same conclusion at 35). The
-FPGA-side L2 (BRINGUP.md §3) is what keeps the crossing the only cost.
+| Transaction | Sequence | Cycles | @ 128 b line, TA=2 |
+|---|---|---|---|
+| Line read | `req`×2 · `dir`↓ · TA · *W* × `rvalid` words · TA · `dir`↑ | 2 + *W* + 2·TA | 14 |
+| Line write | `req`×2 · *W* words | 2 + *W* | 10 |
+| Single read | `req`×3 · TA · 4 words · TA | 7 + 2·TA | — (no single path) |
+| Single write | `req`×3 · 4 words | 7 | — (no single path) |
 
-Width, per 64 B line: 16 b muxed = **38/34** cycles (read/write); 32 b muxed
-= 21/17 but needs 56 pads; 8+8 split = 68/68; 16 b DDR = 20/18 but rejected
-as a bring-up risk. 16 b bidirectional is the only one that fits.
+Plus FPGA memory latency as `rvalid` gaps. At the 512-bit line this was 38 link
+cycles, giving a ~50–70 cycle miss at 1:1 clocks — the same range as a DRAM miss
+on a commodity part (BRINGUP.md §2 reaches the same conclusion at 35). At 128 b
+the transaction is 14 cycles but moves a quarter as much, so the miss *rate*
+rises and the per-byte cost rises with it; the FPGA-side L2 (BRINGUP.md §3) is
+what keeps the crossing the only cost.
 
-## 5. Bridge: `amoeba_link_master` (~400–500 GE)
+Width, per line: 16 b muxed is what the pad budget allows; 32 b muxed would be
+roughly half the data cycles but needs 56 pads; 8+8 split is twice as many; 16 b
+DDR was rejected as a bring-up risk. 16 b bidirectional is the only one that
+fits. Note that the fixed 2 + 2·TA overhead does not shrink with the line, so
+the narrower the line the more of the link's time is header and turnaround —
+the 512-bit line amortised that over 32 data cycles, the 128-bit one over 8.
+
+## 5. Bridge: `forte_link_master` (~400–500 GE)
 
 **Invariant: once `req` is accepted, the bridge always finishes the word
 count. Never abort, shorten, or reorder. If the core abandons the burst, drain
@@ -210,7 +245,7 @@ into a bit bucket and return to IDLE.**
 - Write: drive `HWDATA` as four words, least significant first; pulse `HREADYEXT` on the fourth. AHB holds the beat.
 - Read: assemble four words into a 64-bit beat register; pulse `HREADYEXT`. No FIFO — an AHB-Lite master cannot back-pressure read data.
 - Ignore `HADDR` after the first beat (the ebu re-presents it per beat; the FPGA increments).
-- Contents: 36-FF address/attribute latch ×2 (working + pending), 48-FF beat register (the last word goes straight to `HRDATA`), 5-bit word counter, TA counter, 8-state FSM, output enable = `dir`. Implemented: `hdl/amoeba_link_master.sv`.
+- Contents: 36-FF address/attribute latch ×2 (working + pending), 48-FF beat register (the last word goes straight to `HRDATA`), 5-bit word counter, TA counter, 8-state FSM, output enable = `dir`. Implemented: `hdl/forte_link_master.sv`.
 - All inbound pins (`io` while `dir=0`, `ready`, `rvalid`) captured on negedge, re-registered on posedge (§6).
 - No error path. `HRESPEXT = 0` always.
 
@@ -251,7 +286,7 @@ async FIFOs). It also retires training: phase calibration is deletable, and
 the LFSR is unnecessary because the first fetch is deterministic and `rst_n`
 is an FPGA output, so the gate can live on the FPGA. Controlled lane coverage
 comes from a loopback mode instead -- less silicon than the LFSR and more
-capable, since the FPGA picks the pattern. `hdl/amoeba_link_train.sv` is
+capable, since the FPGA picks the pattern. `hdl/forte_link_train.sv` is
 slated for deletion.
 
 **Reset / training sequence**
@@ -296,23 +331,23 @@ Cost: a 12-bit counter and a 32-bit LFSR.
 ## 10. Integration with Wally
 
 ```
-amoeba_top                      ASIC top, pads only. DESIGN_TOP for synth/lint.
+forte_top                      ASIC top, pads only. DESIGN_TOP for synth/lint.
 ├─ pad cells                    io[15:0] bidir (OE = dir), inputs with pulls
-└─ amoeba_chip                  pad-less; what scan insertion and gate-level sim see
-   ├─ amoeba_rst_sync           async assert, 2-FF release; core reset held until trained
-   ├─ amoeba_link_train         LFSR + counter + status FSM; releases core reset
-   ├─ amoeba_soc                replaces wallypipelinedsoc
+└─ forte_chip                  pad-less; what scan insertion and gate-level sim see
+   ├─ forte_rst_sync           async assert, 2-FF release; core reset held until trained
+   ├─ forte_link_train         LFSR + counter + status FSM; releases core reset
+   ├─ forte_soc                replaces wallypipelinedsoc
    │  ├─ wallypipelinedcore #(P)   unmodified CVW
-   │  └─ amoeba_uncore             adrdecs, CLINT, UART (C), ahbapbbridge, ext port, muxes
-   ├─ amoeba_link_master        AHB-Lite slave on the ext port -> 16-bit address/data words; drop-in for ahb_to_memitf
+   │  └─ forte_uncore             adrdecs, CLINT, UART (C), ahbapbbridge, ext port, muxes
+   ├─ forte_link_master        AHB-Lite slave on the ext port -> 16-bit address/data words; drop-in for ahb_to_memitf
    ├─ irq_sync                  meip/seip 2-FF
    └─ scan_mux                  test_mode: io[7:0] -> scan_in, scan_out -> io[15:8]
 
-pkg/amoeba_link_pkg.sv          TA, word counts, size-in-address encoding: one source of
+pkg/forte_link_pkg.sv          TA, word counts, size-in-address encoding: one source of
                                 truth for the bridge, the TB link model, and the VCU118 link_slave
 ```
 
-The seam: `amoeba_link_master` consumes exactly the external-AHB signals
+The seam: `forte_link_master` consumes exactly the external-AHB signals
 `wallypipelinedsoc` exposes and `ahb_to_memitf` consumes today
 (`rv64_core_wrapper.sv:190-210`). Nothing above or below it changes when the
 bridge goes in.
@@ -320,15 +355,15 @@ bridge goes in.
 | Phase | Work | Gate |
 |---|---|---|
 | 0 Refactor | Move RVFI taps from `rv64_core_wrapper` into `hvl/common/rvfi_tap.sv`, `bind`-attached to `wallypipelinedcore`; monitor refs move with them | Bit-identical RVFI stream and IPC on the full suite |
-| 1 `amoeba_soc`/`amoeba_uncore` | Wrap `wallypipelinedcore`; GPIO/SPI/SDC gone; PLIC per §2. Config: `GPIO/SPI_SUPPORTED=0`; `PLIC_SUPPORTED=1` kept for PMA, `HSELPLIC` folded into `HSELEXT` | Full suite + Linux boot green; synth area delta |
-| 2 Link | `amoeba_link_master` + TB `link_model` (words -> `mem_itf`), selectable `LINK=1`; `ahb_to_memitf` stays as reference | Full suite through the link; abort torture; IPC budget; SVA clean |
+| 1 `forte_soc`/`forte_uncore` | Wrap `wallypipelinedcore`; GPIO/SPI/SDC gone; PLIC per §2. Config: `GPIO/SPI_SUPPORTED=0`; `PLIC_SUPPORTED=1` kept for PMA, `HSELPLIC` folded into `HSELEXT` | Full suite + Linux boot green; synth area delta |
+| 2 Link | `forte_link_master` + TB `link_model` (words -> `mem_itf`), selectable `LINK=1`; `ahb_to_memitf` stays as reference | Full suite through the link; abort torture; IPC budget; SVA clean |
 | 3 Reset/train | Sequencer holds core reset until echo matches; `status`; IRQ sync | Directed reset/IRQ tests; training-failure test keeps core in reset |
-| 4 `amoeba_top` | Pad models, scan mux, `DESIGN_TOP=amoeba_top`, real SDC | Synth + lint clean; gate-level smoke with SDF; `USE_SRAM=1` regression |
-| 5 VCU118 | `link_slave` from `amoeba_link_pkg`; TB `link_model` reused to self-check it | FreeRTOS + Linux on FPGA over the real protocol |
+| 4 `forte_top` | Pad models, scan mux, `DESIGN_TOP=forte_top`, real SDC | Synth + lint clean; gate-level smoke with SDF; `USE_SRAM=1` regression |
+| 5 VCU118 | `link_slave` from `forte_link_pkg`; TB `link_model` reused to self-check it | FreeRTOS + Linux on FPGA over the real protocol |
 
 ## 11. Verification plan
 
-- **Two DUTs in CI.** `DUT ?= rv64_core_wrapper` in `sim/Makefile`; `amoeba_top` is a second matrix entry. Legacy path is the reference until tapeout.
+- **Two DUTs in CI.** `DUT ?= rv64_core_wrapper` in `sim/Makefile`; `forte_top` is a second matrix entry. Legacy path is the reference until tapeout.
 - **`link_model` checks, not just transacts.** One link transaction per AHB burst (bound monitor on the ext port compares address/data/length); never X on `io` while `dir=1`; never drives while `dir=1` or inside a TA window; word-count integrity. Randomised `ready` back-pressure and `rvalid` gaps from a plusarg seed.
 - **SVA in the bridge** (`ifndef SYNTHESIS`): never IDLE mid-transfer; `HREADYEXT` only with a complete beat; `dir` and `rvalid` mutually exclusive; `HADDR[55:32]==0` and `HADDR[30:29]==0` on every `req`; TA respected on every `dir` edge.
 - **Abort torture** (directed asm): mispredicted branches across line boundaries; `fence.i` storms; timer interrupts with tiny `mtimecmp` deltas during `tc_mem_stress` writebacks. Coverage counter "transfer completed after core went IDLE" must be nonzero.

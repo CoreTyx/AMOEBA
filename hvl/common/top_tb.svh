@@ -40,8 +40,8 @@
     logic fault_inject = 1'b0;
 `endif
 
-`ifdef ECE411_DUT_AMOEBA
-    amoeba_dut_wrap dut (
+`ifdef ECE411_DUT_FORTE
+    forte_dut_wrap dut (
 `else
     rv64_core_wrapper dut (
 `endif
@@ -57,6 +57,27 @@
     );
 
     `include "rvfi_reference.svh"
+
+    // ---- where the DUT keeps its RVFI state -------------------------------
+    // The two DUTs put the same signals in different places, and several blocks
+    // below reach in by hierarchical reference.  rv64_core_wrapper has the RVFI
+    // taps INLINE and the SoC one level down; forte_dut_wrap instantiates
+    // rvfi_tap as a child and the SoC three levels down, inside the chip and the
+    // pad ring.  Spelling either hierarchy literally gives a block that compiles
+    // for exactly one DUT and fails to elaborate for the other -- which is what
+    // ECE411_RETIRE_TRACE (legacy-only, on dut.DummyW) and the ECE411_LINUX
+    // misaligned-access flag (forte-only, on dut.tap.Funct3W) each did.
+    //
+    // RT_TAP resolves to whatever holds the RVFI pipeline registers.  Reading a
+    // module's input ports by hierarchical reference is legal, so the same names
+    // work whether they are locals (legacy) or ports (forte).
+`ifdef ECE411_DUT_FORTE
+    `define RT_TAP  dut.tap
+    `define RT_CORE dut.top.chip.soc.core
+`else
+    `define RT_TAP  dut
+    `define RT_CORE dut.soc.core
+`endif
 
 `ifdef ECE411_RETIRE_TRACE
     // ---- retirement trace (AMOEBA random instruction insertion) ------------
@@ -80,21 +101,21 @@
             TrcInstrE <= '0; TrcInstrM <= '0; TrcInstrW <= '0;
             TrcRetireCtr <= '0;
         end else begin
-            if (!dut.StallE) TrcInstrE <= dut.FlushE ? '0 : dut.soc.core.ieu.InstrDMux;
-            if (!dut.StallM) TrcInstrM <= dut.FlushM ? '0 : TrcInstrE;
-            if (!dut.StallW) TrcInstrW <= (dut.FlushW & ~dut.TrapM) ? '0 : TrcInstrM;
+            if (!`RT_TAP.StallE) TrcInstrE <= `RT_TAP.FlushE ? '0 : `RT_CORE.ieu.InstrDMux;
+            if (!`RT_TAP.StallM) TrcInstrM <= `RT_TAP.FlushM ? '0 : TrcInstrE;
+            if (!`RT_TAP.StallW) TrcInstrW <= (`RT_TAP.FlushW & ~`RT_TAP.TrapM) ? '0 : TrcInstrM;
 
             // Reads the pre-edge Writeback values, i.e. the instruction retiring now.
-            if (!dut.StallW) begin
-                if (dut.DummyW) begin
+            if (!`RT_TAP.StallW) begin
+                if (`RT_TAP.DummyW) begin
                     TrcRetireCtr <= TrcRetireCtr + 64'd1;
                     $display("[retire] %5d DUMMY               %08h  rs1=x%0d rs2=x%0d -> p%0d",
                              TrcRetireCtr, TrcInstrW, TrcInstrW[19:15], TrcInstrW[24:20],
-                             dut.soc.core.ieu.c.DummySelW ? 33 : 32);
-                end else if (dut.InstrValidW && (|dut.PCW)) begin
+                             `RT_CORE.ieu.c.DummySelW ? 33 : 32);
+                end else if (`RT_TAP.InstrValidW && (|`RT_TAP.PCW)) begin
                     TrcRetireCtr <= TrcRetireCtr + 64'd1;
                     $display("[retire] %5d real  pc=%08h  %08h  rd=x%0d rs1=x%0d rs2=x%0d",
-                             TrcRetireCtr, dut.PCW[31:0], TrcInstrW,
+                             TrcRetireCtr, `RT_TAP.PCW[31:0], TrcInstrW,
                              TrcInstrW[11:7], TrcInstrW[19:15], TrcInstrW[24:20]);
                 end
             end
@@ -107,9 +128,9 @@
     // has already masked to an 8-byte boundary and so cannot reveal
     // misalignment.  Funct3W[1:0] encodes the access size as log2(bytes).
 `ifdef ECE411_LINUX
-    wire [63:0] acc_size_mask = (64'd1 << dut.tap.Funct3W[1:0]) - 64'd1;
-    assign mon_itf.mem_misaligned[0] = mon_itf.valid[0] && (|dut.tap.MemRWW) &&
-                                       ((dut.tap.IEUAdrW & acc_size_mask) != 64'd0);
+    wire [63:0] acc_size_mask = (64'd1 << `RT_TAP.Funct3W[1:0]) - 64'd1;
+    assign mon_itf.mem_misaligned[0] = mon_itf.valid[0] && (|`RT_TAP.MemRWW) &&
+                                       ((`RT_TAP.IEUAdrW & acc_size_mask) != 64'd0);
 `else
     assign mon_itf.mem_misaligned[0] = 1'b0;
 `endif
@@ -212,7 +233,7 @@
     // holds PENABLE an extra cycle; that is why the CVW model's own $write
     // prints every character twice.  Taking the rising edge yields exactly one
     // byte per store.
-`ifdef ECE411_DUT_AMOEBA
+`ifdef ECE411_DUT_FORTE
     `define UARTPC dut.top.chip.soc.uncore.onchip.uart.uartPC
 `else
     `define UARTPC dut.soc.uncoregen.uncore.uartgen.uart.uartPC

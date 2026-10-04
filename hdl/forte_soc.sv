@@ -1,15 +1,15 @@
 ///////////////////////////////////////////////////////////////////////////////
-// amoeba_soc.sv
+// forte_soc.sv
 //
-// wallypipelinedcore + amoeba_uncore.  Replaces wallypipelinedsoc for the
+// wallypipelinedcore + forte_uncore.  Replaces wallypipelinedsoc for the
 // ASIC: same core, same reset synchroniser, a purpose-built uncore, and only
 // the pins the die has.  The external AHB port is byte-identical to the one
-// wallypipelinedsoc exposes, so amoeba_link_master is a drop-in for
+// wallypipelinedsoc exposes, so forte_link_master is a drop-in for
 // ahb_to_memitf.
 ///////////////////////////////////////////////////////////////////////////////
 
 
-module amoeba_soc import cvw::*; #(
+module forte_soc import cvw::*; #(
   parameter cvw_t P,
   parameter logic   PERIPH_ONCHIP = 1'b1
 )(
@@ -17,6 +17,7 @@ module amoeba_soc import cvw::*; #(
   input  logic                  reset_ext,        // external asynchronous reset
   output logic                  reset,            // reset synchronised to core_clk
   input  logic                  ExternalStall,
+  input  logic                  ecc_inject_en,    // ECC inject enable (DFT / ECC test)
   // external AHB-Lite port
   input  logic [P.AHBW-1:0]     HRDATAEXT,
   input  logic                  HREADYEXT, HRESPEXT,
@@ -48,12 +49,16 @@ module amoeba_soc import cvw::*; #(
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
   synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
 
-  wallypipelinedcore #(P) core(.clk(core_clk), .reset,
+  wallypipelinedcore #(P) core(.clk(core_clk), .reset, .ecc_inject_en,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
-    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall);
+    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
+    // Register-file ECC fault report, added on Making_HDL_Synthesizable.  Left
+    // open as rv64_core_wrapper does: nothing in the ASIC consumes it yet, and
+    // routing it to a pad is a decision for the DFT discussion.
+    .PrivModeUncorrectableFaultW ());
 
-  amoeba_uncore #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) uncore(
+  forte_uncore #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) uncore(
     .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HTRANS,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT,
     .HRDATA, .HREADY, .HRESP,

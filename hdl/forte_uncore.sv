@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////////
-// amoeba_uncore.sv
+// forte_uncore.sv
 //
 // The on-die uncore for the AMOEBA ASIC, derived from CVW's uncore.sv.
 //
@@ -14,7 +14,7 @@
 //   hseldelayreg                  slaves that exist
 //
 // What is gone: GPIO, SPI, SDC, on-chip RAM, boot ROM.  All are
-// *_SUPPORTED=0 in pkg/config_asic.vh; there is nothing to instantiate.
+// *_SUPPORTED=0 in pkg/config.vh; there is nothing to instantiate.
 //
 // PERIPH_ONCHIP=0 keeps the off-chip variant alive for the area comparison:
 // PLIC and UART are then not instantiated, their selects are folded into
@@ -23,7 +23,7 @@
 // interrupt lines come in on MExtIntIn/SExtIntIn instead.
 ///////////////////////////////////////////////////////////////////////////////
 
-module amoeba_uncore import cvw::*; #(
+module forte_uncore import cvw::*; #(
   parameter cvw_t P,
   parameter logic   PERIPH_ONCHIP = 1'b1
 )(
@@ -35,7 +35,7 @@ module amoeba_uncore import cvw::*; #(
   input  logic                 HWRITE,
   input  logic [2:0]           HSIZE,
   input  logic [1:0]           HTRANS,
-  // external port (to amoeba_link_master)
+  // external port (to forte_link_master)
   input  logic [P.AHBW-1:0]    HRDATAEXT,
   input  logic                 HREADYEXT, HRESPEXT,
   output logic                 HSELEXT,

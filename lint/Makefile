@@ -15,7 +15,7 @@ TOP_SRCS          := $(REPO_ROOT)/hdl/ahb_to_memitf.sv $(REPO_ROOT)/hdl/rv64_cor
 export HDL_SRCS   := $(CORE_PKG) $(sort $(CORE_SRCS)) $(TOP_SRCS)
 export INCDIRS    := $(REPO_ROOT)/pkg $(REPO_ROOT)/hdl/core
 export SRAM_LIB   := $(shell find $(REPO_ROOT)/sram/output/ -name "*.db" 2>/dev/null)
-# Overridable so `make lint DESIGN_TOP=amoeba_top` checks the ASIC top.  The
+# Overridable so `make lint DESIGN_TOP=forte_top` checks the ASIC top.  The
 # default stays the legacy DUT: this branch's zero-warning baseline is measured
 # against it, and analysing extra modules could only add warnings to it.
 export DESIGN_TOP ?= rv64_core_wrapper
@@ -24,11 +24,11 @@ export LINT_DEFINES := $(patsubst +define+%,%,$(shell python3 $(REPO_ROOT)/bin/g
 
 # The ASIC top (docs/top_level_plan.md) and the vendored OpenTitan primitives it
 # needs, added only when they are the thing being linted -- see DESIGN_TOP above.
-ifeq ($(DESIGN_TOP),amoeba_top)
+ifeq ($(DESIGN_TOP),forte_top)
   PRIM_SRCS        := $(REPO_ROOT)/third_party/opentitan/prim_flop_2sync.sv \
                       $(REPO_ROOT)/third_party/opentitan/prim_fifo_async.sv
-  export PKG_SRCS  := $(PKG_SRCS) $(REPO_ROOT)/pkg/amoeba_link_pkg.sv
-  export HDL_SRCS  := $(HDL_SRCS) $(sort $(wildcard $(REPO_ROOT)/hdl/amoeba_*.sv)) $(PRIM_SRCS)
+  export PKG_SRCS  := $(PKG_SRCS) $(REPO_ROOT)/pkg/forte_link_pkg.sv
+  export HDL_SRCS  := $(HDL_SRCS) $(sort $(wildcard $(REPO_ROOT)/hdl/forte_*.sv)) $(PRIM_SRCS)
   export INCDIRS   := $(INCDIRS) $(REPO_ROOT)/third_party/opentitan
 endif
 

@@ -2,8 +2,16 @@
 //
 // RVFI monitor taps for wallypipelinedcore, as a module of their own.
 //
+// IN hvl/, NOT hdl/, deliberately.  This is verification-only: nothing
+// reachable from forte_top instantiates it, and synth/Makefile's source list
+// is `find ../hdl -name '*.sv'`, so while it lived under hdl/ it was handed to
+// Design Compiler and SpyGlass as an unreferenced module on every run -- pure
+// noise in the logs of a flow whose value depends on its logs being clean.
+// sim/Makefile globs hvl/common into both VCS_HVL and VER_HVL, so both
+// simulators still find it here.
+//
 // This is the tap logic that used to live inline in rv64_core_wrapper.sv,
-// moved out so that a DUT with the real ASIC top (amoeba_top) can be checked
+// moved out so that a DUT with the real ASIC top (forte_top) can be checked
 // by the same monitor without the pipeline taps existing anywhere in the
 // synthesizable hierarchy.  Every input is a signal read out of the core by
 // hierarchical reference at the instantiation site; nothing here drives the
@@ -12,11 +20,33 @@
 // register-file pipeline are unchanged, so the RVFI stream is bit-identical.
 //
 // Instantiate it once per DUT:
-//   rv64_core_wrapper (legacy DUT)   connects soc.core.*
-//   top_tb.svh, DUT=amoeba           connects dut.chip.soc.core.*
+//   rv64_core_wrapper (legacy DUT)   keeps its own inline copy of this logic
+//   forte_dut_wrap,   DUT=forte      connects top.chip.soc.core.*
+//
+// KEPT IN STEP WITH rv64_core_wrapper BY HAND.  The wrapper on
+// Making_HDL_Synthesizable carries this same logic inline and is deliberately
+// left byte-for-byte identical to their branch, so the two are a known
+// duplication rather than an accident.  What that cost once: this file was
+// extracted before their branch added dummy-instruction tracking and
+// branch-target resolution, and DUT=forte then failed tc_rand_instr_insert on
+// `mismatch in pc_wdata` while DUT=legacy passed it -- the test is the one that
+// makes the uncovered window reachable.  Three things in here came from that
+// and must not be dropped again:
+//
+//   DummyD/E/M/W   injected dummy instructions, piped M->W so they line up with
+//                  InstrValidW rather than the core's own W-stage register
+//   PCSrcM_r/W_r   taken-branch resolution pipelined alongside IEUAdr, so a
+//                  mispredict's architectural next PC comes from IEUAdrW
+//                  instead of a pipeline lookahead that a flush has emptied
+//   rst_rvfi       rst | reset_soc, so these registers never capture the Xs the
+//                  SoC's pipeline controls show before ITS reset releases
 module rvfi_tap (
     input  logic        clk,
     input  logic        rst,
+    // The SoC releases its own reset a few cycles after rst, and until then its
+    // pipeline controls are X in 4-state simulation.  Held in reset for as long
+    // as the SoC is, so no X is ever captured.
+    input  logic        reset_soc,
 
     // pipeline control
     input  logic        StallE, StallM, StallW,
@@ -25,6 +55,10 @@ module rvfi_tap (
     input  logic        InstrValidM, InstrValidE, InstrValidD,
     input  logic [31:0] InstrRawD,
     input  logic [63:0] PCM, PCD, PCE,
+    // branch resolution: PCSrcE, pipelined here E->M->W alongside IEUAdr
+    input  logic        PCSrcE,
+    // injected dummy instructions (InjectD is the core's name for DummyD)
+    input  logic        InjectD, DummyE, DummyM,
     // traps
     input  logic        TrapM, RetM, InterruptM,
     input  logic [63:0] EPCM, TrapVectorM,
@@ -84,6 +118,14 @@ module rvfi_tap (
     output logic        monitor_mem_extamo
 );
 
+    // Declared ahead of first use (SpyGlass rejects forward references);
+    // driven by the M->W pipeline registers further down.
+    logic        InstrValidW;
+    logic        InterruptTakenPending;
+
+    logic        rst_rvfi;
+    assign rst_rvfi = rst | reset_soc;
+
     // Fixed monitor outputs
     assign monitor_intr       = InterruptTakenPending & InstrValidW;
     assign monitor_mode       = PrivilegeModeW;
@@ -92,12 +134,23 @@ module rvfi_tap (
 
     logic [63:0] rvfi_order_ctr;
     always_ff @(posedge clk) begin
-        if (rst) rvfi_order_ctr <= '0;
+        if (rst_rvfi) rvfi_order_ctr <= '0;
         else if (InstrValidW & ~StallW) rvfi_order_ctr <= rvfi_order_ctr + 1;
     end
 
-    // Pipeline M→W registers
-    logic        InstrValidW;
+    // Dummy instruction flag, piped M->W alongside the other monitor signals so
+    // it lines up with InstrValidW rather than the core's own W-stage register.
+    logic        DummyD, DummyE_i, DummyM_i, DummyW;
+    assign DummyD   = InjectD;
+    assign DummyE_i = DummyE;
+    assign DummyM_i = DummyM;
+
+    // Taken-branch/jump resolution, pipelined E->M->W alongside IEUAdr.  IEUAdrE
+    // is the ALU result used both as the memory address and as the branch target,
+    // so IEUAdrW is the architectural target exactly when PCSrcW is set.
+    logic        PCSrcM_r, PCSrcW_r;
+
+    // Pipeline M→W registers (InstrValidW is declared near the top of the module)
     logic [63:0] PCW;
     logic [31:0] InstrRawW;
     logic        TrapW;
@@ -116,27 +169,32 @@ module rvfi_tap (
     // InterruptTakenPending: set when an external interrupt fires and its
     // interrupted instruction is suppressed from RVFI; cleared on the first
     // committed instruction of the interrupt handler (rvfi_intr=1 for it).
-    logic        InterruptTakenPending;
+    // Declared near the top of the module.
     logic        IntrReported;
     assign IntrReported = InterruptTakenPending & InstrValidW & ~StallW;
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             InstrValidW <= '0; PCW <= '0; InstrRawW <= '0;
             InstrRawE_r <= '0; InstrRawM_r <= '0;
             TrapW <= '0; MemRWW <= '0; Funct3W <= '0;
             IEUAdrW <= '0; WriteDataW <= '0;
+            PCSrcM_r <= '0; PCSrcW_r <= '0;
             Rs1E <= '0; Rs2E <= '0; Rs1M <= '0; Rs2M <= '0;
             Rs1W <= '0; Rs2W <= '0;
             Rs1DataM <= '0; Rs2DataM <= '0;
             Rs1DataW <= '0; Rs2DataW <= '0;
-            Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 0;
+            Rs1DataE_stash <= '0; Rs2DataE_stash <= '0; E_stash_valid <= 1'b0;
             InterruptTakenPending <= '0;
+            DummyW <= '0;
         end else begin
             // Clear intr pending when the first handler instruction is reported
             if (IntrReported) InterruptTakenPending <= '0;
             if (!StallE) InstrRawE_r <= FlushE ? '0 : InstrRawD;
             if (!StallM) InstrRawM_r <= FlushM ? '0 : InstrRawE_r;
+            // Same enables as the core's own E->M register for IEUAdr, so PCSrcM_r
+            // stays aligned with IEUAdrM and therefore PCSrcW_r with IEUAdrW.
+            if (!StallM) PCSrcM_r <= FlushM ? 1'b0 : PCSrcE;
             if (!StallW) begin
                 if (TrapM & InterruptM) begin
                     // External interrupt: suppress the interrupted instruction (if any in M)
@@ -149,12 +207,14 @@ module rvfi_tap (
                 end else begin
                     InstrValidW <= (FlushW & ~TrapM) ? '0 : InstrValidM;
                 end
+                DummyW      <= (FlushW & ~TrapM) ? '0 : DummyM_i;
                 PCW         <= (FlushW & ~TrapM) ? '0 : PCM;
                 InstrRawW   <= (FlushW & ~TrapM) ? '0 : InstrRawM_r;
                 TrapW       <= TrapM & ~InterruptM;   // rvfi_trap only for exceptions
                 MemRWW      <= FlushW ? '0 : MemRWM;
                 Funct3W     <= Funct3M;
                 IEUAdrW     <= IEUAdrM;
+                PCSrcW_r    <= (FlushW & ~TrapM) ? 1'b0 : PCSrcM_r;
                 WriteDataW  <= WriteDataM;
                 Rs1W        <= Rs1M;
                 Rs2W        <= Rs2M;
@@ -165,17 +225,17 @@ module rvfi_tap (
                 Rs1E <= FlushE ? '0 : Rs1D;
                 Rs2E <= FlushE ? '0 : Rs2D;
                 // Non-stalling or advancing: reset stash; stale stash no longer relevant.
-                E_stash_valid <= 0;
+                E_stash_valid <= 1'b0;
             end else if (FlushE) begin
                 // E-stage instruction killed; clear stash.
-                E_stash_valid <= 0;
+                E_stash_valid <= 1'b0;
             end else if (!E_stash_valid) begin
                 // First cycle of E-stage stall (MDU busy): ForwardedSrcAE/BE are
                 // correct here because R1E/R2E were loaded last cycle and the
                 // previous instruction is still in M/W providing forwarded values.
                 Rs1DataE_stash <= ForwardedSrcAE;
                 Rs2DataE_stash <= ForwardedSrcBE;
-                E_stash_valid  <= 1;
+                E_stash_valid  <= 1'b1;
             end
             if (!StallM) begin
                 Rs1M <= FlushM ? '0 : Rs1E;
@@ -205,7 +265,12 @@ module rvfi_tap (
         return m;
     endfunction
 
-    assign monitor_valid      = InstrValidW & ~StallW & (|PCW);
+    // Injected dummy instructions are already invisible here because the core
+    // forces their InstrValidE/M low, which is what InstrValidW is derived from.
+    // DummyW is ANDed in as well so that this stays true if that gating is ever
+    // relaxed: a dummy reaching Spike or the RVFI monitor would be reported as a
+    // mismatch on every run.
+    assign monitor_valid      = InstrValidW & ~StallW & (|PCW) & ~DummyW;
     assign monitor_order      = rvfi_order_ctr;
     // For compressed instructions, only bits[15:0] are valid; zero-extend to 32 bits.
     assign monitor_inst       = (InstrRawW[1:0] != 2'b11) ? {16'h0000, InstrRawW[15:0]} : InstrRawW;
@@ -227,7 +292,7 @@ module rvfi_tap (
     logic        RetW;
     logic [63:0] EPCW, TrapVectorW;
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             RetW <= '0; EPCW <= '0; TrapVectorW <= '0;
         end else if (!StallW) begin
             RetW        <= RetM;
@@ -243,11 +308,26 @@ module rvfi_tap (
     // next PC; the fetch discontinuity is expressed by rvfi_intr on the first handler
     // instruction (see InterruptTakenPending above), which rvfimon honors when
     // comparing the shadow PC against the next pc_rdata.
-    assign monitor_pc_wdata = RetW                 ? EPCW        :   // mret/sret: return to saved EPC
-                              TrapW                ? TrapVectorW :   // exception: jump to handler
-                              InstrValidM          ? PCM         :   // normal: lookahead to M stage
-                              InstrValidE          ? PCE         :
-                              InstrValidD          ? PCD         :
+    // A taken branch or jump takes its architectural next PC from its own
+    // resolution (IEUAdrW), not from a pipeline lookahead.  The lookahead cannot
+    // serve this case: the mispredict flushes D and E, and the target has not
+    // been refetched yet, so every downstream stage is empty when the branch
+    // retires -- PCE is even cleared to zero by the flush while the IEU still
+    // shows a dummy in E.  Insertion makes that window reachable often enough to
+    // fail; without it the refill usually lands in time and the lookahead happens
+    // to be right, which is why this was invisible until tc_rand_instr_insert.
+    //
+    // The lookahead still serves sequential instructions, and treats a stage
+    // holding an injected dummy as occupied: the IFU's PC pipeline knows nothing
+    // about insertion and replays the held PC, so a dummy carries the PC of the
+    // real instruction that follows it.  Each term is guarded on a nonzero PC so
+    // a stage cleared by a flush is never selected.
+    assign monitor_pc_wdata = RetW                                  ? EPCW        :  // mret/sret: return to saved EPC
+                              TrapW                                 ? TrapVectorW :  // exception: jump to handler
+                              PCSrcW_r                              ? IEUAdrW     :  // taken branch/jump: resolved target
+                              ((InstrValidM | DummyM_i) & (|PCM))   ? PCM         :  // sequential: lookahead to M
+                              ((InstrValidE | DummyE_i) & (|PCE))   ? PCE         :
+                              ((InstrValidD | DummyD)   & (|PCD))   ? PCD         :
                               pc_wdata_seq;
 
     assign monitor_mem_addr   = IEUAdrW & ~64'h7;
@@ -277,7 +357,7 @@ module rvfi_tap (
     logic [63:0] Frs1DataW, Frs2DataW, Frs3DataW;
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_rvfi) begin
             Frs1E <= '0; Frs2E <= '0; Frs3E <= '0;
             Frs1M <= '0; Frs2M <= '0; Frs3M <= '0;
             Frs1W <= '0; Frs2W <= '0; Frs3W <= '0;

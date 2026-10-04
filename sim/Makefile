@@ -95,80 +95,32 @@ RVFI_NO_FLOAT    = $(if $(strip $(ECE411_NO_FLOAT)),no_float,)
 
 export VCS_ARCH_OVERRIDE=linux
 
-# ── Pruned hardware configurations ────────────────────────────────────────────
-# CONFIG selects which pkg/ parameter set the no-Spike testbench is built
-# against, in place of the full RV64GC pkg/config.vh:
-#
-#     CONFIG=freertos           pkg/config_freertos.vh
-#                               only what the FreeRTOS images execute
-#     CONFIG=freertos_keystone  pkg/config_freertos_keystone.vh
-#                               that, plus what the Keystone SM and OpenSBI need
-#     CONFIG=baremetal_linux    pkg/config_baremetal_linux.vh
-#     CONFIG=asic               pkg/config_asic.vh (tapeout: baremetal_linux + silicon deltas)
-#                               smallest core that boots a soft-float Linux
-#
-#     make freertos_regression CONFIG=freertos
-#     make linux_boot          CONFIG=baremetal_linux
-#
-# None of them has an FPU, so those builds must also drop the RVFI float channel:
-# without ECE411_NO_FLOAT the wrapper taps soc.core.fpu.fpu.fregfile, which is
-# no longer elaborated.  hvl/common/rvfi_reference.svh is generated per build
-# and is shared, so switching CONFIG rewrites it and the other Verilator
-# binaries rebuild on their next invocation.  The binaries themselves live in
-# separate -Mdir trees and coexist.
 # DUT selects the device under test.  legacy is rv64_core_wrapper
-# (wallypipelinedsoc + ahb_to_memitf, the CI reference); amoeba is the ASIC
-# top behind hvl/common/amoeba_dut_wrap.sv, talking to memory over the
-# 16-bit link through amoeba_link_model.  Same testbench, same checkers.
+# (wallypipelinedsoc + ahb_to_memitf, the CI reference); forte is the ASIC
+# top behind hvl/common/forte_dut_wrap.sv, talking to memory over the
+# 16-bit link through forte_link_model.  Same testbench, same checkers.
 #
-#     make run_isa_level DUT=amoeba CONFIG=asic PROG=...
-#     make linux_boot    DUT=amoeba CONFIG=asic
+#     make run_isa_level DUT=forte PROG=...
+#     make linux_boot    DUT=forte
 #
-# Run-time link knobs (amoeba only): +LINK_GAPS=1 withholds ready/rvalid at
+# Run-time link knobs (forte only): +LINK_GAPS=1 withholds ready/rvalid at
 # random, +LINK_SEED=<n> picks the pattern.  Pass via LINK_ARGS.
 DUT ?= legacy
 ifeq ($(DUT),legacy)
   DUT_DEF :=
   DUT_TAG :=
-else ifeq ($(DUT),amoeba)
-  DUT_DEF := +define+ECE411_DUT_AMOEBA
-  DUT_TAG := _amoeba
+else ifeq ($(DUT),forte)
+  DUT_DEF := +define+ECE411_DUT_FORTE
+  DUT_TAG := _forte
 else
-  $(error DUT=$(DUT) is not known -- use legacy or amoeba)
+  $(error DUT=$(DUT) is not known -- use legacy or forte)
 endif
 LINK_ARGS ?=
 
-CONFIG ?=
-ifeq ($(CONFIG),)
-  CONFIG_DEF   :=
-else ifeq ($(CONFIG),freertos)
-  CONFIG_DEF   := +define+AMOEBA_CONFIG_FREERTOS +define+ECE411_NO_FLOAT
-  RVFI_NO_FLOAT := no_float
-  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_freertos
-else ifeq ($(CONFIG),freertos_keystone)
-  CONFIG_DEF   := +define+AMOEBA_CONFIG_FREERTOS_KEYSTONE +define+ECE411_NO_FLOAT
-  RVFI_NO_FLOAT := no_float
-  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_freertos_keystone
-else ifeq ($(CONFIG),baremetal_linux)
-  CONFIG_DEF   := +define+AMOEBA_CONFIG_BAREMETAL_LINUX +define+ECE411_NO_FLOAT
-  RVFI_NO_FLOAT := no_float
-  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_baremetal_linux
-else ifeq ($(CONFIG),asic)
-  CONFIG_DEF   := +define+AMOEBA_CONFIG_ASIC +define+ECE411_NO_FLOAT
-  RVFI_NO_FLOAT := no_float
-  NO_SPIKE_DIR := $(NO_SPIKE_DIR)_asic
-else
-  $(error CONFIG=$(CONFIG) is not a known configuration -- use freertos, freertos_keystone, baremetal_linux, asic, or leave it unset)
-endif
 BUILD_DIR    := $(BUILD_DIR)$(DUT_TAG)
 NO_SPIKE_DIR := $(NO_SPIKE_DIR)$(DUT_TAG)
 
 export VCS_ARCH_OVERRIDE=linux
-CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver
-VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=../vcs_warn.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
-VER_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
-NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) $(CONFIG_DEF) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 
 # Standalone --binary unit testbenches (ft_shadow_test, ecc_secded_dected_test,
 # csr_harden_test).  Like the SoC builds they need the repo's FindBin.pm, and
@@ -183,10 +135,10 @@ CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(
 # Changing this does not invalidate an existing build directory; run the matching
 # clean (or touch this Makefile) to force a recompile.
 EXTRA_DEFINES ?=
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
+COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
 VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=vcs_warn_gen.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
-VER_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
-NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+VER_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
+NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 ECC_INJECT_DIR       := build_ecc_inject$(RETIRE_SUFFIX)
 ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
@@ -294,12 +246,9 @@ endif
 # accesses trap exactly as the generated monitor assumes, and LINUX_RVFI=1 is
 # expected to work there without the false mismatch that forces it off on the
 # main config.
-ifneq ($(CONFIG),)
-  LINUX_BUILD_DIR := $(LINUX_BUILD_DIR)_$(CONFIG)
-endif
 LINUX_BUILD_DIR := $(LINUX_BUILD_DIR)$(DUT_TAG)
 
-LINUX_VER_FLAGS = $(COMMON_FLAGS) $(CONFIG_DEF) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
+LINUX_VER_FLAGS = $(COMMON_FLAGS) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
 	+define+ECE411_LINUX +define+ECE411_NO_TRACE $(LINUX_RVFI_DEF) +incdir+$(CURDIR)/../hvl/verilator \
 	-Wall --timescale 1ps/1ps -Mdir $(LINUX_BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 \
 	-CFLAGS "-O3 -flto -DNDEBUG -DECE411_NO_TRACE" -LDFLAGS "-flto" --x-assign fast --x-initial fast \
@@ -587,12 +536,12 @@ freertos_regression: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 
 # Abort torture for the link bridge: tc_link_abort must pass AND the bridge
 # must have finished at least one transfer after the core abandoned it
-# (amoeba_dut_wrap prints the count at the end of every run).  The core does
-# not abort bursts on its own in bare metal (see amoeba_dut_wrap.sv), so the
+# (forte_dut_wrap prints the count at the end of every run).  The core does
+# not abort bursts on its own in bare metal (see forte_dut_wrap.sv), so the
 # wrapper injects a flush into every 3rd I-fetch burst with +LINK_FORCE_ABORT.
 .PHONY: link_abort
 link_abort:
-	@[ "$(DUT)" = "amoeba" ] || { echo "link_abort needs DUT=amoeba"; exit 1; }
+	[ "$(DUT)" = "forte" ] || { echo "link_abort needs DUT=forte"; exit 1; }
 	$(MAKE) run_verilator_top_tb_no_spike PROG=$(CURDIR)/../testcode/isa_level_testing/tc_link_abort.c LINK_ARGS="+LINK_FORCE_ABORT=3 $(LINK_ARGS)"
 	@line=$$(grep -E '^\[LINK\] transactions' verilator/tc_link_abort/simulation.log); echo "$$line"; \
 	case "$$line" in *"aborted=0 "*) echo "link_abort: no aborted transfers observed -- the abort path was not exercised"; exit 1;; esac

@@ -1,22 +1,23 @@
 ///////////////////////////////////////////////////////////////////////////////
-// amoeba_dut_wrap.sv
+// forte_dut_wrap.sv
 //
 // The ASIC top as a testbench DUT, on the same ports as rv64_core_wrapper:
 // clk/rst, one mem_itf channel, the monitor_* RVFI outputs.  top_tb.svh
 // swaps the module name and nothing else changes -- memory model, tohost
 // snoop, generated rvfi_reference.svh, monitor.
 //
-//   amoeba_top      the chip, behavioural pads
-//   amoeba_link_model   the FPGA side of the link, into mem_itf
+//   forte_top      the chip, behavioural pads
+//   forte_link_model   the FPGA side of the link, into mem_itf
 //   rvfi_tap        the pipeline taps, by hierarchical reference into the core
 //
 ///////////////////////////////////////////////////////////////////////////////
 
-`include "amoeba_config_select.vh"
+`include "config.vh"
 
-module amoeba_dut_wrap import amoeba_link_pkg::*; (
+module forte_dut_wrap import forte_link_pkg::*; (
     input  logic        clk,
     input  logic        rst,
+    input  logic        ecc_inject_en,   // ECC inject enable, driven by top_tb
 
     output logic [63:0] mem_addr,
     output logic [7:0]  mem_rmask,
@@ -62,17 +63,41 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
     wire [LINK_W-1:0] io;
     logic dir, req, wr, burst, ready, rvalid, status, uart_tx;
 
-    amoeba_top top (
-        .core_clk(clk), .rst_n(~rst), .io, .dir, .req, .wr, .burst, .ready, .rvalid,
+    forte_top top (
+        // No link_clk here: forte_top has only the core_clk PAD and ties
+        // link_clk to it internally.  Driving the two domains independently
+        // means instantiating forte_chip directly -- which is exactly what the
+        // two-clock testbench in docs/impl_plan_link_clocking.md s9a is for.
+        .core_clk(clk), .rst_n(~rst), .ecc_inject_en,
+        .io, .dir, .req, .wr, .burst, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 
-    amoeba_link_model model (
+    // BEATS must be the DUT's.  forte_chip derives it as DCACHE_LINELENINBITS /
+    // AHBW from the same config.vh this file includes, so the two cannot drift
+    // apart silently -- a line resize moves both or neither.  Hardcoding 8 here
+    // is what made a 512 -> 128 bit line change hang the regression with no
+    // diagnostic at all.
+    forte_link_model #(.BEATS(DCACHE_LINELENINBITS / AHBW)) model (
         .clk, .rst, .io, .dir, .req, .wr, .burst, .ready, .rvalid,
         .mem_addr, .mem_rmask, .mem_wmask, .mem_wdata, .mem_rdata, .mem_resp);
 
     // ---- RVFI taps, same wiring as rv64_core_wrapper ------------------------
     rvfi_tap tap (
         .clk, .rst,
+        // The SoC's own reset releases a few cycles after rst; until then its
+        // pipeline controls are X in 4-state simulation.  rvfi_tap holds its
+        // registers in reset for as long as this is high so none of those Xs is
+        // ever captured -- the same rst_rvfi the wrapper builds inline.
+        .reset_soc      (top.chip.reset_soc),
+        // Taken-branch resolution and the injected-dummy flags.  Without these
+        // monitor_pc_wdata falls back to a pipeline lookahead that a mispredict
+        // flush has already emptied, and tc_rand_instr_insert fails on
+        // "mismatch in pc_wdata" -- it is the test that makes that window
+        // reachable.  See rvfi_tap.sv.
+        .PCSrcE         (top.chip.soc.core.PCSrcE),
+        .InjectD        (top.chip.soc.core.InjectD),
+        .DummyE         (top.chip.soc.core.ieu.c.DummyE),
+        .DummyM         (top.chip.soc.core.ieu.c.DummyM),
         .StallE         (top.chip.soc.core.StallE),
         .StallM         (top.chip.soc.core.StallM),
         .StallW         (top.chip.soc.core.StallW),
@@ -137,8 +162,8 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
     // is a monitor interface the DUT exports deliberately, rather than the
     // testbench reaching in; until then, expect to re-point these whenever the
     // bridge hierarchy moves.
-    //   core domain (amoeba_link_core): the AHB side, the abort rule, pending
-    //   link domain (amoeba_link_phy):  the pins, the word counters, txn_done
+    //   core domain (forte_link_core): the AHB side, the abort rule, pending
+    //   link domain (forte_link_phy):  the pins, the word counters, txn_done
     // aborted counts transfers the bridge finished after the core had left:
     // the abort path is only proven if this is nonzero on a branchy workload.
     longint unsigned n_txn = 0, n_rd = 0, n_wr = 0, n_abort = 0, n_pending = 0;
@@ -195,7 +220,19 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
             if (forcing) begin
                 release top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush;
                 forcing <= 1'b0;
-            end else if (top.chip.phy.st == LM_RD_DATA && top.chip.phy.wcnt == 5 && top.chip.phy.rvalid_s &&
+            // Word 1, i.e. inside the FIRST beat, and NOT a fixed word part-way
+            // through a 32-word burst.  forte_link_core only latches `aborted`
+            // at a NON-FINAL beat boundary -- beat_ok is unconditionally true
+            // once last_beat holds -- so the forced flush has to land early
+            // enough that HTRANS has gone IDLE before a non-final beat is
+            // retired.  This used to be `wcnt == 5`, which was beat 1 of 8 at a
+            // 512-bit line and is beat 1 of 2 (the LAST beat) at 128 bits: the
+            // injection still fired, the flush still happened, and not one
+            // transfer could be aborted by it.  aborted/flushD_during_ifetch/
+            // idle_midburst_cycles all went to zero and the only thing that
+            // noticed was the link_abort gate.  Word 1 is in a non-final beat
+            // for every BEATS >= 2, which forte_link_core enforces.
+            end else if (top.chip.phy.st == LM_RD_DATA && top.chip.phy.wcnt == 1 && top.chip.phy.rvalid_s &&
                          top.chip.soc.core.ebu.ebu.IFUSelect) begin
                 if (force_cnt + 1 >= force_abort_n) begin
                     force top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush = 1'b1;

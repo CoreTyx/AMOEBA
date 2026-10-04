@@ -1,25 +1,25 @@
 ///////////////////////////////////////////////////////////////////////////////
-// amoeba_link_core.sv
+// forte_link_core.sv
 //
 // The core domain: AHB-Lite slave on the SoC's external port -> flits.  This is
-// the half of hdl/amoeba_link_master.sv that has to stay next to the core,
+// the half of hdl/forte_link_master.sv that has to stay next to the core,
 // because it is the half that can see HTRANS.
 //
 //   LC_IDLE    HREADYOUT=1.  An address phase that completes here is latched
 //              and its command flit pushed.
 //   LC_WFIRST  one idle cycle -- see "WHY LC_WFIRST" below
-//   LC_WDATA   push 8 data flits, pulsing HREADYOUT to pull each next beat
-//   LC_RDATA   pop 8 beats, presenting each on HRDATA with an HREADYOUT pulse
+//   LC_WDATA   push BEATS data flits, pulsing HREADYOUT to pull each next beat
+//   LC_RDATA   pop BEATS beats, presenting each on HRDATA with an HREADYOUT pulse
 //
 // This is simpler than the logic it replaces, because the crossing deals in
 // whole 64-bit beats: there is no 16-bit word accounting here and no beat
 // assembly register.  HRDATA is the inbound FIFO's read data directly.
 //
-// THE ABORT RULE lives here, unchanged in substance from amoeba_link_master.
+// THE ABORT RULE lives here, unchanged in substance from forte_link_master.
 // buscachefsm drops to ADR_PHASE on FlushD in the same cycle, so an I-fetch
 // line fill can lose its master mid-burst.  Once a command flit has been pushed
 // the phy is committed to finishing it on the wire, so this module must still
-// account for all 8 beats -- what it must NOT do is complete an AHB beat for a
+// account for all BEATS beats -- what it must NOT do is complete an AHB beat for a
 // master that has moved on.  A NONSEQ at a beat boundary is the master's *next*
 // request, and pulsing HREADY then would accept it while the old transaction is
 // still draining.  So at a non-final beat boundary HREADYOUT pulses only if
@@ -37,7 +37,7 @@
 // SEQ for beat 1 in that same cycle.  A write would otherwise push beat 0 while
 // htrans_q reads NONSEQ, beat_ok would be false, `aborted` would latch on beat 0
 // of EVERY write, and HREADYOUT would never pulse again: an instant hang.
-// amoeba_link_master was accidentally immune because its first pulse came four
+// forte_link_master was accidentally immune because its first pulse came four
 // words into the burst, by which time SEQ had been showing for three cycles.
 // One idle cycle lets htrans_q catch up.  It costs nothing on the wire -- the
 // phy does not start until the whole transaction is buffered anyway.
@@ -53,12 +53,17 @@
 // asserts if it ever happens.
 ///////////////////////////////////////////////////////////////////////////////
 
-module amoeba_link_core import amoeba_link_pkg::*; #(
-  parameter HADDR_W = 56
+module forte_link_core import forte_link_pkg::*; #(
+  parameter HADDR_W = 56,
+  // Beats per transaction.  Set by hdl/forte_chip.sv from the core config as
+  // DCACHE_LINELENINBITS / AHBW; see "ONE BURST LENGTH PER BUILD" in
+  // pkg/forte_link_pkg.sv.  The default matches a 512-bit line and is here only
+  // because SystemVerilog requires one -- forte_chip always overrides it.
+  parameter BEATS   = 8
 )(
   input  logic                HCLK, HRESETn,
 
-  // AHB-Lite slave (external port of amoeba_soc)
+  // AHB-Lite slave (external port of forte_soc)
   input  logic                HSEL,
   input  logic [HADDR_W-1:0]  HADDR,
   input  logic [1:0]          HTRANS,      // 00 IDLE 01 BUSY 10 NONSEQ 11 SEQ
@@ -89,21 +94,24 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
   logic unused_attrs;
   assign unused_attrs = ^{HSIZE, HBURST};
 
-  link_core_st_t st;                   // states in pkg/amoeba_link_pkg.sv
+  link_core_st_t st;                   // states in pkg/forte_link_pkg.sv
 
   // No addr_r/wr_r: the command flit is pushed in the cycle the address phase
   // is accepted, so the address never needs holding, and after that LC_WDATA vs
   // LC_RDATA is the direction.
   logic [31:0] nxt_addr;
   logic        nxt_wr, pending;
-  logic [2:0]  bcnt;                   // beat within the transaction, 0..7
+  // Beat index runs 0..BEATS-1.  BEATS >= 2 is checked below, so $clog2 is
+  // never asked for the width of a one-element range.
+  localparam BCNT_W = $clog2(BEATS);
+  logic [BCNT_W-1:0] bcnt;             // beat within the transaction
   logic        aborted;
   logic [1:0]  htrans_q;
   always_ff @(posedge HCLK) htrans_q <= HTRANS;
 
   logic last_beat, beat_ok, accept, wpush, rpop;
 
-  assign last_beat = (bcnt == 3'd7);
+  assign last_beat = (bcnt == BCNT_W'(BEATS - 1));
   assign beat_ok   = ~aborted & ~pending & (last_beat | (htrans_q == HTRANS_SEQ));
 
   // Address phase of a transfer to us completes on the mux'd HREADY.  SEQ beats
@@ -119,14 +127,14 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
   // four extra reads, and the surplus beats were misattributed to later
   // transactions -- a deadlock on the second one.
   //
-  // amoeba_link_master never had this exposure: `accept` only ever had effect
+  // forte_link_master never had this exposure: `accept` only ever had effect
   // inside the reset-guarded always_ff, and nothing combinational left the
   // module.  Any combinational signal crossing into a different reset domain
   // needs this gate.
   assign accept = HRESETn & HSEL & (HTRANS == HTRANS_NONSEQ) & HREADY;
 
   // ---- flit traffic ---------------------------------------------------------
-  // A write beat is pushed whenever the FIFO can take it.  All 8 go in whether
+  // A write beat is pushed whenever the FIFO can take it.  All BEATS go in whether
   // or not the master is still interested: the phy is committed to the word
   // count, so a short push would underrun the wire.
   assign rpop  = (st == LC_RDATA) & ibeat_valid;
@@ -148,9 +156,10 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
                                : dat_flit(HWDATA);
 
   // ---- AHB response ---------------------------------------------------------
-  // Stalling on ~ocmd_ready in LC_IDLE cannot deadlock: the FIFO is 16 deep
-  // against 9 flits for one transaction at a time, so it is never full here.
-  // It is gated anyway rather than assumed.
+  // Stalling on ~ocmd_ready in LC_IDLE cannot deadlock: the FIFO is sized to
+  // BEATS+2 (pkg/forte_link_pkg.sv fifo_depth), one transaction plus the next
+  // command, and only one transaction is ever in flight.  It is gated anyway
+  // rather than assumed -- the margin is now one slot, not seven.
   assign HREADYOUT = ((st == LC_IDLE) & ~pending & ocmd_ready)
                    | (wpush & beat_ok)
                    | (rpop  & beat_ok);
@@ -179,7 +188,7 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
           if (wpush) begin
             if (~beat_ok) aborted <= 1'b1;
             if (last_beat) st <= LC_IDLE;
-            else           bcnt <= bcnt + 3'd1;
+            else           bcnt <= bcnt + BCNT_W'(1);
           end
         end
 
@@ -187,7 +196,7 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
           if (rpop) begin
             if (~beat_ok) aborted <= 1'b1;
             if (last_beat) st <= LC_IDLE;
-            else           bcnt <= bcnt + 3'd1;
+            else           bcnt <= bcnt + BCNT_W'(1);
           end
         end
 
@@ -222,15 +231,32 @@ module amoeba_link_core import amoeba_link_pkg::*; #(
   // The address goes over whole, so 32 bits is the only constraint left.
   always_ff @(posedge HCLK) if (HRESETn & accept) begin
     assert (HADDR[HADDR_W-1:32] == '0) else $fatal(1, "link core: HADDR above 4 GB: %h", HADDR);
-    assert (HBURST == HBURST_INCR8)
-      else $fatal(1, "link core: HBURST %b -- the link is INCR8 only", HBURST);
+    // The two sides' idea of the burst length, compared.  A line resize that
+    // nobody propagated here lands on this line instead of hanging the DUT.
+    assert (HBURST == hburst_for(BEATS))
+      else $fatal(1, "link core: HBURST %b but BEATS=%0d expects %b -- the link and the cache disagree about the burst length",
+                  HBURST, BEATS, hburst_for(BEATS));
     assert (HSIZE == 3'b011 & HADDR[2:0] == 3'b000)
-      else $fatal(1, "link core: INCR8 with HSIZE %b at %h is not a full aligned beat", HSIZE, HADDR);
+      else $fatal(1, "link core: HSIZE %b at %h is not a full aligned eight-lane beat", HSIZE, HADDR);
   end
   // Writes are never aborted (the D-cache's Flush is tied low); if that changes,
   // junk goes to memory and this is the first thing to fire.
   always_ff @(posedge HCLK) if (HRESETn & wpush & ~beat_ok)
     $fatal(1, "link core: write burst abandoned by the master at beat %0d", bcnt);
+
+  // BEATS=1 would be a one-beat "burst", which on the wire is indistinguishable
+  // from an uncached single -- and a single is the one case that needs the
+  // {HWSTRB, HSIZE} header word the link does not carry.  Caught at elaboration
+  // rather than left to the HBURST assertion, which would also fire but only
+  // after the first transaction.
+  initial if (BEATS < 2)
+    $fatal(1, "link core: BEATS=%0d; the link carries no size and no lane strobes, so it cannot express a single transfer", BEATS);
+  // The upper bound is what keeps forte_chip's widening of the FIFO occupancy to
+  // DEPTH_W a zero-extend rather than a silent truncation: DEPTH_W is sized for
+  // fifo_depth(MAX_BEATS).  MAX_BEATS is also AHB's largest burst, so a build
+  // above it could not have a legal HBURST encoding either.
+  initial if (BEATS > MAX_BEATS)
+    $fatal(1, "link core: BEATS=%0d exceeds MAX_BEATS=%0d; AHB has no burst that long and the occupancy counters are sized for it", BEATS, MAX_BEATS);
 `endif
 
 endmodule
