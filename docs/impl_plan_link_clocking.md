@@ -466,7 +466,41 @@ Suggested order:
 5. **Loopback**, once the DFT/debug-pin question is settled.
 
 Steps 3 and 4 are the ones that touch RTL verified by the regression, so they
-want the non-integer-ratio sweep (§4.2) standing up first.## 10. Open items
+want the non-integer-ratio sweep (§4.2) standing up first.## 9a. REQUIRED: the two-clock testbench
+
+**Status: not done. This is the highest-value outstanding item, because without
+it the architecture chosen in §4 has no coverage.**
+
+`amoeba_top` ties `link_clk` to the `core_clk` pad, so the ISA regression runs
+both domains from one clock. RTL has no clock tree, so simulation sees **zero
+skew** between them: `prim_fifo_async`'s Gray-coded pointers always cross at the
+same phase, the synchronisers never resolve anything marginal, and the entire
+reason for taking option 3 goes unexercised. A green regression says nothing
+about the CDC.
+
+What exists today:
+
+- `third_party/opentitan/tb/run.sh` — the FIFO alone at Width=65, Depth=16,
+  ratio 1:1.37, 2000 words with backpressure. Proves the vendored module, not
+  its integration.
+- The `[FLIT]` balance line in `amoeba_dut_wrap` (`cmd_push`/`cmd_pop`/
+  `beat_push`/`beat_pop`) plus the stale-beat and 8-beats-per-read assertions.
+  These are the checks that caught the reset-gating bug in `a76988e`, and they
+  are what a two-clock run should be gated on.
+
+What is needed: a testbench that instantiates **`amoeba_chip` directly** (not
+`amoeba_top`, which ties the clocks) and drives `core_clk` and `link_clk` from
+independent generators at a non-integer ratio — 1:1.37 as in the FIFO bench, and
+ideally a sweep. Then run the existing ISA programmes through it and require the
+flit balance to be exact and the assertions silent.
+
+This verifies the crossing under conditions strictly **worse** than the chip
+will see, since the real part has one clock source with bounded tree skew. If it
+passes at 1:1.37 with arbitrary phase it will pass at 1:1.
+
+Also still owed: a non-integer-ratio sweep in CI, per §4.2 point 3.
+
+## 10. Open items
 
 | Item | Needs |
 |---|---|
@@ -477,7 +511,7 @@ want the non-integer-ratio sweep (§4.2) standing up first.## 10. Open items
 | ~~Async FIFO choice~~ | **Decided: OpenTitan `prim_fifo_async`.** Remaining: vendor it, confirm port names and the power-of-two depth constraint against the actual source |
 | Loopback entry encoding | `rvalid` high at reset release is free; confirm no conflict with the FPGA slave's own reset behaviour |
 | First-header checker in fabric | ~20 LUTs; decide whether it also re-asserts `rst_n` automatically or only flags |
-| Non-integer clock-ratio regression | Required if Option 3 proceeds |
+| **Non-integer clock-ratio regression** | **Required -- Option 3 has proceeded (a76988e) and this is still missing. See §9a.** |
 | Pad budget | 44 used (42 + `link_clk` + `clk_out`), 8 spare. Power/ground placeholder more likely to grow with non-standard packaging |
 | **SDC carries no package term** | `constraints.sdc` input/output delays are PLACEHOLDER and do not name pad or package delay at all. With packaging as the stated risk, the budget must break out package explicitly |
 | **DFT/debug vs `io[15:0]`** | `io` currently doubles as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |
