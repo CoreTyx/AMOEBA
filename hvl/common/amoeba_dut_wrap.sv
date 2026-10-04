@@ -128,26 +128,50 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
     );
 
     // ---- link statistics, printed at the end of every run -------------------
+    // NOTE ON THE PROBES BELOW.  These are hierarchical references into the
+    // DUT, and that has now broken twice on refactors: once when inserting a
+    // state shifted the enum values these compared against (fixed in 6ad99fe by
+    // moving the enums into the package), and again when the bridge split in
+    // two and `link` became `linkcore` + `phy`.  Both times the ISA regression
+    // stayed green and only the link_abort gate caught it.  The structural fix
+    // is a monitor interface the DUT exports deliberately, rather than the
+    // testbench reaching in; until then, expect to re-point these whenever the
+    // bridge hierarchy moves.
+    //   core domain (amoeba_link_core): the AHB side, the abort rule, pending
+    //   link domain (amoeba_link_phy):  the pins, the word counters, txn_done
     // aborted counts transfers the bridge finished after the core had left:
     // the abort path is only proven if this is nonzero on a branchy workload.
     longint unsigned n_txn = 0, n_rd = 0, n_wr = 0, n_abort = 0, n_pending = 0;
     logic aborted_q, pending_q;
     always @(posedge clk) begin
-        aborted_q <= top.chip.link.aborted;
-        pending_q <= top.chip.link.pending;
-        if (top.chip.link.txn_done) begin
+        aborted_q <= top.chip.linkcore.aborted;
+        pending_q <= top.chip.linkcore.pending;
+        if (top.chip.phy.txn_done) begin
             n_txn <= n_txn + 1;
-            if (top.chip.link.wr_r) n_wr <= n_wr + 1; else n_rd <= n_rd + 1;
+            if (top.chip.phy.wr_r) n_wr <= n_wr + 1; else n_rd <= n_rd + 1;
         end
-        if (top.chip.link.aborted & ~aborted_q) n_abort   <= n_abort + 1;
-        if (top.chip.link.pending & ~pending_q) n_pending <= n_pending + 1;
+        if (top.chip.linkcore.aborted & ~aborted_q) n_abort   <= n_abort + 1;
+        if (top.chip.linkcore.pending & ~pending_q) n_pending <= n_pending + 1;
     end
+    // Flit accounting across the crossing.  If these do not balance the two
+    // halves disagree about how many beats a transaction has, and stale beats
+    // poison every transaction after the first.
+    longint unsigned n_cmd_push = 0, n_cmd_pop = 0, n_beat_push = 0, n_beat_pop = 0;
+    always @(posedge clk) begin
+        if (top.chip.linkcore.cmd_push   & top.chip.linkcore.ocmd_ready) n_cmd_push  <= n_cmd_push  + 1;
+        if (top.chip.phy.ocmd_ready & top.chip.phy.ocmd_valid
+                                    & top.chip.phy.ocmd_data[64])        n_cmd_pop   <= n_cmd_pop   + 1;
+        if (top.chip.phy.ibeat_valid     & top.chip.phy.ibeat_ready)     n_beat_push <= n_beat_push + 1;
+        if (top.chip.linkcore.rpop)                                      n_beat_pop  <= n_beat_pop  + 1;
+    end
+    final $display("[FLIT] cmd_push=%0d cmd_pop=%0d beat_push=%0d beat_pop=%0d",
+                   n_cmd_push, n_cmd_pop, n_beat_push, n_beat_pop);
     // Diagnostics for the abort path: flushes while a read is in flight, and
     // cycles where the master shows IDLE mid-burst (what the bridge keys on).
     longint unsigned n_flush_rd = 0, n_idle_midburst = 0;
     always @(posedge clk) begin
-        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.link.st inside {LM_RD_TA, LM_RD_DATA, LM_RD_TA2})) n_flush_rd <= n_flush_rd + 1;
-        if ((top.chip.link.st == LM_RD_DATA) & (top.chip.link.HTRANS == 2'b00) & ~top.chip.link.last_beat)
+        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.phy.st inside {LM_RD_TA, LM_RD_DATA, LM_RD_TA2})) n_flush_rd <= n_flush_rd + 1;
+        if ((top.chip.phy.st == LM_RD_DATA) & (top.chip.linkcore.HTRANS == 2'b00) & ~top.chip.linkcore.last_beat)
             n_idle_midburst <= n_idle_midburst + 1;
     end
     final $display("[LINK] transactions=%0d reads=%0d writes=%0d aborted=%0d pipelined=%0d flushD_during_ifetch=%0d idle_midburst_cycles=%0d",
@@ -171,7 +195,7 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
             if (forcing) begin
                 release top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush;
                 forcing <= 1'b0;
-            end else if (top.chip.link.st == LM_RD_DATA && top.chip.link.wcnt == 5 && top.chip.link.rvalid_s &&
+            end else if (top.chip.phy.st == LM_RD_DATA && top.chip.phy.wcnt == 5 && top.chip.phy.rvalid_s &&
                          top.chip.soc.core.ebu.ebu.IFUSelect) begin
                 if (force_cnt + 1 >= force_abort_n) begin
                     force top.chip.soc.core.ifu.bus.icache.ahbcacheinterface.Flush = 1'b1;
@@ -193,25 +217,29 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
     initial void'($value$plusargs("LINK_PINS=%d", pins_n));
     initial if ($test$plusargs("LINK_PINS_WR")) pins_wr_only = 1;
     always @(posedge clk) if (pins_n > 0) begin
-        if (!pins_armed && top.chip.link.accept
-                        && (!pins_wr_only || top.chip.link.HWRITE)) begin
+        if (!pins_armed && top.chip.linkcore.accept
+                        && (!pins_wr_only || top.chip.linkcore.HWRITE)) begin
             pins_armed <= 1'b1;
-            $display("# cyc st           io    dir req wr bst rdy rvld  drv  pnd hro hr/hsel note");
+            $display("# cyc PHYst      io    dir req rvld drv   | COREst   bcnt abt ok htq hro note");
         end
         if (pins_armed && pins_cnt < pins_n) begin
             pins_cnt <= pins_cnt + 1;
-            $display("P %4d %-10s %4h   %b   %b   %b  %b   %b   %b   %-5s %b %b %b%b %s",
+            $display("P %4d %-10s %4h   %b   %b   %b  %-5s | %-9s %0d   %b   %b  %2b  %b  %s",
                 pins_cnt,
-                top.chip.link.st.name(),
-                io,
-                dir, req, wr, burst, ready, rvalid,
+                top.chip.phy.st.name(),
+                io, dir, req, rvalid,
                 (top.chip.io_oe[0] && !model.io_oe) ? "ASIC" :
                 (!top.chip.io_oe[0] && model.io_oe) ? "fpga" :
                 (!top.chip.io_oe[0] && !model.io_oe) ? "--"   : "BOTH!",
-                top.chip.link.pending, top.chip.link.HREADYOUT,
-                top.chip.link.HREADY, top.chip.link.HSEL,
-                top.chip.link.accept ? "accept" :
-                top.chip.link.HREADYOUT && top.chip.link.st != amoeba_link_pkg::LM_IDLE ? "HREADY pulse" : "");
+                top.chip.linkcore.st.name(),
+                top.chip.linkcore.bcnt,
+                top.chip.linkcore.aborted,
+                top.chip.linkcore.beat_ok,
+                top.chip.linkcore.htrans_q,
+                top.chip.linkcore.HREADYOUT,
+                top.chip.linkcore.accept ? "accept" :
+                top.chip.linkcore.rpop   ? "rpop"   :
+                top.chip.linkcore.wpush  ? "wpush"  : "");
         end
     end
 
@@ -220,15 +248,15 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; (
     initial if ($test$plusargs("LINK_TRACE")) link_trace = 1;
     always @(posedge clk) begin
         if (link_trace) begin
-            if (top.chip.link.accept)
+            if (top.chip.linkcore.accept)
                 $display("[LINK %0t] accept  addr=%h wr=%b burst=%b st=%0d pending=%b",
-                         $time, top.chip.link.HADDR[31:0], top.chip.link.HWRITE, top.chip.link.HBURST,
-                         top.chip.link.st, top.chip.link.pending);
-            if (top.chip.link.req & ~top.chip.link.dir)
+                         $time, top.chip.linkcore.HADDR[31:0], top.chip.linkcore.HWRITE, top.chip.linkcore.HBURST,
+                         top.chip.phy.st, top.chip.linkcore.pending);
+            if (top.chip.phy.req & ~top.chip.phy.dir)
                 $display("[LINK %0t] req while dir=0", $time);
-            if (top.chip.link.HREADYOUT & top.chip.link.st != LM_IDLE)
+            if (top.chip.linkcore.HREADYOUT & top.chip.phy.st != LM_IDLE)
                 $display("[LINK %0t] beat    st=%0d wcnt=%0d hrdata=%h", $time,
-                         top.chip.link.st, top.chip.link.wcnt, top.chip.link.HRDATA);
+                         top.chip.phy.st, top.chip.phy.wcnt, top.chip.linkcore.HRDATA);
             if (model.lst == LS_HDR1)
                 $display("[LINK %0t] model   header hi=%h lo=%h wr=%b burst=%b", $time,
                          model.hdr_hi, model.io_i, model.wr, model.burst);

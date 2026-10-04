@@ -66,10 +66,35 @@ package amoeba_link_pkg;
   // amoeba_dut_wrap.sv used to compare `st` against literal integers; adding a
   // state silently repointed every one of them at its neighbour, and the abort
   // injection stopped firing with no error anywhere.
+  // amoeba_link_phy, the link domain.
   typedef enum logic [3:0] {
     LM_IDLE, LM_START, LM_HDR0, LM_HDR1,
     LM_WDATA, LM_RD_TA, LM_RD_DATA, LM_RD_TA2
   } link_st_t;
+
+  // amoeba_link_core, the core domain.
+  typedef enum logic [1:0] { LC_IDLE, LC_WFIRST, LC_WDATA, LC_RDATA } link_core_st_t;
+
+  // The flit crossing between them.  Width is set by the DATA flits -- one
+  // 64-bit AHB beat -- so the command rides free in a slot that exists anyway;
+  // its 31 reserved bits cost nothing.
+  //
+  //   command flit  [64] is_cmd=1 | [63] wr | [62:32] reserved | [31:0] addr
+  //   data flit     [64] is_cmd=0 | [63:0] one 64-bit beat
+  //
+  // The crossing deals in transactions and beats, never in 16-bit link words:
+  // serialization is a link-domain implementation detail.
+  localparam int FLIT_W   = 65;
+  localparam int FIFO_D   = 16;    // power of two (prim_fifo_async); 9 flits max
+  localparam int FIFO_DW  = 5;     // $clog2(FIFO_D+1): occupancy 0..16
+
+  function automatic logic [FLIT_W-1:0] cmd_flit(input logic wr, input logic [31:0] addr);
+    return {1'b1, wr, 31'b0, addr};
+  endfunction
+
+  function automatic logic [FLIT_W-1:0] dat_flit(input logic [63:0] beat);
+    return {1'b0, beat};
+  endfunction
 
   typedef enum logic [3:0] {
     LS_IDLE, LS_HDR1, LS_WDATA, LS_RD_TA, LS_RD

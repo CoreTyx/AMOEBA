@@ -34,8 +34,14 @@ module amoeba_top import amoeba_link_pkg::*; #(
 
   logic [LINK_W-1:0] io_o, io_oe, io_i;
 
+  // link_clk is tied to the core_clk pad: one clock off the board, two clock
+  // trees on the die (docs/impl_plan_link_clocking.md s4).  The separate port on
+  // amoeba_chip is what lets a testbench drive the two domains independently and
+  // actually exercise the FIFOs' pointer crossings; a single port would give
+  // simulation zero skew and no coverage.  Splitting the frequencies later is a
+  // one-line change here plus a pad.
   amoeba_chip #(.PERIPH_ONCHIP(PERIPH_ONCHIP)) chip(
-    .core_clk, .rst_n, .io_o, .io_oe, .io_i, .dir, .req, .wr, .burst, .ready, .rvalid,
+    .core_clk, .link_clk(core_clk), .rst_n, .io_o, .io_oe, .io_i, .dir, .req, .wr, .burst, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .status);
 
 `ifdef AMOEBA_PADLIB
