@@ -60,7 +60,7 @@ export VCS_ARCH_OVERRIDE=linux
 # only compile with -fcoroutines.  The flag is probed so other compilers are unaffected.
 UNIT_TB_CFLAGS    := $(shell echo | $(CXX) -std=c++20 -fcoroutines -x c++ -E - >/dev/null 2>&1 && echo -CFLAGS -fcoroutines)
 UNIT_TB_VERILATOR  = PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(UNIT_TB_CFLAGS)
-CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc +incdir+$(CURDIR)/../hdl/core/ifu/bpred
+CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
 # Extra +define+... passed on the command line, e.g.
 #   make build_isa_tests EXTRA_DEFINES=+define+ECE411_DUMMY_TRACE
 # Changing this does not invalidate an existing build directory; run the matching

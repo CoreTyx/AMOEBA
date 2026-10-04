@@ -66,7 +66,7 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-`include "../pkg/BranchPredictorType.vh"
+//`include "../pkg/BranchPredictorType.vh"
 
 // RV32 or RV64: XLEN = 32 or 64
 localparam XLEN = 32'd64;
@@ -400,7 +400,7 @@ localparam PLIC_SDC_ID = 32'd9;
 // caches, and it stacks with them: no predictor and an 8-line I-cache means
 // most taken branches cost both a mispredict and a miss.
 localparam logic BPRED_SUPPORTED = 0;
-localparam BPRED_TYPE = `BP_TWOBIT; // BP_GSHARE_BASIC, BP_GLOBAL, BP_GLOBAL_BASIC, BP_TWOBIT
+localparam BPRED_TYPE = cvw::BP_TWOBIT; // BP_GSHARE_BASIC, BP_GLOBAL, BP_GLOBAL_BASIC, BP_TWOBIT
 localparam BPRED_SIZE = 32'd8;
 localparam BPRED_NUM_LHR = 32'd6;
 localparam BTB_SIZE = 32'd10;
