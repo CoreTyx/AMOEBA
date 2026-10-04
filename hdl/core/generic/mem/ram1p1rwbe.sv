@@ -57,7 +57,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
 
-  end else if ((USE_SRAM == 1) & (WIDTH == 44)  & (DEPTH == 64)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 44)  & (DEPTH == 64)) begin
     genvar index;
     // 64 x 44-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -67,7 +67,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
 
-  end else if ((USE_SRAM == 1) & (WIDTH == 22)  & (DEPTH == 64)) begin // RV32 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 22)  & (DEPTH == 64)) begin
     genvar index;
     // 64 x 22-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -77,7 +77,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
 
-  end else if ((USE_SRAM == 1) & (WIDTH == 45)  & (DEPTH == 32)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 45)  & (DEPTH == 32)) begin
     genvar index;
     // 32 x 45-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -87,7 +87,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
 
-  end else if ((USE_SRAM == 1) & (WIDTH == 128)  & (DEPTH == 32)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 128)  & (DEPTH == 32)) begin
     genvar index;
     // 32 x 128-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -97,7 +97,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
    
-  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 16)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 16)) begin
     genvar index;
     // 16 x 46-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -107,7 +107,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
   
-  end else if ((USE_SRAM == 1) & (WIDTH == 128)  & (DEPTH == 16)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 128)  & (DEPTH == 16)) begin
     genvar index;
     // 16 x 128-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
@@ -117,7 +117,7 @@ module ram1p1rwbe import cvw::*; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44, PRE
       .A(addr), .D(din),
       .BWEB(~BitWriteMask), .Q(dout));
 
-  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 64)) begin // RV64 cache tag
+  end else if ((USE_SRAM == 1) & (WIDTH == 46)  & (DEPTH == 64)) begin
     genvar index;
     // 64 x 46-bit SRAM
     logic [WIDTH-1:0] BitWriteMask;
