@@ -27,8 +27,15 @@
 //   rvalid           read data word on io this cycle; gaps allowed
 //   dir              1 = ASIC drives io, 0 = ASIC has released it; the single
 //                    source of truth for bus ownership.  TA idle cycles are
-//                    guaranteed by the ASIC on every change, including on a
-//                    training retry (amoeba_link_train RETRY_TA).
+//                    guaranteed by the ASIC on every change.
+//
+// NO LINK TRAINING.  The ASIC used to drive an LFSR pattern and check an echo
+// before releasing the core (docs/impl_plan_link_clocking.md s7).  It does not
+// any more: the first fetch is fully determined (RESET_VECTOR = 0x8000_0000, so
+// an INCR8 read with header words 0x8000, 0x0000, wr=0, burst=1) and `rst_n` is
+// an FPGA output, so the FPGA releases the core, checks that header, and
+// re-asserts reset within microseconds if it is wrong.  The gate moved to the
+// side with a CPU, Python and an ILA instead of a one-bit status pin.
 //
 // THE READY GUARD BAND.  `ready` means "I have room for a whole transaction,
 // and one more in reserve".  It is advisory, not a handshake: the ASIC samples
@@ -54,14 +61,6 @@ package amoeba_link_pkg;
   // the ASIC's two inbound capture registers plus the START -> HDR0 edge.
   localparam int GUARD = 3;
 
-  // Training: after reset the ASIC drives TRAIN_LEN LFSR words with dir=1,
-  // then releases the bus and expects the same TRAIN_LEN words echoed back.
-  // The FPGA centres its input delay on the outbound phase and its output
-  // phase on the echo.  Overridable per instance so simulation stays short.
-  localparam int          TRAIN_LEN_DEFAULT = 4096;
-  localparam int          TRAIN_RETRIES     = 8;
-  localparam logic [15:0] TRAIN_SEED        = 16'hACE1;
-
   // The two FSMs' state encodings live here, not inside their modules, so the
   // testbench can NAME a state instead of numbering it.  hvl/common/
   // amoeba_dut_wrap.sv used to compare `st` against literal integers; adding a
@@ -73,18 +72,10 @@ package amoeba_link_pkg;
   } link_st_t;
 
   typedef enum logic [3:0] {
-    LS_TRAIN, LS_ECHO_TA, LS_ECHO, LS_IDLE, LS_HDR1,
-    LS_WDATA, LS_RD_TA, LS_RD
+    LS_IDLE, LS_HDR1, LS_WDATA, LS_RD_TA, LS_RD
   } link_slave_st_t;
 
   // The only HBURST encoding the link can express.
   localparam logic [2:0] HBURST_INCR8  = 3'b101;
-
-  // 16-bit Fibonacci LFSR, taps 16,14,13,11 (x^16 + x^14 + x^13 + x^11 + 1).
-  function automatic logic [15:0] lfsr_next(input logic [15:0] s);
-    logic fb;
-    fb = s[15] ^ s[13] ^ s[12] ^ s[10];
-    return {s[14:0], fb};
-  endfunction
 
 endpackage

@@ -13,7 +13,6 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 module amoeba_top import amoeba_link_pkg::*; #(
-  parameter TRAIN_LEN     = TRAIN_LEN_DEFAULT,
   parameter logic PERIPH_ONCHIP = 1'b1
 )(
   input  wire              core_clk,
@@ -35,7 +34,7 @@ module amoeba_top import amoeba_link_pkg::*; #(
 
   logic [LINK_W-1:0] io_o, io_oe, io_i;
 
-  amoeba_chip #(.TRAIN_LEN(TRAIN_LEN), .PERIPH_ONCHIP(PERIPH_ONCHIP)) chip(
+  amoeba_chip #(.PERIPH_ONCHIP(PERIPH_ONCHIP)) chip(
     .core_clk, .rst_n, .io_o, .io_oe, .io_i, .dir, .req, .wr, .burst, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .status);
 

@@ -1,19 +1,19 @@
 ///////////////////////////////////////////////////////////////////////////////
 // amoeba_chip.sv
 //
-// The die minus its pads: reset synchroniser, link training, the SoC, the
-// link master, the scan mux.  This is the boundary DFT insertion and
-// gate-level simulation see.  amoeba_top adds the pad cells.
+// The die minus its pads: reset synchroniser, the SoC, the link bridge, the
+// scan mux.  This is the boundary DFT insertion and gate-level simulation see.
+// amoeba_top adds the pad cells.
 //
-// Bus ownership: amoeba_link_train drives io until it declares the link
-// trained, then amoeba_link_master does.  The core is held in reset until
-// then, so no transaction can leave before the FPGA can receive it.
+// Bus ownership: the link bridge is the only driver.  There is no training FSM
+// to arbitrate with any more -- the core leaves reset as soon as rst_n is
+// released, and it is the FPGA that decides when that happens
+// (pkg/amoeba_link_pkg.sv, docs/impl_plan_link_clocking.md s7).
 ///////////////////////////////////////////////////////////////////////////////
 
 `include "amoeba_config_select.vh"
 
 module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
-  parameter TRAIN_LEN     = TRAIN_LEN_DEFAULT,
   parameter logic PERIPH_ONCHIP = 1'b1,
   parameter HB_BIT        = 15          // status heartbeat: link-transaction counter tap
 )(
@@ -46,15 +46,8 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic rst_n_s;
   amoeba_rst_sync rstsync(.clk(core_clk), .rst_n_in(rst_n), .rst_n_out(rst_n_s));
 
-  // ---- link training / core-reset gate --------------------------------------
-  logic [LINK_W-1:0] tr_io_o, lm_io_o;
-  logic              tr_io_oe, tr_dir, lm_io_oe, lm_dir;
-  logic              trained, failed;
-
-  amoeba_link_train #(.TRAIN_LEN(TRAIN_LEN)) train(
-    .clk(core_clk), .rst_n(rst_n_s),
-    .io_o(tr_io_o), .io_oe(tr_io_oe), .io_i, .dir(tr_dir), .rvalid,
-    .trained, .failed);
+  logic [LINK_W-1:0] lm_io_o;
+  logic              lm_io_oe, lm_dir;
 
   // ---- SoC ------------------------------------------------------------------
   logic              reset_soc, reset_ext;
@@ -70,7 +63,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic [1:0]        irq_s;
   logic              uart_rx_s;
 
-  assign reset_ext = ~rst_n_s | ~trained;
+  assign reset_ext = ~rst_n_s;
 
   synchronizer irq0sync(.clk(core_clk), .d(irq[0]),  .q(irq_s[0]));
   synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
@@ -86,7 +79,7 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   // ---- link master ----------------------------------------------------------
   logic txn_done;
   amoeba_link_master #(.HADDR_W(P.PA_BITS)) link(
-    .HCLK, .HRESETn, .run(trained),
+    .HCLK, .HRESETn,
     .HSEL(HSELEXT), .HADDR, .HTRANS, .HWRITE, .HSIZE, .HBURST, .HWDATA, .HREADY,
     .HRDATA(HRDATAEXT), .HREADYOUT(HREADYEXT), .HRESP(HRESPEXT),
     .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .burst, .ready, .rvalid,
@@ -98,19 +91,14 @@ module amoeba_chip import cvw::*; import amoeba_link_pkg::*; #(
   logic [7:0] scan_q;
   always_ff @(posedge core_clk) if (scan_en) scan_q <= io_i[7:0];
 
-  logic [LINK_W-1:0] fn_io_o;
-  logic              fn_oe;
-  assign fn_io_o = trained ? lm_io_o  : tr_io_o;
-  assign fn_oe   = trained ? lm_io_oe : tr_io_oe;
-  assign dir     = trained ? lm_dir   : tr_dir;
-
-  assign io_o  = test_mode ? {scan_q, 8'h00}            : fn_io_o;
-  assign io_oe = test_mode ? {8'hFF, 8'h00}             : {LINK_W{fn_oe}};
+  assign dir   = lm_dir;
+  assign io_o  = test_mode ? {scan_q, 8'h00} : lm_io_o;
+  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
 
   // ---- status ---------------------------------------------------------------
   logic [HB_BIT:0] hb;
   always_ff @(posedge core_clk or negedge rst_n_s)
     if (!rst_n_s) hb <= '0; else if (txn_done) hb <= hb + 1'b1;
-  assign status = trained & hb[HB_BIT];
+  assign status = hb[HB_BIT];
 
 endmodule

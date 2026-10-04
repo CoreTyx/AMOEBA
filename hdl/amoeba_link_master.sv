@@ -47,15 +47,15 @@
 // at the bottom can catch a transfer this link cannot express.
 //
 // Reset: from HRESETn, the core's synchronised reset -- wallypipelinedcore
-// parks nothing on its AHB while held in reset (fpga/pynq/rtl/amoeba_pynq_top.sv),
-// and `run` additionally gates every accept on link training having passed.
+// parks nothing on its AHB while held in reset (fpga/pynq/rtl/amoeba_pynq_top.sv).
+// There is no longer a `run` gate: link training is gone and the FPGA holds
+// rst_n until it is ready to serve (pkg/amoeba_link_pkg.sv).
 ///////////////////////////////////////////////////////////////////////////////
 
 module amoeba_link_master import amoeba_link_pkg::*; #(
   parameter HADDR_W = 56
 )(
   input  logic               HCLK, HRESETn,
-  input  logic               run,          // link trained; accept transactions
 
   // AHB-Lite slave (external port of amoeba_soc)
   input  logic               HSEL,
@@ -126,7 +126,7 @@ module amoeba_link_master import amoeba_link_pkg::*; #(
   assign beat_ok   = ~aborted & ~pending & (last_beat | (htrans_q == HTRANS_SEQ));
 
   // Address phase of a transfer to us completes on the mux'd HREADY.
-  assign accept = run & HSEL & (HTRANS == HTRANS_NONSEQ) & HREADY;   // SEQ beats belong to the current burst
+  assign accept = HSEL & (HTRANS == HTRANS_NONSEQ) & HREADY;   // SEQ beats belong to the current burst
 
   // ---- AHB response ----------------------------------------------------------
   logic wr_pulse, rd_pulse;

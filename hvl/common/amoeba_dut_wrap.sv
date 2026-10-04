@@ -10,14 +10,11 @@
 //   amoeba_link_model   the FPGA side of the link, into mem_itf
 //   rvfi_tap        the pipeline taps, by hierarchical reference into the core
 //
-// TRAIN_LEN is shortened so training costs ~150 cycles per run instead of ~8k.
 ///////////////////////////////////////////////////////////////////////////////
 
 `include "amoeba_config_select.vh"
 
-module amoeba_dut_wrap import amoeba_link_pkg::*; #(
-    parameter int TRAIN_LEN = 64
-)(
+module amoeba_dut_wrap import amoeba_link_pkg::*; (
     input  logic        clk,
     input  logic        rst,
 
@@ -65,11 +62,11 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     wire [LINK_W-1:0] io;
     logic dir, req, wr, burst, ready, rvalid, status, uart_tx;
 
-    amoeba_top #(.TRAIN_LEN(TRAIN_LEN)) top (
+    amoeba_top top (
         .core_clk(clk), .rst_n(~rst), .io, .dir, .req, .wr, .burst, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 
-    amoeba_link_model #(.TRAIN_LEN(TRAIN_LEN)) model (
+    amoeba_link_model model (
         .clk, .rst, .io, .dir, .req, .wr, .burst, .ready, .rvalid,
         .mem_addr, .mem_rmask, .mem_wmask, .mem_wdata, .mem_rdata, .mem_resp);
 
@@ -221,12 +218,8 @@ module amoeba_dut_wrap import amoeba_link_pkg::*; #(
     // ---- +LINK_TRACE: transaction-level trace of the bridge and the model ---
     bit link_trace = 0;
     initial if ($test$plusargs("LINK_TRACE")) link_trace = 1;
-    logic trained_q;
     always @(posedge clk) begin
-        trained_q <= top.chip.trained;
         if (link_trace) begin
-            if (top.chip.trained & ~trained_q)
-                $display("[LINK %0t] trained", $time);
             if (top.chip.link.accept)
                 $display("[LINK %0t] accept  addr=%h wr=%b burst=%b st=%0d pending=%b",
                          $time, top.chip.link.HADDR[31:0], top.chip.link.HWRITE, top.chip.link.HBURST,

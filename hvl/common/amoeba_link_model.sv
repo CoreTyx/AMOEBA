@@ -6,8 +6,6 @@
 // mem_itf_w_mask on the other, so the whole existing regression runs through
 // the real protocol with the memory model, tohost snoop and RVFI unchanged.
 //
-//   training   after reset, a falling dir with no req pending means "echo":
-//              wait TA, drive TRAIN_LEN LFSR words with rvalid=1, release
 //   header     req=1 for two cycles: A[31:16] then A[15:0].  wr comes off the
 //              pins; burst is always 1 -- the link is INCR8 only, so there is
 //              no size and no byte strobes on the wire
@@ -26,17 +24,11 @@
 // +LINK_GAPS=1 (+LINK_SEED=n) withholds ready and rvalid at random so the
 // ASIC's handling of both is exercised; the protocol guarantees neither is
 // ever required to be immediate.
-// +LINK_TRAIN_ERR=n corrupts word n of the FIRST echo so the ASIC's training
-// retry is exercised; the second attempt is clean and training then passes.
-//
 // Checks: req only while dir=1; a header only while idle; the model never
-// drives while dir=1; the queue never overflows; TA honoured on both dir
-// edges -- including on a retry, which is what +LINK_TRAIN_ERR proves.
+// drives while dir=1; the queue never overflows; TA honoured on both dir edges.
 ///////////////////////////////////////////////////////////////////////////////
 
-module amoeba_link_model import amoeba_link_pkg::*; #(
-  parameter int TRAIN_LEN = 64
-)(
+module amoeba_link_model import amoeba_link_pkg::*; (
   input  logic              clk,
   input  logic              rst,
   inout  wire  [LINK_W-1:0] io,
@@ -62,16 +54,11 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
 
   // ---- plusargs --------------------------------------------------------------
   bit          gaps = 0;
-  bit          train_err = 0;
-  logic [15:0] train_err_word = '0;
   logic [31:0] prng = 32'h1234_5678;
   initial begin
-    int seed, w;
+    int seed;
     if ($test$plusargs("LINK_GAPS")) gaps = 1;
     if ($value$plusargs("LINK_SEED=%d", seed)) prng = 32'(seed) ^ 32'hA5A5_0001;
-    if ($value$plusargs("LINK_TRAIN_ERR=%d", w)) begin
-      train_err = 1; train_err_word = 16'(w);
-    end
   end
   function automatic logic [31:0] prng_next(input logic [31:0] s);
     return {s[30:0], s[31] ^ s[21] ^ s[1] ^ s[0]};
@@ -104,14 +91,9 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
   logic        twr;
   logic [5:0]  wcnt;                      // words in this transaction
   logic [47:0] wacc;
-  logic [15:0] lfsr;
-  logic [15:0] tcnt;
   logic [3:0]  ta_cnt;
-  logic        dir_q;
-  logic        read_pending;              // header seen, bus not yet returned
   logic [3:0]  rd_queue_idx;              // beats queued so far (0..8)
   logic        gap_ready, gap_rvalid;
-  logic [3:0]  echo_try;                  // which echo attempt this is
 
   wire [63:0] taddr_al  = 64'({taddr[31:3], 3'b000});
   wire [63:0] beat_addr = taddr_al + 64'(wcnt[5:2]) * 8;
@@ -120,14 +102,12 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      lst <= LS_TRAIN; io_o <= '0; io_oe <= 1'b0; ready <= 1'b0; rvalid <= 1'b0;
+      lst <= LS_IDLE; io_o <= '0; io_oe <= 1'b0; ready <= 1'b0; rvalid <= 1'b0;
       q_tail <= '0; rd_start <= 1'b0;
-      wcnt <= '0; wacc <= '0; lfsr <= TRAIN_SEED; tcnt <= '0; ta_cnt <= '0; dir_q <= 1'b1;
-      read_pending <= 1'b0; hdr_hi <= '0; taddr <= '0; twr <= 1'b0;
+      wcnt <= '0; wacc <= '0; ta_cnt <= '0;
+      hdr_hi <= '0; taddr <= '0; twr <= 1'b0;
       rd_queue_idx <= 4'd8; gap_ready <= 1'b0; gap_rvalid <= 1'b0;
-      echo_try <= '0;
     end else begin
-      dir_q <= dir;
       prng  <= prng_next(prng);
       gap_ready  <= gaps & (prng[3:0] == 4'd0);      // ~6% of cycles
       gap_rvalid <= gaps & (prng[7:5] == 3'd0);      // ~12% of cycles
@@ -150,41 +130,11 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
       end
 
       case (lst)
-        // --- training: wait for the ASIC to release the bus, then echo ------
-        LS_TRAIN: begin
-          ready <= 1'b0;
-          if (dir_q & ~dir) begin
-            ta_cnt <= '0; lfsr <= TRAIN_SEED; tcnt <= '0;
-            echo_try <= echo_try + 1'b1; lst <= LS_ECHO_TA;
-          end
-        end
-        LS_ECHO_TA: begin
-          ta_cnt <= ta_cnt + 1'b1;
-          if (ta_cnt == 4'(TA - 1)) lst <= LS_ECHO;
-        end
-        LS_ECHO: begin
-          // A correct ASIC gives TA before taking the bus back (RETRY_TA), so
-          // this never fires -- but a slave that kept driving into a reclaimed
-          // bus would be shorting the pad ring, so model the safe behaviour.
-          if (dir) begin
-            io_oe <= 1'b0; rvalid <= 1'b0; lst <= LS_TRAIN;
-          end else begin
-            io_oe <= 1'b1; rvalid <= 1'b1; lfsr <= lfsr_next(lfsr);
-            io_o <= (train_err & echo_try == 4'd1 & tcnt == train_err_word) ? ~lfsr : lfsr;
-            tcnt <= tcnt + 1'b1;
-            if (tcnt == 16'(TRAIN_LEN - 1)) lst <= LS_IDLE;
-          end
-        end
-
-        // --- idle: header, or a retrain ------------------------------------
+        // --- idle: wait for a header ---------------------------------------
         LS_IDLE: begin
           io_oe <= 1'b0; rvalid <= 1'b0;
           if (req) begin
             hdr_hi <= io_i; lst <= LS_HDR1;
-          end else if (dir_q & ~dir & ~read_pending) begin
-            // dir fell with nothing outstanding: the ASIC is retraining
-            ta_cnt <= '0; lfsr <= TRAIN_SEED; tcnt <= '0;
-            echo_try <= echo_try + 1'b1; lst <= LS_ECHO_TA;
           end
         end
         LS_HDR1: begin
@@ -193,7 +143,7 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
           if (wr) lst <= LS_WDATA;
           else begin
             rd_queue_idx <= '0; rd_start <= 1'b1;
-            read_pending <= 1'b1; ta_cnt <= '0; lst <= LS_RD_TA;
+            ta_cnt <= '0; lst <= LS_RD_TA;
           end
         end
 
@@ -224,7 +174,7 @@ module amoeba_link_model import amoeba_link_pkg::*; #(
           if (rbuf_valid[wcnt[4:2]] & ~gap_rvalid) begin
             io_oe <= 1'b1; io_o <= rbuf[wcnt[4:2]][16 * wcnt[1:0] +: 16]; rvalid <= 1'b1;
             wcnt <= wcnt + 1'b1;
-            if (last_word) begin read_pending <= 1'b0; lst <= LS_IDLE; end
+            if (last_word) lst <= LS_IDLE;
           end else begin
             io_oe <= 1'b0; rvalid <= 1'b0;
           end
