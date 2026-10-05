@@ -33,8 +33,7 @@ module hazard (
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
   input  logic  DivBusyE, FDivBusyE,
-  // Shadow retry has the same whole-pipeline semantics as a cache/bus stall.
-  input  logic  FTStall,                           // result is not yet trusted
+  input  logic  ShadowConflictStallE,
   input  logic  wfiM, IntPendingM,
   input  logic  InjectD,
   // Stall & flush outputs
@@ -89,13 +88,13 @@ module hazard (
   // AMOEBA: a dummy instruction insertion holds Decode for one cycle so the real
   // instruction is replayed, while Execute accepts the injected instruction below.
   assign StallDCause = (StructuralStallD | FPUStallD | InjectD) & ~FlushDCause;
-  assign StallECause = (DivBusyE | FDivBusyE) & ~FlushECause;
+  assign StallECause = (DivBusyE | FDivBusyE | ShadowConflictStallE) & ~FlushECause;
   assign StallMCause = WFIStallM & ~FlushMCause;
   // Need to gate IFUStallF when the equivalent FlushFCause = FlushDCause = 1.
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
   // Use normal backward stall propagation to freeze F through W.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | FTStall;
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall;
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0
