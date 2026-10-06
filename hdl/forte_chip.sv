@@ -56,10 +56,13 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // test
   input  logic              test_mode,
   input  logic              scan_en,
-  // ECC inject enable for the register-file ECC path.  wallypipelinedcore gained
-  // this input on Making_HDL_Synthesizable; forte_soc instantiates that module
-  // directly, so leaving it unconnected would drive X into the ECC logic.
-  input  logic              ecc_inject_en,
+  // Fault injection enable, straight from the pad.  wallypipelinedcore gained
+  // this input on Making_HDL_Synthesizable as ecc_inject_en; forte_soc
+  // instantiates that module directly, so leaving it unconnected would drive X
+  // into the ECC logic.  The name changes at the forte_soc boundary and not
+  // here, because everything from the pin inwards is the ASIC's naming and
+  // everything from wallypipelinedcore outwards is theirs.
+  input  logic              fault_inject,
   // status
   output logic              status
 );
@@ -110,7 +113,7 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
 
   forte_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
-    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0), .ecc_inject_en,
+    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0), .fault_inject,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
     .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HREADY,
     .UARTSin(uart_rx_s), .UARTSout(uart_tx),
