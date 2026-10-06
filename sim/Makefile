@@ -505,7 +505,7 @@ ft_shadow_regression:
 
 ft_shadow_test:
 	mkdir -p $(FT_TB_DIR)
-	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) -GTEST_XLEN=$(FT_XLEN) \
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) -GTEST_XLEN=$(FT_XLEN) \
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \

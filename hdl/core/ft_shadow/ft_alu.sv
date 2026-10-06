@@ -5,7 +5,7 @@ module ft_alu import cvw::*; #(
   parameter cvw_t P,
   parameter int TE_THRESHOLD = 3
 ) (
-  input logic clk, reset, flush, valid,
+  input logic clk, reset, flush, valid, advance,
   input logic [P.XLEN-1:0] A, B,
   // Branches need PC+immediate and register comparison simultaneously.
   input logic [P.XLEN-1:0] cmp_a, cmp_b,
@@ -135,13 +135,13 @@ module ft_alu import cvw::*; #(
                        ((result_live[0] != result_live[1]) | (arith_live[0] != arith_live[1]));
   assign cmp_mismatch = valid & ~cmp_recompute & ~cmp_isolated & (cmp_live[0] != cmp_live[1]);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) alu_ctrl(
-    .clk, .reset, .flush, .valid, .mismatch(alu_mismatch), .recompute_supported(alu_supported),
+    .clk, .reset, .flush, .valid, .advance, .mismatch(alu_mismatch), .recompute_supported(alu_supported),
     .recompute_primary_ok(alu_ok[0]), .recompute_shadow_ok(alu_ok[1]),
     .recompute_mode(alu_recompute), .capture_normal(alu_capture_normal),
     .stall_req(alu_stall), .unresolved(alu_unresolved), .isolated(alu_isolated),
     .use_shadow(alu_use_shadow), .pe_primary, .pe_shadow);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) cmp_ctrl(
-    .clk, .reset, .flush, .valid, .mismatch(cmp_mismatch), .recompute_supported(1'b1),
+    .clk, .reset, .flush, .valid, .advance, .mismatch(cmp_mismatch), .recompute_supported(1'b1),
     .recompute_primary_ok(cmp_ok[0]), .recompute_shadow_ok(cmp_ok[1]),
     .recompute_mode(cmp_recompute), .capture_normal(cmp_capture_normal),
     .stall_req(cmp_stall), .unresolved(cmp_unresolved), .isolated(cmp_isolated),

@@ -153,7 +153,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
   // ALU drives both the architectural result and LSU address.
   ft_alu #(P) ftalu(
-    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .A(SrcAE), .B(SrcBE),
+    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .advance(~StallM), .A(SrcAE), .B(SrcBE),
     .cmp_a(ForwardedSrcAE), .cmp_b(ForwardedSrcBE), .cmp_sgnd(BranchSignedE), .flags(FlagsE),
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),

@@ -8,6 +8,7 @@ module ft_shadow_ctrl #(
   // Clock/reset/flush define the lifetime of the held transaction.
   input  logic clk, reset, flush,
   input  logic valid,                   // operation currently occupies the wrapper
+  input  logic advance,                 // owning pipeline stage accepts the transaction
   input  logic mismatch,                // primary and shadow outputs disagree
   input  logic recompute_supported,     // wrapper supplies a trusted alternate test
   input  logic recompute_primary_ok,    // primary passes the alternate test
@@ -41,8 +42,8 @@ module ft_shadow_ctrl #(
   assign isolated       = (state == ISOLATED);
   assign unresolved     = (state == UNRESOLVED);
   // A mismatch/recompute holds every architectural stage.  UNRESOLVED is
-  // deliberately not stalled so its instruction can enter M and take a
-  // precise synchronous trap.
+  // deliberately not stalled so the owning stage can advance and report a
+  // precise synchronous trap. Other stall sources may delay that acceptance.
   assign stall_req      = (state == RECOMPUTE) |
                           (((state == NORMAL) | (state == RETRY)) & valid & mismatch);
 
@@ -101,10 +102,12 @@ module ft_shadow_ctrl #(
         // The diagnosed-good copy is used for subsequent operations until a
         // flush/reset; the bad copy is never trusted again in this instance.
         ISOLATED: state <= ISOLATED;
-        // Release one instruction to M so the normal trap path can capture PC.
+        // Keep the fault and masked result until the pipeline accepts it.
         UNRESOLVED: begin
-          state          <= NORMAL;
-          mismatch_count <= '0;
+          if (advance) begin
+            state          <= NORMAL;
+            mismatch_count <= '0;
+          end
         end
         default: state <= NORMAL;
       endcase

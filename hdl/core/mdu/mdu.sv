@@ -81,13 +81,17 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign DIV_PE_p = 1'b0;
     assign DIV_PE_r = 1'b0;
   end else begin : div
+    logic DivUnresolvedE;
     // Runtime injection is routed from the core-local DIV hook.
     ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
         .fi_enable(DIVFiEnable), .fi_target(DIVFiTarget), .fi_kind(DIVFiKind),
         .fi_bit(DIVFiBit), .fi_channel(DIVFiChannel),
-        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedM),
+        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
         .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
+    // Division completes in E. Carry its terminal fault through the same
+    // E->M enable/flush as its instruction and PC before requesting a trap.
+    flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
   end
 
   assign FTStallM      = MulFTStallM | DivFTStallM;

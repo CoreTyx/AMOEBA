@@ -29,7 +29,7 @@ module ft_mul import cvw::*; #(
   // Save the transaction that produced the current partial product. A retry
   // must replay these exact operands while the architectural stages are held.
   always_ff @(posedge clk) begin
-    if (reset | FlushM) begin
+    if (reset | (FlushM & ~StallM)) begin
       saved_a <= '0;
       saved_b <= '0;
       saved_funct3 <= '0;
@@ -53,9 +53,9 @@ module ft_mul import cvw::*; #(
 
   // Permit the internal PP registers to load the saved retry transaction even
   // when the architectural hazard unit is asserting StallM.
-  mul #(P.XLEN) primary(.clk, .reset, .StallM(internal_stall_m), .FlushM,
+  mul #(P.XLEN) primary(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(primary_prod_raw));
-  mul #(P.XLEN) shadow(.clk, .reset, .StallM(internal_stall_m), .FlushM,
+  mul #(P.XLEN) shadow(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(shadow_prod_raw));
   ft_fault_inject #(.WIDTH(P.XLEN*2)) primary_fi(
     .data_i(primary_prod_raw), .fi_enable(fi_enable & fi_target[0]),
@@ -66,8 +66,10 @@ module ft_mul import cvw::*; #(
 
   // MUL uses DMR/retry only in this implementation.  A persistent mismatch
   // is unresolved; do not apply an invalid signedness-agnostic recompute rule.
+  // A trap may request FlushM while unrelated backpressure holds M. Accept
+  // that flush only when the architectural M-stage register accepts it too.
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
-    .clk, .reset, .flush(FlushM), .valid(mul_active_m), .mismatch,
+    .clk, .reset, .flush(FlushM & ~StallM), .valid(mul_active_m), .advance(~StallM), .mismatch,
     .recompute_supported(1'b0), .recompute_primary_ok(1'b0), .recompute_shadow_ok(1'b0),
     .recompute_mode, .capture_normal(), .stall_req, .unresolved, .isolated, .use_shadow,
     .pe_primary, .pe_shadow);

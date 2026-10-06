@@ -32,6 +32,9 @@ module ft_div import cvw::*; #(
   logic primary_busy, shadow_busy, primary_done, shadow_done;
   logic result_valid, mismatch;
   logic retry_reset, retry_again, internal_stall_m;
+  logic saved_valid, saved_signed, saved_w64;
+  logic [P.XLEN-1:0] saved_a, saved_b, operand_a, operand_b;
+  logic operand_signed, operand_w64;
   logic [P.XLEN-1:0] primary_quot_raw, primary_rem_raw;
   logic [P.XLEN-1:0] shadow_quot_raw, shadow_rem_raw;
   logic [P.XLEN-1:0] primary_quot, primary_rem, shadow_quot, shadow_rem;
@@ -44,7 +47,35 @@ module ft_div import cvw::*; #(
   // A retry owns both divider FSMs while the architectural pipeline remains
   // frozen.  Remove the external M-stage stall only for these private FSMs so
   // the held E-stage divide can relaunch and make forward progress.
-  assign internal_stall_m = (state == RETRY) ? 1'b0 : StallM;
+  // Hold DONE on the final retry edge. Otherwise returning to NORMAL would
+  // relaunch the same divide instead of releasing its completed result.
+  assign internal_stall_m = (state == RETRY) ?
+      (result_valid & (~mismatch | (mismatch_count >= RETRY_LIMIT))) : StallM;
+
+  // Forwarding sources can disappear while division holds E and older stages
+  // drain. Capture the launch transaction, including its arithmetic controls,
+  // and use it for every private restart.
+  assign operand_a = saved_valid ? saved_a : ForwardedSrcAE;
+  assign operand_b = saved_valid ? saved_b : ForwardedSrcBE;
+  assign operand_signed = saved_valid ? saved_signed : DivSignedE;
+  assign operand_w64 = saved_valid ? saved_w64 : W64E;
+  always_ff @(posedge clk) begin
+    if (reset | FlushE) begin
+      saved_valid <= 1'b0;
+      saved_a <= '0;
+      saved_b <= '0;
+      saved_signed <= 1'b0;
+      saved_w64 <= 1'b0;
+    end else if (!saved_valid & IntDivE & ~StallM) begin
+      saved_valid <= 1'b1;
+      saved_a <= ForwardedSrcAE;
+      saved_b <= ForwardedSrcBE;
+      saved_signed <= DivSignedE;
+      saved_w64 <= W64E;
+    end else if (result_valid & ~stall_req & ~StallM) begin
+      saved_valid <= 1'b0;
+    end
+  end
 
   // Reset is asserted for the edge that records a failed completed attempt.
   // The next cycle sees both FSMs idle and reissues the unchanged IntDivE.
@@ -55,12 +86,14 @@ module ft_div import cvw::*; #(
 
   div #(P) primary(
     .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
-    .IntDivE, .DivSignedE, .W64E, .ForwardedSrcAE, .ForwardedSrcBE,
+    .IntDivE, .DivSignedE(operand_signed), .W64E(operand_w64),
+    .ForwardedSrcAE(operand_a), .ForwardedSrcBE(operand_b),
     .DivBusyE(primary_busy), .DivDoneE(primary_done),
     .QuotM(primary_quot_raw), .RemM(primary_rem_raw));
   div #(P) shadow(
     .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
-    .IntDivE, .DivSignedE, .W64E, .ForwardedSrcAE, .ForwardedSrcBE,
+    .IntDivE, .DivSignedE(operand_signed), .W64E(operand_w64),
+    .ForwardedSrcAE(operand_a), .ForwardedSrcBE(operand_b),
     .DivBusyE(shadow_busy), .DivDoneE(shadow_done),
     .QuotM(shadow_quot_raw), .RemM(shadow_rem_raw));
 
@@ -87,7 +120,8 @@ module ft_div import cvw::*; #(
   assign DivBusyE = primary_busy | shadow_busy;
 
   // Initial and retry mismatches hold the full pipeline.  A final failed
-  // attempt exposes one M-aligned unresolved pulse; no guessed replica result
+  // attempt holds an E-stage fault until E can advance; the MDU registers it
+  // alongside the instruction. No guessed replica result
   // is allowed to enter the normal MDU result mux.
   assign stall_req = ((state == NORMAL) & mismatch) | (state == RETRY);
   assign unresolved = (state == UNRESOLVED);
@@ -122,9 +156,7 @@ module ft_div import cvw::*; #(
             end
           end
         end
-        // Trap/flush normally clears this state.  Self-clear also makes the
-        // fault indication a single cycle if a standalone wrapper is used.
-        UNRESOLVED: state <= NORMAL;
+        UNRESOLVED: if (!StallM) state <= NORMAL;
         default:    state <= NORMAL;
       endcase
     end

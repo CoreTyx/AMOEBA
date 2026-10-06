@@ -91,7 +91,12 @@ check that each saved/live architectural Boolean agrees with its arithmetic
 sign bit. ADDW/SUBW and other unsupported BMU operations retry and then report
 unresolved. Min/max keep their architectural behavior but have no isolation
 relation. MUL/DIV retain their existing retry-and-trap algorithms; threshold
-one reports a sampled mismatch as unresolved without a retry.
+one reports a sampled mismatch as unresolved without a retry. DIV captures
+its operands, signedness, and word control at launch; forwarding changes during
+iteration cannot change a retry. A successful final retry holds the divider's
+DONE state until the instruction advances. DIV's E-stage terminal fault is
+registered into M with the instruction before requesting cause 16. MUL retains
+its M-stage fault through stalls and clears it on an accepted M-stage flush.
 
 ## Capture and independent recovery
 
@@ -115,6 +120,9 @@ One lane may recover while the other is already isolated.
 
 Stall and unresolved requests are ORed across the controllers. **All** public
 results (`ALUResult`, `Sum`, `flags`) are zeroed while either request is active.
+A terminal unresolved indication remains asserted, with outputs masked, until
+`advance` acknowledges the instruction's E→M transfer (`~StallM`). Independent
+backpressure or a simultaneous fault in the other lane cannot discard it.
 Reset/execute flush clears both controllers and snapshots. Sticky core status
 survives a pipeline flush and clears on reset.
 
@@ -188,7 +196,10 @@ Runtime injection covers both replicas and every channel, physical shift faults
 at every legal amount and low/sign boundary bits, transient recovery,
 persistent isolation/trapping, capture timing, stable retry snapshots, independent
 replica selection, invalid indices, reserved kinds, reset/flush, and subsequent
-operations. Existing MUL/DIV tests remain in that bench.
+operations. MUL/DIV tests cover transient and persistent faults on both
+replicas and divider quotient/remainder channels. Divider tests remove the live
+forwarding operands after launch to verify replay uses the saved transaction.
+ALU/CMP terminal faults are held under downstream backpressure before acceptance.
 The unit fixture explicitly enables Zba/Zbb/Zbkb so this coverage does not depend
 on the production configuration's optional instruction selection.
 
@@ -197,6 +208,12 @@ Its generated configuration enables branch prediction for this fixture. It
 trains branches to predicted-taken, drives only core-local injection hooks,
 and checks simultaneous target/comparison operands, pipeline holding, absence
 of destructive flushes/redirects, correct retirement, BNE/BGE cause-16 trapping,
-precise fault PCs, multiplier faults through MDU, and sticky CSR reads. A hazard
+precise fault PCs, multiplier and divider faults through MDU, and sticky CSR
+reads. Four terminal-fault cases independently stall the pipeline after ALU,
+CMP, MUL, or DIV diagnosis and disable injection, then verify one precise trap
+when the stall is removed. A hazard
 priority probe covers older CSR/return/trap flushes, including interrupted WFI. Normal ISA/Linux tests explicitly
 disable all three runtime bundles.
+
+CI runs the complete six-configuration unit matrix, the independent core
+integration bench, and full-core lint in the fault-tolerant regression job.

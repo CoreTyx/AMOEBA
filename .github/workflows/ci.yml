@@ -107,9 +107,9 @@ jobs:
           path: sim/verilator/build_no_spike
           key: no-spike-build-${{ runner.os }}-${{ github.sha }}
 
-  # ── Shadow-protected execution unit test ───────────────────────────────────
+  # ── Fault-tolerant unit matrix, core integration, and lint ──────────────────
   ci-ft-shadow:
-    name: Shadow Execution Unit Test
+    name: Fault-Tolerant Unit and Core Regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +119,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ make autoconf flex bison libfl-dev help2man zlib1g-dev
+          sudo apt-get install -y python3 gcc g++ make autoconf flex bison libfl-dev help2man zlib1g-dev
 
       - name: Cache Verilator v5.026
         id: cache-verilator
@@ -137,8 +137,14 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Run shadow execution unit test
-        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_test
+      - name: Run RV32/RV64 fault injection matrix (thresholds 1, 2, 3)
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_regression
+
+      - name: Run independent core fault integration test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_test
+
+      - name: Lint full core
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_lint
 
   # ── Discover all baremetal tests ────────────────────────────────────────────
   ci-discover-tests:
