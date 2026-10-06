@@ -457,12 +457,15 @@ ISA_LEVEL_TESTS   ?= $(shell find $(CURDIR)/../testcode/isa_level_testing -name 
 ifneq ($(filter $(CONFIG),asic baremetal_linux freertos freertos_keystone),)
   ISA_LEVEL_TESTS := $(filter-out %tc_branch_prediction.c %tc_zbkb_and_smc.c,$(ISA_LEVEL_TESTS))
 endif
-# The DFT lock register is in hdl/forte_uncore.sv, so it exists only in the ASIC
-# hierarchy.  On the legacy DUT that address falls inside the CLINT's region and
-# clint_apb answers for it, so the test would read 0 where it expects 1 and fail
-# for a reason that has nothing to do with the DUT.
+# tcf_* are FORTE-ONLY tests: they exercise hardware that exists only in the ASIC
+# hierarchy (hdl/forte_*), so on the legacy DUT they fail for reasons that have
+# nothing to do with the DUT -- tcf_dft_lock's address, for instance, falls inside
+# the CLINT's region there and clint_apb answers 0 for it.  Matched by prefix and
+# not by name so that adding the next one needs no edit here;
+# .github/workflows/ci.yml splits its matrices on the same prefix.
+FORTE_ONLY_TESTS := $(wildcard $(CURDIR)/../testcode/isa_level_testing/tcf_*.c)
 ifneq ($(DUT),forte)
-  ISA_LEVEL_TESTS := $(filter-out %tc_dft_lock.c,$(ISA_LEVEL_TESTS))
+  ISA_LEVEL_TESTS := $(filter-out $(FORTE_ONLY_TESTS),$(ISA_LEVEL_TESTS))
 endif
 FREERTOS_TESTS    ?= $(shell find $(CURDIR)/../testcode/freertos -name 'tc_*.c')
 

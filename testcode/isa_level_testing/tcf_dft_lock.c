@@ -1,7 +1,17 @@
 ///////////////////////////////////////////
-// tc_dft_lock.c
+// tcf_dft_lock.c
 //
 // TC_DFT_LOCK - the memory-mapped register that disables the DFT pins.
+//
+// NAMED tcf_, NOT tc_, AND THAT PREFIX IS LOAD-BEARING.  The register lives in
+// hdl/forte_uncore.sv, so it exists only in the ASIC hierarchy; on the legacy
+// DUT this address falls inside the CLINT's region and clint_apb answers 0 for
+// it, so the test fails there for a reason that has nothing to do with the DUT.
+// Both sim/Makefile and .github/workflows/ci.yml therefore treat tcf_* as
+// forte-only: the default ISA matrix skips them and the DUT=forte job runs them.
+// A hardcoded filename exclusion was the first attempt and is the wrong shape --
+// it rots the moment a second forte-only test is added, which is the same way
+// lint/Makefile ended up globbing hdl/amoeba_*.sv after the rename.
 //
 // This tapeout has no efuses, so there is nothing one-time-programmable to blow
 // after test.  hdl/forte_dft_lock.sv is the substitute: a register that resets
