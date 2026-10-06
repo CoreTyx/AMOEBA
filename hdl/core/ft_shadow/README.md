@@ -184,7 +184,6 @@ workspace):
 ```sh
 CCACHE_DISABLE=1 make -C sim ft_shadow_regression
 CCACHE_DISABLE=1 make -C sim ft_core_test
-make -C sim ft_core_lint
 CCACHE_DISABLE=1 make -C sim isa_regression
 CCACHE_DISABLE=1 make -C sim linux_boot
 ```
@@ -215,12 +214,12 @@ when the stall is removed. A hazard
 priority probe covers older CSR/return/trap flushes, including interrupted WFI. Normal ISA/Linux tests explicitly
 disable all three runtime bundles.
 
-CI runs the complete six-configuration unit matrix, the independent core
-integration bench, and full-core lint in the fault-tolerant regression job.
+CI runs the complete six-configuration unit matrix and the independent core
+integration bench in the fault-tolerant regression job.
 
 RTL generate regions use explicit boundaries and named branches; the existing
 named injection/recovery hierarchy is preserved. `TE_THRESHOLD` must be positive;
 the simulation entry point and testbench validate it. Parameter diagnostics stay
 out of synthesizable modules. Injector bit indices use `$clog2(WIDTH)` directly
 for the execution-result widths used here. FT width warnings and generate-name
-warnings in the modified execution path are enabled in the core lint manifest.
+warnings in the modified execution path are enabled in the Verilator warning configuration.

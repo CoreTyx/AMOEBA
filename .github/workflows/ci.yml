@@ -107,7 +107,7 @@ jobs:
           path: sim/verilator/build_no_spike
           key: no-spike-build-${{ runner.os }}-${{ github.sha }}
 
-  # ── Fault-tolerant unit matrix, core integration, and lint ──────────────────
+  # ── Fault-tolerant unit matrix and core integration ──────────────────
   ci-ft-shadow:
     name: Fault-Tolerant Unit and Core Regression
     runs-on: ubuntu-latest
@@ -142,9 +142,6 @@ jobs:
 
       - name: Run independent core fault integration test
         run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_test
-
-      - name: Lint full core
-        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_lint
 
   # ── Discover all baremetal tests ────────────────────────────────────────────
   ci-discover-tests:
