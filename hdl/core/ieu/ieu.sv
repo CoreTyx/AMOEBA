@@ -29,7 +29,9 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // Runtime controls originate at the intentionally unconnected core hooks.
+  // ALU/CMP fault-injection path: wallypipelinedcore -> ieu -> dp -> ftalu.
+  // Forward these test controls unchanged; ftalu applies corruption to the
+  // selected replica/result channel before mismatch checking and recovery.
   input logic ALUFiEnable,
   input logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel,
   input logic [$clog2(P.XLEN+2)-1:0] ALUFiBit,
@@ -150,6 +152,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
 
   datapath #(P) dp(
     .clk, .reset, .ecc_inject_en,
+    // Pass the ALU/CMP replica fault-injection controls to the datapath.
     .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
 
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,

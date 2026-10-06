@@ -29,6 +29,11 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  // Runtime fault-injection controls from wallypipelinedcore's local hooks.
+  // MUL drives ftmul's full-product injectors; DIV drives div.ftdiv's
+  // quotient/remainder injectors (Channel 0/1) when integer DIV is present.
+  // Each Enable gates its bundle. Target[0]/[1] enables primary/shadow;
+  // Kind 00/01/10/11 selects XOR/stuck-at-0/stuck-at-1/no-op at Bit.
   input logic MULFiEnable, DIVFiEnable,
   input logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind,
   input logic [$clog2(2*P.XLEN)-1:0] MULFiBit,
@@ -43,7 +48,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              MDUActiveE,                     // Mul/Div instruction being executed
   output logic [P.XLEN-1:0] MDUResultW,                     // multiply/divide result
   output logic              DivBusyE,                       // busy signal to stall pipeline in Execute stage
-  // M-stage retry/fault status; PE outputs are diagnostic only.
+  // Retry requests and M-aligned terminal faults; PE reports replica isolation.
   output logic              FTStallM, FTUnresolvedM,
   output logic              MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r
 );
@@ -59,11 +64,13 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
 
   // Multiplier.  The shadow wrapper preserves the original E->M PP register
   // timing and retries only a held MUL transaction.
-  // MUL and DIV resolve in M but have different retry mechanisms: MUL reloads
-  // its PP registers, while the iterative DIV wrapper restarts both FSMs.
+  // MUL retries its M-stage transaction by reloading the partial products.
+  // DIV retries the held E-stage transaction by restarting both divider FSMs;
+  // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
+    // Corrupt selected product replica bits before the M-stage checker.
     .fi_enable(MULFiEnable), .fi_target(MULFiTarget), .fi_kind(MULFiKind), .fi_bit(MULFiBit),
     .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
     .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
@@ -82,7 +89,8 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign DIV_PE_r = 1'b0;
   end else begin : div
     logic DivUnresolvedE;
-    // Runtime injection is routed from the core-local DIV hook.
+    // Corrupt selected quotient/remainder replica bits before the E-stage
+    // completion checker. The resulting fault status is registered into M.
     ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
         .fi_enable(DIVFiEnable), .fi_target(DIVFiTarget), .fi_kind(DIVFiKind),

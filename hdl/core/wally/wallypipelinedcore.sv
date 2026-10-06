@@ -90,22 +90,34 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [3:0]                    ENVCFG_CBE;                      // Cache Block operation enables
   logic [3:0]                    CMOpM;                           // 1: cbo.inval; 2: cbo.flush; 4: cbo.clean; 8: cbo.zero
   logic                          IFUPrefetchE, LSUPrefetchM;      // instruction / data prefetch hints
-  // Shadow control is split by detection stage: ALU/compare in E, multiply/
-  // divide in M. FTStall is combined before hazard propagation; unresolved status is
-  // pipelined to M so the existing precise trap machinery can consume it.
+  // Fault-recovery outputs from the protected execution units: ALU/compare
+  // and DIV detect in E, MUL in M. DIV faults reach this interface through
+  // the MDU's E->M register. FTStall holds the pipeline; unresolved status
+  // reaches M for a precise trap, and PE indicators feed sticky CSR status.
   logic                          FTStallE, FTStallM, FTStall;
   logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 
-  // Deliberately undriven DFT hooks. A future controller can drive them;
-  // testbenches force known values. No SoC ports or RTL tie-offs are added.
+  // Runtime fault-injection inputs for testing replica detection and recovery.
+  // These core-local hooks are intentionally undriven: a future test/DFT
+  // controller connects here; simulation testbenches drive known values.
+  // Each Enable activates corruption only in its own execution-unit bundle.
+  // Target is a replica mask: 00=none, 01=primary, 10=shadow, 11=both.
+  // Kind: 00=XOR, 01=stuck-at-0, 10=stuck-at-1, 11=reserved/no-op.
+  // Bit selects the physical result bit to corrupt; out-of-range is a no-op.
+  // All injectors remain instantiated when Enable=0 (data passes through).
   /* verilator lint_off UNDRIVEN */
-  // Runtime controls originate at the intentionally unconnected core hooks.
+  // ALU/CMP path: core -> ieu -> dp -> ftalu -> replica result injectors.
+  // Channel: 00=ALU result, 01=extended arithmetic/address result,
+  //          10=widened shift result, 11=extended comparison difference.
   logic ALUFiEnable;
   logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel;
   logic [$clog2(P.XLEN+2)-1:0] ALUFiBit;
+  // MDU paths: core -> mdu.mdu -> ftmul / div.ftdiv -> replica injectors.
+  // MUL selects a bit of the full 2*XLEN product. DIV selects a bit of an
+  // XLEN result, with Channel=0 for quotient and Channel=1 for remainder.
   logic MULFiEnable, DIVFiEnable;
   logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind;
   logic [$clog2(2*P.XLEN)-1:0] MULFiBit;
@@ -237,6 +249,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      .FTUnresolvedM,
+    // Forward the core-local ALU/CMP fault-injection bundle into the IEU.
     .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
      .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
@@ -439,6 +452,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+      // Independent runtime fault-injection bundles for MUL and integer DIV.
       .MULFiEnable, .MULFiTarget, .MULFiKind, .MULFiBit,
       .DIVFiEnable, .DIVFiTarget, .DIVFiKind, .DIVFiBit, .DIVFiChannel,
 

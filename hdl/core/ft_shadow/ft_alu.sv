@@ -18,6 +18,9 @@ module ft_alu import cvw::*; #(
   input logic [4:0] Rs2E,
   input logic BMUActive,
   input logic [1:0] CZero,
+  // Runtime fault-injection input from core -> IEU -> datapath. Enable gates
+  // corruption; Target[0]/[1] selects primary/shadow (11 enables both).
+  // Kind 00/01/10/11 selects XOR/stuck-at-0/stuck-at-1/no-op at fi_bit.
   input logic fi_enable,
   input logic [1:0] fi_target, fi_kind,
   input logic [$clog2(P.XLEN+2)-1:0] fi_bit,
@@ -78,6 +81,8 @@ module ft_alu import cvw::*; #(
       .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
       .recompute(cmp_recompute), .result(cmp_raw[i]));
 
+    // Fault-injection endpoints: corrupt a selected replica result before
+    // mismatch checking, normal snapshots, and diagnostic consistency checks.
     // Range check before narrowing: bit 64 must not alias result bit 0.
     ft_fault_inject #(.WIDTH(P.XLEN)) result_fi(
       .data_i(result_pre_fi[i]), .data_o(result_live[i]),

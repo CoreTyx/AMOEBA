@@ -12,7 +12,9 @@ module ft_div import cvw::*; #(
   input  logic              StallM, FlushE,
   input  logic              IntDivE, DivSignedE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
-  // Runtime output injection from the core-local hook.
+  // Runtime fault-injection input from core -> MDU. Enable gates corruption
+  // of the selected XLEN quotient/remainder at fi_bit. Target[0]/[1] selects
+  // primary/shadow; Kind 00/01/10/11 is XOR/stuck-at-0/stuck-at-1/no-op.
   input  logic              fi_enable,
   input  logic [1:0]        fi_target,
   input  logic [1:0]        fi_kind,

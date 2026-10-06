@@ -34,7 +34,9 @@
 
 module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // Runtime controls originate at the intentionally unconnected core hooks.
+  // ALU/CMP fault-injection controls forwarded by the IEU from core-local
+  // test hooks. The bundle terminates at ftalu's replica result injectors;
+  // ALUFiChannel selects ALU result, arithmetic, shift, or CMP difference.
   input logic ALUFiEnable,
   input logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel,
   input logic [$clog2(P.XLEN+2)-1:0] ALUFiBit,
@@ -158,6 +160,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
     .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
+    // Runtime test stimulus for the merged ALU/CMP result paths.
     .fi_enable(ALUFiEnable), .fi_target(ALUFiTarget), .fi_kind(ALUFiKind),
     .fi_bit(ALUFiBit), .fi_channel(ALUFiChannel),
     .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(FTStallE),

@@ -54,6 +54,8 @@
 
     // Core-local runtime FT hooks are intentionally undriven in synthesizable
     // RTL. Ordinary ISA/Linux simulations explicitly disable every bundle.
+    // ALUFi* reaches the merged ALU/CMP through IEU/datapath; MULFi*/DIVFi*
+    // reach the product and quotient/remainder injectors through MDU.
     initial begin
         force dut.soc.core.ALUFiEnable = '0;
         force dut.soc.core.ALUFiTarget = '0;

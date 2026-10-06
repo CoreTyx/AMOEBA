@@ -92,6 +92,9 @@ module ft_core_fault_tb;
       .minstret_rdata(64'b0)
   );
   /* verilator lint_on PINMISSING */
+  // Drive the intentionally exposed core-local fault-injection hooks.
+  // Each scenario controls replica, corruption kind, bit, and result channel;
+  // the core routes these bundles to ftalu, ftmul, and ftdiv respectively.
   assign dut.soc.core.ALUFiEnable = fi_enable;
   assign dut.soc.core.ALUFiTarget = fi_target;
   assign dut.soc.core.ALUFiKind = fi_kind;

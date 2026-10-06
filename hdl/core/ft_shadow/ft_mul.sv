@@ -8,7 +8,9 @@ module ft_mul import cvw::*; #(
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0] Funct3E,
   input  logic MulActiveE,
-  // Runtime replica-output fault controls from the core-local hook.
+  // Runtime fault-injection input from core -> MDU. Enable gates corruption
+  // of the full 2*XLEN product at fi_bit. Target[0]/[1] selects primary/shadow;
+  // Kind 00/01/10/11 selects XOR/stuck-at-0/stuck-at-1/no-op.
   input  logic fi_enable,
   input  logic [1:0] fi_target,
   input  logic [1:0] fi_kind,
@@ -57,6 +59,8 @@ module ft_mul import cvw::*; #(
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(primary_prod_raw));
   mul #(P.XLEN) shadow(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(shadow_prod_raw));
+  // Fault-injection endpoints: corrupt completed replica products before
+  // the mismatch checker and the selected architectural product output.
   ft_fault_inject #(.WIDTH(P.XLEN*2)) primary_fi(
     .data_i(primary_prod_raw), .fi_enable(fi_enable & fi_target[0]),
     .fi_kind, .fi_bit, .data_o(primary_prod));
