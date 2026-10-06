@@ -36,9 +36,11 @@ on:
 
 # gh run list / gh run download need actions:read.  A repository whose default
 # token is contents-only would otherwise fail at the download step.
+# pull-requests:read is for the changed-file check in "Download boot image".
 permissions:
   contents: read
   actions: read
+  pull-requests: read
 
 jobs:
   boot:
@@ -84,31 +86,95 @@ jobs:
       - name: Download boot image
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -euo pipefail
           mkdir -p testcode/linux/build
-          # The image must come from this branch.  An unscoped lookup takes the
-          # newest success on any branch, so a PR could silently boot main's
-          # kernel and prove nothing about the change under review.
+
+          # THE BRANCH SCOPING IS CONDITIONAL, AND THAT IS THE POINT.
+          #
+          # An unscoped lookup takes the newest success on any branch, so a PR
+          # that edits the kernel could silently boot main's kernel and prove
+          # nothing about the change under review.  That is why this was scoped.
+          #
+          # But the image is built from testcode/linux/** and
+          # bin/linux_image_to_lst.py and NOTHING ELSE, so a PR that touches
+          # neither cannot affect it, and for those the default branch's image is
+          # the same image.  Scoping unconditionally made this job permanently red
+          # on every hardware-only PR -- which is most of them, since the
+          # pull_request trigger above fires on hdl/**, hvl/** and sim/Makefile.
+          # A job that always fails for a reason unrelated to the change is a job
+          # people learn to ignore, which is worse than one that is occasionally
+          # too permissive.
+          #
+          # So: prefer this branch's own image; fall back to the default branch
+          # ONLY when this ref leaves the image sources alone; and refuse when it
+          # changes them, because then the fallback would be a different kernel.
+          #
           # GITHUB_HEAD_REF is set only for pull_request events; GITHUB_REF_NAME
           # covers schedule and workflow_dispatch.
           BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+
+          find_image () {   # $1 = branch name, prints a run id or nothing
+            gh run list --repo "$GITHUB_REPOSITORY" --branch "$1" \
+              --workflow linux-image.yml --status success \
+              --limit 1 --json databaseId --jq '.[0].databaseId'
+          }
+
           echo "Looking for a boot image built from branch: $BRANCH"
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                     --branch "$BRANCH" \
-                     --workflow linux-image.yml --status success \
-                     --limit 1 --json databaseId --jq '.[0].databaseId')
+          RUN_ID=$(find_image "$BRANCH")
+          IMAGE_FROM="$BRANCH"
+
           if [ -z "$RUN_ID" ]; then
-            echo "No successful linux-image.yml run on branch '$BRANCH'."
-            echo "That workflow builds on push when testcode/linux/** changes;"
-            echo "otherwise run it manually (Actions -> Linux Boot Image -> Run workflow)."
-            exit 1
+            if [ -n "${PR_NUMBER:-}" ]; then
+              # Fetched, then filtered, in two steps on purpose: piping gh into
+              # grep under `set -o pipefail` with a `|| true` would swallow a gh
+              # API failure and read it as "nothing changed", which is exactly
+              # the direction that must not fail open.
+              FILES=$(gh api --paginate \
+                        "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+                        --jq '.[].filename')
+              CHANGED=$(printf '%s\n' "$FILES" \
+                        | grep -E '^(testcode/linux/|bin/linux_image_to_lst\.py$)' || true)
+            else
+              # Not a pull request, so there is no base to compare against and no
+              # safe fallback: a scheduled or dispatched run must have its own.
+              CHANGED="(not a pull request)"
+            fi
+
+            if [ -n "$CHANGED" ]; then
+              echo "No successful linux-image.yml run on branch '$BRANCH', and this"
+              echo "ref changes the image sources, so another branch's image would"
+              echo "not represent it.  Changed:"
+              printf '  %s\n' "$CHANGED"
+              echo "Run Actions -> Linux Boot Image -> Run workflow against"
+              echo "'$BRANCH', then re-run this job."
+              exit 1
+            fi
+
+            FALLBACK="${DEFAULT_BRANCH:-main}"
+            echo "::notice::No boot image for '$BRANCH', and it does not touch the image sources, so falling back to '$FALLBACK'."
+            RUN_ID=$(find_image "$FALLBACK")
+            IMAGE_FROM="$FALLBACK"
+            if [ -z "$RUN_ID" ]; then
+              echo "No successful linux-image.yml run on '$FALLBACK' either, so"
+              echo "there is no image anywhere to boot.  Run Actions -> Linux Boot"
+              echo "Image -> Run workflow."
+              exit 1
+            fi
           fi
+
+          echo "Using boot image from branch '$IMAGE_FROM' (run $RUN_ID)"
+          echo "LINUX_IMAGE_FROM=$IMAGE_FROM" >> "$GITHUB_ENV"
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name amoeba-linux-boot-image --dir testcode/linux/build
           ls -la testcode/linux/build
 
       - name: Show image provenance
-        run: cat testcode/linux/build/boot.provenance
+        run: |
+          echo "Boot image built from branch: ${LINUX_IMAGE_FROM:-unknown}"
+          cat testcode/linux/build/boot.provenance
 
       - name: Build Linux boot simulator
         run: make -C sim build_linux
