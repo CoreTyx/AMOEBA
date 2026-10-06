@@ -217,3 +217,10 @@ disable all three runtime bundles.
 
 CI runs the complete six-configuration unit matrix, the independent core
 integration bench, and full-core lint in the fault-tolerant regression job.
+
+RTL generate regions use explicit boundaries and named branches; the existing
+named injection/recovery hierarchy is preserved. `TE_THRESHOLD` must be positive;
+the simulation entry point and testbench validate it. Parameter diagnostics stay
+out of synthesizable modules. Injector bit indices use `$clog2(WIDTH)` directly
+for the execution-result widths used here. FT width warnings and generate-name
+warnings in the modified execution path are enabled in the core lint manifest.

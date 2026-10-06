@@ -6,7 +6,7 @@
 // quotient and remainder because either may be selected by Funct3M.
 module ft_div import cvw::*; #(
   parameter cvw_t P,
-  parameter int TE_THRESHOLD = 3
+  parameter int TE_THRESHOLD = 3 // must be >= 1
 ) (
   input  logic              clk, reset,
   input  logic              StallM, FlushE,
@@ -25,7 +25,7 @@ module ft_div import cvw::*; #(
   output logic              stall_req, unresolved, pe_primary, pe_shadow
 );
 
-  localparam int COUNT_W = (TE_THRESHOLD <= 1) ? 1 : $clog2(TE_THRESHOLD);
+  localparam int COUNT_W = (TE_THRESHOLD == 1) ? 1 : $clog2(TE_THRESHOLD);
   localparam logic [COUNT_W-1:0] RETRY_LIMIT = COUNT_W'(TE_THRESHOLD-1);
   typedef enum logic [1:0] {NORMAL, RETRY, UNRESOLVED} state_t;
 
@@ -40,11 +40,6 @@ module ft_div import cvw::*; #(
   logic [P.XLEN-1:0] primary_quot_raw, primary_rem_raw;
   logic [P.XLEN-1:0] shadow_quot_raw, shadow_rem_raw;
   logic [P.XLEN-1:0] primary_quot, primary_rem, shadow_quot, shadow_rem;
-
-  // Elaboration-time parameter check (not an initial block, so synthesis sees it too).
-  if (TE_THRESHOLD < 1) begin : g_bad_te_threshold
-    $error("TE_THRESHOLD must be positive");
-  end
 
   // A retry owns both divider FSMs while the architectural pipeline remains
   // frozen.  Remove the external M-stage stall only for these private FSMs so

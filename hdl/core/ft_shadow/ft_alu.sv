@@ -71,70 +71,73 @@ module ft_alu import cvw::*; #(
     else shift_result = aligned;
   endfunction
 
-  for (genvar i = 0; i < 2; i++) begin : replica
-    alu #(P) compute(.A, .B, .W64, .UW64, .SubArith, .ALUSelect,
-      .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl, .BMUActive, .CZero,
-      .RecomputeArith(arith_recompute), .RecomputeShift(shift_recompute),
-      .ArithWide(arith_raw[i]), .ShiftWide(shift_raw[i]),
-      .ALUResult(result_raw[i]), .Sum());
-    addsub #(.WIDTH(P.XLEN+1)) compare(
-      .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
-      .recompute(cmp_recompute), .result(cmp_raw[i]));
+  genvar i;
+  generate
+    for (i = 0; i < 2; i = i + 1) begin : replica
+      alu #(P) compute(.A, .B, .W64, .UW64, .SubArith, .ALUSelect,
+        .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl, .BMUActive, .CZero,
+        .RecomputeArith(arith_recompute), .RecomputeShift(shift_recompute),
+        .ArithWide(arith_raw[i]), .ShiftWide(shift_raw[i]),
+        .ALUResult(result_raw[i]), .Sum());
+      addsub #(.WIDTH(P.XLEN+1)) compare(
+        .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
+        .recompute(cmp_recompute), .result(cmp_raw[i]));
 
-    // Fault-injection endpoints: corrupt a selected replica result before
-    // mismatch checking, normal snapshots, and diagnostic consistency checks.
-    // Range check before narrowing: bit 64 must not alias result bit 0.
-    ft_fault_inject #(.WIDTH(P.XLEN)) result_fi(
-      .data_i(result_pre_fi[i]), .data_o(result_live[i]),
-      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b00) & (int'(fi_bit) < P.XLEN)),
-      .fi_kind, .fi_bit(fi_bit[RESULT_BIT_W-1:0]));
-    ft_fault_inject #(.WIDTH(P.XLEN+1)) arith_fi(
-      .data_i(arith_raw[i]), .data_o(arith_live[i]),
-      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b01) & (int'(fi_bit) < P.XLEN+1)),
-      .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
-    ft_fault_inject #(.WIDTH(P.XLEN+2)) shift_fi(
-      .data_i(shift_raw[i]), .data_o(shift_live[i]),
-      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b10)), .fi_kind, .fi_bit);
-    ft_fault_inject #(.WIDTH(P.XLEN+1)) cmp_fi(
-      .data_i(cmp_raw[i]), .data_o(cmp_live[i]),
-      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b11) & (int'(fi_bit) < P.XLEN+1)),
-      .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
+      // Fault-injection endpoints: corrupt a selected replica result before
+      // mismatch checking, normal snapshots, and diagnostic consistency checks.
+      // Range check before narrowing: bit 64 must not alias result bit 0.
+      ft_fault_inject #(.WIDTH(P.XLEN)) result_fi(
+        .data_i(result_pre_fi[i]), .data_o(result_live[i]),
+        .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b00) & (int'(fi_bit) < P.XLEN)),
+        .fi_kind, .fi_bit(fi_bit[RESULT_BIT_W-1:0]));
+      ft_fault_inject #(.WIDTH(P.XLEN+1)) arith_fi(
+        .data_i(arith_raw[i]), .data_o(arith_live[i]),
+        .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b01) & (int'(fi_bit) < P.XLEN+1)),
+        .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
+      ft_fault_inject #(.WIDTH(P.XLEN+2)) shift_fi(
+        .data_i(shift_raw[i]), .data_o(shift_live[i]),
+        .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b10)), .fi_kind, .fi_bit);
+      ft_fault_inject #(.WIDTH(P.XLEN+1)) cmp_fi(
+        .data_i(cmp_raw[i]), .data_o(cmp_live[i]),
+        .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b11) & (int'(fi_bit) < P.XLEN+1)),
+        .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
 
-    // A shift-channel fault must reach the architectural output, including
-    // word sign extension. The injection bit stays physical during diagnosis.
-    assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute) : result_raw[i];
-    assign cmp_ok[i] = (cmp_live[i] == ~normal_cmp[i]);
-    always_comb begin
-      alu_ok[i] = 1'b0;
-      if (arithmetic_operation) begin
-        alu_ok[i] = (arith_live[i] == ~normal_arith[i]);
-        if (slt_operation) begin
-          alu_ok[i] &= (normal_result[i] == {{(P.XLEN-1){1'b0}}, normal_arith[i][P.XLEN]}) &
-                       (result_live[i] == {{(P.XLEN-1){1'b0}}, arith_live[i][P.XLEN]});
-        end else alu_ok[i] &= (result_live[i] == ~normal_result[i]);
-      end else if (shift_operation) begin
-        alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_live[i], 1'b1)) &
-                    (normal_result[i] == shift_result(normal_shift[i], 1'b0)) &
-                    (result_live[i] == shift_result(shift_live[i], 1'b1)) &
-                    (arith_live[i] == normal_arith[i]) & (arith_live[0] == arith_live[1]);
-      end
-    end
-    always_ff @(posedge clk) begin
-      if (reset | flush) begin
-        normal_result[i] <= '0;
-        normal_arith[i] <= '0;
-        normal_shift[i] <= '0;
-        normal_cmp[i] <= '0;
-      end else begin
-        if (alu_capture_normal) begin
-          normal_result[i] <= result_live[i];
-          normal_arith[i] <= arith_live[i];
-          normal_shift[i] <= shift_live[i];
+      // A shift-channel fault must reach the architectural output, including
+      // word sign extension. The injection bit stays physical during diagnosis.
+      assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute) : result_raw[i];
+      assign cmp_ok[i] = (cmp_live[i] == ~normal_cmp[i]);
+      always_comb begin
+        alu_ok[i] = 1'b0;
+        if (arithmetic_operation) begin
+          alu_ok[i] = (arith_live[i] == ~normal_arith[i]);
+          if (slt_operation) begin
+            alu_ok[i] &= (normal_result[i] == {{(P.XLEN-1){1'b0}}, normal_arith[i][P.XLEN]}) &
+                         (result_live[i] == {{(P.XLEN-1){1'b0}}, arith_live[i][P.XLEN]});
+          end else alu_ok[i] &= (result_live[i] == ~normal_result[i]);
+        end else if (shift_operation) begin
+          alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_live[i], 1'b1)) &
+                      (normal_result[i] == shift_result(normal_shift[i], 1'b0)) &
+                      (result_live[i] == shift_result(shift_live[i], 1'b1)) &
+                      (arith_live[i] == normal_arith[i]) & (arith_live[0] == arith_live[1]);
         end
-        if (cmp_capture_normal) normal_cmp[i] <= cmp_live[i];
+      end
+      always_ff @(posedge clk) begin
+        if (reset | flush) begin
+          normal_result[i] <= '0;
+          normal_arith[i] <= '0;
+          normal_shift[i] <= '0;
+          normal_cmp[i] <= '0;
+        end else begin
+          if (alu_capture_normal) begin
+            normal_result[i] <= result_live[i];
+            normal_arith[i] <= arith_live[i];
+            normal_shift[i] <= shift_live[i];
+          end
+          if (cmp_capture_normal) normal_cmp[i] <= cmp_live[i];
+        end
       end
     end
-  end
+  endgenerate
 
   assign alu_mismatch = valid & ~alu_recompute & ~alu_isolated &
                        ((result_live[0] != result_live[1]) | (arith_live[0] != arith_live[1]));

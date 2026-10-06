@@ -2,7 +2,7 @@
 // A mismatch retries the held transaction.  Recompute is optional and is used
 // by the independent ALU and comparison lanes inside ft_alu.
 module ft_shadow_ctrl #(
-  // Number of consecutive mismatches before escalation.
+  // Number of consecutive mismatches before escalation; must be >= 1.
   parameter int TE_THRESHOLD = 3
 ) (
   // Clock/reset/flush define the lifetime of the held transaction.
@@ -24,17 +24,13 @@ module ft_shadow_ctrl #(
 );
 
   // Keep one counter bit for the threshold-one configuration.
-  localparam int COUNT_W = (TE_THRESHOLD <= 1) ? 1 : $clog2(TE_THRESHOLD);
+  localparam int COUNT_W = (TE_THRESHOLD == 1) ? 1 : $clog2(TE_THRESHOLD);
+  localparam logic [COUNT_W-1:0] RETRY_LIMIT = COUNT_W'(TE_THRESHOLD-1);
   // UNRESOLVED releases the instruction so Wally can report a precise
   // exception; all earlier states preserve the original transaction.
   typedef enum logic [2:0] {NORMAL, RETRY, RECOMPUTE, ISOLATED, UNRESOLVED} state_t;
   state_t state;
   logic [COUNT_W-1:0] mismatch_count;
-
-  // Elaboration-time parameter check (not an initial block, so synthesis sees it too).
-  if (TE_THRESHOLD < 1) begin : g_bad_te_threshold
-    $error("TE_THRESHOLD must be positive");
-  end
 
   assign recompute_mode = (state == RECOMPUTE);
   // Capture unmasked post-injection results once, including threshold 1.
@@ -75,7 +71,7 @@ module ft_shadow_ctrl #(
           if (!valid | !mismatch) begin
             state          <= NORMAL;
             mismatch_count <= '0;
-          end else if (mismatch_count >= TE_THRESHOLD-1) begin
+          end else if (mismatch_count >= RETRY_LIMIT) begin
             if (recompute_supported) state <= RECOMPUTE;
             else                     state <= UNRESOLVED;
           end else begin

@@ -44,16 +44,18 @@ module shifter import cvw::*; #(parameter cvw_t P) (
 
   // Normalize word operands before displacement. SLLI.UW's zero extension
   // already occurs in bitmanipalu's CondShiftA, upstream of this shifter.
-  if (P.XLEN == 64) begin : word_input
-    assign normalized_a = W64 ? (SubArith ? {{32{A[31]}}, A[31:0]} :
-                                                      {32'b0, A[31:0]}) : A;
-    assign rotate_a = W64 ? {A[31:0], A[31:0]} : A;
-    assign amount = W64 ? {1'b0, Amt[4:0]} : Amt;
-  end else begin : full_input
-    assign normalized_a = A;
-    assign rotate_a = A;
-    assign amount = Amt;
-  end
+  generate
+    if (P.XLEN == 64) begin : word_input
+      assign normalized_a = W64 ? (SubArith ? {{32{A[31]}}, A[31:0]} :
+                                                        {32'b0, A[31:0]}) : A;
+      assign rotate_a = W64 ? {A[31:0], A[31:0]} : A;
+      assign amount = W64 ? {1'b0, Amt[4:0]} : Amt;
+    end else begin : full_input
+      assign normalized_a = A;
+      assign rotate_a = A;
+      assign amount = Amt;
+    end
+  endgenerate
   assign arithmetic = Right & SubArith;
   assign shift_input = Recompute ? {normalized_a, 2'b00} :
                       {{2{arithmetic & normalized_a[P.XLEN-1]}}, normalized_a};
@@ -66,15 +68,19 @@ module shifter import cvw::*; #(parameter cvw_t P) (
 
   // Preserve the n-bit rotation ring (word rings are repeated twice). The
   // widened-shift relation is not valid for rotations, so they never diagnose.
-  if (P.ZBB_SUPPORTED | P.ZBKB_SUPPORTED) begin : rotation
-    always_comb begin
-      if (amount == '0) rotate_y = rotate_a;
-      else if (Right) rotate_y = (rotate_a >> amount) |
-                                (rotate_a << (P.XLEN - int'(amount)));
-      else rotate_y = (rotate_a << amount) |
-                      (rotate_a >> (P.XLEN - int'(amount)));
+  generate
+    if (P.ZBB_SUPPORTED | P.ZBKB_SUPPORTED) begin : rotation
+      always_comb begin
+        if (amount == '0) rotate_y = rotate_a;
+        else if (Right) rotate_y = (rotate_a >> amount) |
+                                  (rotate_a << (P.XLEN - int'(amount)));
+        else rotate_y = (rotate_a << amount) |
+                        (rotate_a >> (P.XLEN - int'(amount)));
+      end
+    end else begin : no_rotation
+      assign rotate_y = '0;
     end
-  end else assign rotate_y = '0;
+  endgenerate
 
   assign Y = Rotate ? rotate_y : (Recompute ? WideY[P.XLEN+1:2] : WideY[P.XLEN-1:0]);
 endmodule

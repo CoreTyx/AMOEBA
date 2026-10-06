@@ -504,6 +504,7 @@ ft_shadow_regression:
 	@set -e; for xlen in 32 64; do for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_XLEN=$$xlen FT_THRESHOLD=$$threshold; done; done
 
 ft_shadow_test:
+	@test "$(FT_THRESHOLD)" -ge 1 || { echo "FT_THRESHOLD must be a positive integer" >&2; exit 1; }
 	mkdir -p $(FT_TB_DIR)
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) -GTEST_XLEN=$(FT_XLEN) \
 	    $(CURDIR)/../pkg/types.sv \

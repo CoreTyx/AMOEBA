@@ -74,19 +74,23 @@ module alu import cvw::*; #(parameter cvw_t P) (
   assign Sum = ArithWide[P.XLEN-1:0];
 
   // Zicond block conditionally zeros B
-  if (P.ZICOND_SUPPORTED) begin : zicond
-    logic  BZero;
+  generate
+    if (P.ZICOND_SUPPORTED) begin : zicond
+      logic  BZero;
 
-    assign BZero = (B == 0); // check if rs2 = 0
-    // Create a signal that is 0 when czero.* instruction should clear result
-    // If B = 0 for czero.eqz or if B != 0 for czero.nez
-    always_comb
-      case (CZero)
-        2'b01:   ZeroCondMaskInvB = {P.XLEN{~BZero}}; // czero.eqz: kill if B = 0
-        2'b10:   ZeroCondMaskInvB = {P.XLEN{BZero}};  // czero.nez: kill if B != 0
-        default: ZeroCondMaskInvB = CondMaskInvB;     // otherwise normal behavior
-      endcase
-  end else assign ZeroCondMaskInvB = CondMaskInvB; // no masking if Zicond is not supported
+      assign BZero = (B == 0); // check if rs2 = 0
+      // Create a signal that is 0 when czero.* instruction should clear result
+      // If B = 0 for czero.eqz or if B != 0 for czero.nez
+      always_comb
+        case (CZero)
+          2'b01:   ZeroCondMaskInvB = {P.XLEN{~BZero}}; // czero.eqz: kill if B = 0
+          2'b10:   ZeroCondMaskInvB = {P.XLEN{BZero}};  // czero.nez: kill if B != 0
+          default: ZeroCondMaskInvB = CondMaskInvB;     // otherwise normal behavior
+        endcase
+    end else begin : no_zicond
+      assign ZeroCondMaskInvB = CondMaskInvB; // no masking if Zicond is not supported
+    end
+  endgenerate
 
   // Shifts (configurable for rotation)
   shifter #(P) sh(.A(CondShiftA), .Amt(B[P.LOG_XLEN-1:0]), .Right(Funct3[2]), .W64, .SubArith, .Y(Shift), .WideY(ShiftWide), .Recompute(RecomputeShift), .Rotate(BALUControl[2]));
@@ -113,21 +117,28 @@ module alu import cvw::*; #(parameter cvw_t P) (
     endcase
 
   // Support RV64I W-type addw/subw/addiw/shifts that discard upper 32 bits and sign-extend 32-bit result to 64 bits
-  if (P.XLEN == 64) assign PreALUResult = W64 ? {{32{FullResult[31]}}, FullResult[31:0]} : FullResult;
-  else              assign PreALUResult = FullResult;
+  generate
+    if (P.XLEN == 64) begin : word_result
+      assign PreALUResult = W64 ? {{32{FullResult[31]}}, FullResult[31:0]} : FullResult;
+    end else begin : full_result
+      assign PreALUResult = FullResult;
+    end
+  endgenerate
 
   // Bit manipulation muxing
-  if (P.ZBC_SUPPORTED  | P.ZBS_SUPPORTED  | P.ZBA_SUPPORTED  | P.ZBB_SUPPORTED |
-      P.ZBKB_SUPPORTED | P.ZBKC_SUPPORTED | P.ZBKX_SUPPORTED |
-      P.ZKND_SUPPORTED | P.ZKNE_SUPPORTED | P.ZKNH_SUPPORTED) begin : bitmanipalu
-    bitmanipalu #(P) balu(
-      .A, .B, .W64, .UW64, .BSelect, .ZBBSelect, .BMUActive,
-      .Funct3, .Funct7, .Rs2E, .LT,.LTU, .BALUControl, .PreALUResult, .FullResult,
-      .CondMaskB, .CondShiftA, .ALUResult);
-  end else begin
-    assign ALUResult = PreALUResult;
-    assign CondMaskB = B;
-    assign CondShiftA = A;
-  end
+  generate
+    if (P.ZBC_SUPPORTED  | P.ZBS_SUPPORTED  | P.ZBA_SUPPORTED  | P.ZBB_SUPPORTED |
+        P.ZBKB_SUPPORTED | P.ZBKC_SUPPORTED | P.ZBKX_SUPPORTED |
+        P.ZKND_SUPPORTED | P.ZKNE_SUPPORTED | P.ZKNH_SUPPORTED) begin : bitmanipalu
+      bitmanipalu #(P) balu(
+        .A, .B, .W64, .UW64, .BSelect, .ZBBSelect, .BMUActive,
+        .Funct3, .Funct7, .Rs2E, .LT,.LTU, .BALUControl, .PreALUResult, .FullResult,
+        .CondMaskB, .CondShiftA, .ALUResult);
+    end else begin : no_bitmanip
+      assign ALUResult = PreALUResult;
+      assign CondMaskB = B;
+      assign CondShiftA = A;
+    end
+  endgenerate
 
 endmodule

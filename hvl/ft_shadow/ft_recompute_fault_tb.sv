@@ -651,6 +651,8 @@ module ft_recompute_fault_tb #(
 
 
   initial begin
+    // Parameter diagnostics belong in verification, not synthesizable RTL.
+    if (THRESHOLD < 1) $fatal(1, "THRESHOLD must be positive");
     reset = 1;
     drive_defaults();
     vectors[0] = 0;

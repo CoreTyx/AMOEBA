@@ -177,24 +177,31 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, ecc_inject_en, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
 
   // floating point inputs: FIntResM comes from fclass, fcmp, fmv; FCvtIntResW comes from fcvt
-  if (P.F_SUPPORTED) begin : fpmux
-    mux2  #(P.XLEN)  resultmuxM(IEUResultM, FIntResM, FWriteIntM, IFResultM);
-    mux2  #(P.XLEN)  cvtresultmuxW(IFResultW, FCvtIntResW, FCvtIntW, IFCvtResultW);
-    if (P.IDIV_ON_FPU & P.F_SUPPORTED) begin
-      mux2  #(P.XLEN)  divresultmuxW(MDUResultW, FIntDivResultW, IntDivW, MulDivResultW);
-    end else begin
+  generate
+    if (P.F_SUPPORTED) begin : fpmux
+      mux2  #(P.XLEN)  resultmuxM(IEUResultM, FIntResM, FWriteIntM, IFResultM);
+      mux2  #(P.XLEN)  cvtresultmuxW(IFResultW, FCvtIntResW, FCvtIntW, IFCvtResultW);
+      if (P.IDIV_ON_FPU & P.F_SUPPORTED) begin : fpu_div_result
+        mux2  #(P.XLEN)  divresultmuxW(MDUResultW, FIntDivResultW, IntDivW, MulDivResultW);
+      end else begin : integer_div_result
+        assign MulDivResultW = MDUResultW;
+      end
+    end else begin : fpmux
+      assign IFResultM = IEUResultM;
+      assign IFCvtResultW = IFResultW;
       assign MulDivResultW = MDUResultW;
     end
-  end else begin : fpmux
-    assign IFResultM = IEUResultM;
-    assign IFCvtResultW = IFResultW;
-    assign MulDivResultW = MDUResultW;
-  end
+  endgenerate
   mux5  #(P.XLEN) resultmuxW(IFCvtResultW, ReadDataW, CSRReadValW, MulDivResultW, SCResultW, ResultSrcW, ResultW);
 
   // handle Store Conditional result if atomic extension supported
-  if (P.ZALRSC_SUPPORTED) assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
-  else                    assign SCResultW = '0;
+  generate
+    if (P.ZALRSC_SUPPORTED) begin : sc_result
+      assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
+    end else begin : no_sc_result
+      assign SCResultW = '0;
+    end
+  endgenerate
 
   // ECC error aggregation
   assign RegEccSecErrW = sec_err_rd1 | sec_err_rd2

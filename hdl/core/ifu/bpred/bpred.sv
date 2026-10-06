@@ -95,50 +95,52 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   logic                    PCSrcM;
 
   // Part 1 branch direction prediction
-  if (P.BPRED_TYPE == BP_TWOBIT) begin : Predictor
-    twoBitPredictor #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW,
-      .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
-      .BranchE, .BranchM, .PCSrcE);
+  generate
+    if (P.BPRED_TYPE == BP_TWOBIT) begin : Predictor
+      twoBitPredictor #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW,
+        .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
+        .BranchE, .BranchM, .PCSrcE);
 
-  end else if (P.BPRED_TYPE == BP_GSHARE) begin : Predictor
-    gshare #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
-      .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
-      .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_GSHARE) begin : Predictor
+      gshare #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
+        .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
+        .PCSrcE);
 
-  end else if (P.BPRED_TYPE == BP_GLOBAL) begin : Predictor
-    gshare #(P, P.XLEN, P.BPRED_SIZE, 0) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
-      .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
-      .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_GLOBAL) begin : Predictor
+      gshare #(P, P.XLEN, P.BPRED_SIZE, 0) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
+        .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
+        .PCSrcE);
 
-  end else if (P.BPRED_TYPE == BP_GSHARE_BASIC) begin : Predictor
-    gsharebasic #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
-      .BranchE, .BranchM, .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_GSHARE_BASIC) begin : Predictor
+      gsharebasic #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
+        .BranchE, .BranchM, .PCSrcE);
 
-  end else if (P.BPRED_TYPE == BP_GLOBAL_BASIC) begin : Predictor
-    gsharebasic #(P, P.XLEN, P.BPRED_SIZE, 0) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
-      .BranchE, .BranchM, .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_GLOBAL_BASIC) begin : Predictor
+      gsharebasic #(P, P.XLEN, P.BPRED_SIZE, 0) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
+        .BranchE, .BranchM, .PCSrcE);
 
-  end else if (P.BPRED_TYPE == BP_LOCAL_BASIC) begin : Predictor
-    localbpbasic #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
-      .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
-      .BranchE, .BranchM, .PCSrcE);
-  end else if (P.BPRED_TYPE == BP_LOCAL_AHEAD) begin : Predictor
-    localaheadbp #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
-      .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCM, .BPDirD(BPDirF), .BPDirWrongE,
-      .BranchE, .BranchM, .PCSrcE);
-  end else if (P.BPRED_TYPE == BP_LOCAL_REPAIR) begin : Predictor
-    localrepairbp #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
-      .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
-      .PCNextF, .PCE, .PCM, .BPDirD(BPDirF), .BPDirWrongE,
-      .BranchD, .BranchE, .BranchM, .PCSrcE);
-  end
+    end else if (P.BPRED_TYPE == BP_LOCAL_BASIC) begin : Predictor
+      localbpbasic #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
+        .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCM, .BPDirF, .BPDirWrongE,
+        .BranchE, .BranchM, .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_LOCAL_AHEAD) begin : Predictor
+      localaheadbp #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
+        .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCM, .BPDirD(BPDirF), .BPDirWrongE,
+        .BranchE, .BranchM, .PCSrcE);
+    end else if (P.BPRED_TYPE == BP_LOCAL_REPAIR) begin : Predictor
+      localrepairbp #(P, P.XLEN, P.BPRED_NUM_LHR, P.BPRED_SIZE) DirPredictor(.clk, .reset,
+        .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+        .PCNextF, .PCE, .PCM, .BPDirD(BPDirF), .BPDirWrongE,
+        .BranchD, .BranchE, .BranchM, .PCSrcE);
+    end
+  endgenerate
 
   flopenrc #(1) PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcE, PCSrcM);
 
@@ -190,35 +192,42 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.
   // Effectively this is PCM+4 or the non-existent PCLinkM
-  if(`INSTR_CLASS_PRED) mux2 #(P.XLEN) pcmuxBPWrongInvalidateFlush(PCE, PCF, BPWrongM, NextValidPCE);
-  else  assign NextValidPCE = PCE;
+  generate
+    if (`INSTR_CLASS_PRED) begin : class_prediction_pc
+      mux2 #(P.XLEN) pcmuxBPWrongInvalidateFlush(PCE, PCF, BPWrongM, NextValidPCE);
+    end else begin : no_class_prediction_pc
+      assign NextValidPCE = PCE;
+    end
+  endgenerate
 
-  if(P.ZIHPM_SUPPORTED) begin
-    logic [P.XLEN-1:0]       RASPCD, RASPCE;
-    logic                    RASPredPCWrongE;
-    // performance counters
-    // 1. class         (class wrong / minstret) (IClassWrongM / csr)                    // Correct now
-    // 2. target btb    (btb target wrong / class[0,1,3])  (btb target wrong / (br + j + jal)
-    // 3. target ras    (ras target wrong / class[2])
-    // 4. direction     (br dir wrong / class[0])
+  generate
+    if (P.ZIHPM_SUPPORTED) begin : prediction_counters
+      logic [P.XLEN-1:0]       RASPCD, RASPCE;
+      logic                    RASPredPCWrongE;
+      // performance counters
+      // 1. class         (class wrong / minstret) (IClassWrongM / csr)                    // Correct now
+      // 2. target btb    (btb target wrong / class[0,1,3])  (btb target wrong / (br + j + jal)
+      // 3. target ras    (ras target wrong / class[2])
+      // 4. direction     (br dir wrong / class[0])
 
-    // Unfortunately we can't use PCD to infer the correctness of the BTB or RAS because the class prediction
-    // could be wrong or the fall through address selected for branch predict not taken.
-    // By pipeline the BTB's PC and RAS address through the pipeline we can measure the accuracy of
-    // both without the above inaccuracies.
-    assign RASPredPCWrongE = (RASPCE != IEUAdrE) & ReturnE & PCSrcE;
+      // Unfortunately we can't use PCD to infer the correctness of the BTB or RAS because the class prediction
+      // could be wrong or the fall through address selected for branch predict not taken.
+      // By pipeline the BTB's PC and RAS address through the pipeline we can measure the accuracy of
+      // both without the above inaccuracies.
+      assign RASPredPCWrongE = (RASPCE != IEUAdrE) & ReturnE & PCSrcE;
 
-    flopenrc #(P.XLEN) RASTargetDReg(clk, reset, FlushD, ~StallD, RASPCF, RASPCD);
-    flopenrc #(P.XLEN) RASTargetEReg(clk, reset, FlushE, ~StallE, RASPCD, RASPCE);
-    flopenrc #(2) BPPredWrongRegM(clk, reset, FlushM, ~StallM,
-      {BPDirWrongE, RASPredPCWrongE},
-      {BPDirWrongM, RASPredPCWrongM});
+      flopenrc #(P.XLEN) RASTargetDReg(clk, reset, FlushD, ~StallD, RASPCF, RASPCD);
+      flopenrc #(P.XLEN) RASTargetEReg(clk, reset, FlushE, ~StallE, RASPCD, RASPCE);
+      flopenrc #(2) BPPredWrongRegM(clk, reset, FlushM, ~StallM,
+        {BPDirWrongE, RASPredPCWrongE},
+        {BPDirWrongM, RASPredPCWrongM});
 
-    assign BTAWrongM = BPBTAWrongM & PCSrcM;
+      assign BTAWrongM = BPBTAWrongM & PCSrcM;
 
-  end else begin
-    assign {BPDirWrongM, BTAWrongM, RASPredPCWrongM} = 0;
-  end
+    end else begin : no_prediction_counters
+      assign {BPDirWrongM, BTAWrongM, RASPredPCWrongM} = 0;
+    end
+  endgenerate
 
   assign IClassM = {CallM, ReturnM, JumpM, BranchM};
 
