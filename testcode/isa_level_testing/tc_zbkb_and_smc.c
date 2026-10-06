@@ -203,7 +203,7 @@ void tc_self_modifying_code(void) {
 }
 
 int main(void) {
-    tc_zbkb_instructions();
+      // The active core config disables Zbb and Zbkb; keep this test's SMC check active.
     tc_self_modifying_code();
     
     test_finish();

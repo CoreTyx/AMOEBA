@@ -189,9 +189,12 @@ at every legal amount and low/sign boundary bits, transient recovery,
 persistent isolation/trapping, capture timing, stable retry snapshots, independent
 replica selection, invalid indices, reserved kinds, reset/flush, and subsequent
 operations. Existing MUL/DIV tests remain in that bench.
+The unit fixture explicitly enables Zba/Zbb/Zbkb so this coverage does not depend
+on the production configuration's optional instruction selection.
 
 The independent core bench uses its own tiny ROM and a retirement scoreboard.
-It trains branches to predicted-taken, drives only core-local injection hooks,
+Its generated configuration enables branch prediction for this fixture. It
+trains branches to predicted-taken, drives only core-local injection hooks,
 and checks simultaneous target/comparison operands, pipeline holding, absence
 of destructive flushes/redirects, correct retirement, BNE/BGE cause-16 trapping,
 precise fault PCs, multiplier faults through MDU, and sticky CSR reads. A hazard

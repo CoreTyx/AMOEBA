@@ -29,7 +29,8 @@ module ft_div import cvw::*; #(
 
   state_t state;
   logic [COUNT_W-1:0] mismatch_count;
-  logic primary_busy, shadow_busy, result_valid, mismatch;
+  logic primary_busy, shadow_busy, primary_done, shadow_done;
+  logic result_valid, mismatch;
   logic retry_reset, retry_again, internal_stall_m;
   logic [P.XLEN-1:0] primary_quot_raw, primary_rem_raw;
   logic [P.XLEN-1:0] shadow_quot_raw, shadow_rem_raw;
@@ -55,11 +56,13 @@ module ft_div import cvw::*; #(
   div #(P) primary(
     .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
     .IntDivE, .DivSignedE, .W64E, .ForwardedSrcAE, .ForwardedSrcBE,
-    .DivBusyE(primary_busy), .QuotM(primary_quot_raw), .RemM(primary_rem_raw));
+    .DivBusyE(primary_busy), .DivDoneE(primary_done),
+    .QuotM(primary_quot_raw), .RemM(primary_rem_raw));
   div #(P) shadow(
     .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
     .IntDivE, .DivSignedE, .W64E, .ForwardedSrcAE, .ForwardedSrcBE,
-    .DivBusyE(shadow_busy), .QuotM(shadow_quot_raw), .RemM(shadow_rem_raw));
+    .DivBusyE(shadow_busy), .DivDoneE(shadow_done),
+    .QuotM(shadow_quot_raw), .RemM(shadow_rem_raw));
 
   // Faults are placed after independent replicas; shared operands, controls,
   // progress state, and the common divider algorithm remain out of scope.
@@ -76,10 +79,9 @@ module ft_div import cvw::*; #(
     .data_i(shadow_rem_raw), .fi_enable(fi_enable & fi_channel & fi_target[1]),
     .fi_kind, .fi_bit, .data_o(shadow_rem));
 
-  // div.sv keeps DivBusyE asserted from launch through every iteration.  The
-  // sole non-busy cycle for a held IntDivE is its DONE state, when its outputs
-  // are valid for comparison.  Both busy outputs are retained defensively.
-  assign result_valid = IntDivE & ~primary_busy & ~shadow_busy;
+  // Compare only after both divider FSMs have completed this held instruction;
+  // IDLE is also not busy, but does not contain a valid result.
+  assign result_valid = IntDivE & primary_done & shadow_done;
   assign mismatch = result_valid & ((primary_quot != shadow_quot) |
                                     (primary_rem  != shadow_rem));
   assign DivBusyE = primary_busy | shadow_busy;

@@ -580,10 +580,12 @@ clean:
 .PHONY: ft_core_test
 ft_core_test:
 	mkdir -p verilator/ft_core_tb
+	# Enable prediction only in this fixture to exercise predicted-taken faults.
+	python3 -c 'import pathlib,re; p=pathlib.Path("../pkg/config.vh"); pathlib.Path("verilator/ft_core_tb/config.vh").write_text(re.sub(r"(localparam logic BPRED_SUPPORTED\s*=\s*)[01]", r"\g<1>1", p.read_text()))'
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_core_fault_tb.sv $(CURDIR)/../hvl/ft_shadow/ft_core_dpi.cpp \
-	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
 	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_core_tb/compile.log
 	verilator/ft_core_tb/Vft_core_fault_tb

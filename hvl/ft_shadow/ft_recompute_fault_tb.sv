@@ -9,6 +9,11 @@ module ft_recompute_fault_tb #(parameter int THRESHOLD = 2, TEST_XLEN = 64);
     changed = original;
     changed.XLEN = TEST_XLEN;
     changed.LOG_XLEN = $clog2(TEST_XLEN);
+    // Exercise optional ALU operations even when the production configuration
+    // omits them. This fixture does not change the core's feature selection.
+    changed.ZBA_SUPPORTED = 1;
+    changed.ZBB_SUPPORTED = 1;
+    changed.ZBKB_SUPPORTED = 1;
     return changed;
   endfunction
   localparam cvw_t TP = test_config(P);

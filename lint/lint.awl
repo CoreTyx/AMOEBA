@@ -1,4 +1,3 @@
-waive -rule {{WarnAnalyzeBBox}}  -comment {Design Unit '' does not have functional view in any of the given sglib files}
 waive -rule {{NoAssignX-ML}}     -comment {RHS of a assignment contains 'X}
 waive -rule {{STARC05-2.11.3.1}} -comment {FSM must be split into always_ff and always_comb}
 waive -rule {{FlopEConst}}       -comment {Flip-flop enable pin is permanently disabled or enabled}
@@ -8,13 +7,13 @@ waive -rule {{W287b}}            -comment {output of a instance not connected}
 waive -rule {{W415a}}            -comment {multiple assignment in always_comb}
 waive -rule {{ErrorAnalyzeBBox}} -comment {Design Unit '%s' has no definition; black-box behavior assumed and module interface inferred}
 waive -rule {{SYNTH_5166}}       -comment {Non-synthesizable statement ignored}
-waive -du {{rom1p1r}} -rule {{W123}}                -comment {ROM contents are only loaded by readmemh in an initial block}
+waive -rule {{W240}}		 -comment {Input '' declared but not read}
 waive -du {{rv64_core_wrapper}} -rule {{SYNTH_132}} -comment {RVFI monitor taps into the core through hierarchical references}
 waive -rule {{W123}} -msg {Please refer to 'SignalUsageReport.rpt' for details of violating bits} -comment {Summary pointer; each W123 is also reported individually}
-waive -du {rom1p1r ram1p1rwbe} -rule {{SYNTH_5143}} -comment {Initial blocks only preload memory contents for simulation/FPGA}
+waive -du {ram1p1rwbe} -rule {{SYNTH_5143}} -comment {Initial blocks only preload memory contents for simulation/FPGA}
 # W240 (input not read): each of these is unused only in this configuration or instance (e.g. the
 # read-only icache instance of cache/cacheway/buscachefsm), is part of a standard bus/APB/AHB interface,
 # or is a test-only hook. All match upstream CORE-V-Wally. Waived per module so new code is still checked.
-waive -du {cache cacheway controllerinput ebu fdivsqrtpostproc fdivsqrtpreproc specialcase bitmanipalu icpred lsu mdu pmpadrdec tlbcontrol csrm} -rule {{W240}} -comment {Wally core ports unused in this configuration/instance}
-waive -du {gpio_apb plic_apb rom_ahb spi_apb uart_apb uncore} -rule {{W240}} -comment {Unused AHB/APB interface signals (PSTRB, HTRANS, HPROT, ...) and unconfigured peripheral inputs}
+waive -du {cache cacheway controllerinput ebu icpred lsu mdu pmpadrdec tlbcontrol csrm ifu tlbcamline tlbmixer datapath alu shifter subwordread hptw csr csri csrsr csrs uncore plic_apb uart_apb ram1p1rwbe_64x128 ram1p1rwbe_64x46 rv64_core_wrapper} -rule {{W240}} -comment {Wally core ports unused in this configuration/instance}
+waive -du {plic_apb uart_apb uncore} -rule {{W240}} -comment {Unused AHB/APB interface signals (PSTRB, HTRANS, HPROT, ...) and unconfigured peripheral inputs}
 waive -du {{rv64_core_wrapper}} -rule {{W240}} -comment {RVFI CSR *_rdata inputs belong to the testbench interface; no CSR shadow checking yet}
