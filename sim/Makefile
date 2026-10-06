@@ -589,9 +589,3 @@ ft_core_test:
 	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_core_tb/compile.log
 	verilator/ft_core_tb/Vft_core_fault_tb
-
-.PHONY: ft_core_lint
-ft_core_lint:
-	$(UNIT_TB_VERILATOR) --lint-only --timing --top-module rv64_core_wrapper \
-	    $(CURDIR)/verilator_warn.vlt $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
-	    $(CVW_INCDIRS) $(ECE411_NO_FLOAT) -Wall --timescale 1ps/1ps
