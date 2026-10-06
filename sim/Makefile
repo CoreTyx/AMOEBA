@@ -136,7 +136,12 @@ CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(
 # clean (or touch this Makefile) to force a recompile.
 EXTRA_DEFINES ?=
 COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
-VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=vcs_warn_gen.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
+# $(DUT_DEF) is load-bearing and was missing: only the VER_* flag sets carried
+# it, so `make vcs_isa_regression DUT=forte` silently built the LEGACY DUT.  VCS
+# is the only flow with -xprop, so for as long as that was true the ASIC top had
+# never been simulated in 4 state and the command that looked like it would do so
+# tested the wrong thing.  Same class of miss as the link_abort DUT guard.
+VCS_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=vcs_warn_gen.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
 VER_FLAGS    = $(COMMON_FLAGS) $(DUT_DEF) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) $(DUT_DEF) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 ECC_INJECT_DIR       := build_ecc_inject$(RETIRE_SUFFIX)
@@ -345,17 +350,21 @@ define vcs_msg_config
 	printf '{ +lint=noCAWM-L,noWMIA-L,noULCO; +file=%s; }\n' $(CORE_SV) $(CORE_SRCS) >> $(1)/vcs_warn_gen.config
 endef
 
-vcs/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
-	mkdir -p vcs
-	$(call vcs_msg_config,vcs)
+# DUT-tagged like the Verilator dirs: nothing in the dependency list mentions
+# DUT, so two DUTs sharing one directory would silently reuse each other's
+# binary -- which would have made fixing VCS_FLAGS above useless.
+VCS_DIR := vcs$(DUT_TAG)
+$(VCS_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
+	mkdir -p $(VCS_DIR)
+	$(call vcs_msg_config,$(VCS_DIR))
 	python3 check_sus.py
 	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
-	cd vcs && vcs $(VCS_SRCS) $(VCS_FLAGS) -l compile.log -top top_tb -o top_tb
-	bash check_compile_error.sh vcs
+	cd $(VCS_DIR) && vcs $(VCS_SRCS) $(VCS_FLAGS) -l compile.log -top top_tb -o top_tb
+	bash check_compile_error.sh $(VCS_DIR)
 
 # No-Spike VCS build: the VCS counterpart of verilator/$(NO_SPIKE_DIR), for the
 # ISA-level and FreeRTOS tests (they touch MMIO, which Spike's commit log omits).
-VCS_NO_SPIKE_DIR := vcs_no_spike
+VCS_NO_SPIKE_DIR := vcs_no_spike$(DUT_TAG)
 $(VCS_NO_SPIKE_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
 	mkdir -p $(VCS_NO_SPIKE_DIR)
 	$(call vcs_msg_config,$(VCS_NO_SPIKE_DIR))
@@ -365,13 +374,13 @@ $(VCS_NO_SPIKE_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefi
 	bash check_compile_error.sh $(VCS_NO_SPIKE_DIR)
 
 .PHONY: run_vcs_top_tb
-run_vcs_top_tb: vcs/top_tb $(PROG)
+run_vcs_top_tb: $(VCS_DIR)/top_tb $(PROG)
 	mkdir -p spike
 	python3 ../bin/generate_memory_file.py -8 $(PROG)
-	rm -f vcs/dump.fsdb
+	rm -f $(VCS_DIR)/dump.fsdb
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
-	cd vcs && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
+	cd $(VCS_DIR) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
 		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
@@ -423,13 +432,13 @@ run_verilator_top_tb: verilator/$(BUILD_DIR)/Vtop_tb $(PROG)
 	-cp verilator/dump.fst verilator/$(PROG_NAME)/dump.fst 2>/dev/null
 
 .PHONY: covrep
-covrep: vcs/top_tb.vdb
-	cd vcs && urg -dir top_tb.vdb
+covrep: $(VCS_DIR)/top_tb.vdb
+	cd $(VCS_DIR) && urg -dir top_tb.vdb
 
 .PHONY: verdi
 verdi:
 	mkdir -p verdi
-	cd verdi && timeout $(ECE411_GUI_TIMEOUT) $(VERDI_HOME)/bin/verdi -ssf $(CURDIR)/vcs/dump.fsdb
+	cd verdi && timeout $(ECE411_GUI_TIMEOUT) $(VERDI_HOME)/bin/verdi -ssf $(CURDIR)/$(VCS_DIR)/dump.fsdb
 
 .PHONY: spike
 spike: $(ELF)
@@ -447,6 +456,13 @@ ISA_LEVEL_TESTS   ?= $(shell find $(CURDIR)/../testcode/isa_level_testing -name 
 # tests that need them cannot run there.
 ifneq ($(filter $(CONFIG),asic baremetal_linux freertos freertos_keystone),)
   ISA_LEVEL_TESTS := $(filter-out %tc_branch_prediction.c %tc_zbkb_and_smc.c,$(ISA_LEVEL_TESTS))
+endif
+# The DFT lock register is in hdl/forte_uncore.sv, so it exists only in the ASIC
+# hierarchy.  On the legacy DUT that address falls inside the CLINT's region and
+# clint_apb answers for it, so the test would read 0 where it expects 1 and fail
+# for a reason that has nothing to do with the DUT.
+ifneq ($(DUT),forte)
+  ISA_LEVEL_TESTS := $(filter-out %tc_dft_lock.c,$(ISA_LEVEL_TESTS))
 endif
 FREERTOS_TESTS    ?= $(shell find $(CURDIR)/../testcode/freertos -name 'tc_*.c')
 
@@ -566,16 +582,16 @@ regression:
 
 # ── VCS regressions (EWS only): same test lists, 4-state simulation with X-prop ─
 .PHONY: vcs_baremetal_regression
-vcs_baremetal_regression: vcs/top_tb
+vcs_baremetal_regression: $(VCS_DIR)/top_tb
 	@pass=0; fail=0; total=0; \
 	for test in $(REGRESSION_TESTS); do \
 		total=$$((total+1)); \
 		echo "=== [$$total] VCS: $$test ==="; \
-		if $(MAKE) -s run_vcs_top_tb PROG=$$test > /dev/null 2>&1 && grep -q "test PASSED" vcs/simulation.log; then \
+		if $(MAKE) -s run_vcs_top_tb PROG=$$test > /dev/null 2>&1 && grep -q "test PASSED" $(VCS_DIR)/simulation.log; then \
 			echo "  PASS: $$test"; pass=$$((pass+1)); \
 		else \
-			echo "  FAIL: $$test (see sim/vcs/simulation.log)"; fail=$$((fail+1)); \
-			cp vcs/simulation.log vcs/$$(basename $$test .c).fail.log 2>/dev/null || true; \
+			echo "  FAIL: $$test (see sim/$(VCS_DIR)/simulation.log)"; fail=$$((fail+1)); \
+			cp $(VCS_DIR)/simulation.log $(VCS_DIR)/$$(basename $$test .c).fail.log 2>/dev/null || true; \
 		fi; \
 	done; \
 	echo ""; \

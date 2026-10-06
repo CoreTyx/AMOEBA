@@ -29,6 +29,14 @@ echo "=== programme: $PROG ==="
 CORE_SV="$R/hdl/core/cvw.sv"
 mapfile -t CORE_SRCS < <(find "$R/hdl/core" -name '*.sv' -o -name '*.v' | grep -v '/cvw\.sv$' | sort)
 mapfile -t SRAM_SRCS < <(find "$R/sram/output" -name '*.v' 2>/dev/null | sort)
+# GLOBBED, not hand-listed.  A hand-maintained list silently excludes any new
+# ASIC module: adding hdl/forte_dft_lock.sv broke this build with "Cannot find
+# file containing module", and a hand-listed set is the same failure mode that
+# left lint/Makefile globbing hdl/amoeba_*.sv after the rename and reporting
+# success with no ASIC sources at all.  forte_top is excluded on purpose -- this
+# bench instantiates forte_chip directly to get at the two clocks, so the pad
+# ring is not part of it and would only show up as a second unused top.
+mapfile -t FORTE_SRCS < <(find "$R/hdl" -maxdepth 1 -name 'forte_*.sv' ! -name 'forte_top.sv' | sort)
 
 cd "$OUT"
 echo "=== building in $OUT ==="
@@ -40,8 +48,7 @@ verilator --binary -j "$(nproc)" --timing --timescale 1ns/1ps \
   +incdir+"$R/hvl/common" \
   "$R/pkg/types.sv" "$R/pkg/forte_link_pkg.sv" "$CORE_SV" "${CORE_SRCS[@]}" \
   ${SRAM_SRCS[0]+"${SRAM_SRCS[@]}"} \
-  "$R/hdl/forte_chip.sv" "$R/hdl/forte_link_core.sv" "$R/hdl/forte_link_phy.sv" \
-  "$R/hdl/forte_rst_sync.sv" "$R/hdl/forte_soc.sv" "$R/hdl/forte_uncore.sv" \
+  "${FORTE_SRCS[@]}" \
   "$R/third_party/opentitan/prim_flop_2sync.sv" \
   "$R/third_party/opentitan/prim_fifo_async.sv" \
   "$R/hvl/common/mem_itf.sv" "$R/hvl/common/masked_memory.sv" \

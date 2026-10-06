@@ -36,6 +36,8 @@ module forte_soc import cvw::*; #(
   output logic [1:0]            HTRANS,
   output logic                  HMASTLOCK,
   output logic                  HREADY,
+  // 1 = DFT permitted (hdl/forte_dft_lock.sv), from the uncore to forte_chip.
+  output logic                  dft_unlocked,
   // pins
   input  logic                  UARTSin,
   output logic                  UARTSout,
@@ -65,6 +67,7 @@ module forte_soc import cvw::*; #(
     .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HTRANS,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT,
     .HRDATA, .HREADY, .HRESP,
+    .dft_unlocked,
     .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .MTIME_CLINT,
     .UARTSin, .UARTSout, .ExtIrq, .MExtIntIn, .SExtIntIn);
 

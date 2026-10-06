@@ -34,7 +34,19 @@
 
 module forte_chip import cvw::*; import forte_link_pkg::*; #(
   parameter logic PERIPH_ONCHIP = 1'b1,
-  parameter HB_BIT        = 15          // status heartbeat: link-transaction counter tap
+  // status blink rates, as taps on a free-running link-domain counter.  status
+  // is a square wave off tick[N], so its frequency is f_link / 2**(N+1).  At
+  // 100 MHz: 23 -> 5.96 Hz, 25 -> 1.49 Hz, 27 -> 0.37 Hz.  Roughly 6 / 1.5 /
+  // 0.4 Hz, spread about 4x apart so the three are told apart at a glance
+  // rather than by timing them.  Parameters, not constants, because the real
+  // frequency is not settled and because a testbench has to be able to shrink
+  // them -- nothing can observe a 0.4 Hz blink in a simulation.
+  parameter STATUS_FAST_BIT  = 23,      // stalled
+  parameter STATUS_ACT_BIT   = 25,      // active
+  parameter STATUS_SLOW_BIT  = 27,      // quiet; also sizes the counter
+  // "nothing has completed recently" threshold: 2**N link cycles, 1.31 ms at
+  // 100 MHz.  Long enough that an ordinary gap in traffic is not a stall.
+  parameter STATUS_IDLE_BITS = 17
 )(
   input  logic              core_clk,
   input  logic              link_clk,       // tied to the core_clk pad in forte_top
@@ -117,8 +129,10 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
   synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
 
+  logic dft_unlocked;
   forte_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
     .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0), .fault_inject,
+    .dft_unlocked,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
     .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HREADY,
     .UARTSin(uart_rx_s), .UARTSout(uart_tx),
@@ -170,13 +184,13 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
     .clk_rd_i(core_clk), .rst_rd_ni(rst_n_s),
     .rvalid_o(ic_valid), .rready_i(ic_ready), .rdata_o(ic_data), .rdepth_o(ic_depth_unused));
 
-  logic txn_done;
+  logic txn_done, lm_busy;
   forte_link_phy #(.BEATS(LINK_BEATS)) phy(
     .link_clk, .link_rst_n(link_rst_n_s),
     .ocmd_valid(op_valid), .ocmd_ready(op_ready), .ocmd_data(op_data), .ocmd_depth(op_depth_w),
     .ibeat_valid(ip_valid), .ibeat_ready(ip_ready), .ibeat_data(ip_data),
     .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .ready, .rvalid,
-    .txn_done);
+    .txn_done, .busy(lm_busy));
 
   // Occupancy outputs we do not consume.  Sunk rather than left dangling so the
   // synthesis flow does not warn.
@@ -197,8 +211,26 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // The one-flop chain stubs below reserve the structure; DFT insertion replaces
   // them.  scan_en is qualified with test_mode: on its own it would shift the
   // chains under a running core if it ever glitched in functional mode.
+  // ---- DFT lock -------------------------------------------------------------
+  // THE PIN AND THE REGISTER ARE AN AND.  hdl/forte_dft_lock.sv is a
+  // memory-mapped register that resets to 1 and that boot software clears once
+  // it no longer needs scan; with no efuses on this part it is the only thing
+  // standing between a booted system and full scan access to every flop,
+  // including the register file and the CSRs.  Both pins are qualified, not just
+  // scan_en: test_mode on its own remaps the pads, and leaving that reachable
+  // would let a locked part still have its bus mapped onto the scan pins.
+  //
+  // Clearing it is one-way until reset, so there is no software path back to a
+  // scannable part.  Reset DOES re-enable DFT -- nothing here is non-volatile --
+  // and on this board rst_n is an FPGA output, so this defends against a runtime
+  // compromise and not against physical access.  See the header of
+  // forte_dft_lock.sv for the rest of the threat model.
+  logic test_mode_dft, scan_en_dft;
+  assign test_mode_dft = test_mode & dft_unlocked;
+  assign scan_en_dft   = scan_en   & dft_unlocked;
+
   logic [7:0] scan_q;
-  always_ff @(posedge core_clk) if (test_mode & scan_en) scan_q <= io_i[7:0];
+  always_ff @(posedge core_clk) if (test_mode_dft & scan_en_dft) scan_q <= io_i[7:0];
 
   // The test-mode override on dir and io_oe is load-bearing, not cosmetic: dir
   // is itself a scanned flop, so during shift it toggles pseudo-randomly, and
@@ -206,18 +238,52 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // every shift cycle.  In test mode the directions are fixed by the scan
   // mapping instead -- the low half driven in, the high half driven out.
   assign dir   = lm_dir;
-  assign io_o  = test_mode ? {scan_q, 8'h00} : lm_io_o;
-  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
+  assign io_o  = test_mode_dft ? {scan_q, 8'h00} : lm_io_o;
+  assign io_oe = test_mode_dft ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
 
-  // ---- status ---------------------------------------------------------------
-  // In the LINK domain: txn_done is the phy's, and counting it in the core
-  // domain would need a crossing for a signal whose only consumer is an LED.
-  // status leaves the die straight from here -- a slow single bit with no
+  // ---- status: three distinguishable rates, never frozen ---------------------
+  // In the LINK domain: txn_done and busy are the phy's, and counting them in
+  // the core domain would need a crossing for a signal whose only consumer is an
+  // LED.  status leaves the die straight from here -- one slow signal with no
   // coherency requirement, so no synchroniser is owed.
-  logic [HB_BIT:0] hb;
+  //
+  // WHAT WAS WRONG BEFORE.  status used to be a tap on a counter of completed
+  // transactions, so the blink was driven only by traffic and the pin FROZE
+  // whenever nothing completed.  That made the two states you most need to tell
+  // apart during bring-up -- the core halted or spinning in cache, and the link
+  // wedged mid-transaction -- produce exactly the same picture, and a frozen pin
+  // is also indistinguishable from a very slow blink.
+  //
+  // Now the blink always comes from a free-running counter and only its RATE is
+  // modulated, so "never frozen" is structural rather than a hope:
+  //
+  //   stalled   phy busy and nothing has completed for 2**STATUS_IDLE_BITS
+  //             cycles -- a transaction started and did not finish
+  //   active    something completed recently
+  //   quiet     phy idle and nothing has completed recently -- alive, no traffic
+  //
+  // A dead link_clk still freezes it, which is the one case this cannot cover;
+  // clk_out is the instrument for that (docs/impl_plan_link_clocking.md s6.1)
+  // and is strictly better at it, which is why status does not also try.
+  logic [STATUS_SLOW_BIT:0] tick;
   always_ff @(posedge link_clk or negedge link_rst_n_s)
-    if (!link_rst_n_s) hb <= '0; else if (txn_done) hb <= hb + 1'b1;
-  assign status = hb[HB_BIT];
+    if (!link_rst_n_s) tick <= '0;
+    else               tick <= tick + 1'b1;
+
+  // Saturating: clears on every completion, otherwise counts up and sticks at
+  // all-ones.  Saturating rather than wrapping matters -- a wrapping counter
+  // would drop out of the stalled indication periodically while still wedged.
+  logic [STATUS_IDLE_BITS-1:0] quiet_cnt;
+  logic                        quiet_max;
+  assign quiet_max = (quiet_cnt == {STATUS_IDLE_BITS{1'b1}});
+  always_ff @(posedge link_clk or negedge link_rst_n_s)
+    if (!link_rst_n_s)    quiet_cnt <= '0;
+    else if (txn_done)    quiet_cnt <= '0;
+    else if (!quiet_max)  quiet_cnt <= quiet_cnt + 1'b1;
+
+  assign status = quiet_max ? (lm_busy ? tick[STATUS_FAST_BIT]    // stalled
+                                       : tick[STATUS_SLOW_BIT])   // quiet
+                            : tick[STATUS_ACT_BIT];               // active
 
   // ---- clk_out --------------------------------------------------------------
   // THE VALUE OF THIS PIN IS IN THE CLOCK TREE, NOT HERE.  In RTL it is just the

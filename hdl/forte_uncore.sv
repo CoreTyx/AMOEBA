@@ -42,6 +42,9 @@ module forte_uncore import cvw::*; #(
   // back to the core
   output logic [P.AHBW-1:0]    HRDATA,
   output logic                 HREADY, HRESP,
+  // 1 = DFT permitted; see hdl/forte_dft_lock.sv.  Goes to forte_chip, which is
+  // where the pads are and therefore where the gating has to happen.
+  output logic                 dft_unlocked,
   output logic                 MTimerInt, MSwInt,
   output logic                 MExtInt, SExtInt,
   output logic [63:0]          MTIME_CLINT,
@@ -53,7 +56,21 @@ module forte_uncore import cvw::*; #(
   input  logic                 MExtIntIn, SExtIntIn
 );
 
-  localparam PERIPHS = 3;   // CLINT, PLIC, UART
+  localparam PERIPHS = 4;   // CLINT, PLIC, UART, DFT lock
+
+  // THE DFT LOCK LIVES IN A HOLE IN THE CLINT'S REGION, at CLINT_BASE+0xF000 =
+  // 0x0200_F000.  Not in a region of its own, because every region the PMA will
+  // permit has to come from pkg/config.vh via adrdecs, and the spare ones there
+  // (GPIO, SPI, SDC) are gated on *_SUPPORTED -- enabling one would also make
+  // CVW's uncore.sv instantiate that peripheral in the LEGACY DUT, which this
+  // branch holds byte-identical.  Decoding it here instead touches no CVW file
+  // and no shared config.
+  //
+  // CLINT_RANGE is 64 KB and clint_apb implements msip at +0x0000, mtimecmp at
+  // +0x4000 and mtime at +0xBFF8, so +0xF000 collides with nothing, and the
+  // select below takes that address AWAY from the CLINT so only one slave ever
+  // answers for it.
+  localparam logic [15:0] DFTLOCK_OFF  = 16'hF000;
 
   logic [11:0]                 HSELRegions;
   logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART, HSELSDC, HSELSPI;
@@ -77,9 +94,17 @@ module forte_uncore import cvw::*; #(
   // Off-chip peripherals: their regions leave over the link.
   assign HSELEXT = PERIPH_ONCHIP ? HSELEXTRaw : (HSELEXTRaw | HSELPLIC | HSELUART);
 
-  // AHB -> APB for the on-die peripherals.  PSEL[0]=CLINT, [1]=PLIC, [2]=UART.
+  // The lock's address, carved out of the CLINT's region.  Compared above bit 2
+  // so the whole naturally-aligned doubleword belongs to the lock.
+  logic HSELDFTLOCK, HSELCLINTQ;
+  assign HSELDFTLOCK = HSELCLINT & (HADDR[15:3] == DFTLOCK_OFF[15:3]);
+  assign HSELCLINTQ  = HSELCLINT & ~HSELDFTLOCK;
+
+  // AHB -> APB for the on-die peripherals.
+  // PSEL[0]=CLINT, [1]=PLIC, [2]=UART, [3]=DFT lock.
   logic [PERIPHS-1:0] HSELAPB;
-  assign HSELAPB = PERIPH_ONCHIP ? {HSELUART, HSELPLIC, HSELCLINT} : {2'b00, HSELCLINT};
+  assign HSELAPB = PERIPH_ONCHIP ? {HSELDFTLOCK, HSELUART, HSELPLIC, HSELCLINTQ}
+                                 : {HSELDFTLOCK, 2'b00,            HSELCLINTQ};
 
   ahbapbbridge #(P, PERIPHS) ahbapbbridge (
     .HCLK, .HRESETn, .HSEL(HSELAPB), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
@@ -89,6 +114,11 @@ module forte_uncore import cvw::*; #(
 
   clint_apb #(P) clint(.PCLK, .PRESETn, .PSEL(PSEL[0]), .PADDR(PADDR[15:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[0]), .PREADY(PREADY[0]), .MTIME(MTIME_CLINT), .MTimerInt, .MSwInt);
+
+  // Present whether or not the peripherals are on the die: the DFT pins exist
+  // either way, so the thing that disables them has to exist either way.
+  forte_dft_lock #(P) dftlock(.PCLK, .PRESETn, .PSEL(PSEL[3]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    .PRDATA(PRDATA[3]), .PREADY(PREADY[3]), .unlocked(dft_unlocked));
 
   if (PERIPH_ONCHIP) begin : onchip
     plic_apb #(P) plic(.PCLK, .PRESETn, .PSEL(PSEL[1]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,

@@ -600,9 +600,19 @@ Keeping scan on the bus makes three things required rather than optional:
    during shift it toggles pseudo-randomly; anything deriving `io_oe` from `dir`
    in test mode would flip all sixteen pad directions every shift cycle. The
    override is load-bearing, not cosmetic.
-3. **`scan_en` must be qualified with `test_mode`.** `forte_chip.sv` clocks the
-   chain on `scan_en` alone, so a stray assertion during normal operation
-   shifts the chain under a running core.
+3. **`scan_en` must be qualified with `test_mode`.** Done — `forte_chip.sv` used
+   to clock the chain on `scan_en` alone, so a stray assertion during normal
+   operation would shift the chain under a running core.
+
+Both pins are additionally ANDed with the **DFT lock** register at
+`0x0200_F000` (`hdl/forte_dft_lock.sv`, §3.2 of `top_level_plan.md`), which
+resets to 1 and which boot software clears once it no longer needs scan — this
+part has no efuses, so a register is the only available substitute. `test_mode`
+is gated as well as `scan_en`, deliberately: `scan_en` alone would leave a
+locked part able to enter test mode, which remaps the pads and parks the link.
+Note that the `unlocked` flop must be **excluded from the chains**, and that
+reset re-enables DFT, so this defends against a runtime compromise and not
+against physical access — `rst_n` is an FPGA output.
 
 A fourth, non-blocking: while `test_mode` is high the link is unusable, since
 `io` is the scan port. Scan and functional traffic are mutually exclusive by

@@ -73,6 +73,9 @@ no CVW file is edited.
 | UART interrupt | internal to PLIC | n/a | `uart_irq` pad (+1) or polled 8250 |
 | PLIC claim/complete | 3 cycles | ~100–150 cycles | ~100–150 cycles |
 | Pads used of 52 | 42 | 40 | **42** (43 with `uart_irq`) |
+
+*(Current pad count: 32 signal + 11 power/ground = 43 used, 9 spare. `burst` was
+removed — it was always 1 — and `clk_out` took its pad; `fault_inject` holds one.)*
 | CVW changes | none | `forte_uncore` | `forte_uncore` |
 
 **Recommendation: B**, which is also what `fpga/asic/BRINGUP.md` settles on.
@@ -121,9 +124,9 @@ wait states are inherited for free (there is no error path; `HRESPEXT` is tied l
 | 34 | `ready` | in | **"May start."** ASIC begins `req` only when `ready=1` was sampled; once started the FPGA is committed. Registered on FPGA side. |
 | 35 | `rvalid` | in | Read data word on `io` this cycle. Gaps allowed. |
 | 36–37 | `meip`, `seip` | in | M/S external interrupt from the FPGA. Level, 2-flop sync. (Option A: `irq[1:0]` into on-chip PLIC IDs 3, 6.) |
-| 38 | `test_mode` | in | `io[7:0]` → `scan_in[7:0]`, `io[15:8]` → `scan_out[7:0]`. Up to 8 chains; BRINGUP.md wants 1–2 with CSRs at the front. |
-| 39 | `scan_en` | in | Shift / capture. |
-| 40 | `status` | out | Link-trained, then heartbeat, or sticky halted. Drives an LED. |
+| 38 | `test_mode` | in | **Static for the whole test session.** Remaps the pads: `io[7:0]` → `scan_in[7:0]`, `io[15:8]` → `scan_out[7:0]`, 8 chains each way, and forces the pad directions from the scan mapping instead of from `dir` (which is itself a scanned flop). Also where DFT reset and clock-gating control belongs. ANDed with the DFT lock. |
+| 39 | `scan_en` | in | **Per-cycle shift / capture select.** Toggles on nearly every clock during ATPG: shift N, capture 1, shift out. Qualified with `test_mode` so a glitch cannot shift the chains under a running core, and ANDed with the DFT lock. |
+| 40 | `status` | out | **Three distinguishable rates off a free-running counter, never frozen.** ~6 Hz = stalled (phy busy, nothing completed for ~1.3 ms), ~1.5 Hz = active, ~0.4 Hz = quiet (alive, no traffic). Drives an LED. See §3.1. |
 | (41–42) | `uart_tx`, `uart_rx` | out/in | **Options A and C only.** |
 | (43) | `uart_irq` | out | **Option C, optional.** |
 
@@ -151,6 +154,75 @@ req=1, cycle 2   io[15:0] = {HWSTRB[7:0], 5'b0, HSIZE[2:0]}   SINGLES ONLY (burs
 otherwise        io[15:0] = data word       64-bit beat as 4 words, least significant first
 wr               held from req until the last word
 ```
+
+### 3.1 `status`, and why it is three rates
+
+`status` used to be a tap on a counter of completed link transactions, so the
+blink was driven only by traffic and the pin **froze** whenever nothing
+completed. That made the two states you most need to tell apart during bring-up
+— the core halted or spinning in cache, and the link wedged mid-transaction —
+produce exactly the same picture, and a frozen pin is also indistinguishable
+from a very slow blink.
+
+It is now a free-running counter in the link domain with only its *rate*
+modulated, so "never frozen" is structural rather than aspirational:
+
+| Condition | Rate @ 100 MHz | Means |
+|---|---|---|
+| `busy` and nothing completed for 2^17 link cycles (~1.3 ms) | `tick[23]` ≈ 5.96 Hz | **stalled** — a transaction started and never finished |
+| something completed recently | `tick[25]` ≈ 1.49 Hz | **active** |
+| idle and nothing completed recently | `tick[27]` ≈ 0.37 Hz | **quiet** — alive, no traffic |
+
+The three are ~4× apart so they are told apart at a glance rather than by timing
+them. All four numbers are parameters on `forte_chip`, because the real
+frequency is not settled and because nothing can observe a 0.4 Hz blink in
+simulation — a testbench has to be able to shrink them.
+
+The one case this cannot cover is a dead `link_clk`, which freezes it. `clk_out`
+is the instrument for that (§6.1 of the clocking plan) and is strictly better at
+it, which is why `status` no longer tries to be the clock-alive indicator.
+
+### 3.2 DFT locking, without efuses
+
+This tapeout has no efuses, so there is nothing one-time-programmable to blow
+after test. Scan reaches every flop on the die — register file and CSRs
+included — so a part that leaves the tester with scan still reachable has no
+protected state at all.
+
+The substitute is one memory-mapped register, `hdl/forte_dft_lock.sv`, at
+**`0x0200_F000`**:
+
+- **resets to 1** (DFT permitted), so the part is testable from power-up and
+  before any software runs — a part that came up locked could not be tested;
+- **writing 0 locks it**, and `forte_chip` ANDs it with *both* `test_mode` and
+  `scan_en`, so a locked part keeps its pads functional and cannot shift;
+- **the clear is sticky** until reset. A register software could set back to 1
+  would turn every code-execution bug into a scan unlock, which is the thing
+  the lock exists to prevent.
+
+It sits in a hole in the CLINT's region rather than a region of its own, because
+every region the PMA will permit has to come from `pkg/config.vh` via `adrdecs`,
+and the spare ones there (GPIO, SPI, SDC) are gated on `*_SUPPORTED` — enabling
+one would also make CVW's `uncore.sv` instantiate that peripheral in the legacy
+DUT. Decoding it in `forte_uncore` instead touches no CVW file and no shared
+config. `CLINT_RANGE` is 64 KB and `clint_apb` implements only `msip` (+0x0000),
+`mtimecmp` (+0x4000) and `mtime` (+0xBFF8), so +0xF000 collides with nothing, and
+the select takes that address *away* from the CLINT so only one slave answers.
+
+Covered by `testcode/isa_level_testing/tc_dft_lock.c`, through real loads and
+stores — the flop is not the part most likely to be wrong, the path to it is.
+
+**What this does not defend against, and it matters.** Reset re-enables DFT;
+there is no non-volatile state, so the lock cannot survive a power cycle by
+construction, and on this board `rst_n` is an FPGA *output*. This protects
+against a runtime software compromise, not against physical access. It is also
+only as good as the boot flow — nothing clears it automatically, so if boot
+software never writes 0, DFT stays open for the life of the power cycle.
+Clearing it belongs at the end of early init, after whatever last needs scan and
+before any untrusted code runs. Finally, the `unlocked` flop **must be excluded
+from the scan chains** and from any test-mode reset bypass DFT insertion adds;
+that needs a `set_scan_element false` in an insertion script that does not exist
+yet.
 
 **The attribute word.** A burst is `BEATS` aligned 64-bit beats with every lane
 live, so it needs neither size nor strobes and skips the third header word —

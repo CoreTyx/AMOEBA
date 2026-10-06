@@ -71,7 +71,11 @@ module forte_link_phy import forte_link_pkg::*; #(
   input  logic               ready,
   input  logic               rvalid,
 
-  output logic               txn_done      // one-cycle pulse per completed transaction
+  output logic               txn_done,     // one-cycle pulse per completed transaction
+  // High whenever a transaction is on the wire.  Only consumer is the status
+  // pin, which needs to tell "nothing is happening" from "something started and
+  // never finished" -- the two look identical from txn_done alone.
+  output logic               busy
 );
 
   localparam TA_W = (TA < 2) ? 1 : $clog2(TA + 1);
@@ -121,6 +125,8 @@ module forte_link_phy import forte_link_pkg::*; #(
   // A read beat is pushed on every fourth rvalid word.
   assign ibeat_valid = (st == LM_RD_DATA) & rvalid_s & beat_end;
   assign ibeat_data  = {io_s, beat_r};
+
+  assign busy = (st != LM_IDLE);
 
   assign txn_done = (st == LM_WDATA & last_word)
                   | (st == LM_RD_TA2 & ta_cnt == TA_W'(TA - 1));

@@ -95,13 +95,15 @@ module forte_top import forte_link_pkg::*; #(
 
   // Tristate control for the bidirectional pads, derived in ONE place.
   //
-  // t IS TAKEN AS ACTIVE-HIGH TRISTATE: t=1 releases the pad, t=0 drives it.
-  // That is the OEN / Xilinx-T convention, and the i/o/t port naming of io_tri
-  // matches Xilinx IOBUF's O/I/T closely enough that it is the likely reading.
-  // It is a reading, though, not something this repo can check -- the wrapper
-  // is not in the source tree.  If the PDK cell's t is instead an active-high
-  // output ENABLE, every one of the sixteen pads drives exactly when it should
-  // be listening, and THIS ASSIGN IS THE ONLY LINE THAT CHANGES.
+  // t IS ACTIVE-HIGH TRISTATE: t=0 drives the pad, t=1 releases it.  CONFIRMED
+  // against the PDK cell, which is already in use by others on this tapeout --
+  // this is not an assumption and should not be "corrected" to io_oe.
+  //
+  // It is derived in one place because getting it backwards makes all sixteen
+  // pads drive exactly when they should be listening, and simulation cannot
+  // catch that: the behavioural model further down is written against this same
+  // expression, so it would be wrong in precisely the same direction and every
+  // test would still pass.
   logic [LINK_W-1:0] io_t;
   assign io_t = ~io_oe;
 
