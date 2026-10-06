@@ -4,7 +4,7 @@
 // The ASIC: forte_chip plus the pad ring.  DESIGN_TOP for synthesis and lint.
 //
 // Pad list (docs/top_level_plan.md s3): core_clk, rst_n, io[15:0] bidir, dir,
-// req, wr, burst, ready, rvalid, irq[1:0], uart_tx, uart_rx, test_mode,
+// req, wr, clk_out, ready, rvalid, irq[1:0], uart_tx, uart_rx, test_mode,
 // scan_en, fault_inject, status -- 32 signal pads.  Power and ground are the
 // pad library's business and are NOT instantiated here; see "what this ring
 // does not do" below.
@@ -56,8 +56,12 @@ module forte_top import forte_link_pkg::*; #(
   inout  wire [LINK_W-1:0] io,
   output wire              dir,
   output wire              req,
+  // Forwarded link clock; see forte_chip.  Replaces the `burst` pin, which was
+  // always 1 -- every transfer is a full line and the single path does not
+  // exist -- so it carried no information at the cost of a pad.  If the library
+  // has a dedicated clock-OUTPUT cell, this pin wants it rather than io_out.
+  output wire              clk_out,
   output wire              wr,
-  output wire              burst,
   input  wire              ready,
   input  wire              rvalid,
   input  wire [1:0]        irq,
@@ -82,7 +86,7 @@ module forte_top import forte_link_pkg::*; #(
   // between the synthesis and simulation configurations.
   logic              core_clk_i, rst_n_i;
   logic [LINK_W-1:0] io_o, io_oe, io_i;
-  logic              dir_o, req_o, wr_o, burst_o;
+  logic              dir_o, req_o, wr_o, clk_out_o;
   logic              ready_i, rvalid_i;
   logic [1:0]        irq_i;
   logic              uart_tx_o, uart_rx_i;
@@ -115,7 +119,7 @@ module forte_top import forte_link_pkg::*; #(
     .dir           (dir_o),
     .req           (req_o),
     .wr            (wr_o),
-    .burst         (burst_o),
+    .clk_out       (clk_out_o),
     .ready         (ready_i),
     .rvalid        (rvalid_i),
     .irq           (irq_i),
@@ -142,7 +146,7 @@ module forte_top import forte_link_pkg::*; #(
   io_out io_dir          (.chipout (dir),          .chipin (dir_o));
   io_out io_req          (.chipout (req),          .chipin (req_o));
   io_out io_wr           (.chipout (wr),           .chipin (wr_o));
-  io_out io_burst        (.chipout (burst),        .chipin (burst_o));
+  io_out io_clk_out      (.chipout (clk_out),      .chipin (clk_out_o));
   io_out io_uart_tx      (.chipout (uart_tx),      .chipin (uart_tx_o));
   io_out io_status       (.chipout (status),       .chipin (status_o));
 
@@ -176,7 +180,7 @@ module forte_top import forte_link_pkg::*; #(
   assign dir            = dir_o;
   assign req            = req_o;
   assign wr             = wr_o;
-  assign burst          = burst_o;
+  assign clk_out        = clk_out_o;
   assign uart_tx        = uart_tx_o;
   assign status         = status_o;
 

@@ -117,7 +117,7 @@ wait states are inherited for free (there is no error path; `HRESPEXT` is tied l
 | 30 | `dir` | out | **1 = ASIC drives `io`, 0 = ASIC has released it.** Single source of truth for bus ownership; TA idle cycles guaranteed on every change. |
 | 31 | `req` | out | `io` carries the address: high half, then low half, on consecutive cycles. Held for both. |
 | 32 | `wr` | out | Held for the transaction. 1 = write. |
-| 33 | `burst` | out | Held. 1 = a full `BEATS`-beat line (4·`BEATS` words), 0 = 1 beat (4 words). Always 1 today; the single path does not exist. |
+| 33 | `clk_out` | out | **Forwarded LINK clock.** The FPGA captures inbound `io` with it, so the pad and on-die insertion delay common to both cancel on the ASIC→FPGA path. Must be tapped off the *link* tree at the same depth as the `io` output flops — §6.1 of the clocking plan. Replaced `burst`, which was always 1. |
 | 34 | `ready` | in | **"May start."** ASIC begins `req` only when `ready=1` was sampled; once started the FPGA is committed. Registered on FPGA side. |
 | 35 | `rvalid` | in | Read data word on `io` this cycle. Gaps allowed. |
 | 36–37 | `meip`, `seip` | in | M/S external interrupt from the FPGA. Level, 2-flop sync. (Option A: `irq[1:0]` into on-chip PLIC IDs 3, 6.) |
@@ -141,7 +141,7 @@ Match the pad-library I/O variant to the VCU118 bank the link lands in (HP
 Bus content is only ever an address or data. Transaction type lives on pins,
 held for the whole transaction. Nothing on the bus is decoded by either side.
 This is BRINGUP.md §2's "command + 32-bit address" header with the command
-beat replaced by the `wr`/`burst` pins: one cycle shorter and readable on a
+beat replaced by the `wr` pin: one cycle shorter and readable on a
 scope.
 
 ```
@@ -149,12 +149,14 @@ req=1, cycle 0   io[15:0] = HADDR[31:16]   the whole address; no bits are stolen
 req=1, cycle 1   io[15:0] = HADDR[15:0]
 req=1, cycle 2   io[15:0] = {HWSTRB[7:0], 5'b0, HSIZE[2:0]}   SINGLES ONLY (burst=0)
 otherwise        io[15:0] = data word       64-bit beat as 4 words, least significant first
-wr, burst        held from req until the last word
+wr               held from req until the last word
 ```
 
 **The attribute word.** A burst is `BEATS` aligned 64-bit beats with every lane
 live, so it needs neither size nor strobes and skips the third header word —
-line fills are ~100 % of the traffic and pay nothing. A single spends one
+line fills are ~100 % of the traffic and pay nothing. There is no `burst` pin:
+every transfer is a full line, so it would have been tied to 1 for the life of
+the part. Its pad went to `clk_out`. A single spends one
 extra cycle and carries the real `HWSTRB`. This replaced an earlier encoding
 that rode `HSIZE[1:0]` in address bits 30:29: that constrained every region to
 have those bits clear (enforced only by a `ifndef SYNTHESIS` assertion, so in

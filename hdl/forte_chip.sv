@@ -46,9 +46,14 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   output logic              dir,
   output logic              req,
   output logic              wr,
-  output logic              burst,
   input  logic              ready,
   input  logic              rvalid,
+  // Forwarded LINK clock, for the FPGA to capture inbound io with
+  // (docs/impl_plan_link_clocking.md s6.1).  It must be the LINK clock and not
+  // core_clk: the io output registers live in the link domain, so forwarding
+  // core_clk would have the FPGA capturing link-domain data with a
+  // core-domain clock, which cancels nothing.
+  output logic              clk_out,
   // interrupts, console
   input  logic [1:0]        irq,            // PERIPH_ONCHIP=1: PLIC sources; =0: meip, seip
   output logic              uart_tx,
@@ -170,7 +175,7 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
     .link_clk, .link_rst_n(link_rst_n_s),
     .ocmd_valid(op_valid), .ocmd_ready(op_ready), .ocmd_data(op_data), .ocmd_depth(op_depth_w),
     .ibeat_valid(ip_valid), .ibeat_ready(ip_ready), .ibeat_data(ip_data),
-    .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .burst, .ready, .rvalid,
+    .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .ready, .rvalid,
     .txn_done);
 
   // Occupancy outputs we do not consume.  Sunk rather than left dangling so the
@@ -213,6 +218,24 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   always_ff @(posedge link_clk or negedge link_rst_n_s)
     if (!link_rst_n_s) hb <= '0; else if (txn_done) hb <= hb + 1'b1;
   assign status = hb[HB_BIT];
+
+  // ---- clk_out --------------------------------------------------------------
+  // THE VALUE OF THIS PIN IS IN THE CLOCK TREE, NOT HERE.  In RTL it is just the
+  // link clock on a port.  What makes it useful is where CTS taps it: it has to
+  // come off the link tree at the SAME depth as the phy's io output registers,
+  // because the whole point is that the pad and insertion delay common to both
+  // cancels on the ASIC->FPGA path.  Tapped at the wrong depth it is merely a
+  // clock on a pin and the FPGA has to treat the link as asynchronous again.
+  //
+  // Option 3 makes that nearly free -- this driver and the io flops are both
+  // inside the small link domain, a few hundred microns apart, so the skew is
+  // bounded by placement rather than by constraint (s6.1).
+  //
+  // Needs a create_generated_clock on the port in the SDC, which does not exist
+  // yet (s10).  It is also the best bring-up instrument on the chip: scope it
+  // and you know the die is receiving and distributing a clock before anything
+  // else has to work.
+  assign clk_out = link_clk;
 
 `ifndef SYNTHESIS
   // One length for every transaction, so a build whose two caches disagree has

@@ -547,6 +547,17 @@ link_abort:
 	case "$$line" in *"aborted=0 "*) echo "link_abort: no aborted transfers observed -- the abort path was not exercised"; exit 1;; esac
 	@grep -q 'test PASSED' verilator/tc_link_abort/simulation.log
 
+# Two-clock CDC run (docs/impl_plan_link_clocking.md s9a).  Not part of the
+# ordinary flow: it has its own Verilator build because the clocks are generated
+# in SystemVerilog, which this flow's C++ harness cannot do.  hvl/cdc/run.sh.
+.PHONY: cdc
+cdc:
+	$(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
+
+.PHONY: cdc_sweep
+cdc_sweep:
+	SWEEP=1 $(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
+
 .PHONY: regression
 regression:
 	$(MAKE) baremetal_regression

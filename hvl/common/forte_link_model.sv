@@ -7,8 +7,8 @@
 // the real protocol with the memory model, tohost snoop and RVFI unchanged.
 //
 //   header     req=1 for two cycles: A[31:16] then A[15:0].  wr comes off the
-//              pins; burst is always 1 -- every transfer is a full BEATS-beat
-//              burst, so there is no size and no byte strobes on the wire
+//              pins.  Every transfer is a full BEATS-beat burst, so there is
+//              no size and no byte strobes on the wire, and no `burst` pin
 //   write      4*BEATS words, contiguous, LSW first; beats are queued and
 //              written to mem_itf in order with every lane live
 //   read       beats are fetched from mem_itf in order into a line buffer
@@ -44,7 +44,6 @@ module forte_link_model import forte_link_pkg::*; #(
   input  logic              dir,
   input  logic              req,
   input  logic              wr,
-  input  logic              burst,
   output logic              ready,
   output logic              rvalid,
   // mem_itf_w_mask, one channel
@@ -236,11 +235,11 @@ module forte_link_model import forte_link_pkg::*; #(
     if (req & lst != LS_IDLE & lst != LS_HDR1) $error("link model: header while busy (state %0d)", lst);
     if (io_oe & dir)                        $error("link model: driving io while dir=1");
     if (mem_wmask != '0 & mem_addr[2:0] != 3'b000) $error("link model: unaligned write to memory: %h", mem_addr);
-    // Every transfer is a full BEATS-beat burst.  A single arriving here means
-    // the ASIC issued a transfer the protocol cannot describe -- it has no field
-    // for HSIZE or the byte strobes a single needs.  The mirror of the HBURST
-    // assertion in forte_link_core.
-    if (lst == LS_HDR1 & ~burst) $error("link model: single transfer -- the link carries full bursts only");
+    // There is no longer a single-transfer check here, because there is no
+    // longer any way for the ASIC to ASK for one: with the burst pin gone every
+    // transaction on the wire is BEATS beats by construction.  The check that
+    // the core never requests something else is the HBURST assertion in
+    // forte_link_core, against forte_link_pkg::hburst_for(BEATS).
   end
 
 endmodule

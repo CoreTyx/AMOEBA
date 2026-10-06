@@ -41,10 +41,10 @@
 // carrying {HWSTRB, HSIZE}; that path existed for a configuration nothing
 // exercises, and untested logic does not go to silicon.  BEATS >= 2 is checked:
 // a one-beat line would make a line fill indistinguishable on the wire from an
-// uncached single, which is the case that needs the header word.  `burst` is
-// consequently always 1 -- the pin is kept so a future single path needs no pad,
-// not because it carries information today.
-//   wr, burst        held from req until the last word
+// uncached single, which is the case that needs the header word.  There is no
+// `burst` pin: it would have been tied to 1 for the life of the part, so it cost
+// a pad to carry no information, and that pad went to clk_out instead.
+//   wr               held from req until the last word
 //   ready            see "the ready guard band" below
 //   rvalid           read data word on io this cycle; gaps allowed
 //   dir              1 = ASIC drives io, 0 = ASIC has released it; the single
@@ -54,7 +54,7 @@
 // NO LINK TRAINING.  The ASIC used to drive an LFSR pattern and check an echo
 // before releasing the core (docs/impl_plan_link_clocking.md s7).  It does not
 // any more: the first fetch is fully determined (RESET_VECTOR = 0x8000_0000, so
-// the first read's header words are 0x8000, 0x0000 with wr=0, burst=1) and `rst_n` is
+// the first read's header words are 0x8000, 0x0000 with wr=0) and `rst_n` is
 // an FPGA output, so the FPGA releases the core, checks that header, and
 // re-asserts reset within microseconds if it is wrong.  The gate moved to the
 // side with a CPU, Python and an ILA instead of a one-bit status pin.

@@ -137,11 +137,11 @@ and which a 1:1-ratio simulation will never expose.
                              |
   AHB slave front end        |
     descriptor + data   ---> | FIFO out (16b) ---> link FSM ---> pads
-                             |                      |  drives dir/req/wr/burst
+                             |                      |  drives dir/req/wr
     read data           <--- | FIFO in  (16b) <--- capture <--- pads
 ```
 
-- **FIFO out:** one descriptor word (`{wr, burst, size, strb}`), two address
+- **FIFO out:** one descriptor word (`{wr, size, strb}`), two address
   words, then 4 or 32 data words. Single crossing, ordering free.
 - **FIFO in:** read data words, in order. Responses need no tagging.
 - **`dir` polarity** falls out of the descriptor the link FSM just popped —
@@ -318,7 +318,7 @@ search is only needed when *ins* is unknown at run time.
 **Job B does not need an LFSR at all.** Two arguments retire it.
 
 *First, a directed memory test covers strictly more.* Write patterns, read
-back, compare: that exercises the address path, `req`/`wr`/`burst` framing,
+back, compare: that exercises the address path, `req`/`wr` framing,
 real `dir` turnarounds, the FPGA's decode and memory, and the abort path. The
 LFSR sends no address and tests no turnaround. Walking-ones is also a better
 stuck-at pattern than pseudo-random. On coverage the directed test wins.
@@ -332,7 +332,7 @@ reasoning is wrong, because it ignores two facts:
 
 1. **The first transaction is fully deterministic.** `RESET_VECTOR =
    0x8000_0000`, so it is a full-line read with header words `0x8000`, `0x0000`,
-   `wr=0`, `burst=1`, `dir=1`. The FPGA knows all of it in advance, and knows
+   `wr=0`, `dir=1`. The FPGA knows all of it in advance, and knows
    exactly what it loaded at that address.
 2. **`rst_n` is under FPGA control.** The FPGA does not need the link proven
    before releasing the core. It releases it, judges the first header, and
@@ -425,7 +425,7 @@ owner.
 | 2 | FPGA | Release `rst_n` | — |
 | 3 | FPGA | *First silicon / board change only:* assert loopback (`rvalid` high at reset release), drive walking-ones, adjacent-lane and pseudo-random patterns, check what returns. Proves every lane in both directions. Skipped on a known-good board | as long as wanted |
 | 4 | FPGA | Release `rst_n` | — |
-| 5 | ASIC | `forte_rst_sync` releases, core leaves reset, first fetch issues: `req` 2 cycles, `io = 0x8000, 0x0000`, `wr=0`, `burst=1` | ~10 cycles |
+| 5 | ASIC | `forte_rst_sync` releases, core leaves reset, first fetch issues: `req` 2 cycles, `io = 0x8000, 0x0000`, `wr=0` | ~10 cycles |
 | 6 | FPGA | **Check that header against the known expected value.** Wrong → re-assert `rst_n`, report which lanes disagreed | 1 transaction |
 | 7 | FPGA | Return the loaded line. Then check every subsequent address for plausibility (in range, line-aligned); a corrupted inbound lane shows up as an unexpected next fetch | continuous |
 | 8 | core | Boot proceeds. Early software runs a memory test over the link for the broadest coverage | — |
@@ -468,8 +468,23 @@ Suggested order:
 Steps 3 and 4 are the ones that touch RTL verified by the regression, so they
 want the non-integer-ratio sweep (§4.2) standing up first.## 9a. REQUIRED: the two-clock testbench
 
-**Status: not done. This is the highest-value outstanding item, because without
-it the architecture chosen in §4 has no coverage.**
+**Status: DONE. `hvl/cdc/forte_cdc_tb.sv` + `hvl/cdc/run.sh`, or `make cdc` /
+`make cdc_sweep` from `sim/`.**
+
+Results: all nine ISA programmes pass at 1:1.3701 with exact flit balance, and a
+ratio sweep from 0.685 to 1.370 passes with **identical flit counts at every
+ratio** — the strong form of the result, since it says nothing is lost,
+duplicated or reordered however the two clocks happen to sit relative to each
+other. `tc_link_abort` puts 15757 commands and 27380 beats through the crossing.
+
+One finding worth keeping: the bench first reported a timeout on programmes that
+had in fact passed. `tohost` is at `0x8080_0000`, inside cacheable `EXT_MEM`, so
+the store lands in the D-cache and never reaches the link — the programmes write
+it and then sit in `wfi; j .-8` forever. A memory-side detector alone therefore
+never fires. `top_tb.svh` does not hit this because its primary detector is the
+RVFI monitor at store retirement and its AHB-level one is a documented safety
+net that is in practice dead code. The CDC bench has no RVFI, so it checks the
+M stage directly and keeps the memory-side check only as corroboration.
 
 `forte_top` ties `link_clk` to the `core_clk` pad, so the ISA regression runs
 both domains from one clock. RTL has no clock tree, so simulation sees **zero
@@ -488,11 +503,21 @@ What exists today:
   These are the checks that caught the reset-gating bug in `a76988e`, and they
   are what a two-clock run should be gated on.
 
-What is needed: a testbench that instantiates **`forte_chip` directly** (not
-`forte_top`, which ties the clocks) and drives `core_clk` and `link_clk` from
-independent generators at a non-integer ratio — 1:1.37 as in the FIFO bench, and
-ideally a sweep. Then run the existing ISA programmes through it and require the
-flit balance to be exact and the assertions silent.
+What was needed, and what was built: a testbench that instantiates
+**`forte_chip` directly** (not `forte_top`, which ties the clocks) and drives
+`core_clk` and `link_clk` from independent generators at a non-integer ratio —
+1:1.37 as in the FIFO bench, plus a sweep. It runs the existing ISA programmes
+through it and requires the flit balance to be exact and the assertions silent.
+
+It is a separate top rather than a mode in `top_tb.svh` for two reasons. The
+Verilator flow drives `clk` from a C++ harness, so the shared bench cannot
+generate a second clock at all; and the FPGA side has to move wholesale into the
+link domain, because the link model *is* the FPGA and the memory behind it is the
+FPGA's memory. Left on the core clock, `mem_resp` is a one-cycle pulse in the
+wrong domain and the model's handshake misses it at a non-integer ratio,
+producing failures that say nothing about the DUT. Built with
+`verilator --binary --timing`, as `third_party/opentitan/tb` already does for the
+FIFO alone.
 
 This verifies the crossing under conditions strictly **worse** than the chip
 will see, since the real part has one clock source with bounded tree skew. If it
@@ -511,7 +536,7 @@ Also still owed: a non-integer-ratio sweep in CI, per §4.2 point 3.
 | ~~Async FIFO choice~~ | **Decided: OpenTitan `prim_fifo_async`.** Remaining: vendor it, confirm port names and the power-of-two depth constraint against the actual source |
 | Loopback entry encoding | `rvalid` high at reset release is free; confirm no conflict with the FPGA slave's own reset behaviour |
 | First-header checker in fabric | ~20 LUTs; decide whether it also re-asserts `rst_n` automatically or only flags |
-| **Non-integer clock-ratio regression** | **Required -- Option 3 has proceeded (a76988e) and this is still missing. See §9a.** |
+| **Non-integer clock-ratio regression** | **Done -- `hvl/cdc/`, `make cdc_sweep`. See §9a. Still owed: wiring it into CI.** |
 | Pad budget | 44 used (42 + `link_clk` + `clk_out`), 8 spare. Power/ground placeholder more likely to grow with non-standard packaging |
 | **SDC carries no package term** | `constraints.sdc` input/output delays are PLACEHOLDER and do not name pad or package delay at all. With packaging as the stated risk, the budget must break out package explicitly |
 | **DFT/debug vs `io[15:0]`** | `io` currently doubles as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |

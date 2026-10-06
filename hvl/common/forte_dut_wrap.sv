@@ -65,7 +65,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
 
     // ---- the pads -----------------------------------------------------------
     wire [LINK_W-1:0] io;
-    logic dir, req, wr, burst, ready, rvalid, status, uart_tx;
+    logic dir, req, wr, clk_out, ready, rvalid, status, uart_tx;
 
     forte_top top (
         // No link_clk here: forte_top has only the core_clk PAD and ties
@@ -73,7 +73,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
         // means instantiating forte_chip directly -- which is exactly what the
         // two-clock testbench in docs/impl_plan_link_clocking.md s9a is for.
         .core_clk(clk), .rst_n(~rst), .fault_inject(ecc_inject_en),
-        .io, .dir, .req, .wr, .burst, .ready, .rvalid,
+        .io, .dir, .req, .wr, .clk_out, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 
     // BEATS must be the DUT's.  forte_chip derives it as DCACHE_LINELENINBITS /
@@ -82,7 +82,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
     // is what made a 512 -> 128 bit line change hang the regression with no
     // diagnostic at all.
     forte_link_model #(.BEATS(DCACHE_LINELENINBITS / AHBW)) model (
-        .clk, .rst, .io, .dir, .req, .wr, .burst, .ready, .rvalid,
+        .clk, .rst, .io, .dir, .req, .wr, .ready, .rvalid,
         .mem_addr, .mem_rmask, .mem_wmask, .mem_wdata, .mem_rdata, .mem_resp);
 
     // ---- RVFI taps, same wiring as rv64_core_wrapper ------------------------
@@ -299,8 +299,8 @@ module forte_dut_wrap import forte_link_pkg::*; (
                 $display("[LINK %0t] beat    st=%0d wcnt=%0d hrdata=%h", $time,
                          top.chip.phy.st, top.chip.phy.wcnt, top.chip.linkcore.HRDATA);
             if (model.lst == LS_HDR1)
-                $display("[LINK %0t] model   header hi=%h lo=%h wr=%b burst=%b", $time,
-                         model.hdr_hi, model.io_i, model.wr, model.burst);
+                $display("[LINK %0t] model   header hi=%h lo=%h wr=%b", $time,
+                         model.hdr_hi, model.io_i, model.wr);
             if (model.mem_busy & model.mem_resp)
                 $display("[LINK %0t] model   mem %s addr=%h data=%h", $time,
                          model.mem_rmask != 0 ? "rd" : "wr", model.mem_addr,

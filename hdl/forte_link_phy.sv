@@ -68,7 +68,6 @@ module forte_link_phy import forte_link_pkg::*; #(
   output logic               dir,
   output logic               req,
   output logic               wr,
-  output logic               burst,
   input  logic               ready,
   input  logic               rvalid,
 
@@ -136,13 +135,13 @@ module forte_link_phy import forte_link_pkg::*; #(
   always_ff @(posedge link_clk or negedge link_rst_n) begin
     if (!link_rst_n) begin
       st <= LM_IDLE; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
-      req <= 1'b0; wr <= 1'b0; burst <= 1'b0;
+      req <= 1'b0; wr <= 1'b0;
       addr_r <= '0; wr_r <= 1'b0; wdat_r <= '0;
       wcnt <= '0; beat_r <= '0; ta_cnt <= '0;
     end else begin
       case (st)
         LM_IDLE: begin
-          req <= 1'b0; wr <= 1'b0; burst <= 1'b0; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
+          req <= 1'b0; wr <= 1'b0; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
           if (cmd_complete) begin
             addr_r <= ocmd_data[31:0];
             wr_r   <= cmd_is_wr;
@@ -152,7 +151,7 @@ module forte_link_phy import forte_link_pkg::*; #(
 
         LM_START: begin
           if (ready_s) begin
-            io_o <= addr_r[31:16]; req <= 1'b1; wr <= wr_r; burst <= 1'b1;
+            io_o <= addr_r[31:16]; req <= 1'b1; wr <= wr_r;
             st <= LM_HDR0;
           end
         end
