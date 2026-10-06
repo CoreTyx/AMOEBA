@@ -1,6 +1,6 @@
 // Fault-tolerant shadow controller shared by execute-unit wrappers.
 // A mismatch retries the held transaction.  Recompute is optional and is used
-// only by ft_alu for the supported ordinary-add relation.
+// by the independent ALU and comparison lanes inside ft_alu.
 module ft_shadow_ctrl #(
   // Number of consecutive mismatches before escalation.
   parameter int TE_THRESHOLD = 3
@@ -13,6 +13,7 @@ module ft_shadow_ctrl #(
   input  logic recompute_primary_ok,    // primary passes the alternate test
   input  logic recompute_shadow_ok,     // shadow passes the alternate test
   output logic recompute_mode,          // alternate test is active
+  output logic capture_normal,          // snapshot the first mismatch at this edge
   output logic stall_req,               // hold all architectural stages
   output logic unresolved,               // no trustworthy result; take a trap
   output logic isolated,                // one copy has been diagnosed
@@ -35,6 +36,8 @@ module ft_shadow_ctrl #(
   end
 
   assign recompute_mode = (state == RECOMPUTE);
+  // Capture unmasked post-injection results once, including threshold 1.
+  assign capture_normal = (state == NORMAL) & valid & mismatch & ~reset & ~flush;
   assign isolated       = (state == ISOLATED);
   assign unresolved     = (state == UNRESOLVED);
   // A mismatch/recompute holds every architectural stage.  UNRESOLVED is

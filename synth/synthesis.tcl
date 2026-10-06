@@ -30,7 +30,7 @@ get_license DC-Ultra-Features
 get_license DC-Ultra-Opt
 
 set repo_root [getenv REPO_ROOT]
-lappend search_path "$repo_root/pkg" "$repo_root/third_party/cvw/src" "$repo_root/third_party/cvw/config/rv64gc"
+lappend search_path "$repo_root/pkg" "$repo_root/hdl/core" "$repo_root/third_party/cvw/config/rv64gc"
 
 set pkg_src [getenv PKG_SRCS]
 

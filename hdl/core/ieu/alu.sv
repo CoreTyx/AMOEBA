@@ -41,6 +41,9 @@ module alu import cvw::*; #(parameter cvw_t P) (
   input  logic [2:0]        BALUControl, // ALU Control signals for B instructions in Execute Stage
   input  logic              BMUActive,   // Bit manipulation instruction being executed
   input  logic [1:0]        CZero,       // {czero.nez, czero.eqz} instructions active
+  input  logic RecomputeArith, RecomputeShift, // Private FT diagnostic controls
+  output logic [P.XLEN:0] ArithWide,          // Private, terminates inside ft_alu
+  output logic [P.XLEN+1:0] ShiftWide,        // Private, terminates inside ft_alu
   output logic [P.XLEN-1:0] ALUResult,   // ALU result
   output logic [P.XLEN-1:0] Sum);        // Sum of operands
 
@@ -51,7 +54,7 @@ module alu import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0] CondShiftA;                                                  // Result of A shifted select mux
   logic [P.XLEN-1:0] ZeroCondMaskInvB;                                            // B input to AND gate, accounting for czero.* instructions
   logic [P.XLEN-1:0] AndResult;                                                   // AND result
-  logic              Carry, Neg;                                                  // Flags: carry out, negative
+  logic              SignedCompare;                                                  // Flags: carry out, negative
   logic              LT, LTU;                                                     // Less than, Less than unsigned
   logic              Asign, Bsign;                                                // Sign bits of A, B
 
@@ -59,7 +62,16 @@ module alu import cvw::*; #(parameter cvw_t P) (
   // CondMaskB is B for add/sub, or a masked version of B for certain bit manipulation instructions
   // CondShiftA is A for add/sub or a shifted version of A for shift-and-add BMU instructions
   assign CondMaskInvB = SubArith ? ~CondMaskB : CondMaskB;
-  assign {Carry, Sum} = CondShiftA + CondMaskInvB + {{(P.XLEN-1){1'b0}}, SubArith};
+  // Only the selected signed comparison needs sign extension. Low XLEN bits
+  // retain existing add/sub/address and BMU behavior in either mode.
+  assign SignedCompare = (ALUSelect == 3'b010) |
+                         (BMUActive & (BSelect == 4'b0010) &
+                          (ZBBSelect[1:0] == 2'b11) & ~Funct3[0]);
+  addsub #(.WIDTH(P.XLEN+1)) arithmetic(
+    .a({SignedCompare & CondShiftA[P.XLEN-1], CondShiftA}),
+    .b({SignedCompare & CondMaskB[P.XLEN-1], CondMaskB}),
+    .sub(SubArith), .recompute(RecomputeArith), .result(ArithWide));
+  assign Sum = ArithWide[P.XLEN-1:0];
 
   // Zicond block conditionally zeros B
   if (P.ZICOND_SUPPORTED) begin : zicond
@@ -77,17 +89,14 @@ module alu import cvw::*; #(parameter cvw_t P) (
   end else assign ZeroCondMaskInvB = CondMaskInvB; // no masking if Zicond is not supported
 
   // Shifts (configurable for rotation)
-  shifter #(P) sh(.A(CondShiftA), .Amt(B[P.LOG_XLEN-1:0]), .Right(Funct3[2]), .W64, .SubArith, .Y(Shift), .Rotate(BALUControl[2]));
+  shifter #(P) sh(.A(CondShiftA), .Amt(B[P.LOG_XLEN-1:0]), .Right(Funct3[2]), .W64, .SubArith, .Y(Shift), .WideY(ShiftWide), .Recompute(RecomputeShift), .Rotate(BALUControl[2]));
 
-  // Condition code flags are based on subtraction output Sum = A-B.
-  // Overflow occurs when the numbers being subtracted have the opposite sign
-  // and the result has the opposite sign of A.
-  // LT is simplified from Overflow = Asign & Bsign & Asign & Neg; LT = Neg ^ Overflow
-  assign Neg  = Sum[P.XLEN-1];
+  // The extended subtraction cannot overflow. Convert the unused flag to
+  // its other signedness so LT/LTU retain their existing BMU interface.
   assign Asign = A[P.XLEN-1];
   assign Bsign = B[P.XLEN-1];
-  assign LT = Asign & ~Bsign | Asign & Neg | ~Bsign & Neg;
-  assign LTU = ~Carry;
+  assign LT  = ArithWide[P.XLEN] ^ (~SignedCompare & (Asign ^ Bsign));
+  assign LTU = ArithWide[P.XLEN] ^ ( SignedCompare & (Asign ^ Bsign));
   assign AndResult = A & ZeroCondMaskInvB;
 
   // Select appropriate ALU Result

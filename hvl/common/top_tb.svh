@@ -52,6 +52,25 @@
         .ecc_inject_en (ecc_inject_en)
     );
 
+    // Core-local runtime FT hooks are intentionally undriven in synthesizable
+    // RTL. Ordinary ISA/Linux simulations explicitly disable every bundle.
+    initial begin
+        force dut.soc.core.ALUFiEnable = '0;
+        force dut.soc.core.ALUFiTarget = '0;
+        force dut.soc.core.ALUFiKind = '0;
+        force dut.soc.core.ALUFiBit = '0;
+        force dut.soc.core.ALUFiChannel = '0;
+        force dut.soc.core.MULFiEnable = '0;
+        force dut.soc.core.MULFiTarget = '0;
+        force dut.soc.core.MULFiKind = '0;
+        force dut.soc.core.MULFiBit = '0;
+        force dut.soc.core.DIVFiEnable = '0;
+        force dut.soc.core.DIVFiTarget = '0;
+        force dut.soc.core.DIVFiKind = '0;
+        force dut.soc.core.DIVFiBit = '0;
+        force dut.soc.core.DIVFiChannel = '0;
+    end
+
     `include "rvfi_reference.svh"
 
 `ifdef ECE411_RETIRE_TRACE

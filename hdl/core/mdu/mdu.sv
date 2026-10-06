@@ -29,6 +29,12 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  input logic MULFiEnable, DIVFiEnable,
+  input logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind,
+  input logic [$clog2(2*P.XLEN)-1:0] MULFiBit,
+  input logic [$clog2(P.XLEN)-1:0] DIVFiBit,
+  input logic DIVFiChannel,
+
   input  logic              StallM, StallW,
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
@@ -58,7 +64,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   assign MulActiveE = MDUActiveE & ~IntDivE;
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
+    .fi_enable(MULFiEnable), .fi_target(MULFiTarget), .fi_kind(MULFiKind), .fi_bit(MULFiBit),
     .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
     .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
 
@@ -75,11 +81,11 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign DIV_PE_p = 1'b0;
     assign DIV_PE_r = 1'b0;
   end else begin : div
-    // The production injection controls are tied off.  The direct FT test
-    // enables them only on its local wrapper instance.
+    // Runtime injection is routed from the core-local DIV hook.
     ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
-        .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
+        .fi_enable(DIVFiEnable), .fi_target(DIVFiTarget), .fi_kind(DIVFiKind),
+        .fi_bit(DIVFiBit), .fi_channel(DIVFiChannel),
         .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedM),
         .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
   end

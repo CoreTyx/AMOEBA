@@ -1,105 +1,162 @@
+// E-stage ALU/address and architectural comparison protection. The two lanes
+// have independent controllers and replica selections; only containment is
+// shared. All widened results and diagnostic snapshots terminate here.
 module ft_alu import cvw::*; #(
   parameter cvw_t P,
-  parameter int TE_THRESHOLD = 3,
-  parameter bit FAULT_INJECT = 1'b0
+  parameter int TE_THRESHOLD = 3
 ) (
-  // Inputs are the existing E-stage ALU controls; outputs retain Wally's
-  // result/address interface plus FT control and diagnosis.
-  input  logic clk, reset, flush, valid,
-  input  logic [P.XLEN-1:0] A, B,
-  input  logic W64, UW64, SubArith,
-  input  logic [2:0] ALUSelect,
-  input  logic [3:0] BSelect, ZBBSelect,
-  input  logic [2:0] Funct3, BALUControl,
-  input  logic [6:0] Funct7,
-  input  logic [4:0] Rs2E,
-  input  logic BMUActive,
-  input  logic [1:0] CZero,
-  // Test-only replica-output fault selection; tied off by the production IEU.
-  input  logic fi_enable,
-  input  logic [1:0] fi_target,
-  input  logic [1:0] fi_kind,
-  input  logic [$clog2(P.XLEN)-1:0] fi_bit,
-  input  logic fi_channel, // 0: ALUResult, 1: Sum/address
+  input logic clk, reset, flush, valid,
+  input logic [P.XLEN-1:0] A, B,
+  // Branches need PC+immediate and register comparison simultaneously.
+  input logic [P.XLEN-1:0] cmp_a, cmp_b,
+  input logic cmp_sgnd,
+  input logic W64, UW64, SubArith,
+  input logic [2:0] ALUSelect,
+  input logic [3:0] BSelect, ZBBSelect,
+  input logic [2:0] Funct3, BALUControl,
+  input logic [6:0] Funct7,
+  input logic [4:0] Rs2E,
+  input logic BMUActive,
+  input logic [1:0] CZero,
+  input logic fi_enable,
+  input logic [1:0] fi_target, fi_kind,
+  input logic [$clog2(P.XLEN+2)-1:0] fi_bit,
+  // 00: ALUResult, 01: extended arithmetic, 10: widened shift, 11: CMP.
+  input logic [1:0] fi_channel,
   output logic [P.XLEN-1:0] ALUResult, Sum,
-  output logic stall_req, unresolved, pe_primary, pe_shadow
+  output logic [1:0] flags, // unchanged comparator schema: {eq, lt}
+  output logic stall_req, unresolved, pe_primary, pe_shadow,
+  output logic cmp_pe_primary, cmp_pe_shadow
 );
+  localparam int RESULT_BIT_W = $clog2(P.XLEN);
+  localparam int ARITH_BIT_W = $clog2(P.XLEN+1);
+  logic [P.XLEN-1:0] result_raw[2], result_pre_fi[2], result_live[2];
+  logic [P.XLEN:0] arith_raw[2], arith_live[2], cmp_raw[2], cmp_live[2];
+  logic [P.XLEN+1:0] shift_raw[2], shift_live[2];
+  logic [P.XLEN-1:0] normal_result[2];
+  logic [P.XLEN:0] normal_arith[2], normal_cmp[2];
+  logic [P.XLEN+1:0] normal_shift[2];
+  logic [P.XLEN:0] cmp_extended_a, cmp_extended_b;
+  logic alu_mismatch, cmp_mismatch, arithmetic_operation, slt_operation, shift_operation;
+  logic alu_recompute, cmp_recompute, arith_recompute, shift_recompute;
+  logic alu_capture_normal, cmp_capture_normal, alu_isolated, cmp_isolated;
+  logic alu_use_shadow, cmp_use_shadow, alu_stall, cmp_stall, alu_unresolved, cmp_unresolved;
+  logic alu_supported, alu_ok[2], cmp_ok[2];
 
-  // Live copy outputs; normal_* preserves the first mismatch for diagnosis.
-  logic [P.XLEN-1:0] primary_result_raw, primary_sum_raw;
-  logic [P.XLEN-1:0] shadow_result_raw, shadow_sum_raw;
-  logic [P.XLEN-1:0] primary_result, primary_sum, shadow_result, shadow_sum;
-  logic [P.XLEN-1:0] normal_primary_result, normal_primary_sum;
-  logic [P.XLEN-1:0] normal_shadow_result, normal_shadow_sum;
-  logic [P.XLEN-1:0] recompute_a, recompute_b;
-  logic mismatch, recompute_mode, isolated, use_shadow;
-  logic recompute_supported, recompute_primary_ok, recompute_shadow_ok;
+  // Do not use BMUActive to exclude shifts: the existing BMU decoder also
+  // recognizes ordinary shifts. Rotates keep their original n-bit ring.
+  assign slt_operation = ~W64 & ~BMUActive &
+                         ((ALUSelect == 3'b010) | (ALUSelect == 3'b011));
+  assign arithmetic_operation = (~W64 & ~BMUActive & (ALUSelect == 3'b000)) | slt_operation;
+  assign shift_operation = ~BALUControl[2] &
+      ((ALUSelect == 3'b001) | ((ALUSelect == 3'b101) & ~P.ZBS_SUPPORTED)) &
+      ((BSelect == 4'b0000) | ((BSelect == 4'b0001) & UW64));
+  // A shift relation gives no evidence about a faulty independent address
+  // channel. Such disagreement must trap, even if the shift itself is healthy.
+  assign alu_supported = arithmetic_operation | (shift_operation & (arith_live[0] == arith_live[1]));
+  assign arith_recompute = alu_recompute & arithmetic_operation;
+  assign shift_recompute = alu_recompute & shift_operation;
+  assign cmp_extended_a = {cmp_sgnd & cmp_a[P.XLEN-1], cmp_a};
+  assign cmp_extended_b = {cmp_sgnd & cmp_b[P.XLEN-1], cmp_b};
 
-  // Only ordinary XLEN addition has a trusted complement relation. W-form,
-  // subtraction, BMU, and other operations use retry-only escalation.
-  assign recompute_supported = valid & ~W64 & ~SubArith & ~BMUActive &
-                               (ALUSelect == 3'b000);
-  assign recompute_a = recompute_mode ? (~A + {{(P.XLEN-1){1'b0}}, 1'b1}) : A;
-  assign recompute_b = recompute_mode ? ~B : B;
+  function automatic logic [P.XLEN-1:0] shift_result(
+    input logic [P.XLEN+1:0] wide, input logic diagnostic);
+    logic [P.XLEN-1:0] aligned;
+    aligned = diagnostic ? wide[P.XLEN+1:2] : wide[P.XLEN-1:0];
+    if ((P.XLEN == 64) && W64)
+      shift_result = {{(P.XLEN-32){aligned[31]}}, aligned[31:0]};
+    else shift_result = aligned;
+  endfunction
 
-  // Keep Wally's ALU implementation intact and duplicate its complete output.
-  alu #(P) primary(.A(recompute_a), .B(recompute_b), .W64, .UW64, .SubArith,
-    .ALUSelect, .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl,
-    .BMUActive, .CZero, .ALUResult(primary_result_raw), .Sum(primary_sum_raw));
-  alu #(P) shadow(.A(recompute_a), .B(recompute_b), .W64, .UW64, .SubArith,
-    .ALUSelect, .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl,
-    .BMUActive, .CZero, .ALUResult(shadow_result_raw), .Sum(shadow_sum_raw));
+  for (genvar i = 0; i < 2; i++) begin : replica
+    alu #(P) compute(.A, .B, .W64, .UW64, .SubArith, .ALUSelect,
+      .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl, .BMUActive, .CZero,
+      .RecomputeArith(arith_recompute), .RecomputeShift(shift_recompute),
+      .ArithWide(arith_raw[i]), .ShiftWide(shift_raw[i]),
+      .ALUResult(result_raw[i]), .Sum());
+    addsub #(.WIDTH(P.XLEN+1)) compare(
+      .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
+      .recompute(cmp_recompute), .result(cmp_raw[i]));
 
-  // Inject after independent replicas, never into shared operands or controls.
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_result_fi(
-    .data_i(primary_result_raw), .fi_enable(fi_enable & ~fi_channel & (fi_target[0])),
-    .fi_kind, .fi_bit, .data_o(primary_result));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_result_fi(
-    .data_i(shadow_result_raw), .fi_enable(fi_enable & ~fi_channel & (fi_target[1])),
-    .fi_kind, .fi_bit, .data_o(shadow_result));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_sum_fi(
-    .data_i(primary_sum_raw), .fi_enable(fi_enable & fi_channel & (fi_target[0])),
-    .fi_kind, .fi_bit, .data_o(primary_sum));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_sum_fi(
-    .data_i(shadow_sum_raw), .fi_enable(fi_enable & fi_channel & (fi_target[1])),
-    .fi_kind, .fi_bit, .data_o(shadow_sum));
+    // Range check before narrowing: bit 64 must not alias result bit 0.
+    ft_fault_inject #(.WIDTH(P.XLEN)) result_fi(
+      .data_i(result_pre_fi[i]), .data_o(result_live[i]),
+      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b00) & (int'(fi_bit) < P.XLEN)),
+      .fi_kind, .fi_bit(fi_bit[RESULT_BIT_W-1:0]));
+    ft_fault_inject #(.WIDTH(P.XLEN+1)) arith_fi(
+      .data_i(arith_raw[i]), .data_o(arith_live[i]),
+      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b01) & (int'(fi_bit) < P.XLEN+1)),
+      .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
+    ft_fault_inject #(.WIDTH(P.XLEN+2)) shift_fi(
+      .data_i(shift_raw[i]), .data_o(shift_live[i]),
+      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b10)), .fi_kind, .fi_bit);
+    ft_fault_inject #(.WIDTH(P.XLEN+1)) cmp_fi(
+      .data_i(cmp_raw[i]), .data_o(cmp_live[i]),
+      .fi_enable(fi_enable & fi_target[i] & (fi_channel == 2'b11) & (int'(fi_bit) < P.XLEN+1)),
+      .fi_kind, .fi_bit(fi_bit[ARITH_BIT_W-1:0]));
 
-  // Recompute intentionally changes the operands, so normal mismatch checking
-  // is disabled until the controller finishes diagnosis.
-  assign mismatch = valid & ~recompute_mode & ~isolated &
-                    ((primary_result != shadow_result) | (primary_sum != shadow_sum));
-  assign recompute_primary_ok = (primary_result == ~normal_primary_result) &
-                                (primary_sum == ~normal_primary_sum);
-  assign recompute_shadow_ok  = (shadow_result == ~normal_shadow_result) &
-                                (shadow_sum == ~normal_shadow_sum);
-
-  ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
-    .clk, .reset, .flush, .valid, .mismatch, .recompute_supported,
-    .recompute_primary_ok, .recompute_shadow_ok, .recompute_mode, .stall_req,
-    .unresolved, .isolated, .use_shadow, .pe_primary, .pe_shadow);
-
-  // Save the first normal disagreement for the complement-based diagnosis.
-  always_ff @(posedge clk) begin
-    if (reset | flush) begin
-      normal_primary_result <= '0;
-      normal_primary_sum    <= '0;
-      normal_shadow_result  <= '0;
-      normal_shadow_sum     <= '0;
-    end else if (valid & mismatch & ~recompute_mode & ~isolated) begin
-      normal_primary_result <= primary_result;
-      normal_primary_sum    <= primary_sum;
-      normal_shadow_result  <= shadow_result;
-      normal_shadow_sum     <= shadow_sum;
+    // A shift-channel fault must reach the architectural output, including
+    // word sign extension. The injection bit stays physical during diagnosis.
+    assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute) : result_raw[i];
+    assign cmp_ok[i] = (cmp_live[i] == ~normal_cmp[i]);
+    always_comb begin
+      alu_ok[i] = 1'b0;
+      if (arithmetic_operation) begin
+        alu_ok[i] = (arith_live[i] == ~normal_arith[i]);
+        if (slt_operation) begin
+          alu_ok[i] &= (normal_result[i] == {{(P.XLEN-1){1'b0}}, normal_arith[i][P.XLEN]}) &
+                       (result_live[i] == {{(P.XLEN-1){1'b0}}, arith_live[i][P.XLEN]});
+        end else alu_ok[i] &= (result_live[i] == ~normal_result[i]);
+      end else if (shift_operation) begin
+        alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_live[i], 1'b1)) &
+                    (normal_result[i] == shift_result(normal_shift[i], 1'b0)) &
+                    (result_live[i] == shift_result(shift_live[i], 1'b1)) &
+                    (arith_live[i] == normal_arith[i]) & (arith_live[0] == arith_live[1]);
+      end
+    end
+    always_ff @(posedge clk) begin
+      if (reset | flush) begin
+        normal_result[i] <= '0;
+        normal_arith[i] <= '0;
+        normal_shift[i] <= '0;
+        normal_cmp[i] <= '0;
+      end else begin
+        if (alu_capture_normal) begin
+          normal_result[i] <= result_live[i];
+          normal_arith[i] <= arith_live[i];
+          normal_shift[i] <= shift_live[i];
+        end
+        if (cmp_capture_normal) normal_cmp[i] <= cmp_live[i];
+      end
     end
   end
 
-  // Mask outputs while the transaction is held or cannot be trusted.
+  assign alu_mismatch = valid & ~alu_recompute & ~alu_isolated &
+                       ((result_live[0] != result_live[1]) | (arith_live[0] != arith_live[1]));
+  assign cmp_mismatch = valid & ~cmp_recompute & ~cmp_isolated & (cmp_live[0] != cmp_live[1]);
+  ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) alu_ctrl(
+    .clk, .reset, .flush, .valid, .mismatch(alu_mismatch), .recompute_supported(alu_supported),
+    .recompute_primary_ok(alu_ok[0]), .recompute_shadow_ok(alu_ok[1]),
+    .recompute_mode(alu_recompute), .capture_normal(alu_capture_normal),
+    .stall_req(alu_stall), .unresolved(alu_unresolved), .isolated(alu_isolated),
+    .use_shadow(alu_use_shadow), .pe_primary, .pe_shadow);
+  ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) cmp_ctrl(
+    .clk, .reset, .flush, .valid, .mismatch(cmp_mismatch), .recompute_supported(1'b1),
+    .recompute_primary_ok(cmp_ok[0]), .recompute_shadow_ok(cmp_ok[1]),
+    .recompute_mode(cmp_recompute), .capture_normal(cmp_capture_normal),
+    .stall_req(cmp_stall), .unresolved(cmp_unresolved), .isolated(cmp_isolated),
+    .use_shadow(cmp_use_shadow), .pe_primary(cmp_pe_primary), .pe_shadow(cmp_pe_shadow));
+
+  assign stall_req = alu_stall | cmp_stall;
+  assign unresolved = alu_unresolved | cmp_unresolved;
   always_comb begin
-    ALUResult = use_shadow ? shadow_result : primary_result;
-    Sum       = use_shadow ? shadow_sum : primary_sum;
+    ALUResult = result_live[alu_use_shadow];
+    Sum = arith_live[alu_use_shadow][P.XLEN-1:0];
+    flags = {cmp_live[cmp_use_shadow] == '0, cmp_live[cmp_use_shadow][P.XLEN]};
     if (stall_req | unresolved) begin
       ALUResult = '0;
-      Sum       = '0;
+      Sum = '0;
+      flags = '0;
     end
   end
 endmodule

@@ -1,7 +1,6 @@
 module ft_mul import cvw::*; #(
   parameter cvw_t P,
-  parameter int TE_THRESHOLD = 3,
-  parameter bit FAULT_INJECT = 1'b0
+  parameter int TE_THRESHOLD = 3
 ) (
   // Preserve Wally's E-input/M-output boundary while adding replay control.
   input  logic clk, reset,
@@ -9,7 +8,7 @@ module ft_mul import cvw::*; #(
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0] Funct3E,
   input  logic MulActiveE,
-  // Test-only replica-output fault selection; tied off by the production MDU.
+  // Runtime replica-output fault controls from the core-local hook.
   input  logic fi_enable,
   input  logic [1:0] fi_target,
   input  logic [1:0] fi_kind,
@@ -58,10 +57,10 @@ module ft_mul import cvw::*; #(
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(primary_prod_raw));
   mul #(P.XLEN) shadow(.clk, .reset, .StallM(internal_stall_m), .FlushM,
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(shadow_prod_raw));
-  ft_fault_inject #(.WIDTH(P.XLEN*2), .FAULT_INJECT(FAULT_INJECT)) primary_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN*2)) primary_fi(
     .data_i(primary_prod_raw), .fi_enable(fi_enable & fi_target[0]),
     .fi_kind, .fi_bit, .data_o(primary_prod));
-  ft_fault_inject #(.WIDTH(P.XLEN*2), .FAULT_INJECT(FAULT_INJECT)) shadow_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN*2)) shadow_fi(
     .data_i(shadow_prod_raw), .fi_enable(fi_enable & fi_target[1]),
     .fi_kind, .fi_bit, .data_o(shadow_prod));
 
@@ -70,7 +69,7 @@ module ft_mul import cvw::*; #(
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
     .clk, .reset, .flush(FlushM), .valid(mul_active_m), .mismatch,
     .recompute_supported(1'b0), .recompute_primary_ok(1'b0), .recompute_shadow_ok(1'b0),
-    .recompute_mode, .stall_req, .unresolved, .isolated, .use_shadow,
+    .recompute_mode, .capture_normal(), .stall_req, .unresolved, .isolated, .use_shadow,
     .pe_primary, .pe_shadow);
 
   // Mask stale/untrusted products while held or unresolved.

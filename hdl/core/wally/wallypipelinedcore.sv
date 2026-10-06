@@ -99,6 +99,20 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 
+  // Deliberately undriven DFT hooks. A future controller can drive them;
+  // testbenches force known values. No SoC ports or RTL tie-offs are added.
+  /* verilator lint_off UNDRIVEN */
+  // Runtime controls originate at the intentionally unconnected core hooks.
+  logic ALUFiEnable;
+  logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel;
+  logic [$clog2(P.XLEN+2)-1:0] ALUFiBit;
+  logic MULFiEnable, DIVFiEnable;
+  logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind;
+  logic [$clog2(2*P.XLEN)-1:0] MULFiBit;
+  logic [$clog2(P.XLEN)-1:0] DIVFiBit;
+  logic DIVFiChannel;
+  /* verilator lint_on UNDRIVEN */
+
   // AMOEBA random instruction insertion
   logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
   logic [31:0]                   DummyInstrD;                     // dummy instruction to inject
@@ -222,6 +236,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
+     .FTUnresolvedM,
+    .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
      .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
@@ -339,7 +355,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // global stall and flush control
   hazard hzu(
-    .BPWrongE, .CSRWriteFenceM, .RetM, .TrapM,
+    // Untrusted E results must not flush the instruction being diagnosed.
+    .BPWrongE(BPWrongE & ~FTStall & ~FTUnresolvedE & ~FTUnresolvedM),
+    .CSRWriteFenceM, .RetM, .TrapM,
     .StructuralStallD,
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
@@ -421,6 +439,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+      .MULFiEnable, .MULFiTarget, .MULFiKind, .MULFiBit,
+      .DIVFiEnable, .DIVFiTarget, .DIVFiKind, .DIVFiBit, .DIVFiChannel,
+
       .ForwardedSrcAE, .ForwardedSrcBE,
       .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
       .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),

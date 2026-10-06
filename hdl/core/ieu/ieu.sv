@@ -29,6 +29,11 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  // Runtime controls originate at the intentionally unconnected core hooks.
+  input logic ALUFiEnable,
+  input logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel,
+  input logic [$clog2(P.XLEN+2)-1:0] ALUFiBit,
+
   // ECC inject enable (from top-level, for DFT)
   input  logic              ecc_inject_en,
   // ECC error aggregation outputs (correctable / uncorrectable)
@@ -44,6 +49,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                             // PC
   input  logic [P.XLEN-1:0] PCLinkE,                         // PC + 4
+  input  logic              FTUnresolvedM,                   // older FT fault suppresses E redirects
   input  logic              FTStallM,                         // M-stage retry freezes E control
   output logic              PCSrcE,                          // Select next PC (between PC+4 and IEUAdrE)
   input  logic              FWriteIntE, FCvtIntE,            // FPU writes to integer register file, FPU converts float to int
@@ -132,7 +138,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .InjectD, .DummySelD, .DummyW, .DummySelW,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
-    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM),
+    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
     .BranchSignedE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE, .MDUActiveE,
@@ -144,6 +150,8 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
 
   datapath #(P) dp(
     .clk, .reset, .ecc_inject_en,
+    .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
+
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,

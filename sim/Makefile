@@ -496,10 +496,16 @@ vcs_regression:
 # ── Standalone RTL unit tests ─────────────────────────────────────────────────
 # Self-checking testbenches live in hvl/; their build/run entry points live here
 # alongside the SoC, ECC, and ISA regression targets.
-.PHONY: ft_shadow_test
+FT_THRESHOLD ?= 2
+FT_XLEN ?= 64
+FT_TB_DIR = verilator/ft_shadow_tb_$(FT_XLEN)_$(FT_THRESHOLD)
+.PHONY: ft_shadow_test ft_shadow_regression
+ft_shadow_regression:
+	@set -e; for xlen in 32 64; do for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_XLEN=$$xlen FT_THRESHOLD=$$threshold; done; done
+
 ft_shadow_test:
-	mkdir -p verilator/ft_shadow_tb
-	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module ft_recompute_fault_tb \
+	mkdir -p $(FT_TB_DIR)
+	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) -GTEST_XLEN=$(FT_XLEN) \
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
@@ -518,9 +524,9 @@ ft_shadow_test:
 	    $(wildcard $(CURDIR)/../hdl/core/ft_shadow/*.sv) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_recompute_fault_tb.sv \
 	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
-	    -Mdir verilator/ft_shadow_tb -Wall -Wno-fatal --timescale 1ps/1ps \
-	    2>&1 | tee verilator/ft_shadow_tb/compile.log
-	verilator/ft_shadow_tb/Vft_recompute_fault_tb
+	    -Mdir $(FT_TB_DIR) -Wall -Wno-fatal --timescale 1ps/1ps \
+	    2>&1 | tee $(FT_TB_DIR)/compile.log
+	$(FT_TB_DIR)/Vft_recompute_fault_tb
 
 .PHONY: ecc_baremetal_regression
 ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
@@ -569,3 +575,21 @@ csr_harden_test:
 .PHONY: clean
 clean:
 	rm -rf bin vcs $(VCS_NO_SPIKE_DIR) verdi verilator spike
+
+# Independent full-core runtime-injection/retirement/precise-trap regression.
+.PHONY: ft_core_test
+ft_core_test:
+	mkdir -p verilator/ft_core_tb
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
+	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
+	    $(CURDIR)/../hvl/ft_shadow/ft_core_fault_tb.sv $(CURDIR)/../hvl/ft_shadow/ft_core_dpi.cpp \
+	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
+	    2>&1 | tee verilator/ft_core_tb/compile.log
+	verilator/ft_core_tb/Vft_core_fault_tb
+
+.PHONY: ft_core_lint
+ft_core_lint:
+	$(UNIT_TB_VERILATOR) --lint-only --timing --top-module rv64_core_wrapper \
+	    $(CURDIR)/verilator_warn.vlt $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
+	    $(CVW_INCDIRS) $(ECE411_NO_FLOAT) -Wall --timescale 1ps/1ps

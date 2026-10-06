@@ -6,14 +6,13 @@
 // quotient and remainder because either may be selected by Funct3M.
 module ft_div import cvw::*; #(
   parameter cvw_t P,
-  parameter int TE_THRESHOLD = 3,
-  parameter bit FAULT_INJECT = 1'b0
+  parameter int TE_THRESHOLD = 3
 ) (
   input  logic              clk, reset,
   input  logic              StallM, FlushE,
   input  logic              IntDivE, DivSignedE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
-  // Test-only output injection; tied off by the production MDU.
+  // Runtime output injection from the core-local hook.
   input  logic              fi_enable,
   input  logic [1:0]        fi_target,
   input  logic [1:0]        fi_kind,
@@ -64,16 +63,16 @@ module ft_div import cvw::*; #(
 
   // Faults are placed after independent replicas; shared operands, controls,
   // progress state, and the common divider algorithm remain out of scope.
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_quot_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN)) primary_quot_fi(
     .data_i(primary_quot_raw), .fi_enable(fi_enable & ~fi_channel & fi_target[0]),
     .fi_kind, .fi_bit, .data_o(primary_quot));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_quot_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN)) shadow_quot_fi(
     .data_i(shadow_quot_raw), .fi_enable(fi_enable & ~fi_channel & fi_target[1]),
     .fi_kind, .fi_bit, .data_o(shadow_quot));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) primary_rem_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN)) primary_rem_fi(
     .data_i(primary_rem_raw), .fi_enable(fi_enable & fi_channel & fi_target[0]),
     .fi_kind, .fi_bit, .data_o(primary_rem));
-  ft_fault_inject #(.WIDTH(P.XLEN), .FAULT_INJECT(FAULT_INJECT)) shadow_rem_fi(
+  ft_fault_inject #(.WIDTH(P.XLEN)) shadow_rem_fi(
     .data_i(shadow_rem_raw), .fi_enable(fi_enable & fi_channel & fi_target[1]),
     .fi_kind, .fi_bit, .data_o(shadow_rem));
 
