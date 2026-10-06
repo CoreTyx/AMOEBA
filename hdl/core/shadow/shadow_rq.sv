@@ -14,17 +14,23 @@
 module shadow_rq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
   input  logic              clk, reset,
   input  logic              StallW, FlushW,
+  input  logic              FlushWCause,   // true = real flush (trap); false = stall-induced flush
   // Push from main W-stage
   input  logic [4:0]        RdW,
   input  logic [P.XLEN-1:0] ResultW,
   input  logic              RegWriteW,
   input  logic [P.XLEN-1:0] PCW,          // W-stage PC
   input  logic [1:0]        MemRWW,
+  input  logic [P.XLEN-1:0] MemAddrW,     // W-stage effective address (IEUAdrW) for EA verify
   input  logic              HasStoreW,
   input  logic              SkipVerifyW,
   input  logic              IsFaultedInstrW,
   input  logic              DummyW,
   input  logic              DummySelW,
+  input  logic [P.XLEN-1:0] RawLoadWordW, // Rev 6: raw aligned load word (for shadow data re-derivation)
+  input  logic [2:0]        Funct3W,      // Rev 6: load size/signedness
+  input  logic              CompressedW,  // Rev 7: 2-byte instruction (next-PC check)
+  input  logic              IsCtrlFlowW,  // Rev 7: branch/jal/jalr/system/fence (breaks sequential PC)
   input  logic              InstrValidW,
   // Shadow sW consumed head (pop = advance = no stall/flush)
   input  logic              sW_pop,
@@ -44,11 +50,15 @@ module shadow_rq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
   output logic              sRQ_IsFaultedInstr,
   output logic              sRQ_DummyW,
   output logic              sRQ_DummySelW,
+  output logic [P.XLEN-1:0] sRQ_RawLoadWord,
+  output logic [2:0]        sRQ_Funct3,
+  output logic              sRQ_Compressed,
+  output logic              sRQ_IsCtrlFlow,
   output logic              sRQ_InstrValid
 );
 
-  // Entry width: 5 + XLEN + 1 + XLEN + 2 + 1 + XLEN + 1 + 1 + 1 + 1 + 1
-  localparam int ENTRY_W = 5 + P.XLEN + 1 + P.XLEN + 2 + 1 + P.XLEN + 1 + 1 + 1 + 1 + 1;
+  // Entry width: ... + RawLoadWord(XLEN) + Funct3(3) + Compressed(1) + IsCtrlFlow(1) + InstrValid(1)
+  localparam int ENTRY_W = 5 + P.XLEN + 1 + P.XLEN + 2 + 1 + P.XLEN + 1 + 1 + 1 + 1 + P.XLEN + 3 + 1 + 1 + 1;
 
   logic [ENTRY_W-1:0] entry [N];
 
@@ -78,47 +88,50 @@ module shadow_rq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
     input logic              faulted,
     input logic              dummy,
     input logic              dummy_sel,
+    input logic [P.XLEN-1:0] raw_load_word,
+    input logic [2:0]        funct3,
+    input logic              compressed,
+    input logic              is_ctrl_flow,
     input logic              valid
   );
-    pack_rq = {rd, result, int_we, mem_addr, mem_rw, has_store, pc, skip, faulted, dummy, dummy_sel, valid};
+    pack_rq = {rd, result, int_we, mem_addr, mem_rw, has_store, pc, skip, faulted, dummy, dummy_sel, raw_load_word, funct3, compressed, is_ctrl_flow, valid};
   endfunction
 
   // Unpack head (entry[N-1] = oldest = consumed by shadow sW)
   assign {sRQ_Rd, sRQ_IntResult, sRQ_IntWriteEn, sRQ_MemAddr, sRQ_MemRW, sRQ_HasStore,
-          sRQ_PC, sRQ_SkipVerify, sRQ_IsFaultedInstr, sRQ_DummyW, sRQ_DummySelW, sRQ_InstrValid}
+          sRQ_PC, sRQ_SkipVerify, sRQ_IsFaultedInstr, sRQ_DummyW, sRQ_DummySelW,
+          sRQ_RawLoadWord, sRQ_Funct3, sRQ_Compressed, sRQ_IsCtrlFlow, sRQ_InstrValid}
     = entry[N-1];
 
   // Push data for W-stage
   wire [ENTRY_W-1:0] push_data = pack_rq(
     RdW, ResultW, RegWriteW,
-    '0,          // MemAddr: not threaded in V1 (address check skipped)
+    MemAddrW,    // Rev 6: main's observed effective address for EA verification
     MemRWW, HasStoreW, PCW,
-    SkipVerifyW, IsFaultedInstrW, DummyW, DummySelW, InstrValidW
+    SkipVerifyW, IsFaultedInstrW, DummyW, DummySelW,
+    RawLoadWordW, Funct3W, CompressedW, IsCtrlFlowW, InstrValidW
   );
 
-  // The old StallW_prev forwarding guard is removed.  The hazard: at the first
-  // negedge after a stall exits (StallW just deasserted), the RQ would shift
-  // (evict entry[2]) while the E-stage instruction hasn't advanced to M yet
-  // (E→M happens at the next posedge).  The 1-cycle negedge bypass in
-  // wallypipelinedcore.sv now covers this one-posedge stale-R1E window.
-  //
-  // Removing StallW_prev is also necessary for correctness: with a long stall
-  // (e.g., 42-cycle I-cache miss), an instruction (e.g., addi) can sit in M
-  // while the stall holds.  At the stall-exit posedge, W advances and captures
-  // addi from M.  Without StallW_prev, the very next negedge pushes addi
-  // (push_data now reflects W = addi).  With StallW_prev, that negedge was held,
-  // so addi retired from W before the push — permanently skipped in the RQ.
+  // StallW_prev guard was removed: with a long stall (e.g., 42-cycle I-cache miss),
+  // an instruction can sit in M while the stall holds.  At stall-exit posedge,
+  // W advances and captures that instruction.  Without StallW_prev, the very next
+  // posedge pushes it correctly.  With StallW_prev it would have been skipped.
 
   integer i;
-  always_ff @(negedge clk) begin
+  always_ff @(posedge clk) begin
     if (reset) begin
       for (i = 0; i < N; i++) entry[i] <= '0;
     end else if (StallW) begin
       // Hold all entries while stall active
-    end else if (FlushW) begin
-      for (i = N-1; i > 0; i--) entry[i] <= entry[i-1];
-      entry[0] <= '0;
     end else begin
+      // Advance: always shift and push the W-stage packet verbatim.
+      // Do NOT force a bubble on FlushW/FlushWCause: the InstrValidW field inside
+      // push_data already encodes exactly what the main pipeline commits.  On an
+      // interrupt (TrapM→FlushWCause) the W-stage instruction still RETIRES with
+      // InstrValidW=1 (it is before the trap boundary) and MUST be committed by the
+      // shadow; force-bubbling it here dropped that commit and left the main regfile
+      // stale (observed under FreeRTOS timer interrupts — "stale rs read" in the trap
+      // context-save).  Genuinely squashed slots arrive with InstrValidW=0 already.
       for (i = N-1; i > 0; i--) entry[i] <= entry[i-1];
       entry[0] <= push_data;
     end

@@ -1179,4 +1179,129 @@ This is required because shadow writes the regfile N cycles after main's W-stage
 
 9. **`shadow_hzu.sv` not connected**: intra-shadow forwarding is absent. This is correct for V1 (synchronous shadow with OQ operands) but means a V2 with independent shadow stalls would need to re-wire it.
 
+---
+
+# SHARD Rev 6 — Full Memory / CSR / AMO / Fence Verification (V2 plan)
+
+Rev 6 closes the V1 coverage holes (loads/stores/AMO/CSR/fence all SkipVerify)
+using the RMT structures from `improvement_ideas.md` (DIVA / AR-SMT / SRT-SRTR),
+**adapted to SHARD's trailing-shadow model**. The key adaptation:
+
+> SHARD is not two symmetric threads. The MAIN pipeline (the "leading thread"
+> T0) has already performed every memory and bus side-effect and already
+> committed privilege/CSR state by the time the shadow (trailing T1) sees the
+> instruction. The shadow therefore performs **detection, not prevention**, and
+> must **never re-issue to the bus/cache/CSR** (doing so was the destructive-
+> re-read bug of V1). It verifies against **captured values**.
+
+## 6.1 The two independent checks the shadow CAN make
+
+Because shadow operands arrive via the OQ (already forwarded by the main), the
+shadow cannot independently re-derive register *inputs* — forwarding-select
+faults remain a documented boundary (see `shadow_review.md`). What the shadow
+*can* independently recompute with its own hardware:
+
+1. **The effective address.** The shadow has its own address adder
+   (`salu` → `sIEUAdrE`). Recomputing `rs1 + imm` and comparing to the main's
+   observed access address catches faults in the main's AGU / address adder /
+   immediate path — for **every** load, store, and AMO.
+2. **The ALU/branch result** (already done in V1).
+
+## 6.2 Load Value Queue (LVQ) — `shadow_lvq.sv` (new) / RQ MemAddr field
+
+A single captured-value path serves all memory/CSR classes. Two carriers:
+
+- **RQ.MemAddr** (already present in the entry, was packed `'0`): now carries the
+  main's **observed effective address** `IEUAdrW` (piped `IEUAdrM → IEUAdrW`).
+  Used for EA verification of loads/stores/AMOs at sW.
+- **LVQ** (new N-deep FIFO, pushed at M on any load / AMO / CSR): captures the
+  *value the main observed from the non-idempotent source*:
+  - load  → final load data (`ReadDataW`, aligned) — for optional data recheck,
+  - AMO   → memory old-value returned + `SquashSCW` (SC success/fail code),
+  - CSR   → CSR read value (`CSRReadValW`).
+  The shadow consumes the LVQ head for the matching instruction at sW
+  (FIFO, popped once per captured op — same discipline as the SQ).
+
+## 6.3 Per-class verification (Rev 6)
+
+**Loads** (un-SkipVerify) — IMPLEMENTED: verify `sIEUAdrW == RQ.MemAddr` (EA,
+shadow's own adder) AND re-derive the loaded DATA. The LSU exports the raw
+aligned read word; it rides the RQ entry with `Funct3` and `MemAddr`; at sW the
+shadow runs its OWN copy of `subwordread` and compares to `rq_IntResult`
+(`load_data_mismatch`). This is self-contained in the RQ entry — no alignment
+gating — and is the non-destructive realization of "re-read and verify the data".
+True-positive validated by 1-bit fault injection (fires 17× on `test_fwd_depth`);
+0 false faults with 1208 loads checked in `sorting_algo`.
+
+**Stores** (already non-skip, memory check was off): verify
+`sIEUAdrW == RQ.MemAddr == SQ.PA` (EA). Store *data* equals a forwarded operand
+the shadow also received via OQ, so re-comparing it is an echo (forwarding
+boundary) — EA is the independent check.
+
+**AMOs** (LVQ, per improvement_ideas §1): the shadow **bypasses the bus** and
+reads the old memory value + SC code from the LVQ. It verifies the EA
+(`rs1`, no immediate) and recomputes the register result (`rd = oldval` for
+swap/add/etc., or the SC success code) from the LVQ, comparing to `rq_IntResult`.
+Never re-issues the atomic.
+
+**CSRs** (split read / sync-barrier, per improvement_ideas §2): CSR *reads* take
+the old value from the LVQ (so time-varying counters — `cycle`, `time`,
+`instret` — do not diverge) and verify `rd == LVQ.csr_read`. CSR *writes* are
+already serialized by the main's `CSRWriteFenceM` flush (the natural sync
+barrier); the shadow verifies the read-side and the computed write-value where
+it can model the CSR, and treats privileged/opaque CSRs as a documented
+boundary. The shadow never writes the physical CSR file.
+
+**Fences** (local-drain + token, per improvement_ideas §3): the shadow holds no
+store buffer that reaches the bus, so it only drains its own pipeline ordering
+and verifies it reached the fence PC with no preceding mismatch. The main issued
+the single physical fence; the shadow suppresses any bus action (it has none).
+
+## 6.4 Serialization (ordering guarantee)
+
+To keep the LVQ/SQ FIFOs aligned and ensure a captured value is still the one
+the shadow is checking, the shadow consumes LVQ/SQ/RQ strictly in program order,
+one entry per verified memory/CSR op, under the existing `~StallW` lockstep.
+No cache residency is required because the shadow never re-reads the cache; the
+captured value is authoritative. (This supersedes V1's destructive serialized
+re-read: capture-at-main-access + recompute is non-destructive and needs no
+cache-residency stall.)
+
+## 6.5 Fault response
+
+Any class's mismatch raises `SecFaultW`/`SecFaultPC_W` → MSECFAULT (detection).
+Rev 7 adds an opt-in prevention point for stores (`GATE_STORE_ON_SECFAULT`, see
+below).
+
+---
+
+# SHARD Rev 7 — IMPLEMENTED (AMO / CSR / next-PC / gated store commit)
+
+All four items implemented and validated (sound: 0 false faults across
+baremetal/ISA/FreeRTOS/Linux; each injection-validated true-positive). They use
+the **independent-recompute** pattern (a second copy of the datapath on the same
+captured operands; a disagreement raises MSECFAULT — catches transient/SEU faults;
+a fault common to both copies is the shared-FU boundary).
+
+- **AMO** (`lsu.sv`): a 2nd `amoalu` recomputes `old OP rs2` vs the main's
+  `IMAWriteDataM` → `AMOFaultM`.
+- **CSR** (`csr.sv`): a 2nd csrrw/s/c modify+mux recomputes the write value vs
+  `CSRWriteValM` → `CSRFaultM` (committing writes only). Verifies the CSR modify
+  *datapath*; no full CSR-state mirror (opaque effects remain a boundary).
+- **Next-PC continuity** (`shadow_pipeline.sv`): RQ-self-contained check that
+  consecutive committed PCs satisfy `PC+ilen` unless control-flow/trap breaks the
+  stream (`Compressed`/`IsCtrlFlow` carried in the RQ; FlushW-since-commit
+  suppresses trap/interrupt redirects).
+- **Gated store commit** (`wallypipelinedcore.sv`): an independent AGU adder
+  recomputes the store EA at the commit point vs `IEUAdrE`; mismatch → MSECFAULT,
+  and `GATE_STORE_ON_SECFAULT` (default 0) clears the LSU store write bit so a
+  mis-addressed store cannot corrupt memory. This is the microarchitecture-
+  appropriate "deferred/verify-before-commit store" — the full DIVA store-buffer
+  (SQ as buffer, deferred cache write, load snoop, replay) needs a decoupled
+  shadow and is documented as Rev 8 in `shadow_review.md` §7a.
+
+Fault response remains MSECFAULT logging (non-trapping) by default; the store
+gate is the one opt-in prevention point. Final detailed write-up lives in
+`shadow_review.md` ("FINAL DETAILED IMPLEMENTATION").
+
 10. **MemAddr always 0 in RQ**: The RQ `MemAddr` field is pushed as `'0`. Store address verification (shadow sM check against SQ PA) is not implemented.

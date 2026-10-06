@@ -93,7 +93,15 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   output logic                    ITLBWriteF,                           // Write PTE to ITLB
   output logic                    SelHPTW,                              // During a HPTW walk the effective privilege mode becomes S_MODE
   input var logic [7:0]           PMPCFG_ARRAY_REGW[P.PMP_ENTRIES-1:0], // PMP configuration from privileged unit
-  input var logic [P.PA_BITS-3:0] PMPADDR_ARRAY_REGW[P.PMP_ENTRIES-1:0] // PMP address from privileged unit
+  input var logic [P.PA_BITS-3:0] PMPADDR_ARRAY_REGW[P.PMP_ENTRIES-1:0], // PMP address from privileged unit
+  // SHARD: physical address export and shadow D-cache re-read interface
+  output logic [P.PA_BITS-1:0]   PAdrM_out,                              // PAdrM exposed to SHARD queues
+  output logic [P.XLEN-1:0]      RawReadDataWordM,                       // Rev 6: raw aligned load word (pre-subword-extract) for shadow re-derivation
+  output logic                   AMOFaultM,                              // Rev 7: shadow AMO ALU disagrees with main's AMO result
+  input  logic                   shadow_dcache_req,                      // shadow sM wants to re-read D-cache
+  input  logic [P.PA_BITS-1:0]   shadow_dcache_pa,                       // shadow re-read physical address
+  output logic [P.XLEN-1:0]      shadow_dcache_data,                     // D-cache word returned to shadow
+  output logic                   shadow_dcache_stall                     // D-cache busy (shadow must wait)
 );
   localparam logic MISALIGN_SUPPORT = P.ZICCLSM_SUPPORTED & P.DCACHE_SUPPORTED;
   localparam MLEN = MISALIGN_SUPPORT ? 2*P.LLEN : P.LLEN; // widen buffer for misaligned accessess
@@ -328,11 +336,22 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW
 
+      // SHARD: when shadow requests a D-cache re-read, mux its PA and force a read.
+      // Main is stalled (ShadowDCacheStallM → StallM via hazard) so no new main transaction fires.
+      logic [P.PA_BITS-1:0] dcache_PAdr_mux;
+      logic [1:0]           dcache_RW_mux;
+      logic [11:0]          dcache_NextSet_mux;
+      assign dcache_PAdr_mux    = shadow_dcache_req ? shadow_dcache_pa         : PAdrM;
+      assign dcache_RW_mux      = shadow_dcache_req ? 2'b10                    : CacheRWM;
+      assign dcache_NextSet_mux = shadow_dcache_req ? shadow_dcache_pa[11:0]   : IEUAdrExtE[11:0];
+      assign shadow_dcache_data  = DCacheReadDataWordM[P.XLEN-1:0];
+      assign shadow_dcache_stall = DCacheStallM;
+
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.DCACHE_LINELENINBITS), .NUMSETS(P.DCACHE_WAYSIZEINBYTES*8/LINELEN),
               .NUMWAYS(P.DCACHE_NUMWAYS), .LOGBWPL(LLENLOGBWPL), .WORDLEN(CACHEWORDLEN), .MUXINTERVAL(P.LLEN), .READ_ONLY_CACHE(0)) dcache(
         .clk, .reset, .Stall(GatedStallW & ~SelSpillE), .SelBusBeat, .FlushStage(LSUFlushW),
-        .CacheRW(CacheRWM),
-        .FlushCache(FlushDCache), .NextSet(IEUAdrExtE[11:0]), .PAdr(PAdrM),
+        .CacheRW(dcache_RW_mux),
+        .FlushCache(FlushDCache), .NextSet(dcache_NextSet_mux), .PAdr(dcache_PAdr_mux),
         .ByteMask(ByteMaskSpillM), .BeatCount(BeatCount[AHBWLOGBWPL-1:AHBWLOGBWPL-LLENLOGBWPL]),
         .WriteData(LSUWriteDataSpillM), .SelHPTW,
         .CacheStall(DCacheStallM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
@@ -354,7 +373,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       mux3 #(P.LLEN) UnCachedDataMux(.d0(DCacheReadDataWordSpillM), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
                                     .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
                                     .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(ReadDataWordMuxM));
-    end else begin : passthrough // No Cache, use simple ahbinterface instead of ahbcacheinterface
+    end else begin : passthrough // No Cache — tie off shadow D-cache interface
+      assign shadow_dcache_data  = '0;
+      assign shadow_dcache_stall = 1'b0;
+      // No Cache, use simple ahbinterface instead of ahbcacheinterface
       logic [1:0] BusRW;                    // Non-DTIM memory access, ignore cacheableM
       logic [P.XLEN-1:0] FetchBuffer;
       assign BusRW = ~SelDTIM ? LSURWM : 0;
@@ -380,6 +402,28 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign {LSUBusStallM, BusCommittedM} = '0;
     assign {DCacheMiss, DCacheAccess} = '0;
     assign {DCacheStallM, DCacheCommittedM} = '0;
+    assign shadow_dcache_data  = '0;
+    assign shadow_dcache_stall = 1'b0;
+  end
+
+  assign PAdrM_out = PAdrM;
+  // Rev 6: expose the raw aligned read word (output of the DTIM/D$ read mux, before the
+  // subword extract + sign-extend) so the shadow can re-derive the loaded value with its
+  // own copy of subwordread and verify the formatting datapath independently.
+  assign RawReadDataWordM = ReadDataWordMuxM[P.XLEN-1:0];
+
+  // Rev 7: SHARD independent AMO verification.  A second, separate amoalu instance
+  // recomputes the atomic result from the same operands the main amoalu used; a
+  // disagreement (transient fault in one copy) raises AMOFaultM, piped to W and folded
+  // into the shadow MSECFAULT.  Covers the M-stage AMO datapath the E-stage shadow
+  // wrappers cannot (see amoalu.sv TODO(amo-ft)).
+  if (P.ZAAMO_SUPPORTED) begin : shadow_amo
+    logic [P.XLEN-1:0] ShadowAMOResultM;
+    amoalu #(P) shadow_amoalu(.ReadDataM(ReadDataM[P.XLEN-1:0]), .IHWriteDataM,
+                              .LSUFunct7M, .LSUFunct3M, .AMOResultM(ShadowAMOResultM));
+    assign AMOFaultM = LSUAtomicM[1] & ~LSUFlushW & (ShadowAMOResultM != IMAWriteDataM);
+  end else begin : no_shadow_amo
+    assign AMOFaultM = 1'b0;
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////

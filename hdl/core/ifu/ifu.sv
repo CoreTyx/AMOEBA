@@ -31,6 +31,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic                 StallF, StallD, StallE, StallM, StallW,
   input  logic                 FlushD, FlushE, FlushM, FlushW,
   output logic                 IFUStallF,                                // IFU stalsl pipeline during a multicycle operation
+  output logic                 CompressedE,                              // Rev 7: fetched instruction was 2-byte (for SHARD next-PC check)
   // Command from CPU
   input  logic                 InvalidateICacheM,                        // Clears all instruction cache valid bits
   input  logic                 CSRWriteFenceM,                           // CSR write or fence instruction, PCNextF = the next valid PC (typically PCE)
@@ -120,7 +121,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [31:0]                 IROMInstrF;                               // Instruction from the IROM
   logic [31:0]                 ICacheInstrF;                             // Instruction from the I$
   logic [31:0]                 InstrRawF;                                // Instruction from the IROM, I$, or bus
-  logic                        CompressedF, CompressedE;                 // The fetched instruction is compressed
+  logic                        CompressedF;                              // The fetched instruction is compressed (CompressedE is now a module output)
   logic [31:0]                 PostSpillInstrRawF;                       // Fetch instruction after merge two halves of spill
   logic [31:0]                 InstrRawD;                                // Non-decompressed instruction in the Decode stage
   logic                        IllegalIEUInstrD;                         // IEU Instruction (regular or compressed) is not good

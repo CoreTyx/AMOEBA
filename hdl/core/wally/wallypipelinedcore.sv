@@ -52,7 +52,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 );
 
   logic                          StallF, StallD, StallE, StallM, StallW;
-  logic                          FlushD, FlushE, FlushM, FlushW;
+  logic                          FlushD, FlushE, FlushM, FlushW, FlushWCause;
   logic                          TrapM, RetM;
 
   //  signals that must connect through DP
@@ -195,7 +195,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic              SecFaultW_s;
   logic [P.XLEN-1:0] SecFaultPC_W_s;
   logic              VBC_StallE_s;
-  logic              ShadowConflictStallE;
   // IQ head outputs
   logic [P.XLEN-1:0] iq_sPC;
   logic [31:0]       iq_sInstr32;
@@ -217,6 +216,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [1:0]        oq_MemRWE;
   logic [4:0]        oq_RdE;
   logic              oq_RegWriteE, oq_InstrValidE, oq_DummyE, oq_DummySelE;
+  logic              CompressedE_s;  // Rev 7: next-PC check (CompressedE from IFU)
   // RQ head outputs (shadow sW inputs)
   logic [4:0]        rq_Rd;
   logic [P.XLEN-1:0] rq_IntResult;
@@ -227,6 +227,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0] rq_PC;
   logic              rq_SkipVerify, rq_IsFaultedInstr;
   logic              rq_DummyW_rq, rq_DummySelW_rq, rq_InstrValid;
+  logic [P.XLEN-1:0] rq_RawLoadWord;
+  logic [2:0]        rq_Funct3;
+  logic              rq_Compressed, rq_IsCtrlFlow;
   logic              sW_pop;
   // SQ signals
   logic              sM_pop;
@@ -249,13 +252,14 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                RegWriteE_s;
   logic [4:0]          Rs1D_s, Rs2D_s;
   logic [4:0]          Rs1E_rq;     // Rs1D_s piped one stage: correct timing for RQ E-stage scan
-  // 1-cycle negedge bypass: covers the one-posedge window where R1E/R2E is stale
-  // after shadow writes the regfile at negedge but E→M captures at the next posedge.
-  logic [P.XLEN-1:0]   bypass_val_r;
-  logic [4:0]          bypass_rd_r;
-  logic                bypass_valid_r;
-  logic                RQ_HitA_fwd, RQ_HitB_fwd;
-  logic [P.XLEN-1:0]   RQ_ValA_fwd, RQ_ValB_fwd;
+  // SHARD: D-cache re-read interface
+  logic              shadow_dcache_req_s;
+  logic [P.PA_BITS-1:0] shadow_dcache_pa_s;
+  logic [P.XLEN-1:0]  shadow_dcache_data_s;
+  logic              shadow_dcache_stall_s;
+  logic              ShadowDCacheStallM_s;
+  logic [P.PA_BITS-1:0] PAdrM_s;
+  logic              ShadowVerifyConflictStallM_s;
   // Signals computed in wallypipelinedcore for SHARD push
   logic [1:0]          MemRWW;
   logic                InstrValidW;
@@ -270,6 +274,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
+    .CompressedE(CompressedE_s),
     .InstrValidE, .InstrValidD,
     .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF, .InjectD,
     // Fetch
@@ -354,7 +359,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   lsu #(P) lsu(
     .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
     // CPU interface
-    .MemRWE, .MemRWM, .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
+    .MemRWE, .MemRWM(MemRWM_lsu), .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
     .FpLoadStoreM, .FWriteDataM, .IEUAdrE, .IEUAdrM, .WriteDataM,
     .ReadDataW, .FlushDCacheM, .CMOpM, .LSUPrefetchM,
@@ -385,7 +390,15 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .StoreAmoMisalignedFaultM,    // connects to privilege
     .StoreAmoAccessFaultM,        // connects to privilege
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
-    .LSUStallM);
+    .LSUStallM,
+    // SHARD shadow D-cache re-read interface
+    .PAdrM_out(PAdrM_s),
+    .RawReadDataWordM(RawReadDataWordM_s),
+    .AMOFaultM(AMOFaultM_s),
+    .shadow_dcache_req(shadow_dcache_req_s),
+    .shadow_dcache_pa(shadow_dcache_pa_s),
+    .shadow_dcache_data(shadow_dcache_data_s),
+    .shadow_dcache_stall(shadow_dcache_stall_s));
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections
@@ -404,6 +417,12 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             HWSTRB, HWRITE, HSIZE, HBURST, HPROT, HTRANS, HMASTLOCK} = '0;
   end
 
+  // ShadowVerifyConflictStallM: stall main at M when shadow needs D-cache read and
+  // main simultaneously has a store to the same 8-byte word (would dirty the line).
+  assign ShadowVerifyConflictStallM_s = ShadowDCacheStallM_s
+    & MemRWM[0]
+    & (PAdrM_s[P.PA_BITS-1:3] == shadow_dcache_pa_s[P.PA_BITS-1:3]);
+
   // global stall and flush control
   hazard hzu(
     .BPWrongE, .CSRWriteFenceM, .RetM, .TrapM,
@@ -411,11 +430,12 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
     .DivBusyE, .FDivBusyE,
-    .ShadowConflictStallE,
+    .ShadowDCacheStallM(ShadowDCacheStallM_s),
+    .ShadowVerifyConflictStallM(ShadowVerifyConflictStallM_s),
     .wfiM, .IntPendingM, .InjectD,
     // Stall & flush outputs
     .StallF, .StallD, .StallE, .StallM, .StallW,
-    .FlushD, .FlushE, .FlushM, .FlushW);
+    .FlushD, .FlushE, .FlushM, .FlushW, .FlushWCause);
 
   // privileged unit
   if (P.ZICSR_SUPPORTED) begin : priv
@@ -440,6 +460,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
       .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
+      .CSRFaultM(CSRFaultM_s),
       .RAND_INSTR_INSERT_FREQ_REGW,
       .RegEccSecErrW, .RegEccDedErrW, .ShadowFaultW,
       .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
@@ -453,6 +474,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
     // Without a CSR to program it, dummy instruction insertion stays disabled.
     assign RAND_INSTR_INSERT_FREQ_REGW = '0;
+    assign CSRFaultM_s = 1'b0;
   end
 
   // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
@@ -461,13 +483,64 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // SHARD: W-stage pipeline registers for RQ push
   flopenrc #(2) MemRWWReg      (clk, reset, FlushW, ~StallW, MemRWM, MemRWW);
   flopenrc #(1) InstrValidWReg (clk, reset, FlushW, ~StallW, InstrValidM, InstrValidW);
+  // Rev 6: pipe the effective address to W for shadow EA verification of loads/stores
+  logic [P.XLEN-1:0] IEUAdrW;
+  flopenrc #(P.XLEN) IEUAdrWReg (clk, reset, FlushW, ~StallW, IEUAdrM, IEUAdrW);
+  // Rev 6: pipe the raw load word and funct3 to W for shadow load-data re-derivation
+  logic [P.XLEN-1:0] RawReadDataWordM_s, RawLoadWordW;
+  logic [2:0]        Funct3W;
+  flopenrc #(P.XLEN) RawLoadWordWReg (clk, reset, FlushW, ~StallW, RawReadDataWordM_s, RawLoadWordW);
+  flopenrc #(3)      Funct3WReg      (clk, reset, FlushW, ~StallW, Funct3M, Funct3W);
+  // Rev 7: pipe AMO verification fault (computed at M in the LSU) to W
+  logic AMOFaultM_s, AMOFaultW;
+  flopenrc #(1)      AMOFaultWReg    (clk, reset, FlushW, ~StallW, AMOFaultM_s, AMOFaultW);
+  // Rev 7: pipe CSR verification fault (computed at M in csr.sv, already gated to a
+  // committing CSR write) to W
+  logic CSRFaultM_s, CSRFaultW;
+  flopenrc #(1)      CSRFaultWReg    (clk, reset, FlushW, ~StallW, CSRFaultM_s, CSRFaultW);
+  // Rev 7: carry the compressed flag and a control-flow class bit to W for the RQ-based
+  // next-PC continuity check.  CompressedE (from IFU) is piped E->M->W; the control-flow
+  // class is decoded from the M-stage opcode and piped to W.
+  logic CompressedM_s, CompressedW;
+  logic IsCtrlFlowM, IsCtrlFlowW;
+  flopenrc #(1) CompressedMReg (clk, reset, FlushM, ~StallM, CompressedE_s, CompressedM_s);
+  flopenrc #(1) CompressedWReg (clk, reset, FlushW, ~StallW, CompressedM_s, CompressedW);
+  assign IsCtrlFlowM = (InstrM[6:0] == 7'b1100011)   // branch
+                     | (InstrM[6:0] == 7'b1101111)   // jal
+                     | (InstrM[6:0] == 7'b1100111)   // jalr
+                     | (InstrM[6:0] == 7'b1110011)   // system (ecall/ebreak/csr/mret/wfi)
+                     | (InstrM[6:0] == 7'b0001111);  // fence / fence.i
+  flopenrc #(1) IsCtrlFlowWReg (clk, reset, FlushW, ~StallW, IsCtrlFlowM, IsCtrlFlowW);
+
+  // Rev 7: gated / deferred store commit (prevention).  An independent adder recomputes
+  // the store effective address (SrcAE+SrcBE, the AGU sum) at Execute and it is checked
+  // against the main AGU output IEUAdrE at the commit point.  On a mismatch (a transient
+  // fault in one adder) a fault is raised into MSECFAULT, and — when GATE_STORE_ON_SECFAULT
+  // is enabled — the store's write bit into the LSU is cleared so a mis-addressed store
+  // cannot corrupt memory.  In fault-free operation the two adders always agree, so this
+  // never false-fires and the default behavior is byte-identical (regressions unchanged).
+  // This is the microarchitecture-appropriate realization of the review's "deferred store
+  // commit" (verify-before-commit) without a full DIVA store buffer / shadow decoupling.
+  localparam logic GATE_STORE_ON_SECFAULT = 1'b0;   // 0 = detect+log (safe default); 1 = prevent (suppress write)
+  logic              StoreEAFaultE, StoreEAFaultM, StoreEAFaultW;
+  logic [P.XLEN-1:0] IndepStoreEA_E;
+  logic [1:0]        MemRWM_lsu;
+  assign IndepStoreEA_E = SrcAE_s + SrcBE_s;        // independent copy of the AGU adder
+  assign StoreEAFaultE  = MemRWE[0] & InstrValidE & (IndepStoreEA_E != IEUAdrE);
+  flopenrc #(1) StoreEAFaultMReg (clk, reset, FlushM, ~StallM, StoreEAFaultE, StoreEAFaultM);
+  flopenrc #(1) StoreEAFaultWReg (clk, reset, FlushW, ~StallW, StoreEAFaultM, StoreEAFaultW);
+  assign MemRWM_lsu = (GATE_STORE_ON_SECFAULT & StoreEAFaultM) ? {MemRWM[1], 1'b0} : MemRWM;
+
   // SHARD: E-stage dummy flags and Rs1 for RQ scan (pipelined from D-stage)
   flopenrc #(1) DummyEReg      (clk, reset, FlushE, ~StallE, InjectD, DummyE_s);
   flopenrc #(1) DummySelEReg   (clk, reset, FlushE, ~StallE, DummySelD, DummySelE_s);
   flopenrc #(5) Rs1E_rq_reg    (clk, reset, FlushE, ~StallE, Rs1D_s, Rs1E_rq);
 
   // Assign shadow fault signal for privileged/csr threading
-  assign ShadowFaultW = SecFaultW_s;
+  // Rev 7: fold the AMO verification fault (gated by W-stage validity) into the shadow
+  // MSECFAULT alongside the sW verifier output.
+  assign ShadowFaultW = SecFaultW_s | (AMOFaultW & InstrValidW) | CSRFaultW
+                      | (StoreEAFaultW & InstrValidW);
 
   ///////////////////////////////////////////////////////////////////////////
   // SHARD — Shadow Hardware Audit Redundancy Design
@@ -515,93 +588,59 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // RQ: N-deep shift register pushed at W-stage; provides associative forwarding to main D-stage
   shadow_rq #(.P(P), .N(3)) srq(
     .clk, .reset,
-    .StallW, .FlushW,
+    .StallW, .FlushW, .FlushWCause,
     .RdW, .ResultW(ResultW_s), .RegWriteW(RegWriteW_s), .PCW,
-    .MemRWW, .HasStoreW(1'b0), .SkipVerifyW(1'b0), .IsFaultedInstrW(1'b0),
-    .DummyW, .DummySelW(DummySelW_s), .InstrValidW,
+    .MemRWW, .MemAddrW(IEUAdrW), .HasStoreW(1'b0), .SkipVerifyW(1'b0), .IsFaultedInstrW(1'b0),
+    .DummyW, .DummySelW(DummySelW_s), .RawLoadWordW(RawLoadWordW), .Funct3W(Funct3W),
+    .CompressedW(CompressedW), .IsCtrlFlowW(IsCtrlFlowW), .InstrValidW,
     .sW_pop,
     .Rs1D(Rs1E_rq), .Rs2D(Rs2E_s),   // E-stage regs: Rs1 piped from D, Rs2 exported from ieu
     .RQ_ValA, .RQ_ValB, .RQ_HitA, .RQ_HitB,
     .sRQ_Rd(rq_Rd), .sRQ_IntResult(rq_IntResult), .sRQ_IntWriteEn(rq_IntWriteEn),
     .sRQ_MemAddr(rq_MemAddr), .sRQ_MemRW(rq_MemRW), .sRQ_HasStore(rq_HasStore),
     .sRQ_PC(rq_PC), .sRQ_SkipVerify(rq_SkipVerify), .sRQ_IsFaultedInstr(rq_IsFaultedInstr),
-    .sRQ_DummyW(rq_DummyW_rq), .sRQ_DummySelW(rq_DummySelW_rq), .sRQ_InstrValid(rq_InstrValid));
+    .sRQ_DummyW(rq_DummyW_rq), .sRQ_DummySelW(rq_DummySelW_rq),
+    .sRQ_RawLoadWord(rq_RawLoadWord), .sRQ_Funct3(rq_Funct3),
+    .sRQ_Compressed(rq_Compressed), .sRQ_IsCtrlFlow(rq_IsCtrlFlow), .sRQ_InstrValid(rq_InstrValid));
 
-  // 1-cycle negedge bypass: when shadow writes rd at negedge T, R1E (captured at
-  // posedge T) is stale for exactly one posedge (posedge T+1 = E→M).  The bypass
-  // extends RQ forwarding by latching the written value at negedge and providing
-  // it to ForwardedSrcAE for the next posedge.  Only architectural writes trigger
-  // the bypass (DummyW redirects to shadow registers, not architecturally visible).
-  always_ff @(negedge clk) begin
-    if (reset) begin
-      bypass_valid_r <= 1'b0;
-      bypass_rd_r    <= '0;
-      bypass_val_r   <= '0;
-    end else if (shadow_we3 & ~shadow_DummyW_sp) begin
-      bypass_valid_r <= 1'b1;
-      bypass_rd_r    <= shadow_a3;
-      bypass_val_r   <= shadow_wd3;
-    end else begin
-      bypass_valid_r <= 1'b0;
-    end
-  end
-
-  // Merge bypass with RQ forwarding outputs before passing to IEU.
-  // Bypass is LOWER priority than RQ: if RQ already has a newer entry for the same
-  // register, RQ wins.  The bypass only fills in when RQ has no hit at all.
-  // This ensures a newer RQ entry (e.g., a later write to the same register still
-  // in RQ) is never overshadowed by the bypass's older evicted value.
-  wire bypass_hit_A = bypass_valid_r & (bypass_rd_r == Rs1E_rq) & (bypass_rd_r != '0) & ~RQ_HitA;
-  wire bypass_hit_B = bypass_valid_r & (bypass_rd_r == Rs2E_s)  & (bypass_rd_r != '0) & ~RQ_HitB;
-  assign RQ_HitA_fwd = RQ_HitA | bypass_hit_A;
-  assign RQ_ValA_fwd = bypass_hit_A ? bypass_val_r : RQ_ValA;
-  assign RQ_HitB_fwd = RQ_HitB | bypass_hit_B;
-  assign RQ_ValB_fwd = bypass_hit_B ? bypass_val_r : RQ_ValB;
-
-  // Conflict-stall forwarding hold: when ShadowConflictStallE fires, StallW=0 so the
+  // Conflict-stall forwarding hold: when StallE fires with StallW=0, the
   // RQ keeps shifting (evicting the entry the stalled E-stage needs for forwarding).
-  // Capture the RQ hit/value on the first stall posedge (Rs2E is stable by then),
-  // hold through all stall cycles, and persist one extra cycle so WriteDataM captures
-  // the correct value as E→M advances when the stall ends.
+  // Capture the RQ hit/value on the first stall posedge, hold through all stall cycles,
+  // and persist one extra cycle so WriteDataM captures the correct value as E→M advances.
   logic       cstall_hitA, cstall_hitB;
   logic [P.XLEN-1:0] cstall_valA, cstall_valB;
   logic       cstall_valid;
   logic       StallE_r;
+  wire        cstall_trigger = StallE & ~StallW;
 
   always_ff @(posedge clk) begin
     StallE_r <= StallE;
-    if (reset | (~ShadowConflictStallE & ~StallE)) begin
+    if (reset | ~StallE) begin
       cstall_valid <= 1'b0;
-    end else if (ShadowConflictStallE & ~cstall_valid) begin
-      cstall_hitA  <= RQ_HitA_fwd;
-      cstall_hitB  <= RQ_HitB_fwd;
-      cstall_valA  <= RQ_ValA_fwd;
-      cstall_valB  <= RQ_ValB_fwd;
+    end else if (StallE & ~StallW & ~cstall_valid) begin
+      cstall_hitA  <= RQ_HitA;
+      cstall_hitB  <= RQ_HitB;
+      cstall_valA  <= RQ_ValA;
+      cstall_valB  <= RQ_ValB;
       cstall_valid <= 1'b1;
     end
   end
 
-  // Apply held forwarding: during the active conflict stall OR for one extra cycle
-  // after it ends (StallE_r=1, StallE=0) so the E→M WriteDataM register sees the
-  // correct value when E advances.
-  wire cstall_active = cstall_valid & (ShadowConflictStallE | (StallE_r & ~StallE));
-  wire final_hitA = cstall_active ? cstall_hitA : RQ_HitA_fwd;
-  wire [P.XLEN-1:0] final_valA = (cstall_active & cstall_hitA) ? cstall_valA : RQ_ValA_fwd;
-  wire final_hitB = cstall_active ? cstall_hitB : RQ_HitB_fwd;
-  wire [P.XLEN-1:0] final_valB = (cstall_active & cstall_hitB) ? cstall_valB : RQ_ValB_fwd;
+  // Apply held forwarding: during the active stall OR for one extra cycle after it ends
+  wire cstall_active = cstall_valid & (cstall_trigger | (StallE_r & ~StallE));
+  wire final_hitA = cstall_active ? cstall_hitA : RQ_HitA;
+  wire [P.XLEN-1:0] final_valA = (cstall_active & cstall_hitA) ? cstall_valA : RQ_ValA;
+  wire final_hitB = cstall_active ? cstall_hitB : RQ_HitB;
+  wire [P.XLEN-1:0] final_valB = (cstall_active & cstall_hitB) ? cstall_valB : RQ_ValB;
 
-  // SQ: N-deep FIFO pushed at M-stage for stores; conflict detector
+  // SQ: N-deep FIFO pushed at M-stage for stores
   shadow_sq #(.P(P), .N(3)) ssq(
     .clk, .reset,
     .StallM, .FlushM,
-    .IEUAdrM(IEUAdrM[P.PA_BITS-1:0]),
+    .PAdrM(PAdrM_s),
     .WriteDataM, .ByteMaskM({(P.XLEN/8){1'b1}}),
     .StoreM(MemRWM[0]),
     .sM_pop,
-    .IEUAdrE_PA(IEUAdrE[P.PA_BITS-1:0]),
-    .ByteMaskE({(P.XLEN/8){1'b1}}),
-    .StoreE(MemRWE[0]),
-    .ShadowConflictStallE,
     .sSQ_PA, .sSQ_WriteData, .sSQ_ByteMask, .sSQ_Valid);
 
   // Shadow pipeline: sD→sE→sM→sW
@@ -624,12 +663,20 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .rq_Rd, .rq_IntResult, .rq_IntWriteEn, .rq_MemAddr, .rq_MemRW, .rq_HasStore,
     .rq_PC, .rq_SkipVerify, .rq_IsFaultedInstr,
     .rq_DummyW(rq_DummyW_rq), .rq_DummySelW(rq_DummySelW_rq), .rq_InstrValid,
+    .rq_RawLoadWord(rq_RawLoadWord), .rq_Funct3(rq_Funct3),
+    .rq_Compressed(rq_Compressed), .rq_IsCtrlFlow(rq_IsCtrlFlow),
     // RQ pop
     .sW_pop,
     // SQ head → sM
     .sq_PA(sSQ_PA), .sq_WriteData(sSQ_WriteData), .sq_ByteMask(sSQ_ByteMask), .sq_Valid(sSQ_Valid),
     // SQ pop
     .sM_pop,
+    // SHARD D-cache re-read interface
+    .shadow_dcache_req(shadow_dcache_req_s),
+    .shadow_dcache_pa(shadow_dcache_pa_s),
+    .shadow_dcache_data(shadow_dcache_data_s),
+    .shadow_dcache_stall(shadow_dcache_stall_s),
+    .ShadowDCacheStallM(ShadowDCacheStallM_s),
     // Shadow regfile write port
     .shadow_we3, .shadow_a3, .shadow_wd3, .shadow_DummyW(shadow_DummyW_sp), .shadow_DummySel(shadow_DummySel_sp),
     // Fault reporting
@@ -707,6 +754,5 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             IllegalFPUInstrD, SetFflagsM, FpLoadStoreM,
             FWriteDataM, FCvtIntResW, FIntDivResultW, FDivBusyE} = '0;
   end
-
 
 endmodule

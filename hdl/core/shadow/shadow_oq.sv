@@ -57,7 +57,6 @@ module shadow_oq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
 );
 
   // Pack all fields into one wide vector per entry
-  // Width: 5*XLEN + 3 + 3 + 3 + 4 + 4 + 3 + 1 + 2 + 3 + 7 + 5 + 1 + 1 + 1 + 2 + 5 + 1 + 1 + 1 + 1
   localparam int CTL_W = 3+3+3+4+4+3+1+2+3+7+5+1+1+1+2+5+1+1+1+1; // control bits
   localparam int ENTRY_W = 5*P.XLEN + CTL_W;
 
@@ -87,7 +86,7 @@ module shadow_oq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
   } = entry[N-1];
 
   integer i;
-  always_ff @(negedge clk) begin
+  always_ff @(posedge clk) begin
     if (reset) begin
       for (i = 0; i < N; i++) entry[i] <= '0;
     end else if (StallM) begin

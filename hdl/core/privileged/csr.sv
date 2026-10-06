@@ -100,6 +100,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0]        CSRReadValW,               // value read from CSR
   output logic                     IllegalCSRAccessM,         // Illegal CSR access: CSR doesn't exist or is inaccessible at this privilege level
   output logic                     BigEndianM,                // memory access is big-endian based on privilege mode and STATUS register endian fields
+  output logic                     CSRFaultM,                 // Rev 7: SHARD — shadow CSR write-value recompute disagrees with main
   output logic [31:0]              RAND_INSTR_INSERT_FREQ_REGW // AMOEBA: dummy instruction insertion divider period
 );
 
@@ -205,6 +206,23 @@ module csr import cvw::*;  #(parameter cvw_t P) (
       default: CSRWriteValM = CSRReadValM;
     endcase
   end
+
+  ///////////////////////////////////////////
+  // Rev 7: SHARD independent CSR write-value verification.
+  // A separate replica of the csrrw/csrrs/csrrc modify+select datapath recomputes the
+  // value to be written from the same old-value (CSRReadVal2M) and source (CSRSrcM); a
+  // disagreement on a committing CSR write (transient fault in one copy) raises CSRFaultM.
+  // This verifies the CSR ALU datapath without a full CSR-state mirror.
+  ///////////////////////////////////////////
+  logic [P.XLEN-1:0] ShadowCSRWriteValM;
+  always_comb
+    case (InstrM[13:12])
+      2'b01:   ShadowCSRWriteValM = CSRSrcM;                 // csrrw[i]
+      2'b10:   ShadowCSRWriteValM = CSRReadVal2M | CSRSrcM;  // csrrs[i]
+      2'b11:   ShadowCSRWriteValM = CSRReadVal2M & ~CSRSrcM; // csrrc[i]
+      default: ShadowCSRWriteValM = CSRReadValM;
+    endcase
+  assign CSRFaultM = CSRWriteM & InstrValidNotFlushedM & (ShadowCSRWriteValM != CSRWriteValM);
 
   ///////////////////////////////////////////
   // CSR Write values

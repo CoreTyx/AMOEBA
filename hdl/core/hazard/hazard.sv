@@ -33,17 +33,20 @@ module hazard (
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
   input  logic  DivBusyE, FDivBusyE,
-  input  logic  ShadowConflictStallE,
+  input  logic  ShadowDCacheStallM,
+  input  logic  ShadowVerifyConflictStallM,
   input  logic  wfiM, IntPendingM,
   input  logic  InjectD,
   // Stall & flush outputs
   output logic StallF, StallD, StallE, StallM, StallW,
-  output logic FlushD, FlushE, FlushM, FlushW
+  output logic FlushD, FlushE, FlushM, FlushW,
+  // True only for real pipeline flushes (trap/ret/CSR); false for stall-induced flush
+  output logic FlushWCause
 );
 
   logic                                       StallFCause, StallDCause, StallECause, StallMCause, StallWCause;
   logic                                       LatestUnstalledD, LatestUnstalledE, LatestUnstalledM, LatestUnstalledW;
-  logic                                       FlushDCause, FlushECause, FlushMCause, FlushWCause;
+  logic                                       FlushDCause, FlushECause, FlushMCause;
 
   logic WFIStallM, WFIInterruptedM;
 
@@ -88,13 +91,14 @@ module hazard (
   // AMOEBA: a dummy instruction insertion holds Decode for one cycle so the real
   // instruction is replayed, while Execute accepts the injected instruction below.
   assign StallDCause = (StructuralStallD | FPUStallD | InjectD) & ~FlushDCause;
-  assign StallECause = (DivBusyE | FDivBusyE | ShadowConflictStallE) & ~FlushECause;
-  assign StallMCause = WFIStallM & ~FlushMCause;
+  assign StallECause = (DivBusyE | FDivBusyE) & ~FlushECause;
+  assign StallMCause = (WFIStallM | ShadowDCacheStallM | ShadowVerifyConflictStallM) & ~FlushMCause;
   // Need to gate IFUStallF when the equivalent FlushFCause = FlushDCause = 1.
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
   // Use normal backward stall propagation to freeze F through W.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall;
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall
+                    | ((ShadowDCacheStallM | ShadowVerifyConflictStallM) & ~FlushWCause);
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0

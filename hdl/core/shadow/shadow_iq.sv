@@ -55,7 +55,7 @@ module shadow_iq import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
   assign {sPC, sInstr32, sPCSrc, sFRM_snap, sIsHWCSR, sIsDummy, sDummySel, sInstrValid} = entry[N-1];
 
   integer i;
-  always_ff @(negedge clk) begin
+  always_ff @(posedge clk) begin
     if (reset) begin
       for (i = 0; i < N; i++) entry[i] <= '0;
     end else if (FlushD) begin
