@@ -1,7 +1,7 @@
 
 // Populate parameter structure with values specific to the current configuration
 
-`include "BranchPredictorType.vh"
+//`include "../pkg/BranchPredictorType.vh"
 
 localparam cvw_t P = '{
   XLEN :                 XLEN,

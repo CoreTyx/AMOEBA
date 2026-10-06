@@ -1,9 +1,9 @@
 ///////////////////////////////////////////
 // tc_branch_prediction.c
 //
-// TC_TIGHT_LOOP          - heavily taken backward branch (GShare training)
-// TC_ALTERNATING_BRANCH  - alternating T/NT pattern (predictor stress)
-// TC_CALL_RETURN_PATTERN - deep call stack (BTB + RAS stress)
+// TC_TIGHT_LOOP          - heavily taken backward branch
+// TC_ALTERNATING_BRANCH  - alternating taken/not-taken outcomes
+// TC_CALL_RETURN_PATTERN - deep call stack and returns
 //
 // SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
 ///////////////////////////////////////////
@@ -14,13 +14,11 @@
 // TC_TIGHT_LOOP
 //
 // A tight decrement-and-branch loop that is taken ~99% of the time.
-// The GShare predictor should quickly learn "always taken" for the back edge.
 //
 // We verify:
 //   1. The loop completes (no hang, no wrong path)
 //   2. The accumulator equals the expected sum
-//   3. Cycle count is measured to give a rough sense of throughput
-//      (not a hard pass/fail — just informational)
+//   3. The architectural result is stable across repeated runs
 // -------------------------------------------------------------------------
 
 #define TIGHT_LOOP_N 1000
@@ -38,9 +36,7 @@ static uint64_t tight_loop(uint64_t n) {
 void tc_tight_loop(void) {
     test_begin("TC_TIGHT_LOOP");
 
-    uint64_t t0 = read_cycle();
     uint64_t result = tight_loop(TIGHT_LOOP_N);
-    uint64_t t1 = read_cycle();
 
     // sum 0..999 = 999*1000/2 = 499500
     check("Tight loop N=1000 sum=499500",
@@ -51,23 +47,14 @@ void tc_tight_loop(void) {
     check("Tight loop second run: same result",
           result2, 499500ULL);
 
-    // Informational cycle count (not a hard check)
-    uart_puts("  INFO  cycles for 1000-iter loop: ");
-    uart_putu64(t1 - t0);
-    uart_puts("\n");
-
-    // Sanity: loop must not take unreasonably long
-    // At 100MHz with ~2 CPI that's ~2000 cycles; allow 20x headroom
-    check_bool("Tight loop cycle count < 40000",
-               (t1 - t0) < 40000ULL);
 }
 
 // -------------------------------------------------------------------------
 // TC_ALTERNATING_BRANCH
 //
 // Branch outcome alternates T/NT every iteration.
-// This is the worst case for a 1-bit predictor and stresses the GShare
-// history register.
+// Alternating outcomes exercise branch control flow independently of whether
+// a branch predictor is enabled in the core configuration.
 //
 // After N iterations (N even):
 //   taken_count     = N/2

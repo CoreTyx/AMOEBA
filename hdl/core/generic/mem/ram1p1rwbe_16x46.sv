@@ -1,5 +1,5 @@
 ///////////////////////////////////////////
-// ram2p1rwbe_1024x68.sv
+// ram1p1rwbe_16x46.sv
 //
 // Written: james.stine@okstate.edu 28 January 2023
 // Modified:
@@ -25,28 +25,19 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module ram2p1r1wbe_1024x68(
-  input  logic          CLKA,
-  input  logic          CLKB,
-  input  logic          CEBA,
-  input  logic          CEBB,
-  input  logic          WEBA,
-  input  logic          WEBB,
-  input  logic [9:0]    AA,
-  input  logic [9:0]    AB,
-  input  logic [67:0]   DA,
-  input  logic [67:0]   DB,
-  input  logic [67:0]   BWEBA,
-  input  logic [67:0]   BWEBB,
-  output logic [67:0]   QA,
-  output logic [67:0]   QB
+module ram1p1rwbe_16x46(
+  input  logic          CLK,
+  input  logic          CEB,
+  input  logic          WEB,
+  input  logic [3:0]    A,
+  input  logic [45:0]   D,
+  input  logic [45:0]   BWEB,
+  output logic [45:0]   Q
 );
-
-   // replace "generic1024x68RAM" with "TSDN..1024X68.." module from your memory vendor
-   //generic1024x68RAM sramIP (.CLKA, .CLKB, .CEBA, .CEBB, .WEBA, .WEBB,
-   //         .AA, .AB, .DA, .DB, .BWEBA, .BWEBB, .QA, .QB);
-  //TSDN28HPCPA1024X68M4MW sramIP(.CLKA, .CLKB, .CEBA, .CEBB, .WEBA, .WEBB,
-    //.AA, .AB, .DA, .DB, .BWEBA, .BWEBB, .QA, .QB);
-    sram_dp_1024_68 sramIP(.CLKA, .CLKB, .CENA(CEBA), .CENB(CEBB), .WENA(WEBA), .WENB(WEBB), .AA, .AB, .DA, .DB);
+	logic [47:0] Q_temp;
+	assign Q = Q_temp[45:0];
+   // replace "generic64x44RAM" with "TS1N..64X44.." module from your memory vendor
+   // generic64x44RAM sramIP (.CLK, .CEB, .WEB, .A, .D, .BWEB, .Q);
+   rf_sp_16_46 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D({2'd0, D}), .Q(Q_temp));
 
 endmodule
