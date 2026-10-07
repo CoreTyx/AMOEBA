@@ -35,6 +35,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
   output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (for precise EPC)
+  output logic [31:0]       RegfileSecCount,
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
@@ -152,5 +153,5 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
     .InstrValidE, .FTStallE, .FTUnresolvedE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
-    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW);
+    .InstrValidD, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
 endmodule

@@ -40,7 +40,7 @@
 
 module cacheway import cvw::*; #(parameter cvw_t P,
                   parameter PA_BITS, NUMSETS=512, LINELEN = 256, TAGLEN = 26,
-                  OFFSETLEN = 5, INDEXLEN = 9, READ_ONLY_CACHE = 0,
+                  OFFSETLEN = 5, INDEXLEN = 9, READ_ONLY_CACHE = 0, TAG_ECC_SUPPORTED = 1,
                   // ECC check-bit sizing, needed here (not just in the body) because
                   // LINECHECKWIDTH sizes the DataCheckWay port below. R has no default in
                   // cacheeccbits/enc/dec by design (see those files) -- an insufficient R fails
@@ -131,7 +131,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic [LINELEN-1:0]                 ReadDataLine;
   logic [LINECHECKWIDTH-1:0]          ReadDataCheck;
   logic [TAGLEN-1:0]                  ReadTag;
-  logic [TAGCHECKWIDTH-1:0]           ReadTagCheck;
   logic                               Dirty, DirtyRedundant;
   logic                               SelecteDirty;
   logic                               SelectedWriteWordEn;
@@ -172,46 +171,50 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign FinalByteMask = SetValidWay ? '1 : LineByteMask; // OR
 
   /////////////////////////////////////////////////////////////////////////////////////////////
-  // Tag Array (SECDED-protected: TAGLEN data bits + check-bit side array)
+  // Tag Array (optional SECDED: TAGLEN data bits + check-bit side array)
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  logic [TAGLEN-1:0]       TagEncodedData;
-  logic [TAGCHECKWIDTH-1:0] TagEncodedCheck;
-  cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagenc (
-    .data_i     (PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]),
-    .codeword_o ({TagEncodedData, TagEncodedCheck})
-  );
-
-  logic [TAGLEN-1:0]       TagCorrectionData;
-  logic [TAGCHECKWIDTH-1:0] TagCorrectionCheck;
-  cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagcorrectionenc (
-    .data_i     (CorrectedTagIn),
-    .codeword_o ({TagCorrectionData, TagCorrectionCheck})
-  );
-
   logic [TAGLEN-1:0]       TagWriteData;
-  logic [TAGCHECKWIDTH-1:0] TagCheckWriteData;
-  mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
-  mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
-
+  logic [TAGLEN-1:0]       CorrectedTag;
   logic TagWe;
-  assign TagWe = SetValidEN | (SelCorrectTag & SelectedWay);
+  assign TagWe = SetValidEN | (TAG_ECC_SUPPORTED ? (SelCorrectTag & SelectedWay) : 1'b0);
 
   ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGLEN)) CacheTagMem(.clk, .ce(CacheEn),
     .addr(CacheSetTag), .dout(ReadTag),
     .din(TagWriteData), .we(TagWe));
 
-  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGCHECKWIDTH)) CacheTagCheckMem(.clk, .ce(CacheEn),
-    .addr(CacheSetTag), .dout(ReadTagCheck),
-    .din(TagCheckWriteData), .we(TagWe));
+  if (TAG_ECC_SUPPORTED) begin : tag_ecc
+    logic [TAGCHECKWIDTH-1:0] ReadTagCheck, TagEncodedCheck, TagCorrectionCheck, TagCheckWriteData;
+    logic [TAGLEN-1:0] TagEncodedData, TagCorrectionData;
 
-  logic [TAGLEN-1:0] CorrectedTag;
-  cacheeccdec #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagdec (
-    .codeword_i ({ReadTag, ReadTagCheck}),
-    .data_o     (CorrectedTag),
-    .sec_err_o  (TagSecErr),
-    .ded_err_o  (TagDedErr)
-  );
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagenc (
+      .data_i     (PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]),
+      .codeword_o ({TagEncodedData, TagEncodedCheck})
+    );
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagcorrectionenc (
+      .data_i     (CorrectedTagIn),
+      .codeword_o ({TagCorrectionData, TagCorrectionCheck})
+    );
+
+    mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
+    mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
+
+    ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGCHECKWIDTH)) CacheTagCheckMem(.clk, .ce(CacheEn),
+      .addr(CacheSetTag), .dout(ReadTagCheck),
+      .din(TagCheckWriteData), .we(TagWe));
+
+    cacheeccdec #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagdec (
+      .codeword_i ({ReadTag, ReadTagCheck}),
+      .data_o     (CorrectedTag),
+      .sec_err_o  (TagSecErr),
+      .ded_err_o  (TagDedErr)
+    );
+  end else begin : tag_ecc_disabled
+    assign TagWriteData = PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN];
+    assign CorrectedTag = ReadTag;
+    assign TagSecErr = 1'b0;
+    assign TagDedErr = 1'b0;
+  end
 
   // AND portion of distributed tag multiplexer
   assign TagWay = SelectedWay ? CorrectedTag : '0; // AND part of AOMux

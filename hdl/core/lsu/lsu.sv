@@ -47,6 +47,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   output logic                    SquashSCW,                            // Store conditional failed disable write to GPR
   output logic                    DCacheMiss,                           // D cache miss for performance counters
   output logic                    DCacheAccess,                         // D cache memory access for performance counters
+  output logic [31:0]             DCacheSecCount,
   // address and write data
   input  logic [P.XLEN-1:0]       IEUAdrE,                              // Execution stage memory address
   output logic [P.XLEN-1:0]       IEUAdrM,                              // Memory stage memory address
@@ -334,13 +335,14 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
 
             cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.DCACHE_LINELENINBITS), .NUMSETS(P.DCACHE_WAYSIZEINBYTES*8/LINELEN),
               .NUMWAYS(P.DCACHE_NUMWAYS), .LOGBWPL(LLENLOGBWPL), .WORDLEN(CACHEWORDLEN), .MUXINTERVAL(P.LLEN),
-              .READ_ONLY_CACHE(0), .SCRUB_INTERVAL_CYCLES(P.CACHE_SCRUB_INTERVAL)) dcache(
+              .READ_ONLY_CACHE(0)) dcache(
         .clk, .reset, .Stall(GatedStallW & ~SelSpillE), .SelBusBeat, .FlushStage(LSUFlushW),
         .CacheRW(CacheRWM),
         .FlushCache(FlushDCache), .NextSet(IEUAdrExtE[11:0]), .PAdr(PAdrM),
         .ByteMask(ByteMaskSpillM), .BeatCount(BeatCount[AHBWLOGBWPL-1:AHBWLOGBWPL-LLENLOGBWPL]),
         .WriteData(LSUWriteDataSpillM), .SelHPTW,
         .CacheStall(DCacheStallM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
+        .SecCount(DCacheSecCount),
         .CacheCommitted(DCacheCommittedM),
         .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM),
         .FetchBuffer, .CacheBusRW(CacheBusRW),
@@ -378,6 +380,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       else assign ReadDataWordMuxM[P.XLEN-1:0] = FetchBuffer[P.XLEN-1:0];
       assign LSUHBURST = 3'b0;
       assign {DCacheStallM, DCacheCommittedM, DCacheMiss, DCacheAccess, DCacheReadDataWordM} = '0;
+      assign DCacheSecCount = '0;
     end
   end else begin : nobus // block: bus, only DTIM
     assign {LSUHWDATA, LSUHADDR, LSUHWRITE, LSUHSIZE, LSUHBURST, LSUHTRANS, LSUHWSTRB} = '0;
@@ -385,6 +388,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign ReadDataWordMuxM = DTIMReadDataWordM;
     assign {LSUBusStallM, BusCommittedM} = '0;
     assign {DCacheMiss, DCacheAccess} = '0;
+    assign DCacheSecCount = '0;
     assign {DCacheStallM, DCacheCommittedM} = '0;
   end
 

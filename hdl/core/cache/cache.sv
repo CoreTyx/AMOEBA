@@ -52,6 +52,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // to performance counters to cpu
   output logic                   CacheMiss,         // Cache miss
   output logic                   CacheAccess,       // Cache access
+  output logic [31:0]            SecCount,          // Number of SEC codewords corrected
   // lsu control
   input  logic                   SelHPTW,           // Use PAdr from Hardware Page Table Walker rather than NextSet
   // Bus fsm interface
@@ -76,6 +77,11 @@ module cache import cvw::*; #(parameter cvw_t P,
   localparam                     SETTOP = SETLEN+OFFSETLEN;          // Number of set plus offset bits
   localparam                     TAGLEN = PA_BITS - SETTOP;          // Number of tag bits
   localparam                     FLUSHADRTHRESHOLD = NUMSETS - 1;   // Used to determine when flush is complete
+`ifdef CACHE_TAG_ECC_DISABLED
+  localparam                     TAG_ECC_SUPPORTED = 1'b0;
+`else
+  localparam                     TAG_ECC_SUPPORTED = 1'b1;
+`endif
 
   // ECC sizing for the shared data decoder/encoder (must match cacheway.sv's own derivation exactly
   // -- see the comment there on why this small ladder is duplicated rather than shared via a
@@ -168,6 +174,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // Array of cache ways, along with victim, hit, dirty, and read merging logic
   cacheway #(.P(P), .PA_BITS(PA_BITS), .NUMSETS(NUMSETS), .LINELEN(LINELEN),
              .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
+             .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
              .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
     .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask,
     .SetValid, .ClearValid, .SetDirty, .ClearDirty, .VictimWay,
@@ -363,5 +370,10 @@ module cache import cvw::*; #(parameter cvw_t P,
     .EccDedDirtyFault);
 
   assign EccDedDirtyFaultAdr = PAdr;
+
+  always_ff @(posedge clk)
+    if (reset) SecCount <= '0;
+    else if (SelCorrectTag || SelCorrectData)
+      SecCount <= SecCount + {31'b0, SelCorrectTag} + {31'b0, SelCorrectData};
 
 endmodule

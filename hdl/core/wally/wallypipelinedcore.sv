@@ -47,6 +47,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    output logic [3:0]            HPROT,
    output logic [1:0]            HTRANS,
    output logic                  HMASTLOCK,
+   output logic [31:0]           RegfileSecCount, ICacheSecCount, DCacheSecCount,
    input  logic                  ExternalStall,
    output logic                  PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
@@ -211,7 +212,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
-    .ICacheAccess, .ICacheMiss,
+    .ICacheAccess, .ICacheMiss, .ICacheSecCount,
     // Execute
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
@@ -228,7 +229,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
-     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -306,7 +307,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .StoreAmoMisalignedFaultM,    // connects to privilege
     .StoreAmoAccessFaultM,        // connects to privilege
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
-    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM);
+    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheSecCount);
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections

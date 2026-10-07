@@ -45,6 +45,7 @@ module cache_integration_tb;
   logic CacheCommitted, CacheStall;
   logic [WORDLEN-1:0] ReadDataWord;
   logic CacheMiss, CacheAccess;
+  logic [31:0] SecCount;
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -63,7 +64,7 @@ module cache_integration_tb;
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .ReadDataWord, .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr,
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );
 
@@ -154,7 +155,6 @@ module cache_integration_tb;
   // directly -- no vendor macro stands in the way. Widths computed independently (same ladder as
   // cacheway.sv/cache.sv) rather than pulled hierarchically from the DUT, since Verilator doesn't
   // support a hierarchical parameter reference as a type width outside the instance's own scope.
-  localparam int TB_TAGLEN = PA_BITS - SETLEN - OFFSETLEN;
   function automatic int tbrequiredr(input int dw);
     return (dw <=    1) ?  2 :
            (dw <=    4) ?  3 :
@@ -166,15 +166,7 @@ module cache_integration_tb;
            (dw <=  502) ?  9 :
            (dw <= 1013) ? 10 : 11;
   endfunction
-  localparam int TB_TAGCHECKWIDTH  = tbrequiredr(TB_TAGLEN) + 1;
   localparam int TB_LINECHECKWIDTH = tbrequiredr(LINELEN) + 1;
-
-  function automatic logic [TB_TAGCHECKWIDTH-1:0] peektagcheck(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheTagCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].CacheTagCheckMem.ram.RAM[s];
-    endcase
-  endfunction
 
   function automatic logic [TB_LINECHECKWIDTH-1:0] peekdatacheck(input int w, input int s);
     case (w)
@@ -230,6 +222,7 @@ module cache_integration_tb;
     waitclocks(5);
     reset = 0;
     waitclocks(3);
+    check("SEC counter resets to zero", SecCount == 0);
 
     // ── 1. Fetch (compulsory miss) + read-back correctness ──
     testadr = 16'h1000;
@@ -255,6 +248,7 @@ module cache_integration_tb;
       check("SEC: data still correct after single-bit inject", result === 64'hCAFEF00DDEADBEEF);
       checkafter = peekdatacheck(way, s);
       check("SEC: correction was written back (check bits no longer match the injected error)", checkafter !== (checkbefore ^ (1 << 0)));
+      check("SEC counter increments once for demand correction", SecCount == 1);
     end
 
     // ── 4. Double-bit inject on a CLEAN line: should invalidate + refetch, recovering correct data
@@ -330,6 +324,7 @@ module cache_integration_tb;
         if (checkafter !== (checkbefore ^ (1 << 4))) found = 1;
       end
       check("scrubber: found and corrected an error on an untouched line", found);
+      check("SEC counter includes scrubber correction", SecCount == 2);
     end
 
     $display("cache_integration_tb: %0d/%0d checks passed", checks - errors, checks);

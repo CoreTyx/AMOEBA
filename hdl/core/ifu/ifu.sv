@@ -97,7 +97,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  var logic [P.PA_BITS-3:0] PMPADDR_ARRAY_REGW[P.PMP_ENTRIES-1:0],// PMP address from privileged unit
   output logic                 InstrAccessFaultF,                        // Instruction access fault
   output logic                 ICacheAccess,                             // Report I$ read to performance counters
-  output logic                 ICacheMiss                                // Report I$ miss to performance counters
+  output logic                 ICacheMiss,                               // Report I$ miss to performance counters
+  output logic [31:0]          ICacheSecCount
 );
 
   localparam [31:0]            nop = 32'h00000013;                       // instruction for NOP
@@ -252,8 +253,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM ? IFURWF : '0;
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.ICACHE_LINELENINBITS),
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
-              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1),
-              .SCRUB_INTERVAL_CYCLES(P.CACHE_SCRUB_INTERVAL))
+              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
       icache(.clk, .reset, .FlushStage(FlushD), .Stall(GatedStallD),
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
              .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF),
@@ -261,6 +261,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .ReadDataWord(ICacheInstrF),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
+             .SecCount(ICacheSecCount),
              .ByteMask('0), .BeatCount('0), .SelBusBeat('0),
              .WriteData('0),
              .CacheRW(CacheRWF),
@@ -300,6 +301,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       else assign InstrRawF = ShiftUncachedInstr;
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
+      assign ICacheSecCount = '0;
     end
 
     // mux between the alignments of uncached reads.
@@ -311,6 +313,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign {IFUHADDR, IFUHWRITE, IFUHSIZE, IFUHBURST, IFUHTRANS,
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
+    assign ICacheSecCount = '0;
     assign InstrRawF = IROMInstrF;
   end
 

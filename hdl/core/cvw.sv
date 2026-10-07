@@ -43,6 +43,10 @@ localparam BP_GSHARE_BASIC  = (32'd3);
 localparam BP_GLOBAL_BASIC  = (32'd4);
 localparam BP_LOCAL_BASIC   = (32'd5);
 localparam BP_LOCAL_AHEAD   = (32'd6);
+
+// MMIO address range reserved for ECC correction counters.
+localparam logic [63:0] ECC_COUNTER_BASE  = 64'h1007_0000;
+localparam logic [63:0] ECC_COUNTER_RANGE = 64'h0000_0FFF;
 localparam BP_LOCAL_REPAIR  = (32'd7);
 
 
@@ -101,7 +105,6 @@ typedef struct packed {
   int           ICACHE_WAYSIZEINBYTES;
   int           ICACHE_LINELENINBITS;
   int           CACHE_SRAMLEN;
-  int           CACHE_SCRUB_INTERVAL;  // SECDED background scrubber: cycles between round-robin steps (0 = as fast as grants allow)
 
 // Integer Divider Configuration
 // IDIV_BITSPERCYCLE must be 1, 2, or 4
