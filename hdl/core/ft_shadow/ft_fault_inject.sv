@@ -1,11 +1,28 @@
-// Periodic runtime fault injection. Each instance chooses its own result bit
-// and fault kind with a 16-bit Galois LFSR (x^16+x^14+x^13+x^11+1).
-// Distinct seeds also stagger the one-cycle events across replicas/channels.
+///////////////////////////////////////////
+// ft_fault_inject.sv
+//
+// Written: Siddharth Rau (sidrau2@illinois.edu)
+//
+// Purpose: Periodic runtime single-bit injection into execution-result channels.
+//
+// Usage:
+// Instantiated on replica result channels in ft_alu, ft_mul, and ft_div.
+// fi_enable gates corruption; WIDTH selects the channel width and distinct
+// nonzero SEED values stagger events across replicas and channels.
+//
+// Functionality:
+// A free-running 16-bit Galois LFSR (x^16+x^14+x^13+x^11+1) selects a physical
+// bit and XOR, stuck-at-zero, stuck-at-one, or no corruption. A nine-bit
+// counter permits one-cycle events every 512 clocks. Out-of-range indices
+// skip corruption. Reset restores the seed/counter phase and suppresses
+// injection; disabled channels pass data through unchanged.
+///////////////////////////////////////////
+
 module ft_fault_inject #(
   parameter int WIDTH = 64,
   parameter logic [15:0] SEED = 16'hA001
 ) (
-  input  logic clk, reset,
+  input  logic             clk, reset,
   input  logic [WIDTH-1:0] data_i,
   input  logic             fi_enable,
   output logic [WIDTH-1:0] data_o

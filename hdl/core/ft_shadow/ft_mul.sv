@@ -1,24 +1,42 @@
+///////////////////////////////////////////
+// ft_mul.sv
+//
+// Written: Siddharth Rau (sidrau2@illinois.edu)
+//
+// Purpose: Fault-tolerant wrapper for Wally's registered integer multiplier.
+//
+// Usage:
+// Instantiated by the MDU. Preserves the multiplier's E-input/M-output
+// boundary and returns the full double-width product with recovery status.
+//
+// Functionality:
+// Duplicates the multiplier, compares completed M-stage products, and saves
+// operands and signedness controls for replay while the pipeline is held.
+// Transient mismatches retry; persistent mismatches report an unresolved
+// fault and mask the product. This wrapper does not isolate a replica.
+///////////////////////////////////////////
+
 module ft_mul import cvw::*; #(
   parameter cvw_t P,
   parameter int TE_THRESHOLD = 3
 ) (
   // Preserve Wally's E-input/M-output boundary while adding replay control.
-  input  logic clk, reset,
-  input  logic StallM, FlushM,
-  input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
-  input  logic [2:0] Funct3E,
-  input  logic MulActiveE,
+  input  logic                clk, reset,
+  input  logic                StallM, FlushM,
+  input  logic [P.XLEN-1:0]   ForwardedSrcAE, ForwardedSrcBE,
+  input  logic [2:0]          Funct3E,
+  input  logic                MulActiveE,
   // Shared runtime enable; bit and kind are selected inside each injector.
-  input  logic fi_enable,
+  input  logic                fi_enable,
   output logic [P.XLEN*2-1:0] ProdM,
-  output logic stall_req, unresolved, pe_primary, pe_shadow
+  output logic                stall_req, unresolved, pe_primary, pe_shadow
 );
   // saved_* is the architectural transaction; mul_* selects current E inputs
   // or that saved transaction during an M-stage replay.
   logic [P.XLEN-1:0] saved_a, saved_b, mul_a, mul_b;
   logic [2:0] saved_funct3, mul_funct3;
   logic mul_active_m, mismatch, replay_load;
-  logic recompute_mode, isolated, use_shadow;
+  logic isolated, use_shadow;
   logic [P.XLEN*2-1:0] primary_prod_raw, shadow_prod_raw;
   logic [P.XLEN*2-1:0] primary_prod, shadow_prod;
   logic internal_stall_m;
@@ -65,11 +83,14 @@ module ft_mul import cvw::*; #(
   // is unresolved; do not apply an invalid signedness-agnostic recompute rule.
   // A trap may request FlushM while unrelated backpressure holds M. Accept
   // that flush only when the architectural M-stage register accepts it too.
+  // MUL retries without recomputation or first-mismatch diagnostic snapshots.
+  /* verilator lint_off PINCONNECTEMPTY */
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
     .clk, .reset, .flush(FlushM & ~StallM), .valid(mul_active_m), .advance(~StallM), .mismatch,
     .recompute_supported(1'b0), .recompute_primary_ok(1'b0), .recompute_shadow_ok(1'b0),
-    .recompute_mode, .capture_normal(), .stall_req, .unresolved, .isolated, .use_shadow,
+    .recompute_mode(), .capture_normal(), .stall_req, .unresolved, .isolated, .use_shadow,
     .pe_primary, .pe_shadow);
+  /* verilator lint_on PINCONNECTEMPTY */
 
   // Mask stale/untrusted products while held or unresolved.
   assign ProdM = (stall_req | unresolved) ? '0 : (use_shadow ? shadow_prod : primary_prod);

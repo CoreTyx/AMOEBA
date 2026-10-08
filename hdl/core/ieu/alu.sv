@@ -29,23 +29,23 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module alu import cvw::*; #(parameter cvw_t P) (
-  input  logic [P.XLEN-1:0] A, B,        // Operands
-  input  logic              W64, UW64,   // W64/.uw-type instruction
-  input  logic              SubArith,    // Subtraction or arithmetic shift
-  input  logic [2:0]        ALUSelect,   // ALU mux select signal
-  input  logic [3:0]        BSelect,     // Binary encoding of if it's a ZBA_ZBB_ZBC_ZBS instruction
-  input  logic [3:0]        ZBBSelect,   // ZBB mux select signal
-  input  logic [2:0]        Funct3,      // For BMU decoding
-  input  logic [6:0]        Funct7,      // For ZKNE and ZKND computation
-  input  logic [4:0]        Rs2E,        // For ZKNE and ZKND computation
-  input  logic [2:0]        BALUControl, // ALU Control signals for B instructions in Execute Stage
-  input  logic              BMUActive,   // Bit manipulation instruction being executed
-  input  logic [1:0]        CZero,       // {czero.nez, czero.eqz} instructions active
-  input  logic RecomputeArith, RecomputeShift, // Private FT diagnostic controls
-  output logic [P.XLEN:0] ArithWide,          // Private, terminates inside ft_alu
-  output logic [P.XLEN+1:0] ShiftWide,        // Private, terminates inside ft_alu
-  output logic [P.XLEN-1:0] ALUResult,   // ALU result
-  output logic [P.XLEN-1:0] Sum);        // Sum of operands
+  input  logic [P.XLEN-1:0] A, B,                            // Operands
+  input  logic              W64, UW64,                       // W64/.uw-type instruction
+  input  logic              SubArith,                        // Subtraction or arithmetic shift
+  input  logic [2:0]        ALUSelect,                       // ALU mux select signal
+  input  logic [3:0]        BSelect,                         // Binary encoding of if it's a ZBA_ZBB_ZBC_ZBS instruction
+  input  logic [3:0]        ZBBSelect,                       // ZBB mux select signal
+  input  logic [2:0]        Funct3,                          // For BMU decoding
+  input  logic [6:0]        Funct7,                          // For ZKNE and ZKND computation
+  input  logic [4:0]        Rs2E,                            // For ZKNE and ZKND computation
+  input  logic [2:0]        BALUControl,                     // ALU Control signals for B instructions in Execute Stage
+  input  logic              BMUActive,                       // Bit manipulation instruction being executed
+  input  logic [1:0]        CZero,                           // {czero.nez, czero.eqz} instructions active
+  input  logic              RecomputeArith, RecomputeShift,  // Private FT diagnostic controls
+  output logic [P.XLEN:0]   ArithWide,                       // Private, terminates inside ft_alu
+  output logic [P.XLEN+1:0] ShiftWide,                       // Private, terminates inside ft_alu
+  output logic [P.XLEN-1:0] ALUResult,                       // ALU result
+  output logic [P.XLEN-1:0] Sum);                            // Sum of operands
 
   // CondInvB = ~B when subtracting, B otherwise. Shift = shift result. SLT/U = result of a slt/u instruction.
   // FullResult = ALU result before adjusting for a RV64 w-suffix instruction.
@@ -54,7 +54,7 @@ module alu import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0] CondShiftA;                                                  // Result of A shifted select mux
   logic [P.XLEN-1:0] ZeroCondMaskInvB;                                            // B input to AND gate, accounting for czero.* instructions
   logic [P.XLEN-1:0] AndResult;                                                   // AND result
-  logic              SignedCompare;                                               // Sign-extend operands for signed comparison
+  logic              SignedCompare;                                             // Sign-extend operands for signed comparison
   logic              LT, LTU;                                                     // Less than, Less than unsigned
   logic              Asign, Bsign;                                                // Sign bits of A, B
 

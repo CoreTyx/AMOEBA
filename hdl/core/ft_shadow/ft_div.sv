@@ -1,9 +1,23 @@
-// Fault-tolerant wrapper for Wally's iterative integer divider.
+///////////////////////////////////////////
+// ft_div.sv
 //
-// Unlike MUL, division keeps its transaction in E while div.sv iterates.  A
-// result mismatch is therefore handled by resetting both divider FSMs and
-// restarting the still-held E-stage instruction.  The wrapper protects both
-// quotient and remainder because either may be selected by Funct3M.
+// Written: Siddharth Rau (sidrau2@illinois.edu)
+//
+// Purpose: Fault-tolerant wrapper for Wally's iterative integer divider.
+//
+// Usage:
+// Instantiated by the MDU when integer division uses the dedicated divider.
+// Accepts an E-stage division transaction and registers checked quotient and
+// remainder at E-to-M acceptance.
+//
+// Functionality:
+// Duplicates divider FSMs and compares completed quotient/remainder pairs.
+// Saves launch operands and controls, restarts both FSMs on retryable faults,
+// and holds the architectural pipeline during retry. Persistent mismatches
+// report an unresolved E-stage fault for the MDU to register into M; this
+// wrapper does not isolate a replica.
+///////////////////////////////////////////
+
 module ft_div import cvw::*; #(
   parameter cvw_t P,
   parameter int TE_THRESHOLD = 3 // must be >= 1
@@ -13,7 +27,7 @@ module ft_div import cvw::*; #(
   input  logic              IntDivE, DivSignedE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
   // Shared runtime enable; bit and kind are selected inside each injector.
-  input  logic fi_enable,
+  input  logic              fi_enable,
   output logic              DivBusyE,
   output logic [P.XLEN-1:0] QuotM, RemM,
   output logic              stall_req, unresolved, pe_primary, pe_shadow
@@ -40,8 +54,11 @@ module ft_div import cvw::*; #(
   // the held E-stage divide can relaunch and make forward progress.
   // Hold DONE on the final retry edge. Otherwise returning to NORMAL would
   // relaunch the same divide instead of releasing its completed result.
+  // Threshold one bypasses RETRY; its zero retry limit is intentional.
+  /* verilator lint_off UNSIGNED */
   assign internal_stall_m = (state == RETRY) ?
       (result_valid & (~mismatch | (mismatch_count >= RETRY_LIMIT))) : StallM;
+  /* verilator lint_on UNSIGNED */
 
   // Forwarding sources can disappear while division holds E and older stages
   // drain. Capture the launch transaction, including its arithmetic controls,
@@ -70,10 +87,13 @@ module ft_div import cvw::*; #(
 
   // Reset is asserted for the edge that records a failed completed attempt.
   // The next cycle sees both FSMs idle and reissues the unchanged IntDivE.
+  // Threshold one bypasses RETRY; its zero retry limit is intentional.
+  /* verilator lint_off UNSIGNED */
   assign retry_again = (state == RETRY) & result_valid & mismatch &
                        (mismatch_count < RETRY_LIMIT);
   assign retry_reset = ((state == NORMAL) & mismatch & (TE_THRESHOLD != 1)) |
                        retry_again;
+  /* verilator lint_on UNSIGNED */
 
   div #(P) primary(
     .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
@@ -131,6 +151,8 @@ module ft_div import cvw::*; #(
             end
           end
         end
+        // Threshold one bypasses RETRY; its zero retry limit is intentional.
+        /* verilator lint_off UNSIGNED */
         RETRY: begin
           if (result_valid) begin
             if (!mismatch) begin
@@ -143,6 +165,7 @@ module ft_div import cvw::*; #(
             end
           end
         end
+        /* verilator lint_on UNSIGNED */
         UNRESOLVED: if (!StallM) state <= NORMAL;
         default:    state <= NORMAL;
       endcase

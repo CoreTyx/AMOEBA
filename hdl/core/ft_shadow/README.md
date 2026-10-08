@@ -1,8 +1,9 @@
 # Runtime fault injection and recovery
 
 The working implementation is under `hdl/core`; `hdl/cvw` remains the pristine
-upstream reference. Simulation, lint, and synthesis manifests select the working
-core and read `cvw.sv` before its consumers.
+upstream reference. Simulation and lint manifests select the working core and
+read `cvw.sv` before its consumers. The synthesis manifest still gathers both
+working and upstream HDL; it does not explicitly order the working package first.
 
 ## Hierarchy and interfaces
 
@@ -153,9 +154,9 @@ suppressed during FT stalls and unresolved E/M faults. Prediction-recovery
 flush requests are qualified at the hazard input so predicted-taken branches
 cannot flush their held execute instruction during diagnosis. Unresolved
 releases a masked instruction to M, where the existing precise cause-16 trap
-path consumes its PC; younger redirects remain suppressed. An older M-stage trap, return, or CSR flush also takes priority
-over a younger FT stall so the pipeline can flush, rather than deadlocking
-behind a newly mismatching instruction.
+path consumes its PC; younger redirects remain suppressed. An older M-stage
+trap, return, or CSR flush also takes priority over a younger FT stall so the
+pipeline can flush, rather than deadlocking behind a newly mismatching instruction.
 
 The custom read-only CSR `mftstatus` stays at `0x7c2`:
 
@@ -227,4 +228,6 @@ RTL uses implicit generate constructs consistent with the surrounding core.
 `TE_THRESHOLD` must be positive; the simulation entry point and testbench
 validate it. Parameter diagnostics stay out of synthesizable modules. Injector
 bit indices use `$clog2(WIDTH)` directly for the execution-result widths used
-here. FT width warnings remain enabled in the Verilator warning configuration.
+here. The standalone unit matrix enables width warnings, but `-Wno-fatal` makes
+them nonfatal. Core simulations, including the integration bench, use
+`sim/verilator_warn.vlt`, which suppresses width warnings throughout `hdl/core`.

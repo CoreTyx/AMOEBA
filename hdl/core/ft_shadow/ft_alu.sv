@@ -1,29 +1,45 @@
-// E-stage ALU/address and architectural comparison protection. The two lanes
-// have independent controllers and replica selections; only containment is
-// shared. All widened results and diagnostic snapshots terminate here.
+///////////////////////////////////////////
+// ft_alu.sv
+//
+// Written: Siddharth Rau (sidrau2@illinois.edu)
+//
+// Purpose: E-stage ALU/address and architectural comparison protection.
+//
+// Usage:
+// Instantiated by the IEU datapath with muxed ALU operands and separate
+// forwarded comparison operands. Returns ALUResult, Sum, and {eq, lt} flags.
+//
+// Functionality:
+// Duplicates both lanes with independent recovery controllers and replica
+// selection. Retries mismatches, uses supported arithmetic/shift relations
+// for diagnosis, and isolates a uniquely identified failing replica. Holds
+// or masks public results during recovery/unresolved faults; private widened
+// results and first-mismatch snapshots terminate inside this wrapper.
+///////////////////////////////////////////
+
 module ft_alu import cvw::*; #(
   parameter cvw_t P,
   parameter int TE_THRESHOLD = 3
 ) (
-  input  logic clk, reset, flush, valid, advance,
+  input  logic              clk, reset, flush, valid, advance,
   input  logic [P.XLEN-1:0] A, B,
   // Branches need PC+immediate and register comparison simultaneously.
   input  logic [P.XLEN-1:0] cmp_a, cmp_b,
-  input  logic cmp_sgnd,
-  input  logic W64, UW64, SubArith,
-  input  logic [2:0] ALUSelect,
-  input  logic [3:0] BSelect, ZBBSelect,
-  input  logic [2:0] Funct3, BALUControl,
-  input  logic [6:0] Funct7,
-  input  logic [4:0] Rs2E,
-  input  logic BMUActive,
-  input  logic [1:0] CZero,
+  input  logic              cmp_sgnd,
+  input  logic              W64, UW64, SubArith,
+  input  logic [2:0]        ALUSelect,
+  input  logic [3:0]        BSelect, ZBBSelect,
+  input  logic [2:0]        Funct3, BALUControl,
+  input  logic [6:0]        Funct7,
+  input  logic [4:0]        Rs2E,
+  input  logic              BMUActive,
+  input  logic [1:0]        CZero,
   // Shared runtime enable; each replica/channel selects faults locally.
-  input  logic fi_enable,
+  input  logic              fi_enable,
   output logic [P.XLEN-1:0] ALUResult, Sum,
-  output logic [1:0] flags, // unchanged comparator schema: {eq, lt}
-  output logic stall_req, unresolved, pe_primary, pe_shadow,
-  output logic cmp_pe_primary, cmp_pe_shadow
+  output logic [1:0]        flags,  // unchanged comparator schema: {eq, lt}
+  output logic              stall_req, unresolved, pe_primary, pe_shadow,
+  output logic              cmp_pe_primary, cmp_pe_shadow
 );
   logic [P.XLEN-1:0] result_raw[2], result_pre_fi[2], result_live[2];
   logic [P.XLEN:0] arith_raw[2], arith_live[2], cmp_raw[2], cmp_live[2];
@@ -64,11 +80,14 @@ module ft_alu import cvw::*; #(
   endfunction
 
   for (genvar i = 0; i < 2; i++) begin : replica
+    // Sum is taken from the injected wide arithmetic channel, not this pin.
+    /* verilator lint_off PINCONNECTEMPTY */
     alu #(P) compute(.A, .B, .W64, .UW64, .SubArith, .ALUSelect,
       .BSelect, .ZBBSelect, .Funct3, .Funct7, .Rs2E, .BALUControl, .BMUActive, .CZero,
       .RecomputeArith(arith_recompute), .RecomputeShift(shift_recompute),
       .ArithWide(arith_raw[i]), .ShiftWide(shift_raw[i]),
       .ALUResult(result_raw[i]), .Sum());
+    /* verilator lint_on PINCONNECTEMPTY */
     addsub #(.WIDTH(P.XLEN+1)) compare(
       .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
       .recompute(cmp_recompute), .result(cmp_raw[i]));

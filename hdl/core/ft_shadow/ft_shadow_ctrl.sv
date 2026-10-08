@@ -1,26 +1,43 @@
-// Fault-tolerant shadow controller shared by execute-unit wrappers.
-// A mismatch retries the held transaction.  Recompute is optional and is used
-// by the independent ALU and comparison lanes inside ft_alu.
+///////////////////////////////////////////
+// ft_shadow_ctrl.sv
+//
+// Written: Siddharth Rau (sidrau2@illinois.edu)
+//
+// Purpose: Shared mismatch retry, diagnosis, and replica-selection controller.
+//
+// Usage:
+// Instantiated independently for the ALU and comparison lanes in ft_alu,
+// and for retry-only multiplier recovery in ft_mul. TE_THRESHOLD must be
+// positive; advance acknowledges acceptance by the owning pipeline stage.
+//
+// Functionality:
+// Captures the first mismatch, counts consecutive mismatches, and requests
+// stalls during retry or supported recomputation. A uniquely passing
+// diagnostic relation isolates the failing replica; ambiguous or unsupported
+// diagnosis reports unresolved until acceptance. Isolation persists until
+// reset/flush; the owning core records reset-sticky diagnostic status.
+///////////////////////////////////////////
+
 module ft_shadow_ctrl #(
   // Number of consecutive mismatches before escalation; must be >= 1.
   parameter int TE_THRESHOLD = 3
 ) (
   // Clock/reset/flush define the lifetime of the held transaction.
   input  logic clk, reset, flush,
-  input  logic valid,                   // operation currently occupies the wrapper
-  input  logic advance,                 // owning pipeline stage accepts the transaction
-  input  logic mismatch,                // primary and shadow outputs disagree
-  input  logic recompute_supported,     // wrapper supplies a trusted alternate test
-  input  logic recompute_primary_ok,    // primary passes the alternate test
-  input  logic recompute_shadow_ok,     // shadow passes the alternate test
-  output logic recompute_mode,          // alternate test is active
-  output logic capture_normal,          // snapshot the first mismatch at this edge
-  output logic stall_req,               // hold all architectural stages
-  output logic unresolved,               // no trustworthy result; take a trap
-  output logic isolated,                // one copy has been diagnosed
-  output logic use_shadow,              // select shadow after primary failure
+  input  logic valid,                 // operation currently occupies the wrapper
+  input  logic advance,               // owning pipeline stage accepts the transaction
+  input  logic mismatch,              // primary and shadow outputs disagree
+  input  logic recompute_supported,   // wrapper supplies a trusted alternate test
+  input  logic recompute_primary_ok,  // primary passes the alternate test
+  input  logic recompute_shadow_ok,   // shadow passes the alternate test
+  output logic recompute_mode,        // alternate test is active
+  output logic capture_normal,        // snapshot the first mismatch at this edge
+  output logic stall_req,             // hold all architectural stages
+  output logic unresolved,            // no trustworthy result; take a trap
+  output logic isolated,              // one copy has been diagnosed
+  output logic use_shadow,            // select shadow after primary failure
   output logic pe_primary,
-  output logic pe_shadow                 // diagnostic isolation indicators
+  output logic pe_shadow              // diagnostic isolation indicators
 );
 
   // Keep one counter bit for the threshold-one configuration.
@@ -67,6 +84,8 @@ module ft_shadow_ctrl #(
         end
         // The pipeline remains frozen while the same operation is observed
         // again. A matching retry returns directly to NORMAL.
+        // Threshold one bypasses RETRY; its zero retry limit is intentional.
+        /* verilator lint_off UNSIGNED */
         RETRY: begin
           if (!valid | !mismatch) begin
             state          <= NORMAL;
@@ -78,6 +97,7 @@ module ft_shadow_ctrl #(
             mismatch_count <= mismatch_count + COUNT_W'(1);
           end
         end
+        /* verilator lint_on UNSIGNED */
         // Recompute is one diagnostic cycle. Exactly one passing relation is
         // required; agreement or disagreement by both copies is ambiguous.
         RECOMPUTE: begin
