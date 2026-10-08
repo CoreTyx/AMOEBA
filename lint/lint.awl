@@ -16,4 +16,5 @@ waive -du {ram1p1rwbe} -rule {{SYNTH_5143}} -comment {Initial blocks only preloa
 # or is a test-only hook. All match upstream CORE-V-Wally. Waived per module so new code is still checked.
 waive -du {cache cacheway controllerinput ebu icpred lsu mdu pmpadrdec tlbcontrol csrm ifu tlbcamline tlbmixer datapath alu shifter subwordread hptw csr csri csrsr csrs uncore plic_apb uart_apb ram1p1rwbe_64x128 ram1p1rwbe_64x46 rv64_core_wrapper} -rule {{W240}} -comment {Wally core ports unused in this configuration/instance}
 waive -du {plic_apb uart_apb uncore} -rule {{W240}} -comment {Unused AHB/APB interface signals (PSTRB, HTRANS, HPROT, ...) and unconfigured peripheral inputs}
+waive -du {{ft_fault_inject}} -rule {{W240}} -comment {Fault-injection controls are unused when FAULT_INJECT=0 (test-only hook)}
 waive -du {{rv64_core_wrapper}} -rule {{W240}} -comment {RVFI CSR *_rdata inputs belong to the testbench interface; no CSR shadow checking yet}

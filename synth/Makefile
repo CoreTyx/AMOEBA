@@ -3,11 +3,8 @@ SHELL=/bin/bash -o pipefail
 
 export PKG_SRCS = $(CURDIR)/../pkg/types.sv
 export REPO_ROOT = $(abspath $(CURDIR)/..)
-# Select the working core, with its package first. hdl/cvw is a pristine
-# reference tree and must never be compiled alongside these module definitions.
-CORE_PKG       := $(REPO_ROOT)/hdl/core/cvw.sv
-CORE_SRCS      := $(filter-out $(CORE_PKG), $(shell find $(REPO_ROOT)/hdl/core -name '*.sv' -o -name '*.v'))
-export HDL_SRCS = $(CORE_PKG) $(sort $(CORE_SRCS)) $(REPO_ROOT)/hdl/ahb_to_memitf.sv $(REPO_ROOT)/hdl/rv64_core_wrapper.sv
+CVW_SRCS       := $(shell find $(CURDIR)/../third_party/cvw/src -name '*.sv' -o -name '*.v' 2>/dev/null)
+export HDL_SRCS = $(shell find $(CURDIR)/../hdl -name '*.sv') $(CVW_SRCS)
 export SRAM_LIB = $(shell find $(CURDIR)/../sram/output/ -name "*.db")
 export DESIGN_TOP = rv64_core_wrapper
 

@@ -55,7 +55,3 @@ lint_off -rule BLKSEQ         -file "*/third_party/cvw/*"
 lint_off -rule SELRANGE       -file "*/third_party/cvw/*"
 lint_off -rule UNUSEDPARAM    -file "*/third_party/cvw/*"
 lint_off -rule UNUSEDSIGNAL   -file "*/third_party/cvw/*"
-
-// Keep width checks enabled for the FT implementation.
-lint_on -rule WIDTHEXPAND -file "*/hdl/core/ft_shadow/*"
-lint_on -rule WIDTHTRUNC -file "*/hdl/core/ft_shadow/*"
