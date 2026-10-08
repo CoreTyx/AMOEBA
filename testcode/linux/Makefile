@@ -39,29 +39,17 @@ SBI_SRC    := $(BUILD)/opensbi-$(OPENSBI_VERSION)
 REPO       := $(TOP)/../..
 
 # ---- toolchain --------------------------------------------------------------
-# The kernel's VDSO is a shared object, and the bare-metal riscv64-unknown-elf-
-# toolchain the rest of the repo uses cannot link one -- it fails with
-# "-shared not supported".  A Linux-targeting cross compiler is mandatory here.
+# The kernel's VDSO is a shared object, which a bare-metal riscv64-unknown-elf-
+# toolchain cannot link -- it fails with "-shared not supported".  A
+# Linux-targeting cross compiler is mandatory here, and it is why the whole repo
+# builds with one.
 #
-# If the host already has one, use it.  Otherwise fetch kernel.org's nolibc
-# cross toolchain, which exists precisely for building kernels: 33 MB rather
-# than a full distro toolchain, no root needed, and pinned by checksum like
-# every other input.  Override by setting CROSS_COMPILE on the command line.
-TC_VERSION := 13.2.0
-TC_SHA256  := 07c58f4551e636cbe8ba16707909e94ac262f45dc8fe28034011842bdc0c7417
-TC_BIN     := $(BUILD)/gcc-$(TC_VERSION)-nolibc/riscv64-linux/bin
-
-HOST_CROSS := $(shell for p in riscv64-linux-gnu- riscv64-unknown-linux-gnu-; do \
-                  command -v $${p}gcc >/dev/null 2>&1 && echo $$p && break; done)
-
-ifndef CROSS_COMPILE
-  ifeq ($(HOST_CROSS),)
-    CROSS_COMPILE := $(TC_BIN)/riscv64-linux-
-    TOOLCHAIN_DEP := $(TC_BIN)/riscv64-linux-gcc
-  else
-    CROSS_COMPILE := $(HOST_CROSS)
-  endif
-endif
+# bin/toolchain.py pins kernel.org's nolibc cross toolchain, which exists
+# precisely for building kernels: 33 MB rather than a full distro toolchain, no
+# root needed, and pinned by checksum like every other input.  It is fetched on
+# first use and shared with the baremetal, ISA and FreeRTOS tests.  Override by
+# setting CROSS_COMPILE on the command line.
+CROSS_COMPILE ?= $(shell python3 $(REPO)/bin/toolchain.py)
 
 KERNEL_IMAGE := $(LINUX_SRC)/arch/riscv/boot/Image
 FW_PAYLOAD   := $(SBI_SRC)/build/platform/generic/firmware/fw_payload.bin
@@ -71,20 +59,12 @@ KMAKE := $(MAKE) -C $(LINUX_SRC) ARCH=riscv CROSS_COMPILE=$(CROSS_COMPILE)
 .PHONY: all smoke clean distclean check-toolchain
 all: $(BUILD)/boot.lst
 
-check-toolchain: $(TOOLCHAIN_DEP)
-	@command -v $(CROSS_COMPILE)gcc >/dev/null 2>&1 || { \
-	  echo "error: $(CROSS_COMPILE)gcc not usable"; exit 1; }
-	@echo "using CROSS_COMPILE=$(CROSS_COMPILE)"
-
-$(TC_BIN)/riscv64-linux-gcc: $(DL)/riscv64-cross.tar.xz
-	mkdir -p $(BUILD)
-	tar -C $(BUILD) -xf $<
-	touch $@
-
-$(DL)/riscv64-cross.tar.xz:
-	mkdir -p $(DL)
-	curl -fsSL -o $@ https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/$(TC_VERSION)/x86_64-gcc-$(TC_VERSION)-nolibc-riscv64-linux.tar.xz
-	echo "$(TC_SHA256)  $@" | sha256sum -c -
+# An empty prefix would silently fall through to the host's native gcc.
+check-toolchain:
+	@p="$(CROSS_COMPILE)"; \
+	  [ -n "$$p" ] && command -v "$${p}gcc" >/dev/null 2>&1 || { \
+	    echo "error: $${p}gcc not usable"; exit 1; }; \
+	  echo "using CROSS_COMPILE=$$p"
 
 # ---- sources ----------------------------------------------------------------
 # Checksums are pinned so a boot regression can never be an upstream tarball
@@ -111,8 +91,8 @@ $(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz
 	touch $@
 
 # ---- userland ---------------------------------------------------------------
-# /init is freestanding assembly against the Linux syscall ABI, so the newlib
-# bare-metal toolchain is all that is needed -- no musl, no glibc, no buildroot.
+# /init is freestanding assembly against the Linux syscall ABI, so the libc-less
+# toolchain is all that is needed -- no musl, no glibc, no buildroot.
 
 $(BUILD)/init: initramfs/init.S | check-toolchain
 	mkdir -p $(BUILD)

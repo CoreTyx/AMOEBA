@@ -5,3 +5,5 @@ formal/freertos/dump.fst
 *.elf
 .codex/
 hvl/ft_shadow/build/
+/toolchain/
+__pycache__/

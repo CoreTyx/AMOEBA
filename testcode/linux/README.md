@@ -122,11 +122,12 @@ page walk on every TLB miss. These force Sv39 and its three-level walk.
 
 ## Toolchain
 
-Everything builds with the bare-metal `riscv64-unknown-elf-` toolchain the repo
-already requires. `/init` is freestanding assembly against the Linux syscall
-ABI, so no musl, glibc or buildroot is needed to answer "did we reach
-userspace". A richer busybox userland would need a `riscv64-*-linux-gnu`
-toolchain; that is deliberately out of scope here.
+Everything builds with the pinned `riscv64-linux-` toolchain the rest of the
+repo uses; `bin/toolchain.py` fetches it on first use. It has no C library.
+`/init` is freestanding assembly against the Linux syscall ABI, so no musl,
+glibc or buildroot is needed to answer "did we reach userspace". A richer
+busybox userland would need a `riscv64-*-linux-gnu` toolchain with a libc; that
+is deliberately out of scope here.
 
 ## Console plumbing
 

@@ -12,6 +12,7 @@ on:
     paths:
       - 'testcode/linux/**'
       - 'bin/linux_image_to_lst.py'
+      - 'bin/toolchain.py'
       - '.github/workflows/linux-image.yml'
 
 jobs:
@@ -30,7 +31,15 @@ jobs:
           sudo apt-get install -y python3 gcc g++ make curl xz-utils \
             bc bison flex libssl-dev libelf-dev device-tree-compiler cpio
 
-      # The kernel cross toolchain, sources and checksums are all pinned inside
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps this job off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
+
+      # The kernel and OpenSBI sources and their checksums are pinned inside
       # testcode/linux/Makefile, so this cache key only has to track that file.
       - name: Cache downloads
         uses: actions/cache@v4

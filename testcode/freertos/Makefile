@@ -19,8 +19,14 @@ FREERTOS_PORT_CHIP  := $(FREERTOS_PORT)/chip_specific_extensions/RISCV_MTIME_CLI
 PROG ?= $(abspath sorting_algo_app.c)
 
 # ---- Toolchain ----
-CC      := $(firstword $(foreach t,riscv64-unknown-elf-gcc riscv64-elf-gcc,$(if $(shell which $(t) 2>/dev/null),$(t))))
-OBJDUMP := $(firstword $(foreach t,riscv64-unknown-elf-objdump riscv64-elf-objdump,$(if $(shell which $(t) 2>/dev/null),$(t))))
+# The same pinned compiler as every other test tier; bin/toolchain.py fetches it
+# on first use.  Override by setting CROSS_COMPILE.
+CROSS_COMPILE ?= $(shell python3 $(BIN_DIR)/toolchain.py)
+ifeq ($(strip $(CROSS_COMPILE)),)
+$(error no RISC-V toolchain: bin/toolchain.py failed and CROSS_COMPILE is not set)
+endif
+CC      := $(CROSS_COMPILE)gcc
+OBJDUMP := $(CROSS_COMPILE)objdump
 
 # ---- ISA: rv64imac (no FPU, matches AMOEBA amoeba config) ----
 MARCH := rv64imac_zicsr
@@ -28,12 +34,12 @@ MABI  := lp64
 
 CFLAGS := -march=$(MARCH) -mabi=$(MABI) -mcmodel=medany \
           -O2 -gdwarf-2 \
-          -nostdlib -static \
+          -ffreestanding -nostdlib -static \
           -fno-tree-loop-distribute-patterns \
           -ffunction-sections -fdata-sections \
           -Wa,-march=$(MARCH)
 
-# Add stub headers when the cross-sysroot lacks newlib (e.g. Ubuntu gcc-riscv64-unknown-elf)
+# Add stub headers when the cross-sysroot lacks newlib (the pinned toolchain ships no libc)
 _SYSROOT := $(shell $(CC) -print-sysroot 2>/dev/null)
 ifeq ($(wildcard $(_SYSROOT)/include/stdlib.h),)
 _STUB_INC := -isystem $(abspath stub_include)

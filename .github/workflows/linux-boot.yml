@@ -29,6 +29,7 @@ on:
     paths:
       - 'testcode/linux/**'
       - 'bin/linux_image_to_lst.py'
+      - 'bin/toolchain.py'
       - 'hdl/**'
       - 'hvl/**'
       - 'sim/Makefile'
@@ -112,6 +113,14 @@ jobs:
 
       - name: Build Linux boot simulator
         run: make -C sim build_linux
+
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps this job off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
 
       # Cheap pre-flight: proves the UART tap, the .lst loader and the pass
       # matcher all work before committing hours to a boot.

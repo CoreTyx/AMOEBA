@@ -2,10 +2,11 @@
 
 import sys
 import os
-import shutil
 import pathlib
 import subprocess
 import math
+
+import toolchain
 
 RED    = "31"
 YELLOW = "33"
@@ -39,30 +40,11 @@ linker_script = os.path.join(script_dir, "link.ld")
 compile = True
 
 
-assembler = "riscv64-unknown-elf-gcc"
-if not shutil.which(assembler):
-    fallbacks = ["riscv64-elf-gcc", "riscv64-elf-gcc-15.2.0"]
-    for candidate in fallbacks:
-        if shutil.which(candidate):
-            assembler = candidate
-            break
-    else:
-        print("Error: No valid RISC-V compiler toolchain found in your PATH.")
-        assembler = None
+cross = toolchain.prefix()
+assembler = cross + "gcc"
+objdump = cross + "objdump"
+objcopy = cross + "objcopy"
 print(f"Using assembler: {assembler}")
-
-objdump="riscv64-unknown-elf-objdump"
-if not shutil.which(objdump):
-    for candidate in ["riscv64-elf-objdump", "riscv64-elf-objdump-15.2.0"]:
-        if shutil.which(candidate):
-            objdump = candidate
-            break
-objcopy="riscv64-unknown-elf-objcopy"
-if not shutil.which(objcopy):
-    for candidate in ["riscv64-elf-objcopy", "riscv64-elf-objcopy-15.2.0"]:
-        if shutil.which(candidate):
-            objcopy = candidate
-            break
 
 result = subprocess.run(f"python3 {script_dir}/get_options.py arch", shell=True, stdout=subprocess.PIPE)
 arch = result.stdout.decode().split('\n')[0]

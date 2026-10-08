@@ -239,8 +239,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler
+            device-tree-compiler
           pip3 install --quiet pyyaml
+
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps the test matrix off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
 
       - name: Restore no-spike build cache
         uses: actions/cache@v4
@@ -276,8 +284,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler libboost-regex-dev libboost-system-dev
+            device-tree-compiler libboost-regex-dev libboost-system-dev
           pip3 install --quiet pyyaml
+
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps the test matrix off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
 
       - name: Build spike.so
         run: g++ -shared -fPIC -O2 hvl/common/spike_dpi.cpp -o hvl/common/spike.so
@@ -325,9 +341,16 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
-            autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf
+            autoconf flex bison libfl-dev help2man zlib1g-dev
           pip3 install --quiet pyyaml
+
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps the test matrix off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
 
       - name: Fetch FreeRTOS-Kernel submodule
         run: git submodule update --init third_party/FreeRTOS-Kernel
@@ -472,8 +495,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler
+            device-tree-compiler
           pip3 install --quiet pyyaml
+
+      # bin/toolchain.py pins the RISC-V cross toolchain and fetches it on first
+      # use; caching it keeps the test matrix off kernel.org's mirrors.
+      - name: Cache RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: riscv-toolchain-${{ runner.os }}-${{ hashFiles('bin/toolchain.py') }}
 
       - name: Restore ECC inject build cache
         uses: actions/cache@v4

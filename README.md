@@ -64,6 +64,7 @@ bin/                  Build helper scripts
   link.ld               Linker script (entry at 0x80000000, stack at 0x8ff00000)
   generate_rtl.sh       Refreshes hdl/cvw/ and creates hdl/core/ from CVW submodule
   generate_memory_file.py  ELF → byte-addressed .lst memory image
+  toolchain.py          Pins and fetches the RISC-V cross toolchain all test code builds with
   rvfi_reference.py     Generates hvl/common/rvfi_reference.svh from JSON config
   get_options.py        Reads options.json fields for Makefile use
 testcode/             C test programs
@@ -83,26 +84,24 @@ options.json          Project configuration (clock, ISA switches, synthesis sett
 
 ### 1. System Packages
 
-Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `riscv64-*-elf-gcc`, `python3`, and `gtkwave`.
+Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, and `gtkwave`. The RISC-V cross-compiler is not a system package: `bin/toolchain.py` downloads a pinned one into `toolchain/` the first time a test is built (needs `curl` and `xz`) — see [Compiling Test Programs](#compiling-test-programs).
 
 **Arch Linux**
 ```bash
 sudo pacman -S verilator gcc python python-pip gtkwave git base-devel
-sudo pacman -S riscv64-elf-gcc dtc boost   # cross-compiler + Spike build deps
+sudo pacman -S dtc boost                   # Spike build deps
 ```
 
 **Ubuntu / Debian**
 ```bash
 sudo apt update
 sudo apt install verilator g++ python3 gtkwave git make
-sudo apt install gcc-riscv64-unknown-elf         # cross-compiler
 sudo apt install device-tree-compiler libboost-all-dev build-essential  # Spike build deps
 ```
 
 **Fedora**
 ```bash
 sudo dnf install verilator gcc-c++ python3 gtkwave git make
-sudo dnf install gcc-riscv64-linux-gnu           # cross-compiler (or build from source)
 sudo dnf install dtc boost-devel                 # Spike build deps
 ```
 
@@ -191,21 +190,24 @@ gtkwave sim/verilator/dump.fst &
 
 ## Compiling Test Programs
 
-Pre-built ELFs are checked in under `testcode/baremetal/`. Recompile if you modify a test.
+Every piece of test code — baremetal, ISA-level, ECC, FreeRTOS and the Linux boot image — is built with one pinned cross toolchain: kernel.org's `riscv64-linux-gcc` 13.2.0 (Binutils 2.41, no C library). `bin/toolchain.py` downloads it into `toolchain/` on first use and verifies its checksum; nothing needs to be installed or put on `PATH`.
 
-The RISC-V bare-metal cross-compiler binary name varies by distribution:
-
-| Distribution | Binary name |
-|---|---|
-| Arch Linux | `riscv64-elf-gcc` |
-| Ubuntu / Debian | `riscv64-unknown-elf-gcc` |
-| Fedora | `riscv64-linux-gnu-gcc` (or toolchain from source) |
-
-**Bare-metal compile command:**
 ```bash
-riscv64-elf-gcc -march=rv64gc -mabi=lp64d -O2 -nostdlib \
-    -T bin/link.ld bin/startup.s testcode/baremetal/mytest.c \
-    -o testcode/baremetal/mytest.elf
+python3 bin/toolchain.py     # prints the tool prefix, fetching the toolchain if it is missing
+```
+
+The toolchain ships no libc, so tests must be freestanding: no newlib headers, `printf` or `malloc`.
+
+To build with a different toolchain (a locally patched one, or on a host that is not x86-64 Linux), set `CROSS_COMPILE` to its prefix. It applies to every tier:
+
+```bash
+CROSS_COMPILE=/opt/riscv/bin/riscv64-unknown-linux-gnu- make -C sim regression
+```
+
+The simulation targets compile `PROG` for you. To compile a test by hand into `sim/bin/`:
+
+```bash
+python3 bin/generate_memory_file.py -8 testcode/baremetal/mytest.c
 ```
 
 Test programs must terminate with the halt instruction `slti x0, x0, -256` (encoding `0xF0002013`). The testbench detects this and ends simulation cleanly. See `testcode/baremetal/basic_arith.c` for a minimal example.
@@ -657,7 +659,7 @@ Each FreeRTOS and ISA test appears as an independent check in the PR status pane
 | `verilator` | ≥ 5.000 | RTL simulation (primary local tool) |
 | `g++` | ≥ 11 | Compiles `spike.so` DPI bridge and Verilator C++ harness |
 | `spike` (source build) | main branch | ISA reference co-simulation (`--enable-commitlog` required) |
-| `riscv64-*-elf-gcc` | any recent | Bare-metal cross-compiler for test ELFs |
+| `riscv64-linux-gcc` | 13.2.0 (pinned) | Cross-compiler for all test code; fetched by `bin/toolchain.py`, not installed |
 | `python3` | ≥ 3.8 | Build helper scripts (`get_options.py`, `rvfi_reference.py`, `generate_memory_file.py`) |
 | `gtkwave` | any | FST waveform viewer (Verilator) |
 | `vcs` / `verdi` | — | EWS-only: commercial simulation + waveform viewer |
