@@ -68,7 +68,7 @@ module ft_recompute_fault_tb #(parameter int THRESHOLD = 2, TEST_XLEN = 64);
     .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved),
     .pe_primary(mul_pe_primary), .pe_shadow(mul_pe_shadow));
   ft_div #(.P(TP), .TE_THRESHOLD(THRESHOLD)) div_dut(
-    .clk, .reset, .StallM(1'b0), .FlushE(flush), .IntDivE(div_active), .DivSignedE(div_signed),
+    .clk, .reset, .StallM(div_stall), .FlushE(flush), .FlushM(flush), .IntDivE(div_active), .DivSignedE(div_signed),
     .W64E(div_w64), .ForwardedSrcAE(div_a), .ForwardedSrcBE(div_b), .fi_enable(div_fi_enable),
     .DivBusyE(div_busy), .QuotM(div_quot), .RemM(div_rem), .stall_req(div_stall),
     .unresolved(div_unresolved), .pe_primary(div_pe_primary), .pe_shadow(div_pe_shadow));
@@ -423,6 +423,7 @@ module ft_recompute_fault_tb #(parameter int THRESHOLD = 2, TEST_XLEN = 64);
       @(negedge clk);
       div_fi_enable = 1'b0;
       wait_div_complete();
+      clock_edge(); // accept the checked E-stage result into the M-stage output
       check(!div_stall && !div_unresolved && div_quot == 64'd14 && div_rem == 64'd2,
              {test_id, ": retry restores quotient and remainder"});
       $display("  recovered: fault disabled; quotient/remainder=%0h/%0h stall=%b unresolved=%b",

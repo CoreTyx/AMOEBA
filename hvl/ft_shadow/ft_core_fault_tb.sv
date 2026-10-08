@@ -204,7 +204,7 @@ module ft_core_fault_tb;
     };
   endfunction
   function automatic logic mdu_case(input int test_case);
-    return (test_case >= 7 && test_case <= 11) || (test_case >= 14 && test_case <= 15);
+    return (test_case >= 7 && test_case <= 11) || (test_case >= 14 && test_case <= 15) || test_case>=17;
   endfunction
   function automatic logic trap_case(input int test_case);
     return test_case == 3 || test_case == 4 || test_case == 7 ||
@@ -259,7 +259,8 @@ module ft_core_fault_tb;
   // 5 ALU transient, 6 address isolation, 7 MUL trap, 8 MUL transient,
   // 9 DIV quotient trap, 10 DIV transient, 11 DIV remainder trap,
   // 12/13 CMP/ALU terminal backpressure, 14/15 MUL/DIV terminal backpressure,
-  // 16 shared ECC/FT enable with actual periodic LFSR injection and CSR checks.
+  // 16 shared ECC/FT enable with actual periodic LFSR injection and CSR checks,
+  // 17/18 late DIV/REM injection, 19/20 the same with independent M backpressure.
   initial begin
     #1;
     check(probe_stall_w && !probe_flush_e, "FT holds without older flush");
@@ -272,7 +273,7 @@ module ft_core_fault_tb;
       #1;
       check(!probe_stall_w && probe_flush_e, "older CSR/return/trap/WFI flush overrides FT hold");
     end
-    for (scenario = 0; scenario < 17; scenario++) begin
+    for (scenario = 0; scenario < 21; scenario++) begin
       @(negedge clk);
       rst = 1;
       directed = (scenario != 16);
@@ -295,7 +296,7 @@ module ft_core_fault_tb;
         // mul/divu/remu a0,s0,s1
         rom[5] = {
           7'b0000001, 5'd9, 5'd8,
-          3'((scenario == 7 || scenario == 8 || scenario == 14) ? 0 : ((scenario == 11) ? 7 : 5)),
+          3'((scenario == 7 || scenario == 8 || scenario == 14) ? 0 : ((scenario == 11 || scenario == 18 || scenario == 20) ? 7 : 5)),
           5'd10, 7'b0110011
         };
         rom[6] = csr_read(11, 'h7c2);
@@ -324,7 +325,7 @@ module ft_core_fault_tb;
           #1;
           check(dut.soc.core.FTStall, "directed injector fault reaches merged ALU/CMP");
         end
-        if(!injected && mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE==BASE+20) begin
+        if(!injected && scenario<17 && mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE==BASE+20) begin
           if (scenario == 7 || scenario == 8 || scenario == 14) begin
             mul_fi_enable = 1;
             mul_fi_target = (scenario == 8) ? 2 : 1;
@@ -339,6 +340,21 @@ module ft_core_fault_tb;
           end
           injected = 1;
         end
+        // The instruction has already passed its E-stage comparison. A later
+        // injector event must not change the accepted M-stage result, including
+        // when an unrelated stall extends its lifetime in M.
+        if(!injected && scenario>=17 && dut.soc.core.InstrValidM && dut.soc.core.PCM==BASE+20) begin
+          div_fi_enable = 1;
+          div_fi_target = 1;
+          div_fi_kind = 2;
+          div_fi_bit = 4;
+          div_fi_channel = (scenario == 18 || scenario == 20);
+          injected = 1;
+          if(scenario>=19) begin
+            force dut.soc.core.ExternalStall = 1'b1;
+            backpressure_cycles = 4;
+          end
+        end
         // Stall independently of FT after diagnosis completes. Disabling the
         // fault prevents a new mismatch from hiding a lost terminal indication.
         if (scenario >= 12 && scenario <= 15 && !backpressure_started &&
@@ -352,7 +368,7 @@ module ft_core_fault_tb;
           backpressure_started = 1;
           backpressure_cycles = 4;
         end else if (backpressure_cycles > 0) begin
-          check((scenario == 14) ? dut.soc.core.FTUnresolvedM :
+          if(scenario<17) check((scenario == 14) ? dut.soc.core.FTUnresolvedM :
                 ((scenario == 15) ? dut.soc.core.mdu.mdu.div.ftdiv.unresolved :
                  dut.soc.core.FTUnresolvedE), "terminal fault survives external stall");
           backpressure_cycles--;
@@ -382,13 +398,16 @@ module ft_core_fault_tb;
         held_pc   = dut.soc.core.PCE;
       end
       check(finished, "program reaches architectural completion");
-      if (scenario != 0 && scenario != 16) check(injected && held_cycles > 0, "runtime fault actually exercised");
+      if (scenario != 0 && scenario != 16 && scenario<17) check(injected && held_cycles > 0, "runtime fault actually exercised");
       if (scenario >= 12 && scenario <= 15) check(backpressure_started, "terminal backpressure exercised");
       if (trap_case(scenario)) begin
         check(
             trap_count==1 && regs[12]==16 && regs[13]==(mdu_case(scenario)?BASE+20:BRANCH_PC),
             "precise machine cause-16 trap");
         check(regs[14][6] && regs[10] == 0, "unresolved sticky status and no younger retirement");
+      end else if (scenario>=17) begin
+        check(injected && trap_count==0 && regs[11]==0 && regs[10]==((scenario==18 || scenario==20)?2:1),
+              "accepted DIV/REM result survives late injection and M-stage stalls");
       end else if (scenario == 8) begin
         check(trap_count == 0 && regs[10] == 143 && regs[11] == 0,
               "core MUL transient retires correct product");

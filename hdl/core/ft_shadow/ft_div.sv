@@ -9,7 +9,7 @@ module ft_div import cvw::*; #(
   parameter int TE_THRESHOLD = 3 // must be >= 1
 ) (
   input  logic              clk, reset,
-  input  logic              StallM, FlushE,
+  input  logic              StallM, FlushE, FlushM,
   input  logic              IntDivE, DivSignedE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
   // Shared runtime enable; bit and kind are selected inside each injector.
@@ -149,9 +149,12 @@ module ft_div import cvw::*; #(
     end
   end
 
-  // Mask all untrusted outputs.  During normal iteration DivBusyE already
-  // prevents M-stage consumption; retry/unresolved additionally protect the
-  // held transaction from any accidental result-path use.
-  assign QuotM = (stall_req | unresolved) ? '0 : primary_quot;
-  assign RemM  = (stall_req | unresolved) ? '0 : primary_rem;
+  // The checker validates E-stage results. Capture that exact pair when the
+  // instruction advances into M; live injectors may change on the next cycle,
+  // when IntDivE no longer enables the checker. Holding these registers also
+  // protects an older M-stage divide while a younger divide retries in E.
+  flopenrc #(P.XLEN) quotreg(clk, reset, FlushM, ~StallM,
+    (result_valid & ~stall_req & ~unresolved) ? primary_quot : '0, QuotM);
+  flopenrc #(P.XLEN) remreg(clk, reset, FlushM, ~StallM,
+    (result_valid & ~stall_req & ~unresolved) ? primary_rem : '0, RemM);
 endmodule

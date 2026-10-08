@@ -90,7 +90,10 @@ relation. MUL/DIV retain their existing retry-and-trap algorithms; threshold
 one reports a sampled mismatch as unresolved without a retry. DIV captures
 its operands, signedness, and word control at launch; forwarding changes during
 iteration cannot change a retry. A successful final retry holds the divider's
-DONE state until the instruction advances. DIV's E-stage terminal fault is
+DONE state until the instruction advances. The checked quotient and remainder
+are registered on that same E→M edge and held through M-stage stalls. Later
+injector events or a younger divider retry cannot change the accepted result.
+DIV's E-stage terminal fault is
 registered into M with the instruction before requesting cause 16. MUL retains
 its M-stage fault through stalls and clears it on an accepted M-stage flush.
 
@@ -208,7 +211,9 @@ of destructive flushes/redirects, correct retirement, BNE/BGE cause-16 trapping,
 precise fault PCs, multiplier and divider faults through MDU, and sticky CSR
 reads. Four terminal-fault cases independently stall the pipeline after ALU,
 CMP, MUL, or DIV diagnosis and disable injection, then verify one precise trap
-when the stall is removed. A hazard
+when the stall is removed. Four additional cases inject quotient/remainder
+faults only after E→M acceptance, with and without M-stage backpressure, and
+verify the already-checked division still retires correctly. A hazard
 priority probe covers older CSR/return/trap flushes, including interrupted WFI.
 An additional scenario enables the actual shared `fault_inject` input and LFSRs,
 checks 1,024 correctly retired loop branches, and confirms ECC corrections appear

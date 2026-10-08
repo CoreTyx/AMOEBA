@@ -82,7 +82,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     logic DivUnresolvedE;
     // Corrupt selected quotient/remainder replica bits before the E-stage
     // completion checker. The resulting fault status is registered into M.
-    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
+    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
         .fi_enable(fault_inject),
         .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
