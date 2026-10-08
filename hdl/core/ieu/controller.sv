@@ -480,21 +480,32 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign CSRWriteFenceM = CSRWriteM | FenceM;
 
   // Forwarding logic
+  // AMOEBA: forwarding is suppressed for injected dummy instructions.  A dummy's
+  // result is redirected to a shadow physical register that nothing ever reads, so
+  // its operands are architecturally irrelevant and a stale value is harmless.
+  // Suppressing it also keeps the register file read port -- where the dummy operand
+  // mask is applied -- as the dummy's only operand source, so no unmasked live
+  // register value can reach the ALU by way of the bypass network.
   always_comb begin
     ForwardAE = 2'b00;
     ForwardBE = 2'b00;
-    if (Rs1E != 5'b0)
+    if ((Rs1E != 5'b0) & ~DummyE)
       if      ((Rs1E == RdM) & RegWriteM) ForwardAE = 2'b10;
       else if ((Rs1E == RdW) & RegWriteW) ForwardAE = 2'b01;
 
-    if (Rs2E != 5'b0)
+    if ((Rs2E != 5'b0) & ~DummyE)
       if      ((Rs2E == RdM) & RegWriteM) ForwardBE = 2'b10;
       else if ((Rs2E == RdW) & RegWriteW) ForwardBE = 2'b01;
   end
 
   // Stall on dependent operations that finish in Mem Stage and can't bypass in time
   // Structural hazard causes stall if any of these events occur
-  assign MatchDE = ((Rs1D == RdE) | (Rs2D == RdE)) & (RdE != 5'b0); // Decode-stage instruction source depends on result from execute stage instruction
+  // AMOEBA: ~InjectD because an injected dummy's source fields describe the captured
+  // instruction's dependencies, not its own -- its operands are masked and unused.
+  // StallD is already asserted by InjectD in this cycle, so this changes no timing;
+  // it stops dummy reads from being counted as program load/store stalls and from
+  // exposing the captured instruction's dependency structure through those counters.
+  assign MatchDE = ((Rs1D == RdE) | (Rs2D == RdE)) & (RdE != 5'b0) & ~InjectD; // Decode-stage instruction source depends on result from execute stage instruction
   assign LoadStallD = (MemReadE|SCE) & MatchDE;
   assign StoreStallD = MemRWD[1] & MemRWE[0];   // Store or AMO followed by load or AMO
   assign CSRRdStallD = CSRReadE & MatchDE;

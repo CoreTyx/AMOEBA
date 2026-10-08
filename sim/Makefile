@@ -44,6 +44,42 @@ else
   NO_SPIKE_DIR     := build_no_spike
 endif
 
+# ── AMOEBA random-instruction-insertion traces ────────────────────────────────
+# ECE411_DUMMY_TRACE is ON by default, including in CI.  dummygen and dummymask
+# only print when the divider is enabled (Enabled = |rand_instr_insert_freq), so
+# every test that does not write CSR 0x7c1 produces no output at all and CI logs
+# stay exactly as quiet as before.  Only tc_rand_instr_insert and tc_insert_trace
+# enable it, and those are the tests whose logs we want.
+#   [dummy] <time> cycle <n>  CAPTURE/INJECT ...   (hdl/core/ieu/dummygen.sv)
+#   [dmask] <time>  rs1/rs2 <raw> -> <masked>      (hdl/core/ieu/dummymask.sv)
+# Turn it off with DUMMY_TRACE=0; as with EXTRA_DEFINES that does not invalidate
+# an existing build directory, so touch this Makefile when switching.
+DUMMY_TRACE ?= 1
+ifeq ($(DUMMY_TRACE),1)
+  DUMMY_TRACE_DEF  := +define+ECE411_DUMMY_TRACE
+else
+  DUMMY_TRACE_DEF  :=
+endif
+
+# ECE411_RETIRE_TRACE is OPT-IN and must stay that way.  Unlike the two above it
+# prints one line for every retired instruction whether or not insertion is
+# enabled (hvl/common/top_tb.svh), which on a FreeRTOS or Linux run is millions
+# of lines.  Enabling it switches build directory so it can never be served from
+# -- or poison -- the default cached build that CI restores.
+#
+#     make run_verilator_top_tb_no_spike RETIRE_TRACE=1 \
+#          PROG=../testcode/isa_level_testing/tc_insert_trace.c
+RETIRE_TRACE ?= 0
+ifeq ($(RETIRE_TRACE),1)
+  RETIRE_TRACE_DEF := +define+ECE411_RETIRE_TRACE
+  RETIRE_SUFFIX    := _retire
+else
+  RETIRE_TRACE_DEF :=
+  RETIRE_SUFFIX    :=
+endif
+BUILD_DIR    := $(BUILD_DIR)$(RETIRE_SUFFIX)
+NO_SPIKE_DIR := $(NO_SPIKE_DIR)$(RETIRE_SUFFIX)
+
 TIMEOUT      ?= 10000000
 PROG_NAME ?= $(notdir $(basename $(PROG)))
 
@@ -62,15 +98,16 @@ UNIT_TB_CFLAGS    := $(shell echo | $(CXX) -std=c++20 -fcoroutines -x c++ -E - >
 UNIT_TB_VERILATOR  = PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(UNIT_TB_CFLAGS)
 CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../third_party/cvw/config/rv64gc
 # Extra +define+... passed on the command line, e.g.
-#   make build_isa_tests EXTRA_DEFINES=+define+ECE411_DUMMY_TRACE
+#   make build_isa_tests EXTRA_DEFINES=+define+ECE411_SOME_FLAG
+# (ECE411_DUMMY_TRACE and ECE411_RETIRE_TRACE have their own switches above.)
 # Changing this does not invalidate an existing build directory; run the matching
 # clean (or touch this Makefile) to force a recompile.
 EXTRA_DEFINES ?=
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(EXTRA_DEFINES)
+COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
 VCS_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/vcs -licqueue -full64 -lca -sverilog -timescale=1ps/1ps -debug_acc+all -kdb -suppress=LCA_FEATURES_ENABLED -msg_config=vcs_warn_gen.config -xprop=../xprop.config -xprop=flowctrl -assert svaext
 VER_FLAGS    = $(COMMON_FLAGS) +incdir+$(CURDIR)/../hvl/verilator $(TRACE_DEF) -Wall --timescale 1ps/1ps -Mdir $(BUILD_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(NO_SPIKE_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
-ECC_INJECT_DIR       := build_ecc_inject
+ECC_INJECT_DIR       := build_ecc_inject$(RETIRE_SUFFIX)
 ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
 # Same flags as the Linux boot simulator but ECE411_SIM_INJECT enables the shared

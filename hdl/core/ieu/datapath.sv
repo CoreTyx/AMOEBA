@@ -40,6 +40,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
   input  logic [4:0]        Rs1D, Rs2D, Rs2E,             // Source registers
+  input  logic              InjectD,                 // AMOEBA: decode stage holds an injected dummy instruction
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -95,6 +96,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Fetch stage signals
   // Decode stage signals
   logic [P.XLEN-1:0] R1D, R2D;                       // Read data from Rs1 (RD1), Rs2 (RD2)
+  logic [P.XLEN-1:0] R1DRaw, R2DRaw;                 // Register file read data before dummy operand masking
   logic [P.XLEN-1:0] ImmExtD;                        // Extended immediate in Decode stage
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
@@ -130,10 +132,20 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .we3(RegWriteW), .a1(Rs1D), .a2(Rs2D), .a3(RdW),
     .wd3(ResultW),
     .DummyW, .DummySelW,
-    .rd1(R1D), .rd2(R2D),
+    .rd1(R1DRaw), .rd2(R2DRaw),
     .inject_en(fault_inject),
     .sec_err_rd1, .ded_err_rd1,
     .sec_err_rd2, .ded_err_rd2
+  );
+
+  // AMOEBA: obfuscate the operands of inserted dummy instructions.  Placed after
+  // the register file's SECDED decoder so that the ECC check still sees the true
+  // stored codeword -- masking the codeword itself would look like a burst error
+  // and would spray sec/ded reports on every injection.
+  dummymask #(P.XLEN) dmask(
+    .clk, .reset, .InjectD,
+    .Rd1D(R1DRaw), .Rd2D(R2DRaw),
+    .Rd1MaskedD(R1D), .Rd2MaskedD(R2D)
   );
   extend #(P) ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
 
