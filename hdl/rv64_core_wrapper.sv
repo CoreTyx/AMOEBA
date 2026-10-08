@@ -255,17 +255,17 @@ module rv64_core_wrapper import cvw::*; (
     logic [4:0]  GPRAddr;
     logic        GPRWen;
     logic [63:0] GPRValue;
-    // SHARD: shadow_pipeline now drives regf.we3/a3/wd3 at sW timing (N=3 cycles after
-    // main's W-stage).  RVFI monitor_valid fires at main's W-stage, so the regfile write
-    // port is misaligned.  Use main's W-stage signals instead: these report the
-    // architectural result at exactly the cycle the instruction retires in main.
+    // SHARD: the shadow pipeline drives regf.we3/a3/wd3 when it commits, some cycles
+    // after the instruction retires from the main pipeline.  RVFI monitor_valid fires at
+    // main's W-stage, so report main's W-stage result: in a fault-free run that is
+    // exactly what the shadow commits.
     assign GPRAddr  = soc.core.RdW;
     assign GPRWen   = soc.core.RegWriteW_s;
     assign GPRValue = soc.core.ResultW_s;
 
     logic [4:0] Rs1D, Rs2D;
-    assign Rs1D = soc.core.ieu.dp.regf.a1;
-    assign Rs2D = soc.core.ieu.dp.regf.a2;
+    assign Rs1D = soc.core.ieu.c.Rs1D;
+    assign Rs2D = soc.core.ieu.c.Rs2D;
 
     // AMOEBA: dummy instruction flag, piped M->W alongside the other monitor signals
     // so it lines up with InstrValidW rather than the core's own W-stage register.

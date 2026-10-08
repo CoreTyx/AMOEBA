@@ -56,6 +56,7 @@ module fpu import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0]    FIntResM,                           // data to be written to integer register (to IEU)
   output logic                 IllegalFPUInstrD,                   // Is the instruction an illegal fpu instruction (to IFU)
   output logic [4:0]           SetFflagsM,                         // FPU flags (to privileged unit)
+  output logic                 FMAFaultM,                          // SHARD: FMA significand product fails its residue check
   // Writeback stage
   input  logic [4:0]           RdW,                                // which FP register to write to (from IEU)
   input  logic [P.FLEN-1:0]    ReadDataW,                          // Read data (from LSU)
@@ -118,6 +119,7 @@ module fpu import cvw::*;  #(parameter cvw_t P) (
 
   // Fma Signals
   logic                        FmaAddSubE;                         // Multiply by 1.0 when adding or subtracting
+  logic                        PmResidueFaultE;                    // FMA significand product fails its residue check
   logic [1:0]                  FmaZSelE;                           // Select Z = Y when adding or subtracting, 0 when multiplying
   logic [P.FMALEN-1:0]         SmE, SmM;                           // Sum significand
   logic                        FmaAStickyE, FmaAStickyM;           // FMA addend sticky bit output
@@ -244,7 +246,12 @@ module fpu import cvw::*;  #(parameter cvw_t P) (
   // fused multiply add: fadd/sub, fmul, fmadd/fnmadd/fmsub/fnmsub
   fma #(P) fma (.Xs(XsE), .Ys(YsE), .Zs(ZsE), .Xe(XeE), .Ye(YeE), .Ze(ZeE), .Xm(XmE), .Ym(YmE), .Zm(ZmE),
     .XZero(XZeroE), .YZero(YZeroE), .ZZero(ZZeroE), .OpCtrl(OpCtrlE),
-    .As(AsE), .Ps(PsE), .Ss(SsE), .Se(SeE), .Sm(SmE), .InvA(InvAE), .SCnt(SCntE), .ASticky(FmaAStickyE));
+    .As(AsE), .Ps(PsE), .Ss(SsE), .Se(SeE), .Sm(SmE), .InvA(InvAE), .SCnt(SCntE), .ASticky(FmaAStickyE),
+    .PmResidueFault(PmResidueFaultE));
+
+  // SHARD: the residue check matters only when the instruction's result comes from the FMA
+  flopenrc #(1) FMAFaultMReg(clk, reset, FlushM, ~StallM,
+    PmResidueFaultE & FPUActiveE & (PostProcSelE == 2'b10), FMAFaultM);
 
   // divide and square root: fdiv, fsqrt, optionally integer division
   fdivsqrt #(P) fdivsqrt(.clk, .reset, .FmtE, .XmE, .YmE, .XeE, .YeE, .SqrtE(OpCtrlE[0]), .SqrtM(OpCtrlM[0]),

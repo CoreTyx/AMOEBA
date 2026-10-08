@@ -38,6 +38,7 @@ module privdec import cvw::*;  #(parameter cvw_t P) (
   input  logic [1:0]   PrivilegeModeW,                      // current privilege level
   input  logic         STATUS_TSR, STATUS_TVM, STATUS_TW,   // status bits
   input  logic         TrapM,                               // Trap is occurring
+  input  logic         ShardRedirectM,                      // SHARD recovery/retry flushes the Memory stage
   output logic         IllegalInstrFaultM,                  // Illegal instruction
   output logic         EcallFaultM, BreakpointFaultM,       // Ecall or breakpoint; must retire, so don't flush it when the trap occurs
   output logic         sretM, mretM, RetM,                  // return instructions
@@ -70,9 +71,11 @@ module privdec import cvw::*;  #(parameter cvw_t P) (
   assign vmaM           =  presfencevmaM | (sinvalvmaM & P.SVINVAL_SUPPORTED);      // sfence.vma or sinval.vma
   assign fenceinvalM    = (sfencewinvalM | sfenceinvalirM) & P.SVINVAL_SUPPORTED;   // sfence.w.inval or sfence.inval.ir
 
+  // SHARD: an xRET waiting in the Memory stage must not take effect in the cycle a
+  // redirect flushes it.
   assign sretM =      PrivilegedM & (InstrM[31:20] == 12'b000100000010) & rs1zeroM & P.S_SUPPORTED &
-                      (PrivilegeModeW == P.M_MODE | PrivilegeModeW == P.S_MODE & ~STATUS_TSR);
-  assign mretM =      PrivilegedM & (InstrM[31:20] == 12'b001100000010) & rs1zeroM & (PrivilegeModeW == P.M_MODE);
+                      (PrivilegeModeW == P.M_MODE | PrivilegeModeW == P.S_MODE & ~STATUS_TSR) & ~ShardRedirectM;
+  assign mretM =      PrivilegedM & (InstrM[31:20] == 12'b001100000010) & rs1zeroM & (PrivilegeModeW == P.M_MODE) & ~ShardRedirectM;
   assign RetM =       sretM | mretM;
   assign ecallM =     PrivilegedM & (InstrM[31:20] == 12'b000000000000) & rs1zeroM;
   assign ebreakM =    PrivilegedM & (InstrM[31:20] == 12'b000000000001) & rs1zeroM;

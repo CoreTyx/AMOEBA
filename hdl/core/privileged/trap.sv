@@ -34,6 +34,8 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 LoadAccessFaultM, StoreAmoAccessFaultM, EcallFaultM, InstrPageFaultM,
   input  logic                 LoadPageFaultM, StoreAmoPageFaultM,              // various trap sources
   input  logic                 HardwareErrorFaultM,                             // IEU ECC DED — uncorrectable hardware error
+  input  logic                 ShadowFaultTrapM,                                // SHARD: a fault persisted through its retries, or cannot be replayed
+  output logic                 ShadowFaultTrapTakenM,                           // cause 16 selected and accepted
   input  logic                 wfiM, wfiW,                                      // wait for interrupt instruction
   input  logic [1:0]           PrivilegeModeW,                                  // current privilege mode
   input  logic [11:0]          MIP_REGW, MIE_REGW, MIDELEG_REGW,                // interrupt pending, enabled, and delegate CSRs
@@ -41,6 +43,8 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 STATUS_MIE, STATUS_SIE,                          // machine/supervisor interrupt enables
   input  logic                 InstrValidM,                                     // current instruction is valid, not flushed
   input  logic                 CommittedM, CommittedF,                          // LSU/IFU has committed to a bus operation that can't be interrupted
+  input  logic                 ShadowQuiescentM,                                // SHARD: every retired instruction is verified and committed
+  output logic                 TrapPendingM,                                    // SHARD: a trap is ready and waits only for the shadow
   output logic                 TrapM,                                           // Trap is occurring
   output logic                 InterruptM,                                      // Interrupt is occurring
   output logic                 ExceptionM,                                      // exception is occurring
@@ -92,10 +96,15 @@ module trap import cvw::*;  #(parameter cvw_t P) (
                       BothInstrPageFaultM | LoadPageFaultM | StoreAmoPageFaultM |
                       BreakpointFaultM | EcallFaultM |
                       LoadAccessFaultM | StoreAmoAccessFaultM |
-                      HardwareErrorFaultM;
+                      HardwareErrorFaultM | ShadowFaultTrapM;
   // coverage on
-  assign TrapM = (ExceptionM & ~CommittedF) | InterruptM;
+  // SHARD: a trap changes privileged state that cannot be rolled back, so it is taken
+  // only once the shadow has verified and committed every older instruction.  Until
+  // then the trapping instruction is held in the Memory stage (see the LSU's HoldM).
+  assign TrapPendingM = (ExceptionM & ~CommittedF) | InterruptM;
+  assign TrapM = TrapPendingM & ShadowQuiescentM;
   assign HardwareErrorTrapM = TrapM & ~InterruptM & (CauseM == 5'd19);
+  assign ShadowFaultTrapTakenM = TrapM & ~InterruptM & (CauseM == 5'd16);
 
   ///////////////////////////////////////////
   // Cause priority defined in privileged spec
@@ -113,6 +122,9 @@ module trap import cvw::*;  #(parameter cvw_t P) (
     else if (ValidIntsM[9])                                   CauseM = 5'd9;  // delegated Supervisor External Int
     else if (ValidIntsM[1])                                   CauseM = 5'd1;  // delegated Supervisor Sw Int
     else if (ValidIntsM[5])                                   CauseM = 5'd5;  // delegated Supervisor Timer Int
+    // SHARD fault: whatever sits in the Memory stage is not trusted, so this outranks
+    // every exception that instruction might raise
+    else if (ShadowFaultTrapM)                                CauseM = 5'd16;
     else if (BothInstrPageFaultM)                             CauseM = 5'd12;
     else if (BothInstrAccessFaultM)                           CauseM = 5'd1;
     else if (IllegalInstrFaultM)                              CauseM = 5'd2;

@@ -36,7 +36,8 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              IntDivE, W64E,                  // Integer division/remainder, and W-type instructions
   input  logic              MDUActiveE,                     // Mul/Div instruction being executed
   output logic [P.XLEN-1:0] MDUResultW,                     // multiply/divide result
-  output logic              DivBusyE                        // busy signal to stall pipeline in Execute stage
+  output logic              DivBusyE,                       // busy signal to stall pipeline in Execute stage
+  output logic              MULFaultM                       // SHARD: product fails its residue check
 );
 
   logic [P.XLEN*2-1:0]      ProdM;                          // double-width product from mul
@@ -47,6 +48,33 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
 
   mul #(P.XLEN) multiplier(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .ProdM);
+
+  // SHARD mod-3 residue check of the multiplier.  The multiplier is not duplicated in
+  // the shadow, so the check must not share its failure modes: res(A)*res(B) is
+  // compared with res(ProdM).  For a signed operand the value is the unsigned reading
+  // minus sign*2^XLEN, and 2^XLEN = 1 (mod 3); likewise the product as an integer is
+  // the unsigned reading of ProdM minus its sign bit when the product can be negative
+  // (mulh, mulhsu).  The shadow separately verifies that A and B are the right operands.
+  logic [1:0] ResAE, ResBE, ResAAdjE, ResBAdjE, ResABE, ResABM, ResProdM, ResProdAdjM;
+  logic       SignedAE, SignedBE, MulE, MulM, SignedProdM;
+  logic [3:0] ResMulE;
+
+  assign SignedAE = (Funct3E == 3'b001) | (Funct3E == 3'b010);   // mulh, mulhsu
+  assign SignedBE = (Funct3E == 3'b001);                         // mulh
+  shadow_residue #(P.XLEN) resa(.a(ForwardedSrcAE), .residue(ResAE));
+  shadow_residue #(P.XLEN) resb(.a(ForwardedSrcBE), .residue(ResBE));
+  // subtract the sign (mod 3): r - 1 = r + 2
+  assign ResAAdjE = (SignedAE & ForwardedSrcAE[P.XLEN-1]) ? ((ResAE == 2'd0) ? 2'd2 : ResAE - 2'd1) : ResAE;
+  assign ResBAdjE = (SignedBE & ForwardedSrcBE[P.XLEN-1]) ? ((ResBE == 2'd0) ? 2'd2 : ResBE - 2'd1) : ResBE;
+  assign ResMulE  = ResAAdjE * ResBAdjE;                         // 0, 1, 2 or 4
+  assign ResABE   = (ResMulE == 4'd4) ? 2'd1 : ResMulE[1:0];
+  assign MulE     = MDUActiveE & ~IntDivE;
+
+  flopenrc #(4) ResMReg(clk, reset, FlushM, ~StallM, {ResABE, MulE, SignedAE}, {ResABM, MulM, SignedProdM});
+
+  shadow_residue #(2*P.XLEN) resp(.a(ProdM), .residue(ResProdM));
+  assign ResProdAdjM = (SignedProdM & ProdM[2*P.XLEN-1]) ? ((ResProdM == 2'd0) ? 2'd2 : ResProdM - 2'd1) : ResProdM;
+  assign MULFaultM   = MulM & (ResProdAdjM != ResABM);
 
   if ((P.IDIV_ON_FPU & P.F_SUPPORTED) | (!P.M_SUPPORTED)) begin : nodiv
     assign QuotM    = '0;

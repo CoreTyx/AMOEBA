@@ -33,6 +33,7 @@ module lrsc import cvw::*;  #(parameter cvw_t P) (
   input  logic                 clk,
   input  logic                 reset,
   input  logic                 StallW,
+  input  logic                 ShardRedirectM, // SHARD recovery or retry: discard the reservation
   input  logic                 MemReadM,   // Memory read
   input  logic [1:0]           PreLSURWM,  // Memory operation from the HPTW or IEU [1]: read, [0]: write
   output logic [1:0]           LSURWM,     // Memory operation after potential squash of SC
@@ -56,8 +57,11 @@ module lrsc import cvw::*;  #(parameter cvw_t P) (
   assign WriteAdrMatchM = PreLSURWM[0] & (PAdrM[P.PA_BITS-1:RESERVATION_SET_ADDRESS_BITS] == ReservationPAdrW) & ReservationValidW;
   assign SquashSCM = scM & ~WriteAdrMatchM;
   assign LSURWM = SquashSCM ? 2'b00 : PreLSURWM;
+  // SHARD: a recovery or retry redirect squashes instructions that may have set or used
+  // the reservation, so drop it; the replayed SC then fails and software retries the LR.
   always_comb begin // ReservationValidM (next value of valid reservation)
-    if (lrM) ReservationValidM = 1'b1;  // set valid on load reserve
+    if (ShardRedirectM) ReservationValidM = 1'b0;
+    else if (lrM) ReservationValidM = 1'b1;  // set valid on load reserve
   // if we implement multiple harts invalidate reservation if another hart stores to this reservation.
     else if (scM) ReservationValidM = 1'b0; // clear valid on store to same address or any sc
     else ReservationValidM = ReservationValidW; // otherwise don't change valid

@@ -44,7 +44,12 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   output logic [XLEN-1:0]  rd1, rd2,
   input  logic             inject_en,
   output logic             sec_err_rd1, ded_err_rd1,
-  output logic             sec_err_rd2, ded_err_rd2
+  output logic             sec_err_rd2, ded_err_rd2,
+  // SHARD: read ports 4 and 5 serve the shadow pipeline's own operand sourcing
+  input  logic [4:0]       a4, a5,
+  output logic [XLEN-1:0]  rd4, rd5,
+  output logic             sec_err_rd4, ded_err_rd4,
+  output logic             sec_err_rd5, ded_err_rd5
 );
 
   localparam ARCHREGS = E_SUPPORTED ? 16 : 32;
@@ -114,6 +119,26 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
     .data_o    (rd2),
     .sec_err_o (sec_err_rd2),
     .ded_err_o (ded_err_rd2)
+  );
+
+  // ── Read ports 4 and 5 (shadow) ───────────────────────────────────────────────
+  logic [CW-1:0] cw_rd4_raw, cw_rd5_raw;
+
+  assign cw_rd4_raw = (a4 != '0) ? rf[a4] : '0;
+  assign cw_rd5_raw = (a5 != '0) ? rf[a5] : '0;
+
+  ecc_secded_dec #(.DATA_WIDTH(XLEN)) dec4 (
+    .codeword_i(cw_rd4_raw),
+    .data_o    (rd4),
+    .sec_err_o (sec_err_rd4),
+    .ded_err_o (ded_err_rd4)
+  );
+
+  ecc_secded_dec #(.DATA_WIDTH(XLEN)) dec5 (
+    .codeword_i(cw_rd5_raw),
+    .data_o    (rd5),
+    .sec_err_o (sec_err_rd5),
+    .ded_err_o (ded_err_rd5)
   );
 
 endmodule

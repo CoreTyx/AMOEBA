@@ -35,6 +35,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   // CSR Reads and Writes, and values needed for traps
   input  logic              CSRReadM, CSRWriteM,                            // Read or write CSRs
   input  logic [P.XLEN-1:0] SrcAM,                                          // GPR register to write
+  input  logic [P.XLEN-1:0] ForwardedSrcAM,                                 // SHARD: rs1 value on the checked path
   input  logic [31:0]       InstrM,                                         // Instruction
   input  logic [31:0]       InstrOrigM,                                     // Original compressed or uncompressed instruction in Memory stage for Illegal Instruction MTVAL
   input  logic [P.XLEN-1:0] IEUAdrxTvalM,                                   // address from IEU
@@ -98,11 +99,20 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic              BigEndianM,                                     // Use big endian in current privilege mode
   // Fault outputs
   output logic              wfiM, IntPendingM,                              // Stall in Memory stage for WFI until interrupt pending or timeout
+  output logic              CSRFaultM,                                      // SHARD: CSR instruction's read or write value fails verification
+  output logic              CSRStateFaultM,                                 // SHARD: CSR mirror differs from the CSR file
+  input  logic              CSRMirrorResyncM,                               // SHARD: reload the CSR mirror
   output logic [31:0]       RAND_INSTR_INSERT_FREQ_REGW,                    // AMOEBA: dummy instruction insertion divider period
   output logic              PrivModeUncorrectableFaultW,                   // TMR uncorrectable privilege mode fault
   input  logic              RegEccSecErrW,                                 // IEU ECC SEC (correctable 1-bit flip)
   input  logic              RegEccDedErrW,                                 // IEU ECC DED, retained for MSECFAULT logging
   input  logic              ShadowFaultW,                                  // SHARD shadow pipeline mismatch
+  input  logic              ShadowQuiescentM,                              // SHARD: every retired instruction is verified and committed
+  input  logic              ShardRedirectM,                                // SHARD recovery/retry redirect
+  output logic              TrapPendingM,                                  // SHARD: a trap waits for the shadow to become quiescent
+  input  logic              ShadowFaultTrapM,                              // SHARD: unrecovered fault presented to trap logic (cause 16)
+  input  logic [P.XLEN-1:0] ShadowFaultEPCM, ShadowFaultMtvalM,            // captured trap metadata
+  output logic              ShadowFaultTrapTakenM,                         // cause 16 was selected and consumed
   input  logic              EccDedFaultM,                                  // registered DED fault presented to trap logic
   input  logic [P.XLEN-1:0] EccDedFaultEPCM, EccDedFaultMtvalM,             // captured trap metadata
   output logic              EccDedTrapTakenM                               // cause 19 was selected and consumed
@@ -140,16 +150,17 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   privdec #(P) pmd(.clk, .reset, .StallW, .FlushW, .InstrM(InstrM[31:7]),
     .PrivilegedM, .IllegalIEUFPUInstrM, .IllegalCSRAccessM,
     .PrivilegeModeW, .STATUS_TSR, .STATUS_TVM, .STATUS_TW, .TrapM, .IllegalInstrFaultM,
-    .EcallFaultM, .BreakpointFaultM, .sretM, .mretM, .RetM, .wfiM, .wfiW, .sfencevmaM);
+    .EcallFaultM, .BreakpointFaultM, .sretM, .mretM, .RetM, .wfiM, .wfiW, .sfencevmaM, .ShardRedirectM);
 
   // Control and Status Registers
   csr #(P) csr(.clk, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
-    .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
+    .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .ForwardedSrcAM, .IEUAdrxTvalM,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
     .RegEccSecErrW, .RegEccDedErrW, .ShadowFaultW, .EccDedFaultEPCM, .EccDedFaultMtvalM,
+    .ShadowFaultEPCM, .ShadowFaultMtvalM,
     .TrapM, .mretM, .sretM, .InterruptM,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
-    .MTIME_CLINT, .InstrValidM, .FRegWriteM, .LoadStallD, .StoreStallD,
+    .MTIME_CLINT, .InstrValidM, .FRegWriteM(FRegWriteM & ~ShardRedirectM), .LoadStallD, .StoreStallD,
     .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .BPWrongM,
     .sfencevmaM, .ExceptionM, .InvalidateICacheM, .ICacheStallF, .DCacheStallM, .DivBusyE, .FDivBusyE,
     .IClassWrongM, .IClassM, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess,
@@ -160,7 +171,8 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .SATP_REGW, .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
     .SetFflagsM, .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE,
     .EPCM, .TrapVectorM,
-    .CSRReadValW, .IllegalCSRAccessM, .BigEndianM, .RAND_INSTR_INSERT_FREQ_REGW);
+    .CSRReadValW, .IllegalCSRAccessM, .BigEndianM, .CSRFaultM, .CSRStateFaultM, .CSRMirrorResyncM,
+    .RAND_INSTR_INSERT_FREQ_REGW);
 
   // pipeline early-arriving trap sources
   privpiperegs ppr(.clk, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
@@ -172,9 +184,10 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
-    .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM), .PrivilegeModeW,
+    .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM),
+    .ShadowFaultTrapM, .ShadowFaultTrapTakenM, .PrivilegeModeW,
     .MIP_REGW, .MIE_REGW, .MIDELEG_REGW, .MEDELEG_REGW, .STATUS_MIE, .STATUS_SIE,
-    .InstrValidM, .CommittedM, .CommittedF,
+    .InstrValidM, .CommittedM, .CommittedF, .ShadowQuiescentM, .TrapPendingM,
     .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),
     .IntPendingM, .DelegateM, .CauseM);
 endmodule

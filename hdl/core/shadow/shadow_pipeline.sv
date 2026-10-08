@@ -1,322 +1,272 @@
 ///////////////////////////////////////////
 // shadow_pipeline.sv
 //
-// Purpose: SHARD shadow pipeline top-level — sD → sE → sM → sW.
-//          Pulls instructions from IQ, operands from OQ, store data from SQ,
-//          and committed results from RQ. Re-executes using a shadow ALU and
-//          comparator. At sW, verifies against RQ and writes the register file.
+// Purpose: SHARD shadow pipeline sD -> sE -> sM -> sW.
+//          The shadow re-executes every instruction the main pipeline retired, in
+//          order, from verified state only, and is the sole writer of the register
+//          file.  It is decoupled from the main pipeline's stalls: an instruction
+//          enters sE as soon as its IQ entry and its RQ entry exist, and then moves
+//          one stage per cycle.
 //
-//          V1 simplifications:
-//            - Same stall/flush as main (synchronous shadow)
-//            - SkipVerify for FP, DIV, LR/SC, AMO, CSR, fence, WFI
-//            - sM: address-only check for stores (no D-cache re-read)
-//            - VBC_StallE: tied low (not implemented)
+//            sD  IQ head.  Decode source registers.
+//            sE  Operands from the register file with sM/sW bypass (shadow_hzu),
+//                checked against the operands the main pipeline used (OQ).  ALU,
+//                branch comparator, immediate and link address recomputed.
+//                Next-PC continuity checked.
+//            sM  shadow_verifier compares against the OQ, RQ and SQ records.
+//            sW  Commit: write the register file, release the RQ entry and mark
+//                the store-queue entry verified -- or, on any fault, commit
+//                nothing and raise Fault so the core can flush and replay.
 //
 // A component of the CORE-V-WALLY configurable RISC-V project.
 // SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
 ///////////////////////////////////////////
 
-module shadow_pipeline import cvw::*; #(parameter cvw_t P, parameter int N = 3) (
-  input  logic              clk, reset,
-  // Main stall/flush (shadow uses same signals for V1)
-  input  logic              StallD, StallE, StallM, StallW,
-  input  logic              FlushD, FlushE, FlushM, FlushW,
-  // IQ head (shadow sD input)
-  input  logic [P.XLEN-1:0] sPC_in,
-  input  logic [31:0]       sInstr32_in,
-  input  logic              sPCSrc_in,
-  input  logic [2:0]        sFRM_snap_in,
-  input  logic              sIsHWCSR_in,
-  input  logic              sIsDummy_in,
-  input  logic              sDummySel_in,
-  input  logic              sInstrValid_in,
-  // OQ head fields (shadow sE input)
-  input  logic [P.XLEN-1:0] oq_SrcAE,
-  input  logic [P.XLEN-1:0] oq_SrcBE,
-  input  logic [P.XLEN-1:0] oq_ForwardedSrcBE,
-  input  logic [P.XLEN-1:0] oq_PCLinkE,
-  input  logic [P.XLEN-1:0] oq_ImmExtE,
-  input  logic              oq_W64E, oq_UW64E, oq_SubArithE,
-  input  logic [2:0]        oq_ALUSelectE,
-  input  logic [3:0]        oq_BSelectE, oq_ZBBSelectE,
-  input  logic [2:0]        oq_BALUControlE,
-  input  logic              oq_BMUActiveE,
-  input  logic [1:0]        oq_CZeroE,
-  input  logic [2:0]        oq_Funct3E,
-  input  logic [6:0]        oq_Funct7E,
-  input  logic [4:0]        oq_Rs2E,
-  input  logic              oq_ALUResultSrcE, oq_JumpE, oq_BranchSignedE,
-  input  logic [1:0]        oq_MemRWE,
-  input  logic [4:0]        oq_RdE,
-  input  logic              oq_RegWriteE, oq_InstrValidE, oq_DummyE, oq_DummySelE,
-  // RQ head (shadow sW input)
-  input  logic [4:0]        rq_Rd,
-  input  logic [P.XLEN-1:0] rq_IntResult,
-  input  logic              rq_IntWriteEn,
-  input  logic [P.XLEN-1:0] rq_MemAddr,
-  input  logic [1:0]        rq_MemRW,
-  input  logic              rq_HasStore,
-  input  logic [P.XLEN-1:0] rq_PC,
-  input  logic              rq_SkipVerify,
-  input  logic              rq_IsFaultedInstr,
-  input  logic              rq_DummyW,
-  input  logic              rq_DummySelW,
-  input  logic              rq_InstrValid,
-  // RQ pop (shadow sW consumed entry)
-  output logic              sW_pop,
-  // SQ head (shadow sM input)
-  input  logic [P.PA_BITS-1:0] sq_PA,
-  input  logic [P.XLEN-1:0]   sq_WriteData,
-  input  logic [P.XLEN/8-1:0] sq_ByteMask,
-  input  logic                sq_Valid,
-  // SQ pop (shadow sM consumed a store entry)
-  output logic              sM_pop,
-  // Shadow regfile write port (drives regfile we3/a3/wd3)
-  output logic              shadow_we3,
-  output logic [4:0]        shadow_a3,      // 5-bit Rd; regfile uses DummyW/Sel for shadow regs
-  output logic [P.XLEN-1:0] shadow_wd3,
-  output logic              shadow_DummyW,  // dummy write → shadow physical register
-  output logic              shadow_DummySel,
-  // MSECFAULT reporting
-  output logic              SecFaultW,
-  output logic [P.XLEN-1:0] SecFaultPC_W,
-  // VBC (V1: stubbed)
-  output logic              VBC_StallE,
-  // Shadow stage Rd outputs (for future use / debug)
-  output logic [4:0]        sRdE_out,
-  output logic [4:0]        sRdM_out
+module shadow_pipeline import cvw::*; #(parameter cvw_t P, parameter int DEPTH = 8) (
+  input  logic                       clk, reset,
+  input  logic                       StreamBreak,     // main took a trap: the next retired PC is not sequential
+  // IQ head (sD)
+  input  logic                       iqValid,
+  input  logic [P.XLEN-1:0]          iqPC,
+  input  logic [31:0]                iqInstr,
+  input  logic                       iqCompressed,
+  output logic                       iqPop,
+  // OQ head (sE)
+  input  logic [P.XLEN-1:0]          oqForwardedSrcA, oqForwardedSrcB,
+  input  logic [P.XLEN-1:0]          oqIEUAdr, oqRawLoadWord,
+  input  logic                       oqALUSrcA, oqALUSrcB,
+  input  logic [2:0]                 oqImmSrc,
+  input  logic                       oqW64, oqUW64, oqSubArith,
+  input  logic [2:0]                 oqALUSelect,
+  input  logic [3:0]                 oqBSelect, oqZBBSelect,
+  input  logic [2:0]                 oqBALUControl,
+  input  logic                       oqBMUActive,
+  input  logic [1:0]                 oqCZero,
+  input  logic                       oqALUResultSrc, oqJump, oqBranch,
+  input  logic                       oqPCSrc,
+  input  logic                       oqRegWrite,
+  input  logic [2:0]                 oqResultSrc,
+  input  logic                       oqFWriteInt,
+  input  logic                       oqViaSQ, oqAMO, oqLoadChk,
+  output logic                       oqPop,
+  // RQ: two oldest entries, occupancy, and this cycle's push
+  input  logic [4:0]                 rqRd [2],
+  input  logic                       rqRegWrite [2],
+  input  logic [P.XLEN-1:0]          rqResult [2],
+  input  logic [$clog2(DEPTH+1)-1:0] rqCount,
+  input  logic                       rqPush,
+  // SQ contents
+  input  logic [P.PA_BITS-1:0]       sqPA [DEPTH],
+  input  logic [1:0]                 sqSize [DEPTH],
+  input  logic [P.XLEN-1:0]          sqData [DEPTH],
+  input  logic [$clog2(DEPTH+1)-1:0] sqCount, sqNVerified,
+  // Register file: shadow read ports and the only write port
+  output logic [4:0]                 sRs1E, sRs2E,
+  input  logic [P.XLEN-1:0]          sRD1E, sRD2E,
+  output logic                       shadow_we3,
+  output logic [4:0]                 shadow_a3,
+  output logic [P.XLEN-1:0]          shadow_wd3,
+  // Commit / fault
+  output logic                       Commit,          // sW instruction verified and committed (pops the RQ)
+  output logic                       CommitStore,     // ... and it owns the oldest unverified SQ entry
+  output logic                       Fault,           // sW instruction failed verification
+  output logic [P.XLEN-1:0]          FaultPC,         // where to resume: the PC that instruction should have had
+  output logic [7:0]                 FaultClass
 );
 
-  // ---------------------------------------------------------------------------
-  // SkipVerify opcode decode (combinational, used at sD)
-  // ---------------------------------------------------------------------------
-  function automatic logic is_skip_verify(input logic [31:0] instr);
-    logic [6:0] op;
-    logic [6:0] f7;
-    logic [11:0] i_imm;
-    op    = instr[6:0];
-    f7    = instr[31:25];
-    i_imm = instr[31:20];
-    // FP ops
-    if (op == 7'b1010011 || op == 7'b1000011 || op == 7'b1000111 ||
-        op == 7'b1001011 || op == 7'b1001111)
-      return 1'b1;
-    // Integer DIV/REM (R-type, funct7=0000001)
-    if (op == 7'b0110011 && f7 == 7'b0000001)
-      return 1'b1;
-    // LR/SC/AMO
-    if (op == 7'b0101111)
-      return 1'b1;
-    // CSR instructions (SYSTEM opcode, funct3 != 000)
-    if (op == 7'b1110011 && instr[14:12] != 3'b000)
-      return 1'b1;
-    // WFI: SYSTEM opcode, funct3=000, imm=000100000101
-    if (op == 7'b1110011 && instr[14:12] == 3'b000 && i_imm == 12'b000100000101)
-      return 1'b1;
-    // ECALL/EBREAK/MRET/SRET: SYSTEM opcode, funct3=000
-    if (op == 7'b1110011 && instr[14:12] == 3'b000)
-      return 1'b1;
-    // Fence / fence.i
-    if (op == 7'b0001111)
-      return 1'b1;
-    // FP load/store
-    if (op == 7'b0000111 || op == 7'b0100111)
-      return 1'b1;
-    // Integer loads (lb, lh, lw, ld, lbu, lhu, lwu) — shadow can't re-read memory
-    if (op == 7'b0000011)
-      return 1'b1;
-    return 1'b0;
-  endfunction
+  localparam int CW = $clog2(DEPTH+1);
 
-  function automatic logic is_branch(input logic [31:0] instr);
-    return (instr[6:0] == 7'b1100011); // BRANCH opcode
-  endfunction
+  // Stage occupancy
+  logic              sValidE, sValidM, sValidW;
+  logic              AdvanceDE;
 
-  // ---------------------------------------------------------------------------
-  // sD stage (combinational decode from IQ head)
-  // ---------------------------------------------------------------------------
-  logic [4:0]        sRs1D, sRs2D, sRdD;
-  logic              sSkipVerifyD, sIsBranchD;
-  logic              sInstrValidD_q;  // qualified valid
-
-  assign sRs1D        = sInstr32_in[19:15];
-  assign sRs2D        = sInstr32_in[24:20];
-  assign sRdD         = sInstr32_in[11:7];
-  assign sSkipVerifyD = is_skip_verify(sInstr32_in) | sIsHWCSR_in | sIsDummy_in;
-  assign sIsBranchD   = is_branch(sInstr32_in);
-  assign sInstrValidD_q = sInstrValid_in;
-
-  // ---------------------------------------------------------------------------
-  // sD → sE pipeline register
-  // ---------------------------------------------------------------------------
-  logic [P.XLEN-1:0] sPC_E;
-  logic [31:0]       sInstr32_E;
-  logic              sPCSrc_E;
-  logic [4:0]        sRs1_E, sRs2_E, sRd_E;
-  logic              sSkipVerify_E, sIsBranch_E, sInstrValid_E;
-  logic              sIsDummy_E, sDummySel_E;
-
-  flopenrc #(P.XLEN) sPC_E_reg      (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sPC_in),       .q(sPC_E));
-  flopenrc #(32)     sI32_E_reg     (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sInstr32_in),  .q(sInstr32_E));
-  flopenrc #(1)      sPCSrc_E_reg   (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sPCSrc_in),    .q(sPCSrc_E));
-  flopenrc #(5)      sRs1_E_reg     (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sRs1D),        .q(sRs1_E));
-  flopenrc #(5)      sRs2_E_reg     (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sRs2D),        .q(sRs2_E));
-  flopenrc #(5)      sRd_E_reg      (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sRdD),         .q(sRd_E));
-  flopenrc #(1)      sSkip_E_reg    (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sSkipVerifyD), .q(sSkipVerify_E));
-  flopenrc #(1)      sBr_E_reg      (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sIsBranchD),   .q(sIsBranch_E));
-  flopenrc #(1)      sValid_E_reg   (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sInstrValidD_q),.q(sInstrValid_E));
-  flopenrc #(1)      sDummy_E_reg   (.clk, .reset, .en(~StallE), .clear(FlushE), .d(sIsDummy_in),  .q(sIsDummy_E));
-  flopenrc #(1)      sDummySel_E_reg(.clk, .reset, .en(~StallE), .clear(FlushE), .d(sDummySel_in), .q(sDummySel_E));
-
-  assign sRdE_out = sRd_E;
-
-  // ---------------------------------------------------------------------------
-  // sE stage: shadow forwarding + ALU
-  // ---------------------------------------------------------------------------
-  logic [P.XLEN-1:0] sALUResultE, sIEUAdrE;
-  logic [P.XLEN-1:0] sAltResultE, sIEUResultE;
+  // sE
+  logic [P.XLEN-1:0] sPCE, sPCLinkE, sImmExtE;
+  logic [31:0]       sInstrE;
+  logic              sCompressedE;
+  logic [1:0]        sForwardAE, sForwardBE;
+  logic [P.XLEN-1:0] sForwardedSrcAE, sForwardedSrcBE, sSrcAE, sSrcBE;
+  logic [P.XLEN-1:0] sALUResultE, sSumE, sAltResultE, sIEUResultE;
   logic [1:0]        sFlagsE;
+  logic              sBranchSignedE, sTakenE;
+  logic              sOpFaultE, sNPCFaultE;
+  logic              sRetE;
+  logic              NPCValid;
+  logic [P.XLEN-1:0] NPCExpected, sRestartPCE;
 
-  // V1: shadow operands come directly from OQ (main already forwarded correctly).
-  // No intra-shadow forwarding needed; eliminates combinational loop through shadow ALU.
+  // sM
+  logic [P.XLEN-1:0] sRestartPCM, sIEUResultM, sSumM, sSrcBM, sIEUAdrM, sRawLoadWordM, sValM;
+  logic [31:0]       sInstrM;
+  logic              sTakenM, sOpFaultM, sNPCFaultM;
+  logic              sPCSrcM, sRegWriteM, sALUClassM, sLoadChkM, sViaSQM, sAMOM;
+  logic [7:0]        sFaultM;
+  logic              rqSelM;
+  logic [CW-1:0]     sqIdxM;
 
-  // Shadow ALU — uses OQ operands directly
-  alu #(P) salu(
-    oq_SrcAE, oq_SrcBE,
-    oq_W64E, oq_UW64E, oq_SubArithE,
-    oq_ALUSelectE, oq_BSelectE, oq_ZBBSelectE,
-    oq_Funct3E, oq_Funct7E, oq_Rs2E,
-    oq_BALUControlE, oq_BMUActiveE, oq_CZeroE,
-    sALUResultE, sIEUAdrE
-  );
+  // sW
+  logic [P.XLEN-1:0] sRestartPCW, sValW;
+  logic [4:0]        sRdW;
+  logic              sRegWriteW, sViaSQW;
+  logic [7:0]        sFaultW;
 
-  // Shadow comparator (for branch verification) — uses OQ operands directly
-  comparator #(P.XLEN) scomp(oq_SrcAE, oq_SrcBE, oq_BranchSignedE, sFlagsE);
-  // FlagsE[0] = LT, FlagsE[1] = EQ; branch taken depends on funct3 — simplified:
-  // actual branch decision matches main's PCSrcE which we compare at sW via IQ.PCSrc
+  ///////////////////////////////////////////
+  // sD: an instruction leaves the IQ once its RQ entry is certain to be present
+  // when it reaches sM (every instruction in sE, sM, sW owns one RQ entry, in order).
+  ///////////////////////////////////////////
 
-  // AltResult mux (JAL/JALR link address = PCLink)
-  mux2 #(P.XLEN) saltresult(oq_ImmExtE, oq_PCLinkE, oq_JumpE, sAltResultE);
-  mux2 #(P.XLEN) sieuresult(sALUResultE, sAltResultE, oq_ALUResultSrcE, sIEUResultE);
+  assign AdvanceDE = iqValid & ~Fault &
+    ((rqCount + {{(CW-1){1'b0}}, rqPush}) >
+     ({{(CW-1){1'b0}}, sValidE} + {{(CW-1){1'b0}}, sValidM} + {{(CW-1){1'b0}}, sValidW}));
+  assign iqPop = AdvanceDE;
 
-  // ---------------------------------------------------------------------------
-  // sE → sM pipeline register
-  // ---------------------------------------------------------------------------
-  logic [P.XLEN-1:0] sPC_M;
-  logic [31:0]       sInstr32_M;
-  logic              sPCSrc_M;
-  logic [4:0]        sRs1_M, sRs2_M, sRd_M;
-  logic              sSkipVerify_M, sIsBranch_M, sInstrValid_M;
-  logic              sIsDummy_M, sDummySel_M;
-  logic [P.XLEN-1:0] sIEUResultM, sIEUAdrM;
-  logic [1:0]        sFlagsM;
-  logic [1:0]        sMemRW_M;
-  logic              sRegWrite_M;
+  always_ff @(posedge clk)
+    if (reset | Fault) sValidE <= 1'b0;
+    else               sValidE <= AdvanceDE;
 
-  flopenrc #(P.XLEN) sPC_M_reg      (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sPC_E),         .q(sPC_M));
-  flopenrc #(32)     sI32_M_reg     (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sInstr32_E),    .q(sInstr32_M));
-  flopenrc #(1)      sPCSrc_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sPCSrc_E),      .q(sPCSrc_M));
-  flopenrc #(5)      sRs1_M_reg     (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sRs1_E),        .q(sRs1_M));
-  flopenrc #(5)      sRs2_M_reg     (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sRs2_E),        .q(sRs2_M));
-  flopenrc #(5)      sRd_M_reg      (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sRd_E),         .q(sRd_M));
-  flopenrc #(1)      sSkip_M_reg    (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sSkipVerify_E), .q(sSkipVerify_M));
-  flopenrc #(1)      sBr_M_reg      (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sIsBranch_E),   .q(sIsBranch_M));
-  flopenrc #(1)      sValid_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sInstrValid_E), .q(sInstrValid_M));
-  flopenrc #(P.XLEN) sResult_M_reg  (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sIEUResultE),   .q(sIEUResultM));
-  flopenrc #(P.XLEN) sAddr_M_reg    (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sIEUAdrE),      .q(sIEUAdrM));
-  flopenrc #(2)      sFlags_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sFlagsE),       .q(sFlagsM));
-  flopenrc #(2)      sMemRW_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(oq_MemRWE),     .q(sMemRW_M));
-  flopenrc #(1)      sRegWr_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(oq_RegWriteE & sInstrValid_E), .q(sRegWrite_M));
-  flopenrc #(1)      sDummy_M_reg   (.clk, .reset, .en(~StallM), .clear(FlushM), .d(sIsDummy_E),    .q(sIsDummy_M));
-  flopenrc #(1)      sDummySel_M_reg(.clk, .reset, .en(~StallM), .clear(FlushM), .d(sDummySel_E),   .q(sDummySel_M));
+  always_ff @(posedge clk)
+    if (AdvanceDE) begin
+      sPCE         <= iqPC;
+      sInstrE      <= iqInstr;
+      sCompressedE <= iqCompressed;
+    end
 
-  assign sRdM_out            = sRd_M;
+  ///////////////////////////////////////////
+  // sE: operand sourcing, operand check, re-execution, next-PC continuity
+  ///////////////////////////////////////////
 
-  // sM: pop SQ on store; V1 does address-only check (no D-cache re-read)
-  assign sM_pop = sInstrValid_M & sMemRW_M[0] & ~StallM & ~FlushM; // store in sM advancing
+  assign sRs1E = sInstrE[19:15];
+  assign sRs2E = sInstrE[24:20];
 
-  // ---------------------------------------------------------------------------
-  // sM → sW pipeline register
-  // ---------------------------------------------------------------------------
-  logic [P.XLEN-1:0] sPC_W;
-  logic [31:0]       sInstr32_W;
-  logic              sPCSrc_W;
-  logic [4:0]        sRd_W;
-  logic              sSkipVerify_W, sIsBranch_W, sInstrValid_W;
-  logic              sIsDummy_W, sDummySel_W;
-  logic [P.XLEN-1:0] sIEUResultW;
-  logic [1:0]        sFlagsW;
+  shadow_hzu hzu(.sRs1E, .sRs2E, .sRdM(sInstrM[11:7]), .sRdW,
+    .sRegWriteM(sValidM & sRegWriteM), .sRegWriteW(sValidW & sRegWriteW),
+    .sForwardAE, .sForwardBE);
 
-  flopenrc #(P.XLEN) sPC_W_reg      (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sPC_M),         .q(sPC_W));
-  flopenrc #(32)     sI32_W_reg     (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sInstr32_M),    .q(sInstr32_W));
-  flopenrc #(1)      sPCSrc_W_reg   (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sPCSrc_M),      .q(sPCSrc_W));
-  flopenrc #(5)      sRd_W_reg      (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sRd_M),         .q(sRd_W));
-  flopenrc #(1)      sSkip_W_reg    (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sSkipVerify_M), .q(sSkipVerify_W));
-  flopenrc #(1)      sBr_W_reg      (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sIsBranch_M),   .q(sIsBranch_W));
-  flopenrc #(1)      sValid_W_reg   (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sInstrValid_M), .q(sInstrValid_W));
-  flopenrc #(P.XLEN) sResult_W_reg  (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sIEUResultM),   .q(sIEUResultW));
-  flopenrc #(2)      sFlags_W_reg   (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sFlagsM),       .q(sFlagsW));
-  flopenrc #(1)      sDummy_W_reg   (.clk, .reset, .en(~StallW), .clear(FlushW), .d(sIsDummy_M),    .q(sIsDummy_W));
-  flopenrc #(1)      sDummySel_W_reg(.clk, .reset, .en(~StallW), .clear(FlushW), .d(sDummySel_M),   .q(sDummySel_W));
+  mux3 #(P.XLEN) sfaemux(sRD1E, sValW, sValM, sForwardAE, sForwardedSrcAE);
+  mux3 #(P.XLEN) sfbemux(sRD2E, sValW, sValM, sForwardBE, sForwardedSrcBE);
 
-  // ---------------------------------------------------------------------------
-  // sW stage: verification and register file write
-  // ---------------------------------------------------------------------------
-  logic              sv_match, sv_mismatch;
-  logic [P.XLEN-1:0] sv_fault_pc;
-  // Branch taken: check FlagsW against branch opcode
-  // Simplified: use FlagsW[1] (EQ) and FlagsW[0] (LT), branch direction from funct3
-  logic              sBranchTakenW;
-  logic [2:0]        sBrFunct3W;
-  assign sBrFunct3W    = sInstr32_W[14:12];
-  always_comb
-    case (sBrFunct3W)
-      3'b000: sBranchTakenW =  sFlagsW[1];         // BEQ
-      3'b001: sBranchTakenW = ~sFlagsW[1];         // BNE
-      3'b100: sBranchTakenW =  sFlagsW[0];         // BLT
-      3'b101: sBranchTakenW = ~sFlagsW[0];         // BGE
-      3'b110: sBranchTakenW =  sFlagsW[0];         // BLTU
-      3'b111: sBranchTakenW = ~sFlagsW[0];         // BGEU
-      default: sBranchTakenW = 1'b0;
-    endcase
+  // The main pipeline must have used exactly the operands the shadow derives from
+  // verified state.  This covers the forwarding selects, RQ forwarding and regfile read.
+  assign sOpFaultE = (sForwardedSrcAE != oqForwardedSrcA) | (sForwardedSrcBE != oqForwardedSrcB);
 
-  shadow_verifier #(P) sv (
-    .sInstr32(sInstr32_W),
-    .sALUResult(sIEUResultW),
-    .rq_IntResult(rq_IntResult),
-    .rq_IntWriteEn(rq_IntWriteEn),
-    .rq_SkipVerify(rq_SkipVerify | sSkipVerify_W),
-    .rq_InstrValid(rq_InstrValid & sInstrValid_W),
-    .sBranchTaken(sBranchTakenW),
-    .rq_PCSrc(sPCSrc_W),
-    .isBranch(sIsBranch_W),
-    .rq_PC(rq_PC),
-    .SecFaultMatch(sv_match),
-    .SecFaultMismatch(sv_mismatch),
-    .SecFaultPC(sv_fault_pc)
-  );
+  extend #(P) sext(.InstrD(sInstrE[31:7]), .ImmSrcD(oqImmSrc), .ImmExtD(sImmExtE));
+  assign sPCLinkE = sPCE + (sCompressedE ? 'd2 : 'd4);
 
-  // sW outputs
-  assign sW_pop = ~StallW & ~FlushW;
+  mux2 #(P.XLEN) ssrcamux(sForwardedSrcAE, sPCE, oqALUSrcA, sSrcAE);
+  mux2 #(P.XLEN) ssrcbmux(sForwardedSrcBE, sImmExtE, oqALUSrcB, sSrcBE);
 
-  // VBC: stubbed for V1
-  assign VBC_StallE = 1'b0;
+  alu #(P) salu(sSrcAE, sSrcBE, oqW64, oqUW64, oqSubArith, oqALUSelect, oqBSelect, oqZBBSelect,
+    sInstrE[14:12], sInstrE[31:25], sInstrE[24:20], oqBALUControl, oqBMUActive, oqCZero,
+    sALUResultE, sSumE);
 
-  // Fault detection: use verifier's sv_mismatch (verifier handles SkipVerify + InstrValid).
-  assign SecFaultW   = sv_mismatch;
-  assign SecFaultPC_W = sv_fault_pc;
+  assign sBranchSignedE = ~(sInstrE[14:13] == 2'b11) & oqBranch;
+  comparator #(P.XLEN) scomp(sForwardedSrcAE, sForwardedSrcBE, sBranchSignedE, sFlagsE);
+  assign sTakenE = oqJump | (oqBranch & ((sInstrE[14] ? sFlagsE[0] : sFlagsE[1]) ^ sInstrE[12]));
 
-  // Regfile write: shadow drives write port with RQ committed value.
-  // Write whenever RQ has a valid committing entry, regardless of shadow's own
-  // validity.  When shadow has a bubble (flush-induced gap from IQ flush), we
-  // trust the main pipeline's RQ result and skip verification for that entry.
-  // This is necessary because FlushD (CSR fence, misprediction) flushes the IQ
-  // and creates N-cycle holes in the shadow pipeline while RQ continues filling.
-  wire write_enable = rq_InstrValid & ~FlushW & (rq_IntWriteEn | rq_DummyW);
-  assign shadow_we3      = write_enable;
-  assign shadow_a3       = rq_Rd;          // 5-bit; regfile uses DummyW to redirect
-  assign shadow_wd3      = rq_IntResult;
-  assign shadow_DummyW   = rq_DummyW   & write_enable;
-  assign shadow_DummySel = rq_DummySelW;
+  mux2 #(P.XLEN) saltresultmux(sImmExtE, sPCLinkE, oqJump, sAltResultE);
+  mux2 #(P.XLEN) sieuresultmux(sALUResultE, sAltResultE, oqALUResultSrc, sIEUResultE);
+
+  // Next-PC continuity: each retired instruction must sit where its predecessor leads
+  // (fall-through, or the shadow's own branch/jump target).  A trap and an xRET break
+  // the chain; the first instruction after one is not checked.  When the chain is
+  // intact the expected PC, not the PC the main pipeline actually fetched, is where a
+  // replay must resume -- for a next-PC fault the two differ.
+  assign sNPCFaultE  = NPCValid & (sPCE != NPCExpected);
+  assign sRestartPCE = NPCValid ? NPCExpected : sPCE;
+  assign sRetE = (sInstrE[6:0] == 7'b1110011) & (sInstrE[19:7] == 13'b0) &
+                 ((sInstrE[31:20] == 12'b000100000010) | (sInstrE[31:20] == 12'b001100000010));
+
+  always_ff @(posedge clk)
+    if (reset | StreamBreak) NPCValid <= 1'b0;
+    else if (Fault)          NPCValid <= 1'b1;     // the replay must start at FaultPC
+    else if (sValidE)        NPCValid <= ~sRetE;
+
+  always_ff @(posedge clk)
+    if (Fault)        NPCExpected <= FaultPC;
+    else if (sValidE) NPCExpected <= sTakenE ? {sSumE[P.XLEN-1:1], 1'b0} : sPCLinkE;
+
+  assign oqPop = sValidE & ~Fault;
+
+  ///////////////////////////////////////////
+  // sE -> sM
+  ///////////////////////////////////////////
+
+  always_ff @(posedge clk)
+    if (reset | Fault) sValidM <= 1'b0;
+    else               sValidM <= sValidE;
+
+  always_ff @(posedge clk)
+    if (sValidE) begin
+      sRestartPCM   <= sRestartPCE;
+      sInstrM       <= sInstrE;
+      sIEUResultM   <= sIEUResultE;
+      sSumM         <= sSumE;
+      sTakenM       <= sTakenE;
+      sSrcBM        <= sForwardedSrcBE;
+      sOpFaultM     <= sOpFaultE;
+      sNPCFaultM    <= sNPCFaultE;
+      sIEUAdrM      <= oqIEUAdr;
+      sRawLoadWordM <= oqRawLoadWord;
+      sPCSrcM       <= oqPCSrc;
+      sRegWriteM    <= oqRegWrite;
+      sALUClassM    <= (oqResultSrc == 3'b000) & ~oqFWriteInt;
+      sLoadChkM     <= oqLoadChk;
+      sViaSQM       <= oqViaSQ;
+      sAMOM         <= oqAMO;
+    end
+
+  ///////////////////////////////////////////
+  // sM: verification against the RQ and SQ records
+  ///////////////////////////////////////////
+
+  // sW owns RQ entry 0 when occupied, so sM's entry is right behind it.  Likewise the
+  // store in sM owns the oldest unverified SQ entry unless sW holds an older store.
+  assign rqSelM = sValidW;
+  assign sqIdxM = sqNVerified + {{(CW-1){1'b0}}, sValidW & sViaSQW};
+
+  shadow_verifier #(P) verifier(
+    .sOpFault(sOpFaultM), .sNPCFault(sNPCFaultM),
+    .sInstr(sInstrM), .sIEUResult(sIEUResultM), .sSum(sSumM), .sTaken(sTakenM), .sSrcB(sSrcBM),
+    .mIEUAdr(sIEUAdrM), .mRawLoadWord(sRawLoadWordM), .mPCSrc(sPCSrcM), .mRegWrite(sRegWriteM),
+    .mALUClass(sALUClassM), .mLoadChk(sLoadChkM), .mViaSQ(sViaSQM), .mAMO(sAMOM),
+    .rqRd(rqRd[rqSelM]), .rqRegWrite(rqRegWrite[rqSelM]), .rqResult(rqResult[rqSelM]),
+    .sqValid(sqIdxM < sqCount), .sqPA(sqPA[sqIdxM[$clog2(DEPTH)-1:0]]),
+    .sqSize(sqSize[sqIdxM[$clog2(DEPTH)-1:0]]), .sqData(sqData[sqIdxM[$clog2(DEPTH)-1:0]]),
+    .Fault(sFaultM));
+
+  // Value this instruction leaves in its destination register: the shadow's own result
+  // where it can recompute it, otherwise the main pipeline's result record.
+  assign sValM = sALUClassM ? sIEUResultM : rqResult[rqSelM];
+
+  ///////////////////////////////////////////
+  // sM -> sW
+  ///////////////////////////////////////////
+
+  always_ff @(posedge clk)
+    if (reset | Fault) sValidW <= 1'b0;
+    else               sValidW <= sValidM;
+
+  always_ff @(posedge clk)
+    if (sValidM) begin
+      sRestartPCW <= sRestartPCM;
+      sRdW       <= sInstrM[11:7];
+      sRegWriteW <= sRegWriteM;
+      sViaSQW    <= sViaSQM;
+      sValW      <= sValM;
+      sFaultW    <= sFaultM;
+    end
+
+  ///////////////////////////////////////////
+  // sW: commit or fault
+  ///////////////////////////////////////////
+
+  assign Fault       = sValidW & (|sFaultW);
+  assign FaultPC     = sRestartPCW;
+  assign FaultClass  = sFaultW;
+  assign Commit      = sValidW & ~(|sFaultW);
+  assign CommitStore = Commit & sViaSQW;
+
+  assign shadow_we3 = Commit & sRegWriteW;
+  assign shadow_a3  = sRdW;
+  assign shadow_wd3 = sValW;
 
 endmodule

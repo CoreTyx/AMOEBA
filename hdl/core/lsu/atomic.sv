@@ -32,6 +32,7 @@ module atomic import cvw::*;  #(parameter cvw_t P) (
   input logic                 clk,
   input logic                 reset,
   input logic                 StallW,
+  input logic                 ShardRedirectM, // SHARD recovery or retry: discard the reservation
   input logic [P.XLEN-1:0]    ReadDataM,      // LSU ReadData XLEN because FPU does not issue atomic memory operation from FPU registers
   input logic [P.XLEN-1:0]    IHWriteDataM,   // LSU WriteData XLEN because FPU does not issue atomic memory operation from FPU registers
   input logic [P.PA_BITS-1:0] PAdrM,          // Physical memory address
@@ -58,7 +59,7 @@ module atomic import cvw::*;  #(parameter cvw_t P) (
   // LRSC unit
   if (P.ZALRSC_SUPPORTED) begin
     assign MemReadM = PreLSURWM[1] & ~LSUFlushW;
-    lrsc #(P) lrsc(.clk, .reset, .StallW, .MemReadM, .PreLSURWM, .LSUAtomicM, .PAdrM, .SquashSCW, .LSURWM);
+    lrsc #(P) lrsc(.clk, .reset, .StallW, .ShardRedirectM, .MemReadM, .PreLSURWM, .LSUAtomicM, .PAdrM, .SquashSCW, .LSURWM);
   end else begin
     assign SquashSCW = 0;
     assign LSURWM = PreLSURWM;

@@ -90,42 +90,28 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic [31:0]       DummyInstrD,                     // Dummy instruction to inject
   input  logic              DummySelD,                       // Which shadow physical register the dummy writes
   output logic              DummyW,                          // Writeback stage holds a dummy instruction
-  // SHARD shadow write port (driven by shadow_pipeline, drives regfile exclusively)
+  // SHARD: register file ports owned by the shadow pipeline (sole writer, two read ports)
   input  logic              shadow_we3,
   input  logic [4:0]        shadow_a3,
   input  logic [P.XLEN-1:0] shadow_wd3,
-  input  logic              shadow_DummyW,
-  input  logic              shadow_DummySel,
-  // SHARD RQ associative forwarding (driven by shadow_rq)
+  input  logic [4:0]        sRs1E, sRs2E,
+  output logic [P.XLEN-1:0] sRD1E, sRD2E,
+  // SHARD: RQ associative forwarding (driven by shadow_rq)
+  output logic [4:0]        Rs1E, Rs2E,                      // Execute-stage source registers for the RQ lookup
   input  logic              RQ_HitA,
   input  logic [P.XLEN-1:0] RQ_ValA,
   input  logic              RQ_HitB,
   input  logic [P.XLEN-1:0] RQ_ValB,
-  // SHARD OQ push: E-stage post-mux values exported for shadow_oq
-  output logic [P.XLEN-1:0] SrcAE_out,
-  output logic [P.XLEN-1:0] SrcBE_out,
-  output logic [P.XLEN-1:0] ImmExtE_out,
-  // SHARD OQ push: E-stage control signals
-  output logic              UW64E_out,
-  output logic              SubArithE_out,
-  output logic [2:0]        ALUSelectE_out,
-  output logic [3:0]        BSelectE_out,
-  output logic [3:0]        ZBBSelectE_out,
-  output logic [2:0]        BALUControlE_out,
-  output logic              BMUActiveE_out,
-  output logic [1:0]        CZeroE_out,
-  output logic [6:0]        Funct7E_out,
-  output logic [4:0]        Rs2E_out,
-  output logic              ALUResultSrcE_out,
-  output logic              BranchSignedE_out,
-  output logic              RegWriteE_out,
-  // SHARD RQ push: W-stage signals
-  output logic              RegWriteW_out,
-  output logic              DummySelW_out,
-  output logic [P.XLEN-1:0] ResultW_out,
-  // SHARD RQ forwarding scan: D-stage source registers (wallypipelinedcore pipes them to E)
-  output logic [4:0]        Rs1D_out,
-  output logic [4:0]        Rs2D_out
+  // SHARD: what the main pipeline used, recorded for the shadow
+  output logic [P.XLEN-1:0] SrcAE, SrcBE,                    // ALU operands
+  output logic [P.XLEN-1:0] ForwardedSrcAM,                  // rs1 value in Memory stage
+  output logic [27:0]       ShardCtlM,                       // datapath controls in Memory stage
+  output logic              PCSrcM,                          // branch or jump redirected the PC
+  output logic              RegWriteM,                       // integer register write, Memory stage
+  output logic [2:0]        ResultSrcM,                      // result select, Memory stage
+  output logic              FWriteIntM,                      // FPU result written to an integer register
+  output logic              RegWriteW,                       // integer register write, Writeback stage
+  output logic [P.XLEN-1:0] ResultW                          // Writeback-stage result
 );
 
   logic [2:0] ImmSrcD;                                       // Select type of immediate extension
@@ -134,7 +120,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] ResultSrcW;                                    // Selects result in Writeback stage
   logic       ALUResultSrcE;                                 // Selects ALU result to pass on to Memory stage
   logic [2:0] ALUSelectE;                                    // ALU select mux signal
-  logic       FWriteIntM;                                    // FPU writing to integer register file
   logic       IntDivW;                                       // Integer divide instruction
   logic [3:0] BSelectE;                                      // Indicates if ZBA_ZBB_ZBC_ZBS instruction in one-hot encoding
   logic [3:0] ZBBSelectE;                                    // ZBB Result Select Signal in Execute Stage
@@ -148,24 +133,23 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // predictor and the FPU keep decoding the real instruction, which is being held
   // in Decode for one cycle and will issue normally next cycle.
   logic [31:0] InstrDMux;
-  logic        DummySelW;
   assign InstrDMux = InjectD ? DummyInstrD : InstrD;
 
   // Forwarding signals
   logic [4:0] Rs1D, Rs2D;
-  logic [4:0] Rs2E;                                          // Source registers
   logic [1:0] ForwardAE, ForwardBE;                          // Select signals for forwarding multiplexers
-  logic       RegWriteW;                                     // Register will be written in Writeback stage
   logic       BranchSignedE;                                 // Branch does signed comparison on operands
   logic       BMUActiveE;                                    // Bit manipulation instruction being executed
   logic [1:0] CZeroE;                                        // {czero.nez, czero.eqz} instructions active
   logic       RegWriteE;                                     // E-stage register write enable
+  logic [2:0] ImmSrcE;                                       // Immediate format, Execute stage
+  logic [27:0] ShardCtlE;                                    // Datapath controls recorded for the shadow
 
   controller #(P) c(
     .clk, .reset, .StallD, .FlushD, .InstrD(InstrDMux), .STATUS_FS, .ENVCFG_CBE, .ImmSrcD,
-    .InjectD, .DummySelD, .DummyW, .DummySelW,
+    .InjectD, .DummySelD, .DummyW, .DummySelW(),
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
-    .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
+    .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D, .Rs1E, .Rs2E,
     .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(1'b0),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
@@ -173,37 +157,27 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .FCvtIntE, .ForwardAE, .ForwardBE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
     .StallM, .FlushM, .MemRWE, .MemRWM, .CSRReadM, .CSRWriteM, .PrivilegedM, .AtomicM, .Funct3M,
     .FlushDCacheM, .InstrValidM, .InstrValidE, .InstrValidD, .FWriteIntM,
-    .StallW, .FlushW, .RegWriteE, .RegWriteW, .IntDivW, .ResultSrcW, .CSRWriteFenceM, .InvalidateICacheM,
+    .StallW, .FlushW, .RegWriteE, .RegWriteM, .ResultSrcM, .RegWriteW, .IntDivW, .ResultSrcW, .CSRWriteFenceM, .InvalidateICacheM,
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
     .clk, .reset, .ecc_inject_en,
-    .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
+    .ImmSrcD, .InstrD(InstrDMux), .Rs1E, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
-    .shadow_we3, .shadow_a3, .shadow_wd3, .shadow_DummyW, .shadow_DummySel,
+    .shadow_we3, .shadow_a3, .shadow_wd3, .sRs1E, .sRs2E, .sRD1E, .sRD2E,
     .RQ_HitA, .RQ_ValA, .RQ_HitB, .RQ_ValB,
-    .SrcAE_out, .SrcBE_out, .ImmExtE_out, .ResultW_out,
+    .SrcAE_out(SrcAE), .SrcBE_out(SrcBE), .ForwardedSrcAM, .ResultW_out(ResultW),
     .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW);
-  // SHARD passthrough assignments
-  assign UW64E_out        = UW64E;
-  assign SubArithE_out    = SubArithE;
-  assign ALUSelectE_out   = ALUSelectE;
-  assign BSelectE_out     = BSelectE;
-  assign ZBBSelectE_out   = ZBBSelectE;
-  assign BALUControlE_out = BALUControlE;
-  assign BMUActiveE_out   = BMUActiveE;
-  assign CZeroE_out       = CZeroE;
-  assign Funct7E_out      = Funct7E;
-  assign Rs2E_out         = Rs2E;
-  assign ALUResultSrcE_out = ALUResultSrcE;
-  assign BranchSignedE_out = BranchSignedE;
-  assign RegWriteE_out    = RegWriteE;
-  assign RegWriteW_out    = RegWriteW;
-  assign DummySelW_out    = DummySelW;
-  assign Rs1D_out         = Rs1D;
-  assign Rs2D_out         = Rs2D;
+
+  // SHARD: the shadow re-executes each retired instruction with the main pipeline's
+  // decoded datapath controls, captured as the instruction moves to the Memory stage.
+  flopenrc #(3) ImmSrcEReg(clk, reset, FlushE, ~StallE, ImmSrcD, ImmSrcE);
+  assign ShardCtlE = {ALUSrcAE, ALUSrcBE, ImmSrcE, W64E, UW64E, SubArithE, ALUSelectE, BSelectE,
+                      ZBBSelectE, BALUControlE, BMUActiveE, CZeroE, ALUResultSrcE, JumpE, BranchE};
+  flopenrc #(28) ShardCtlMReg(clk, reset, FlushM, ~StallM, ShardCtlE, ShardCtlM);
+  flopenrc #(1)  PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcE, PCSrcM);
 endmodule

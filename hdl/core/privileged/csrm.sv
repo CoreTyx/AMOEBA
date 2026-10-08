@@ -43,6 +43,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [6:0]               SecFaultM,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
   output logic [P.XLEN-1:0]        MEPC_REGW,
+  output logic [P.XLEN-1:0]        MSCRATCH_REGW, MTVAL_REGW, MCAUSE_REGW, // SHARD: compared against the CSR mirror
   output logic [31:0]              MCOUNTEREN_REGW, MCOUNTINHIBIT_REGW,
   output logic [15:0]              MEDELEG_REGW,
   output logic [11:0]              MIDELEG_REGW,
@@ -58,7 +59,6 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
 
   logic [P.PA_BITS-3:0]            PMPADDR_ARRAY_PREGRAIN_REGW[P.PMP_ENTRIES-1:0];
   logic [P.XLEN-1:0]               MISA_REGW, MHARTID_REGW;
-  logic [P.XLEN-1:0]               MSCRATCH_REGW, MTVAL_REGW, MCAUSE_REGW;
   logic [P.XLEN-1:0]               MENVCFGH_REGW;
   logic [P.XLEN-1:0]               TVECWriteValM;
   logic                            WriteMTVECM, WriteMEDELEGM, WriteMIDELEGM;

@@ -38,6 +38,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        PCM,                       // program counter, next PC going to trap/return logic
   input  logic [P.XLEN-1:0]        PCSpillM,                  // program counter, next PC going to trap/return logic aligned after an instruction spill
   input  logic [P.XLEN-1:0]        SrcAM, IEUAdrxTvalM,       // SrcA and memory address from IEU
+  input  logic [P.XLEN-1:0]        ForwardedSrcAM,            // SHARD: rs1 value on the path that is checked against the register file
   input  logic                     CSRReadM, CSRWriteM,       // read or write CSR
   input  logic                     PrivModeSecFaultW,         // TMR correctable fault from privmode
   input  logic                     PrivModeUncorrectableFaultW, // TMR uncorrectable fault from privmode
@@ -45,6 +46,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic                     RegEccDedErrW,             // IEU ECC DED, retained for MSECFAULT logging
   input  logic                     ShadowFaultW,              // SHARD shadow pipeline mismatch
   input  logic [P.XLEN-1:0]        EccDedFaultEPCM, EccDedFaultMtvalM, // captured DED trap metadata
+  input  logic [P.XLEN-1:0]        ShadowFaultEPCM, ShadowFaultMtvalM, // captured SHARD fault trap metadata
   input  logic                     TrapM,                     // trap is occurring
   input  logic                     mretM, sretM,              // return instruction
   input  logic                     InterruptM,                // interrupt is occurring
@@ -100,6 +102,9 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0]        CSRReadValW,               // value read from CSR
   output logic                     IllegalCSRAccessM,         // Illegal CSR access: CSR doesn't exist or is inaccessible at this privilege level
   output logic                     BigEndianM,                // memory access is big-endian based on privilege mode and STATUS register endian fields
+  output logic                     CSRFaultM,                 // SHARD: CSR instruction's read or write value fails verification
+  output logic                     CSRStateFaultM,            // SHARD: CSR mirror differs from the CSR file
+  input  logic                     CSRMirrorResyncM,          // SHARD: reload the CSR mirror after reporting a state fault
   output logic [31:0]              RAND_INSTR_INSERT_FREQ_REGW // AMOEBA: dummy instruction insertion divider period
 );
 
@@ -114,6 +119,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]       MSTATUS_REGW, SSTATUS_REGW, MSTATUSH_REGW;
   logic [P.XLEN-1:0]       STVEC_REGW, MTVEC_REGW;
   logic [P.XLEN-1:0]       MEPC_REGW, SEPC_REGW;
+  logic [P.XLEN-1:0]       MSCRATCH_REGW, MTVAL_REGW, MCAUSE_REGW, SSCRATCH_REGW, STVAL_REGW, SCAUSE_REGW;
   logic [31:0]             MCOUNTINHIBIT_REGW, MCOUNTEREN_REGW, SCOUNTEREN_REGW;
   logic                    WriteMSTATUSM, WriteMSTATUSHM, WriteSSTATUSM;
   logic                    CSRMWriteM, CSRSWriteM, CSRUWriteM;
@@ -155,6 +161,8 @@ module csr import cvw::*;  #(parameter cvw_t P) (
       0, 4, 6, 13, 15, 5, 7:  NextFaultMtvalM = IEUAdrxTvalM; // Instruction misaligned, Load/Store Misaligned/page/access faults
       // Hardware error (ECC DED): use metadata captured when the error was detected.
       19:                     NextFaultMtvalM = EccDedFaultMtvalM;
+      // SHARD fault: which checks failed
+      16:                     NextFaultMtvalM = ShadowFaultMtvalM;
       default:                NextFaultMtvalM = '0; // Ecall, interrupts
     endcase
 
@@ -207,12 +215,55 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   end
 
   ///////////////////////////////////////////
+  // SHARD CSR verification.
+  // shadow_csr holds an independent copy of the trap-handling and translation CSRs.
+  // Before a CSR instruction commits:
+  //  - the value it read must equal the mirror's (mirrored CSRs), and
+  //  - the value it is about to write must equal one recomputed by a second copy of
+  //    the csrrw/csrrs/csrrc datapath, from the mirror's old value where there is one.
+  // The source operand was checked against the register file before this point (CSR
+  // writes wait for the shadow to be quiescent).  A mismatch makes the instruction
+  // replay instead of committing.  In addition the mirror compares its whole state
+  // with the CSR file every cycle (CSRStateFaultM).
+  ///////////////////////////////////////////
+  logic [P.XLEN-1:0] ShadowCSRSrcM, ShadowCSROldValM, ShadowCSRWriteValM, MirrorReadValM;
+  logic              MirrorHitM;
+
+  // The checking side takes rs1 from ForwardedSrcAM, a different register from the
+  // main CSR datapath's SrcAM, and the one compared with the register file.
+  assign ShadowCSRSrcM = InstrM[14] ? {{(P.XLEN-5){1'b0}}, InstrM[19:15]} : ForwardedSrcAM;
+
+  shadow_csr #(P) shadowcsr(.clk, .reset, .StallW,
+    .CSRWriteCommitM(CSRWriteM & InstrValidNotFlushedM), .CSRAdrM, .CSROpM(InstrM[13:12]), .CSRSrcM(ShadowCSRSrcM),
+    .TrapM, .InterruptM, .CauseM, .mretM, .sretM, .PCM, .EccDedFaultEPCM, .ShadowFaultEPCM,
+    .NextFaultMtvalM, .FSDirtyM(FRegWriteM | WriteFRMM | SetOrWriteFFLAGSM), .Resync(CSRMirrorResyncM),
+    .PrivilegeModeW, .MSTATUS_REGW, .MSTATUSH_REGW, .MEDELEG_REGW, .MIDELEG_REGW,
+    .MTVEC_REGW, .MSCRATCH_REGW, .MEPC_REGW, .MCAUSE_REGW, .MTVAL_REGW,
+    .STVEC_REGW, .SSCRATCH_REGW, .SEPC_REGW, .SCAUSE_REGW, .STVAL_REGW, .SATP_REGW,
+    .MirrorHitM, .MirrorReadValM, .StateFault(CSRStateFaultM));
+
+  assign ShadowCSROldValM = MirrorHitM ? MirrorReadValM : CSRReadVal2M;
+  always_comb
+    case (InstrM[13:12])
+      2'b01:   ShadowCSRWriteValM = ShadowCSRSrcM;                     // csrrw[i]
+      2'b10:   ShadowCSRWriteValM = ShadowCSROldValM | ShadowCSRSrcM;  // csrrs[i]
+      2'b11:   ShadowCSRWriteValM = ShadowCSROldValM & ~ShadowCSRSrcM; // csrrc[i]
+      default: ShadowCSRWriteValM = CSRReadValM;
+    endcase
+  // An illegal access traps instead of committing, so it is not checked
+  assign CSRFaultM = InstrValidM & ~IllegalCSRAccessM &
+                     ((CSRReadM & MirrorHitM & (MirrorReadValM != CSRReadValM)) |
+                      (CSRWriteM & (ShadowCSRWriteValM != CSRWriteValM)));
+
+  ///////////////////////////////////////////
   // CSR Write values
   ///////////////////////////////////////////
 
   assign CSRAdrM = InstrM[31:20];
   // A registered DED record supplies MEPC only when cause 19 actually wins trap priority.
-  assign UnalignedNextEPCM = TrapM ? ((CauseM == 5'd19) ? EccDedFaultEPCM : PCM) : CSRWriteValM;
+  // Likewise a SHARD fault trap reports the instruction that failed verification.
+  assign UnalignedNextEPCM = TrapM ? ((CauseM == 5'd19) ? EccDedFaultEPCM :
+                                      (CauseM == 5'd16) ? ShadowFaultEPCM : PCM) : CSRWriteValM;
   assign NextEPCM = P.ZCA_SUPPORTED ? {UnalignedNextEPCM[P.XLEN-1:1], 1'b0} : {UnalignedNextEPCM[P.XLEN-1:2], 2'b00}; // 3.1.15 alignment
   assign NextCauseM = TrapM ? {InterruptM, CauseM}: {CSRWriteValM[P.XLEN-1], CSRWriteValM[4:0]};
   assign NextMtvalM = TrapM ? NextFaultMtvalM : CSRWriteValM;
@@ -255,7 +306,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
     .UngatedCSRMWriteM, .CSRMWriteM, .MTrapM, .CSRAdrM,
     .NextEPCM, .NextCauseM, .NextMtvalM, .MSTATUS_REGW, .MSTATUSH_REGW,
     .CSRWriteValM, .CSRMReadValM, .MTVEC_REGW,
-    .MEPC_REGW, .MCOUNTEREN_REGW, .MCOUNTINHIBIT_REGW,
+    .MEPC_REGW, .MSCRATCH_REGW, .MTVAL_REGW, .MCAUSE_REGW, .MCOUNTEREN_REGW, .MCOUNTINHIBIT_REGW,
     .MEDELEG_REGW, .MIDELEG_REGW,.PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
     .MIP_REGW, .MIE_REGW, .SecFaultM, .WriteMSTATUSM, .WriteMSTATUSHM,
     .IllegalCSRMAccessM, .IllegalCSRMWriteReadonlyM,
@@ -270,7 +321,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
       .NextEPCM, .NextCauseM, .NextMtvalM, .SSTATUS_REGW,
       .STATUS_TVM,
       .CSRWriteValM, .PrivilegeModeW,
-      .CSRSReadValM, .STVEC_REGW, .SEPC_REGW,
+      .CSRSReadValM, .STVEC_REGW, .SEPC_REGW, .SSCRATCH_REGW, .STVAL_REGW, .SCAUSE_REGW,
       .SCOUNTEREN_REGW,
       .SATP_REGW, .MIP_REGW, .MIE_REGW, .MIDELEG_REGW, .MTIME_CLINT, .STCE,
       .WriteSSTATUSM, .IllegalCSRSAccessM, .STimerInt, .SENVCFG_REGW);
@@ -278,6 +329,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
     assign WriteSSTATUSM = 1'b0;
     assign CSRSReadValM = '0;
     assign SEPC_REGW = '0;
+    assign {SSCRATCH_REGW, STVAL_REGW, SCAUSE_REGW} = '0;
     assign STVEC_REGW = '0;
     assign SCOUNTEREN_REGW = '0;
     assign SATP_REGW = '0;

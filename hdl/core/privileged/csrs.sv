@@ -40,6 +40,7 @@ module csrs import cvw::*;  #(parameter cvw_t P) (
   input  logic [1:0]        PrivilegeModeW,
   output logic [P.XLEN-1:0] CSRSReadValM, STVEC_REGW,
   output logic [P.XLEN-1:0] SEPC_REGW,
+  output logic [P.XLEN-1:0] SSCRATCH_REGW, STVAL_REGW, SCAUSE_REGW, // SHARD: compared against the CSR mirror
   output logic [31:0]       SCOUNTEREN_REGW,
   output logic [P.XLEN-1:0] SATP_REGW,
   input  logic [11:0]       MIP_REGW, MIE_REGW, MIDELEG_REGW,
@@ -74,7 +75,6 @@ module csrs import cvw::*;  #(parameter cvw_t P) (
   logic                    WriteSTIMECMPM, WriteSTIMECMPHM;
   logic                    WriteSENVCFGM;
 
-  logic [P.XLEN-1:0]       SSCRATCH_REGW, STVAL_REGW, SCAUSE_REGW;
   logic [P.XLEN-1:0]       SENVCFG_WriteValM;
   logic [P.XLEN-1:0]               TVECWriteValM;
 

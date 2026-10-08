@@ -39,7 +39,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Decode stage signals
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
-  input  logic [4:0]        Rs1D, Rs2D, Rs2E,             // Source registers
+  input  logic [4:0]        Rs1E, Rs2E,              // Source registers of the instruction in Execute
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -79,23 +79,23 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] MDUResultW,              // MDU (Multiply/divide unit) result
   input  logic [P.XLEN-1:0] FIntDivResultW,          // FPU's integer divide result
   input  logic [4:0]        RdW,                     // Destination register
-  // Shadow write port — shadow pipeline drives regfile exclusively
+  // SHARD: the shadow pipeline is the only writer of the register file, and reads it
+  // through its own two ports
   input  logic              shadow_we3,
   input  logic [4:0]        shadow_a3,
   input  logic [P.XLEN-1:0] shadow_wd3,
-  input  logic              shadow_DummyW,
-  input  logic              shadow_DummySel,
-  // RQ associative forwarding — N-entry scan result from shadow_rq
+  input  logic [4:0]        sRs1E, sRs2E,
+  output logic [P.XLEN-1:0] sRD1E, sRD2E,
+  // SHARD: RQ associative forwarding of retired-but-uncommitted results
   input  logic              RQ_HitA,
   input  logic [P.XLEN-1:0] RQ_ValA,
   input  logic              RQ_HitB,
   input  logic [P.XLEN-1:0] RQ_ValB,
-  // Outputs needed by shadow OQ push (main E-stage post-mux values)
-  output logic [P.XLEN-1:0] SrcAE_out,
+  // SHARD: values recorded for the shadow
+  output logic [P.XLEN-1:0] SrcAE_out,               // ALU operands after the PC/immediate muxes
   output logic [P.XLEN-1:0] SrcBE_out,
-  output logic [P.XLEN-1:0] ImmExtE_out,
-  // Output needed by shadow RQ push (main W-stage result)
-  output logic [P.XLEN-1:0] ResultW_out,
+  output logic [P.XLEN-1:0] ForwardedSrcAM,          // rs1 value used, in Memory stage (rs2 is WriteDataM)
+  output logic [P.XLEN-1:0] ResultW_out,             // W-stage result on its way to the RQ
   // ECC error aggregation outputs
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
   output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
@@ -104,7 +104,6 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   // Fetch stage signals
   // Decode stage signals
-  logic [P.XLEN-1:0] R1D, R2D;                       // Read data from Rs1 (RD1), Rs2 (RD2)
   logic [P.XLEN-1:0] ImmExtD;                        // Extended immediate in Decode stage
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
@@ -124,41 +123,45 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // ECC error signals from register file read ports
   logic sec_err_rd1, ded_err_rd1;
   logic sec_err_rd2, ded_err_rd2;
+  logic sec_err_rd4, ded_err_rd4;
+  logic sec_err_rd5, ded_err_rd5;
 
-  // ECC error signals from the 7 pipeline registers (sec / ded per instance)
-  logic sec_rd1e, ded_rd1e;   // R1D → R1E
-  logic sec_rd2e, ded_rd2e;   // R2D → R2E
+  // ECC error signals from the 5 pipeline registers (sec / ded per instance)
   logic sec_imme, ded_imme;   // ImmExtD → ImmExtE
   logic sec_srcam, ded_srcam; // SrcAE → SrcAM
   logic sec_ieumm, ded_ieumm; // IEUResultE → IEUResultM
   logic sec_wdm,  ded_wdm;    // ForwardedSrcBE → WriteDataM
   logic sec_ifrw, ded_ifrw;   // IFResultM → IFResultW
 
-  // Decode stage — regfile write port driven exclusively by shadow pipeline
+  // SHARD: the register file holds verified state only, and the shadow commits to it
+  // at a time unrelated to the main pipeline's stalls.  It is therefore read in Execute,
+  // combinationally, so that an instruction held in Execute always sees the current
+  // committed value underneath the M/W bypasses and the RQ.  Injected dummy instructions
+  // never retire, so their shadow-register write port is tied off.
   regfile #(P.XLEN, P.E_SUPPORTED) regf(
     .clk, .reset,
-    .we3(shadow_we3), .a1(Rs1D), .a2(Rs2D), .a3(shadow_a3),
+    .we3(shadow_we3), .a1(Rs1E), .a2(Rs2E), .a3(shadow_a3),
     .wd3(shadow_wd3),
-    .DummyW(shadow_DummyW), .DummySelW(shadow_DummySel),
-    .rd1(R1D), .rd2(R2D),
+    .DummyW(1'b0), .DummySelW(1'b0),
+    .rd1(R1E), .rd2(R2E),
     .inject_en(ecc_inject_en),
     .sec_err_rd1, .ded_err_rd1,
-    .sec_err_rd2, .ded_err_rd2
+    .sec_err_rd2, .ded_err_rd2,
+    .a4(sRs1E), .a5(sRs2E), .rd4(sRD1E), .rd5(sRD2E),
+    .sec_err_rd4, .ded_err_rd4,
+    .sec_err_rd5, .ded_err_rd5
   );
   extend #(P) ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
 
-  // Execute stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R1D,             R1E,        sec_rd1e,  ded_rd1e);
-  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R2D,             R2E,        sec_rd2e,  ded_rd2e);
+  // Execute stage pipeline register (ECC-protected)
   flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ecc_inject_en, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
 
   // Standard M/W bypass forwarding mux
   logic [P.XLEN-1:0] FwdSrcA_mw, FwdSrcB_mw;
   mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, FwdSrcA_mw);
   mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, FwdSrcB_mw);
-  // RQ associative forwarding: only fires when standard M/W forwarding has no match.
-  // Standard forwarding (ForwardAE/BE != 00) always takes priority — it reflects the
-  // current W-stage result and is newer than any RQ entry.
+  // RQ associative forwarding applies when neither the M nor the W stage produces the
+  // register: those are newer than any RQ entry, which in turn is newer than the regfile.
   assign ForwardedSrcAE = (RQ_HitA & (ForwardAE == 2'b00)) ? RQ_ValA : FwdSrcA_mw;
   assign ForwardedSrcBE = (RQ_HitB & (ForwardBE == 2'b00)) ? RQ_ValB : FwdSrcB_mw;
   comparator #(P.XLEN) comp(ForwardedSrcAE, ForwardedSrcBE, BranchSignedE, FlagsE);
@@ -172,6 +175,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, ecc_inject_en, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
   flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
   flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
+  flopenrc     #(P.XLEN) FwdSrcAMReg  (clk, reset, FlushM, ~StallM, ForwardedSrcAE, ForwardedSrcAM);
 
   // Writeback stage pipeline register (ECC-protected)
   flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, ecc_inject_en, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
@@ -197,20 +201,17 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   else                    assign SCResultW = '0;
 
   // ECC error aggregation
-  assign RegEccSecErrW = sec_err_rd1 | sec_err_rd2
-                       | sec_rd1e | sec_rd2e | sec_imme
+  assign RegEccSecErrW = sec_err_rd1 | sec_err_rd2 | sec_err_rd4 | sec_err_rd5
+                       | sec_imme
                        | sec_srcam | sec_ieumm | sec_wdm | sec_ifrw;
-  assign RegEccDedErrW = ded_err_rd1 | ded_err_rd2
-                       | ded_rd1e | ded_rd2e | ded_imme
+  assign RegEccDedErrW = ded_err_rd1 | ded_err_rd2 | ded_err_rd4 | ded_err_rd5
+                       | ded_imme
                        | ded_srcam | ded_ieumm | ded_wdm | ded_ifrw;
   // Separate W-stage pipeline reg DED: instruction in W when this fires, so MEPC should use PCW
   assign RegEccDedErrPipeW = ded_ifrw;
 
-  // Shadow OQ push: export post-mux E-stage values for shadow_oq in wallypipelinedcore
   assign SrcAE_out   = SrcAE;
   assign SrcBE_out   = SrcBE;
-  assign ImmExtE_out = ImmExtE;
-  // RQ push: export main W-stage result before regfile (shadow reads from RQ)
   assign ResultW_out = ResultW;
 
 endmodule

@@ -31,6 +31,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic                 StallF, StallD, StallE, StallM, StallW,
   input  logic                 FlushD, FlushE, FlushM, FlushW,
   output logic                 IFUStallF,                                // IFU stalsl pipeline during a multicycle operation
+  output logic                 CompressedE,                              // Rev 7: fetched instruction was 2-byte (for SHARD next-PC check)
   // Command from CPU
   input  logic                 InvalidateICacheM,                        // Clears all instruction cache valid bits
   input  logic                 CSRWriteFenceM,                           // CSR write or fence instruction, PCNextF = the next valid PC (typically PCE)
@@ -60,6 +61,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]    EPCM,                                     // Exception Program counter from privileged unit
   input  logic [P.XLEN-1:0]    TrapVectorM,                              // Trap vector, from privileged unit
   input  logic                 RetM, TrapM,                              // return instruction, or trap
+  input  logic                 ShardRedirectM,                           // SHARD recovery/retry: refetch from ShardRedirectPCM
+  input  logic [P.XLEN-1:0]    ShardRedirectPCM,                         // PC of the instruction to replay
   input  logic                 InjectD,                                  // AMOEBA: Decode holds an injected dummy instruction
   output logic [31:0]          InstrD,                                   // The decoded instruction in Decode stage
   output logic [31:0]          InstrM,                                   // The decoded instruction in Memory stage
@@ -107,6 +110,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]           PC1NextF;                                 // Branch predictor next PCF
   logic [P.XLEN-1:0]           PC2NextF;                                 // Selected PC between branch prediction and next valid PC if CSRWriteFence
   logic [P.XLEN-1:0]           UnalignedPCNextF;                         // The next PCF, but not aligned to 2 bytes.
+  logic [P.XLEN-1:0]           PC3NextF;                                 // Next PCF before a SHARD redirect
   logic                        InstrMisalignedFaultE;                    // Branch/jump target not aligned to 4 bytes if no compressed allowed (2 bytes if allowed)
   logic [P.XLEN-1:0]           PCPlus2or4F;                              // PCF + 2 (CompressedF) or PCF + 4 (Non-compressed)
   logic [P.XLEN-1:0]           PCSpillNextF;                             // Next PCF after possible + 2 to handle spill
@@ -120,7 +124,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [31:0]                 IROMInstrF;                               // Instruction from the IROM
   logic [31:0]                 ICacheInstrF;                             // Instruction from the I$
   logic [31:0]                 InstrRawF;                                // Instruction from the IROM, I$, or bus
-  logic                        CompressedF, CompressedE;                 // The fetched instruction is compressed
+  logic                        CompressedF;                              // The fetched instruction is compressed (CompressedE is now a module output)
   logic [31:0]                 PostSpillInstrRawF;                       // Fetch instruction after merge two halves of spill
   logic [31:0]                 InstrRawD;                                // Non-decompressed instruction in the Decode stage
   logic                        IllegalIEUInstrD;                         // IEU Instruction (regular or compressed) is not good
@@ -323,7 +327,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(NextValidPCE), .s(CSRWriteFenceM),.y(PC2NextF));
   else assign PC2NextF = PC1NextF;
 
-  mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, UnalignedPCNextF);
+  mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, PC3NextF);
+  mux2 #(P.XLEN) pcmuxshard(PC3NextF, ShardRedirectPCM, ShardRedirectM, UnalignedPCNextF);
   mux2 #(P.XLEN) pcresetmux({UnalignedPCNextF[P.XLEN-1:1], 1'b0}, P.RESET_VECTOR[P.XLEN-1:0], reset, PCNextF);
   flopen #(P.XLEN) pcreg(clk, ~StallF | reset, PCNextF, PCF);
 

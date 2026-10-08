@@ -43,7 +43,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        StructuralStallD,        // Structural stalls detected by controller
   output logic        LoadStallD,              // Structural stalls for load, sent to performance counters
   output logic        StoreStallD,             // load after store hazard
-  output logic [4:0]  Rs1D, Rs2D, Rs2E,        // Register sources to read in Decode or Execute stage
+  output logic [4:0]  Rs1D, Rs2D, Rs1E, Rs2E,  // Register sources to read in Decode or Execute stage
   // AMOEBA random instruction insertion
   input  logic        InjectD,                 // Decode stage holds an injected dummy instruction
   input  logic        DummySelD,               // Which shadow physical register the dummy writes
@@ -91,7 +91,8 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        FWriteIntM,              // FPU controller writes integer register file
   // Writeback stage control signals
   input  logic        StallW, FlushW,          // Stall, flush Writeback stage
-  output logic        RegWriteE,               // E-stage register write enable (for SHARD OQ push)
+  output logic        RegWriteE, RegWriteM,    // E/M-stage register write enable (SHARD result record)
+  output logic [2:0]  ResultSrcM,              // M-stage result select (SHARD result class)
   output logic        RegWriteW, IntDivW,      // Instruction writes a register, is an integer divide
   output logic [2:0]  ResultSrcW,              // Select source of result to write back to register file
   // Stall during CSRs
@@ -101,7 +102,6 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic [4:0]  RdW                      // Register destinations in Execute, Memory, or Writeback stage
 );
 
-  logic [4:0] Rs1E;                      // pipelined register sources
   logic [6:0] OpD;                             // Opcode in Decode stage
   logic [2:0] Funct3D;                         // Funct3 field in Decode stage
   logic [6:0] Funct7D;                         // Funct7 field in Decode stage
@@ -114,7 +114,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
 
   // pipelined control signals
   logic        RegWriteD;                      // RegWrite (register will be written; RegWriteE is output port)
-  logic [2:0]  ResultSrcD, ResultSrcE, ResultSrcM; // Select which result to write back to register file
+  logic [2:0]  ResultSrcD, ResultSrcE;         // Select which result to write back to register file
   logic [2:0]  PreImmSrcD;                     // Immediate source format (before amending for prefetches)
   logic [1:0]  MemRWD;                         // Store (write to memory)
   logic        ALUOpD;                         // 0 for address generation, 1 for all other operations (must use Funct3)
@@ -149,7 +149,6 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   logic        FenceD, FenceE;                 // Fence instruction
   logic        SFenceVmaD;                     // sfence.vma instruction
   logic        IntDivM;                        // Integer divide instruction
-  logic        RegWriteM;                      // Instruction writes a register (needed for Hazard unit)
   logic [1:0]  CZeroD;
   logic        IFunctD, RFunctD, MFunctD;      // Detect I, R, and M-type RV32IM/Rv64IM instructions
   logic        LFunctD, SFunctD, BFunctD;      // Detect load, store, branch instructions

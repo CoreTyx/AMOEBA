@@ -33,7 +33,8 @@ module hazard (
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
   input  logic  DivBusyE, FDivBusyE,
-  input  logic  ShadowConflictStallE,
+  input  logic  ShardRedirectM,       // SHARD recovery/retry: flush the whole pipeline and refetch
+  input  logic  ShardStallW,          // SHARD: the shadow's queues are nearly full, or the Memory stage awaits a replay
   input  logic  wfiM, IntPendingM,
   input  logic  InjectD,
   // Stall & flush outputs
@@ -71,10 +72,13 @@ module hazard (
   // Branch misprediction is found in the Execute stage and must flush the next two instructions.
   //   However, an active division operation resides in the Execute stage, and when the BP incorrectly mispredicts the divide as a taken branch, the divide must still complete
   // When a WFI is interrupted and causes a trap, it flushes the rest of the pipeline but not the W stage, because the WFI needs to commit
-  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | BPWrongE;
-  assign FlushECause = TrapM | RetM | CSRWriteFenceM |(BPWrongE & ~(DivBusyE | FDivBusyE));
-  assign FlushMCause = TrapM | RetM | CSRWriteFenceM;
-  assign FlushWCause = TrapM & ~WFIInterruptedM;
+  // SHARD: a redirect (replay after a detected fault) flushes every stage like a trap.
+  // The Writeback stage holds an instruction that already retired into the shadow's
+  // queues; the redirect only clears what would have followed it.
+  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | BPWrongE | ShardRedirectM;
+  assign FlushECause = TrapM | RetM | CSRWriteFenceM |(BPWrongE & ~(DivBusyE | FDivBusyE)) | ShardRedirectM;
+  assign FlushMCause = TrapM | RetM | CSRWriteFenceM | ShardRedirectM;
+  assign FlushWCause = (TrapM & ~WFIInterruptedM) | ShardRedirectM;
 
   // Stall causes
   //  Most data dependency stalls are identified in the decode stage
@@ -88,13 +92,18 @@ module hazard (
   // AMOEBA: a dummy instruction insertion holds Decode for one cycle so the real
   // instruction is replayed, while Execute accepts the injected instruction below.
   assign StallDCause = (StructuralStallD | FPUStallD | InjectD) & ~FlushDCause;
-  assign StallECause = (DivBusyE | FDivBusyE | ShadowConflictStallE) & ~FlushECause;
+  assign StallECause = (DivBusyE | FDivBusyE) & ~FlushECause;
   assign StallMCause = WFIStallM & ~FlushMCause;
   // Need to gate IFUStallF when the equivalent FlushFCause = FlushDCause = 1.
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
   // Use normal backward stall propagation to freeze F through W.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall;
+  // SHARD: freeze the pipeline while the shadow's queues are nearly full, and hold an
+  // instruction that failed a Memory-stage check until its replay redirect.  The stall
+  // is not needed for an instruction to reach the shadow -- the Writeback stage pushes
+  // its result regardless of StallW -- so the shadow always drains and releases it.
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall
+                    | (ShardStallW & ~FlushWCause);
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0

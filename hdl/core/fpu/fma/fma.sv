@@ -40,7 +40,8 @@ module fma import cvw::*;  #(parameter cvw_t P) (
   output logic                         Ps,                     // the product's sign
   output logic                         Ss,                     // the sum's sign
   output logic [P.NE+1:0]              Se,                     // the sum's exponent
-  output logic [$clog2(P.FMALEN+1)-1:0] SCnt                    // normalization shift count
+  output logic [$clog2(P.FMALEN+1)-1:0] SCnt,                   // normalization shift count
+  output logic                         PmResidueFault          // SHARD: significand product fails its mod-3 residue check
 );
 
   //  OpCtrl:
@@ -73,6 +74,18 @@ module fma import cvw::*;  #(parameter cvw_t P) (
 
   // multiplication of the mantissa's
   fmamult #(P) mult(.Xm, .Ym, .Pm);
+
+  // SHARD mod-3 residue check of the significand multiplier: res(Xm)*res(Ym) = res(Pm).
+  // The FPU is not duplicated, so its largest shared block gets an arithmetically
+  // independent check instead.
+  logic [1:0] ResXm, ResYm, ResXmYm, ResPm;
+  logic [3:0] ResMul;
+  shadow_residue #(P.NF+1)   resx(.a(Xm), .residue(ResXm));
+  shadow_residue #(P.NF+1)   resy(.a(Ym), .residue(ResYm));
+  shadow_residue #(2*P.NF+2) resp(.a(Pm), .residue(ResPm));
+  assign ResMul  = ResXm * ResYm;                               // 0, 1, 2 or 4
+  assign ResXmYm = (ResMul == 4'd4) ? 2'd1 : ResMul[1:0];
+  assign PmResidueFault = (ResPm != ResXmYm);
 
   // calculate the signs and take the operation into account
   fmasign sign(.OpCtrl, .Xs, .Ys, .Zs, .Ps, .As, .InvA);
