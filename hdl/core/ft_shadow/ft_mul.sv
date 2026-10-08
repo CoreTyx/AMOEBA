@@ -8,13 +8,8 @@ module ft_mul import cvw::*; #(
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0] Funct3E,
   input  logic MulActiveE,
-  // Runtime fault-injection input from core -> MDU. Enable gates corruption
-  // of the full 2*XLEN product at fi_bit. Target[0]/[1] selects primary/shadow;
-  // Kind 00/01/10/11 selects XOR/stuck-at-0/stuck-at-1/no-op.
+  // Shared runtime enable; bit and kind are selected inside each injector.
   input  logic fi_enable,
-  input  logic [1:0] fi_target,
-  input  logic [1:0] fi_kind,
-  input  logic [$clog2(P.XLEN*2)-1:0] fi_bit,
   output logic [P.XLEN*2-1:0] ProdM,
   output logic stall_req, unresolved, pe_primary, pe_shadow
 );
@@ -61,12 +56,10 @@ module ft_mul import cvw::*; #(
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(shadow_prod_raw));
   // Fault-injection endpoints: corrupt completed replica products before
   // the mismatch checker and the selected architectural product output.
-  ft_fault_inject #(.WIDTH(P.XLEN*2)) primary_fi(
-    .data_i(primary_prod_raw), .fi_enable(fi_enable & fi_target[0]),
-    .fi_kind, .fi_bit, .data_o(primary_prod));
-  ft_fault_inject #(.WIDTH(P.XLEN*2)) shadow_fi(
-    .data_i(shadow_prod_raw), .fi_enable(fi_enable & fi_target[1]),
-    .fi_kind, .fi_bit, .data_o(shadow_prod));
+  ft_fault_inject #(.WIDTH(P.XLEN*2), .SEED(16'hA081)) primary_fi(
+    .clk, .reset, .fi_enable, .data_i(primary_prod_raw), .data_o(primary_prod));
+  ft_fault_inject #(.WIDTH(P.XLEN*2), .SEED(16'hA091)) shadow_fi(
+    .clk, .reset, .fi_enable, .data_i(shadow_prod_raw), .data_o(shadow_prod));
 
   // MUL uses DMR/retry only in this implementation.  A persistent mismatch
   // is unresolved; do not apply an invalid signedness-agnostic recompute rule.

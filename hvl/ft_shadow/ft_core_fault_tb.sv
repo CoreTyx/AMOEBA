@@ -1,5 +1,5 @@
 // Independent core integration regression: tiny ROM, real pipeline/CSR/trap
-// machinery, and only the intentionally core-local runtime injection hooks.
+// machinery, private directed injector forces, and the shared runtime enable.
 // Testbench clocks/scoreboards deliberately use blocking assignments.
 /* verilator lint_off BLKSEQ */
 /* verilator lint_off SYNCASYNCNET */
@@ -20,6 +20,7 @@ module ft_core_fault_tb;
   logic div_fi_enable = 0, div_fi_channel = 0;
   logic [1:0] div_fi_target = 1, div_fi_kind = 0;
   logic [5:0] div_fi_bit = 0;
+  logic fault_inject = 0, directed = 1;
   logic fi_enable = 0;
   logic [1:0] fi_target = 1, fi_kind = 0, fi_channel = 0;
   logic [6:0] fi_bit = 0;
@@ -72,7 +73,7 @@ module ft_core_fault_tb;
       .mem_rdata,
       .mem_wdata,
       .mem_resp,
-      .ecc_inject_en(1'b0),
+      .fault_inject,
       .monitor_valid,
       .monitor_trap,
       .monitor_pc_rdata,
@@ -92,23 +93,97 @@ module ft_core_fault_tb;
       .minstret_rdata(64'b0)
   );
   /* verilator lint_on PINMISSING */
-  // Drive the intentionally exposed core-local fault-injection hooks.
-  // Each scenario controls replica, corruption kind, bit, and result channel;
-  // the core routes these bundles to ftalu, ftmul, and ftdiv respectively.
-  assign dut.soc.core.ALUFiEnable = fi_enable;
-  assign dut.soc.core.ALUFiTarget = fi_target;
-  assign dut.soc.core.ALUFiKind = fi_kind;
-  assign dut.soc.core.ALUFiChannel = fi_channel;
-  assign dut.soc.core.ALUFiBit = fi_bit;
-  assign dut.soc.core.MULFiEnable = mul_fi_enable;
-  assign dut.soc.core.MULFiTarget = mul_fi_target;
-  assign dut.soc.core.MULFiKind = mul_fi_kind;
-  assign dut.soc.core.MULFiBit = mul_fi_bit;
-  assign dut.soc.core.DIVFiEnable = div_fi_enable;
-  assign dut.soc.core.DIVFiTarget = div_fi_target;
-  assign dut.soc.core.DIVFiKind = div_fi_kind;
-  assign dut.soc.core.DIVFiBit = div_fi_bit;
-  assign dut.soc.core.DIVFiChannel = div_fi_channel;
+  // Directed cases override injector internals, without adding RTL test ports.
+  // Releasing these forces exercises the shared enable and actual LFSRs.
+  always @* begin
+    if (directed) begin
+      force dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.inject_now = fi_enable & fi_target[0] & (fi_channel == 2'd0);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_bit = $clog2(64)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.inject_now = fi_enable & fi_target[0] & (fi_channel == 2'd1);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_bit = $clog2(64+1)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.inject_now = fi_enable & fi_target[0] & (fi_channel == 2'd2);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.fi_bit = $clog2(64+2)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.inject_now = fi_enable & fi_target[0] & (fi_channel == 2'd3);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_bit = $clog2(64+1)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd0);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_bit = $clog2(64)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd1);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.fi_bit = $clog2(64+1)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd2);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_bit = $clog2(64+2)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_kind = fi_kind;
+      force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd3);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit = $clog2(64+1)'(fi_bit);
+      force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind = fi_kind;
+      force dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now = mul_fi_enable & mul_fi_target[0];
+      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit = mul_fi_bit;
+      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind = mul_fi_kind;
+      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now = mul_fi_enable & mul_fi_target[1];
+      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit = mul_fi_bit;
+      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind = mul_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now = div_fi_enable & div_fi_target[0] & (div_fi_channel == 1'b0);
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind = div_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now = div_fi_enable & div_fi_target[0] & (div_fi_channel == 1'b1);
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind = div_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now = div_fi_enable & div_fi_target[1] & (div_fi_channel == 1'b0);
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind = div_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now = div_fi_enable & div_fi_target[1] & (div_fi_channel == 1'b1);
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind = div_fi_kind;
+    end else begin
+      release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_kind;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit;
+      release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now;
+      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now;
+      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind;
+    end
+  end
   always_comb begin
     mem_resp  = (|mem_rmask) | (|mem_wmask);
     mem_rdata = 0;
@@ -129,11 +204,11 @@ module ft_core_fault_tb;
     };
   endfunction
   function automatic logic mdu_case(input int test_case);
-    return (test_case >= 7 && test_case <= 11) || test_case >= 14;
+    return (test_case >= 7 && test_case <= 11) || (test_case >= 14 && test_case <= 15);
   endfunction
   function automatic logic trap_case(input int test_case);
     return test_case == 3 || test_case == 4 || test_case == 7 ||
-           test_case == 9 || test_case == 11 || test_case >= 12;
+           test_case == 9 || test_case == 11 || (test_case >= 12 && test_case <= 15);
   endfunction
   task automatic check(input logic condition, input string label_text);
     checks++;
@@ -175,7 +250,7 @@ module ft_core_fault_tb;
       end
       if (!mdu_case(scenario) && monitor_pc_rdata == BRANCH_PC && !monitor_trap)
         retired_branches++;
-      if(monitor_pc_rdata==(mdu_case(scenario)?BASE+28:BASE+40) || monitor_pc_rdata==BASE+268)
+      if(monitor_pc_rdata==(mdu_case(scenario)?BASE+28:((scenario==16)?BASE+44:BASE+40)) || monitor_pc_rdata==BASE+268)
         finished = 1;
     end
   end
@@ -183,7 +258,8 @@ module ft_core_fault_tb;
   // 0 healthy, 1 ALU isolation, 2 CMP isolation, 3/4 BNE/BGE trap,
   // 5 ALU transient, 6 address isolation, 7 MUL trap, 8 MUL transient,
   // 9 DIV quotient trap, 10 DIV transient, 11 DIV remainder trap,
-  // 12/13 CMP/ALU terminal backpressure, 14/15 MUL/DIV terminal backpressure.
+  // 12/13 CMP/ALU terminal backpressure, 14/15 MUL/DIV terminal backpressure,
+  // 16 shared ECC/FT enable with actual periodic LFSR injection and CSR checks.
   initial begin
     #1;
     check(probe_stall_w && !probe_flush_e, "FT holds without older flush");
@@ -196,9 +272,11 @@ module ft_core_fault_tb;
       #1;
       check(!probe_stall_w && probe_flush_e, "older CSR/return/trap/WFI flush overrides FT hold");
     end
-    for (scenario = 0; scenario < 16; scenario++) begin
+    for (scenario = 0; scenario < 17; scenario++) begin
       @(negedge clk);
       rst = 1;
+      directed = (scenario != 16);
+      fault_inject = (scenario == 16);
       fi_enable = 0;
       mul_fi_enable = 0;
       div_fi_enable = 0;
@@ -206,6 +284,11 @@ module ft_core_fault_tb;
       backpressure_cycles = 0;
       backpressure_started = 0;
       load_program(scenario == 4);
+      if (scenario == 16) begin
+        rom[3] = addi(8, 0, 1024); // run through several real injection periods
+        rom[10] = csr_read(15, 'h7c0);
+        rom[11] = 32'h0000006f;
+      end
       if (mdu_case(scenario)) begin
         rom[3] = addi(8, 0, 13);
         rom[4] = addi(9, 0, 11);
@@ -225,7 +308,7 @@ module ft_core_fault_tb;
       rst = 0;
       for (int cycle = 0; cycle < 10000 && !finished; cycle++) begin
         @(negedge clk);
-        if(!injected && scenario!=0 && !mdu_case(scenario) && dut.soc.core.InstrValidE &&
+        if(!injected && scenario!=0 && scenario<16 && !mdu_case(scenario) && dut.soc.core.InstrValidE &&
            dut.soc.core.PCE==BRANCH_PC && dut.soc.core.ForwardedSrcAE==8) begin
           // This loop has trained the predictor before diagnosis begins.
           check(!dut.soc.core.BPWrongE && dut.soc.core.PCSrcE, "faulted branch is predicted taken");
@@ -239,7 +322,7 @@ module ft_core_fault_tb;
           fi_enable = 1;
           injected = 1;
           #1;
-          check(dut.soc.core.FTStall, "core hook reaches merged ALU/CMP");
+          check(dut.soc.core.FTStall, "directed injector fault reaches merged ALU/CMP");
         end
         if(!injected && mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE==BASE+20) begin
           if (scenario == 7 || scenario == 8 || scenario == 14) begin
@@ -258,7 +341,7 @@ module ft_core_fault_tb;
         end
         // Stall independently of FT after diagnosis completes. Disabling the
         // fault prevents a new mismatch from hiding a lost terminal indication.
-        if (scenario >= 12 && !backpressure_started &&
+        if (scenario >= 12 && scenario <= 15 && !backpressure_started &&
             ((scenario == 14 && dut.soc.core.FTUnresolvedM) ||
              (scenario == 15 && dut.soc.core.mdu.mdu.div.ftdiv.unresolved) ||
              ((scenario == 12 || scenario == 13) && dut.soc.core.FTUnresolvedE))) begin
@@ -299,8 +382,8 @@ module ft_core_fault_tb;
         held_pc   = dut.soc.core.PCE;
       end
       check(finished, "program reaches architectural completion");
-      if (scenario != 0) check(injected && held_cycles > 0, "runtime fault actually exercised");
-      if (scenario >= 12) check(backpressure_started, "terminal backpressure exercised");
+      if (scenario != 0 && scenario != 16) check(injected && held_cycles > 0, "runtime fault actually exercised");
+      if (scenario >= 12 && scenario <= 15) check(backpressure_started, "terminal backpressure exercised");
       if (trap_case(scenario)) begin
         check(
             trap_count==1 && regs[12]==16 && regs[13]==(mdu_case(scenario)?BASE+20:BRANCH_PC),
@@ -312,6 +395,12 @@ module ft_core_fault_tb;
       end else if (scenario == 10) begin
         check(trap_count == 0 && regs[10] == 1 && regs[11] == 0,
               "core DIV transient retries original forwarded operands");
+      end else if (scenario == 16) begin
+        check(held_cycles > 0, "shared enable exercises actual LFSR faults");
+        check(trap_count == 0 && regs[10] == 42 && regs[9] == 1024 && retired_branches == 1024,
+              "periodic FT injection recovers and retires the loop correctly");
+        check(regs[15][4] && regs[11] == 0,
+              "ECC SEC appears in MSECFAULT while FTSTATUS contains only ft_* status");
       end else begin
         check(trap_count == 0 && regs[10] == 42 && regs[9] == 64 && retired_branches == 64,
               "correct branch retirement and loop result");

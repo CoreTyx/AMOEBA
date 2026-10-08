@@ -72,15 +72,13 @@ module div import cvw::*;  #(parameter cvw_t P) (
   assign DivDoneE = (state == DONE);
 
   // Handle sign extension for W-type instructions
-  generate
-    if (P.XLEN == 64) begin : rv64 // RV64 has W-type instructions
-      mux2 #(P.XLEN) xinmux(ForwardedSrcAE, {ForwardedSrcAE[31:0], 32'b0}, W64E, XinE);
-      mux2 #(P.XLEN) dinmux(ForwardedSrcBE, {{32{ForwardedSrcBE[31]&DivSignedE}}, ForwardedSrcBE[31:0]}, W64E, DinE);
-    end else begin : rv32 // RV32 has no W-type instructions
-      assign XinE = ForwardedSrcAE;
-      assign DinE = ForwardedSrcBE;
+  if (P.XLEN == 64) begin : rv64 // RV64 has W-type instructions
+    mux2 #(P.XLEN) xinmux(ForwardedSrcAE, {ForwardedSrcAE[31:0], 32'b0}, W64E, XinE);
+    mux2 #(P.XLEN) dinmux(ForwardedSrcBE, {{32{ForwardedSrcBE[31]&DivSignedE}}, ForwardedSrcBE[31:0]}, W64E, DinE);
+  end else begin // RV32 has no W-type instructions
+    assign XinE = ForwardedSrcAE;
+    assign DinE = ForwardedSrcBE;
     end
-  endgenerate
 
   // Extract sign bits and check for division by zero
   assign SignDE = DivSignedE & DinE[P.XLEN-1];
@@ -109,11 +107,8 @@ module div import cvw::*;  #(parameter cvw_t P) (
 
   // one copy of divstep for each bit produced per cycle
   genvar i;
-  generate
-    for (i = 0; i < P.IDIV_BITSPERCYCLE; i = i + 1) begin : steps
-      divstep #(P.XLEN) divstep(W[i], XQ[i], DAbsB, W[i+1], XQ[i+1]);
-    end
-  endgenerate
+  for (i=0; i<P.IDIV_BITSPERCYCLE; i = i+1)
+    divstep #(P.XLEN) divstep(W[i], XQ[i], DAbsB, W[i+1], XQ[i+1]);
 
   //////////////////////////////
   // Memory Stage: output sign correction and special cases

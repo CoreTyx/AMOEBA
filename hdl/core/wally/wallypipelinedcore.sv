@@ -29,8 +29,8 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
-   // ECC inject enable (from top-level, for DFT)
-   input  logic                  ecc_inject_en,
+   // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
+   input  logic                  fault_inject,
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -99,31 +99,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
-
-  // Runtime fault-injection inputs for testing replica detection and recovery.
-  // These core-local hooks are intentionally undriven: a future test/DFT
-  // controller connects here; simulation testbenches drive known values.
-  // Each Enable activates corruption only in its own execution-unit bundle.
-  // Target is a replica mask: 00=none, 01=primary, 10=shadow, 11=both.
-  // Kind: 00=XOR, 01=stuck-at-0, 10=stuck-at-1, 11=reserved/no-op.
-  // Bit selects the physical result bit to corrupt; out-of-range is a no-op.
-  // All injectors remain instantiated when Enable=0 (data passes through).
-  /* verilator lint_off UNDRIVEN */
-  // ALU/CMP path: core -> ieu -> dp -> ftalu -> replica result injectors.
-  // Channel: 00=ALU result, 01=extended arithmetic/address result,
-  //          10=widened shift result, 11=extended comparison difference.
-  logic ALUFiEnable;
-  logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel;
-  logic [$clog2(P.XLEN+2)-1:0] ALUFiBit;
-  // MDU paths: core -> mdu.mdu -> ftmul / div.ftdiv -> replica injectors.
-  // MUL selects a bit of the full 2*XLEN product. DIV selects a bit of an
-  // XLEN result, with Channel=0 for quotient and Channel=1 for remainder.
-  logic MULFiEnable, DIVFiEnable;
-  logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind;
-  logic [$clog2(2*P.XLEN)-1:0] MULFiBit;
-  logic [$clog2(P.XLEN)-1:0] DIVFiBit;
-  logic DIVFiChannel;
-  /* verilator lint_on UNDRIVEN */
 
   // AMOEBA random instruction insertion
   logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
@@ -249,9 +224,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      .FTUnresolvedM,
-    // Forward the core-local ALU/CMP fault-injection bundle into the IEU.
-    .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
-     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+     .fault_inject, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -331,24 +304,22 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
     .LSUStallM);
 
-  generate
-    if (P.BUS_SUPPORTED) begin : ebu
-      ebu #(P) ebu(// IFU connections
-        .clk, .reset,
-        // IFU interface
-        .IFUHADDR, .IFUHBURST, .IFUHTRANS, .IFUHREADY, .IFUHSIZE,
-        // LSU interface
-        .LSUHADDR, .LSUHWDATA, .LSUHWSTRB, .LSUHSIZE, .LSUHBURST,
-        .LSUHTRANS, .LSUHWRITE, .LSUHREADY,
-        // BUS interface
-        .HREADY, .HRESP, .HCLK, .HRESETn,
-        .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST,
-        .HPROT, .HTRANS, .HMASTLOCK);
-    end else begin : no_ebu
-      assign {IFUHREADY, LSUHREADY, HCLK, HRESETn, HADDR, HWDATA,
-              HWSTRB, HWRITE, HSIZE, HBURST, HPROT, HTRANS, HMASTLOCK} = '0;
-    end
-  endgenerate
+  if (P.BUS_SUPPORTED) begin : ebu
+    ebu #(P) ebu(// IFU connections
+      .clk, .reset,
+      // IFU interface
+      .IFUHADDR, .IFUHBURST, .IFUHTRANS, .IFUHREADY, .IFUHSIZE,
+      // LSU interface
+      .LSUHADDR, .LSUHWDATA, .LSUHWSTRB, .LSUHSIZE, .LSUHBURST,
+      .LSUHTRANS, .LSUHWRITE, .LSUHREADY,
+      // BUS interface
+      .HREADY, .HRESP, .HCLK, .HRESETn,
+      .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST,
+      .HPROT, .HTRANS, .HMASTLOCK);
+  end else begin
+    assign {IFUHREADY, LSUHREADY, HCLK, HRESETn, HADDR, HWDATA,
+            HWSTRB, HWRITE, HSIZE, HBURST, HPROT, HTRANS, HMASTLOCK} = '0;
+  end
 
   // E faults advance with the instruction into M; MDU faults already occur in
   // M. A retry freezes all stages, while an unresolved operation is released
@@ -357,10 +328,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign FTUnresolvedM = FTUnresolvedEReg | MDUUnresolvedM;
   assign FTStall = FTStallE | FTStallM;
 
-  // mftstatus (custom read-only CSR) is backed by reset-sticky diagnosis bits:
-  // {shadow unresolved, ECC DED, ECC SEC, div isolated, mul isolated, cmp isolated, alu isolated}.
-  // The ECC bits are supplied by the IEU W-stage aggregate interface.
-  assign FTStatus = {FTUnresolvedM, RegEccDedErrW, RegEccSecErrW, (DIV_PE_p | DIV_PE_r),
+  // MFTSTATUS (0x7C2), reset-sticky ft_* status:
+  // [0] ALU isolated, [1] CMP isolated, [2] MUL isolated, [3] DIV isolated,
+  // [5:4] reserved zero, [6] unresolved FT fault (cause 16).
+  // ECC correction/detection is recorded separately in MSECFAULT (0x7C0).
+  assign FTStatus = {FTUnresolvedM, 2'b00, (DIV_PE_p | DIV_PE_r),
                      (MUL_PE_p | MUL_PE_r), (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
   // Sticky status survives the transient checker pulse and is read via CSR.
   always_ff @(posedge clk) begin
@@ -384,45 +356,43 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .FlushD, .FlushE, .FlushM, .FlushW);
 
   // privileged unit
-  generate
-    if (P.ZICSR_SUPPORTED) begin : priv
-      privileged #(P) priv(
-        .clk, .reset,
-        .FlushD, .FlushE, .FlushM, .FlushW, .StallD, .StallE, .StallM, .StallW,
-        .CSRReadM, .CSRWriteM, .SrcAM, .PCM, .PCSpillM,
-        .InstrM, .InstrOrigM, .CSRReadValW, .EPCM, .TrapVectorM,
-        .RetM, .TrapM, .sfencevmaM, .InvalidateICacheM, .DCacheStallM, .ICacheStallF,
-        .InstrValidM, .CommittedM, .CommittedF,
-        .FRegWriteM, .LoadStallD, .StoreStallD,
-        .BPDirWrongM, .BTAWrongM, .BPWrongM,
-        .RASPredPCWrongM, .IClassWrongM, .DivBusyE, .FDivBusyE,
-        .IClassM, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
-        .InstrPageFaultF, .LoadPageFaultM, .StoreAmoPageFaultM,
-        .InstrMisalignedFaultM, .IllegalIEUFPUInstrD,
-        .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
-        .FTUnresolvedFaultM(FTUnresolvedM), .FTStatus(FTStatusSticky),
-        .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
-        .MTIME_CLINT, .IEUAdrxTvalM, .SetFflagsM,
-        .InstrAccessFaultF, .HPTWInstrAccessFaultF, .HPTWInstrPageFaultF, .LoadAccessFaultM, .StoreAmoAccessFaultM, .SelHPTW,
-        .PrivilegeModeW, .SATP_REGW,
-        .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
-        .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
-        .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
-        .RAND_INSTR_INSERT_FREQ_REGW,
-        .RegEccSecErrW, .RegEccDedErrW,
-        .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
-        .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
-    end else begin : no_priv
-      assign {CSRReadValW, PrivilegeModeW,
-              SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
-              // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
-              ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
-              EPCM, TrapVectorM, RetM, TrapM,
-              sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
-      // Without a CSR to program it, dummy instruction insertion stays disabled.
-      assign RAND_INSTR_INSERT_FREQ_REGW = '0;
-    end
-  endgenerate
+  if (P.ZICSR_SUPPORTED) begin : priv
+    privileged #(P) priv(
+      .clk, .reset,
+      .FlushD, .FlushE, .FlushM, .FlushW, .StallD, .StallE, .StallM, .StallW,
+      .CSRReadM, .CSRWriteM, .SrcAM, .PCM, .PCSpillM,
+      .InstrM, .InstrOrigM, .CSRReadValW, .EPCM, .TrapVectorM,
+      .RetM, .TrapM, .sfencevmaM, .InvalidateICacheM, .DCacheStallM, .ICacheStallF,
+      .InstrValidM, .CommittedM, .CommittedF,
+      .FRegWriteM, .LoadStallD, .StoreStallD,
+      .BPDirWrongM, .BTAWrongM, .BPWrongM,
+      .RASPredPCWrongM, .IClassWrongM, .DivBusyE, .FDivBusyE,
+      .IClassM, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
+      .InstrPageFaultF, .LoadPageFaultM, .StoreAmoPageFaultM,
+      .InstrMisalignedFaultM, .IllegalIEUFPUInstrD,
+      .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
+      .FTUnresolvedFaultM(FTUnresolvedM), .FTStatus(FTStatusSticky),
+      .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
+      .MTIME_CLINT, .IEUAdrxTvalM, .SetFflagsM,
+      .InstrAccessFaultF, .HPTWInstrAccessFaultF, .HPTWInstrPageFaultF, .LoadAccessFaultM, .StoreAmoAccessFaultM, .SelHPTW,
+      .PrivilegeModeW, .SATP_REGW,
+      .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
+      .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
+      .FRM_REGW, .ENVCFG_CBE, .ENVCFG_PBMTE, .ENVCFG_ADUE, .wfiM, .IntPendingM, .BigEndianM,
+      .RAND_INSTR_INSERT_FREQ_REGW,
+      .RegEccSecErrW, .RegEccDedErrW,
+      .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
+      .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
+  end else begin
+    assign {CSRReadValW, PrivilegeModeW,
+            SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
+            // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
+            ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
+            EPCM, TrapVectorM, RetM, TrapM,
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
+    // Without a CSR to program it, dummy instruction insertion stays disabled.
+    assign RAND_INSTR_INSERT_FREQ_REGW = '0;
+  end
 
   // W-stage PC: used as MEPC when the DED error comes from the W-stage pipeline register
   flopenrc #(P.XLEN) PCWReg(clk, reset, FlushW, ~StallW, PCM, PCW);
@@ -454,61 +424,54 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign PrivModeUncorrectableFaultW = PrivModeUncorrectableFaultW_priv | RegEccDedErrSticky;
 
   // multiply/divide unit
-  generate
-    if (P.ZMMUL_SUPPORTED) begin : mdu
-      mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
-        // Independent runtime fault-injection bundles for MUL and integer DIV.
-        .MULFiEnable, .MULFiTarget, .MULFiKind, .MULFiBit,
-        .DIVFiEnable, .DIVFiTarget, .DIVFiKind, .DIVFiBit, .DIVFiChannel,
-
-        .ForwardedSrcAE, .ForwardedSrcBE,
-        .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
-        .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),
-        .MUL_PE_p, .MUL_PE_r, .DIV_PE_p, .DIV_PE_r);
-    end else begin : no_mdu // no M instructions supported
-      assign MDUResultW = '0;
-      assign DivBusyE   = 1'b0;
-      assign FTStallM = 1'b0;
-      assign MDUUnresolvedM = 1'b0;
-      assign MUL_PE_p = 1'b0;
-      assign MUL_PE_r = 1'b0;
-      assign DIV_PE_p = 1'b0;
-      assign DIV_PE_r = 1'b0;
-    end
-  endgenerate
+  if (P.ZMMUL_SUPPORTED) begin : mdu
+    mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+      .fault_inject,
+      .ForwardedSrcAE, .ForwardedSrcBE,
+      .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
+      .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),
+      .MUL_PE_p, .MUL_PE_r, .DIV_PE_p, .DIV_PE_r);
+  end else begin // no M instructions supported
+    assign MDUResultW = '0;
+    assign DivBusyE   = 1'b0;
+    assign FTStallM = 1'b0;
+    assign MDUUnresolvedM = 1'b0;
+    assign MUL_PE_p = 1'b0;
+    assign MUL_PE_r = 1'b0;
+    assign DIV_PE_p = 1'b0;
+    assign DIV_PE_r = 1'b0;
+  end
 
   // floating point unit
-  generate
-    if (P.F_SUPPORTED) begin : fpu
-      fpu #(P) fpu(
-        .clk, .reset,
-        .FRM_REGW,                           // Rounding mode from CSR
-        .InstrD,                             // instruction from IFU
-        .ReadDataW(ReadDataW[P.FLEN-1:0]),   // Read data from memory
-        .ForwardedSrcAE,                     // Integer input being processed (from IEU)
-        .StallE, .StallM, .StallW,           // stall signals from HZU
-        .FlushE, .FlushM, .FlushW,           // flush signals from HZU
-        .RdE, .RdM, .RdW,                    // which FP register to write to (from IEU)
-        .STATUS_FS,                          // is floating-point enabled?
-        .FRegWriteM,                         // FP register write enable
-        .FpLoadStoreM,
-        .ForwardedSrcBE,                     // Integer input for intdiv
-        .Funct3E, .Funct3M, .IntDivE, .W64E, // Integer flags and functions
-        .FPUStallD,                          // Stall the decode stage
-        .FWriteIntE, .FCvtIntE,              // integer register write enable, conversion operation
-        .FWriteDataM,                        // Data to be written to memory
-        .FIntResM,                           // data to be written to integer register
-        .FCvtIntResW,                        // fp -> int conversion result to be stored in int register
-        .FCvtIntW,                           // fpu result selection
-        .FDivBusyE,                          // Is the divide/sqrt unit busy (stall execute stage)
-        .IllegalFPUInstrD,                   // Is the instruction an illegal fpu instruction
-        .SetFflagsM,                         // FPU flags (to privileged unit)
-        .FIntDivResultW);
-    end else begin : no_fpu // no F_SUPPORTED or D_SUPPORTED; tie outputs low
-      assign {FPUStallD, FWriteIntE, FCvtIntE, FIntResM, FCvtIntW, FRegWriteM,
-              IllegalFPUInstrD, SetFflagsM, FpLoadStoreM,
-              FWriteDataM, FCvtIntResW, FIntDivResultW, FDivBusyE} = '0;
-    end
-  endgenerate
+  if (P.F_SUPPORTED) begin : fpu
+    fpu #(P) fpu(
+      .clk, .reset,
+      .FRM_REGW,                           // Rounding mode from CSR
+      .InstrD,                             // instruction from IFU
+      .ReadDataW(ReadDataW[P.FLEN-1:0]),   // Read data from memory
+      .ForwardedSrcAE,                     // Integer input being processed (from IEU)
+      .StallE, .StallM, .StallW,           // stall signals from HZU
+      .FlushE, .FlushM, .FlushW,           // flush signals from HZU
+      .RdE, .RdM, .RdW,                    // which FP register to write to (from IEU)
+      .STATUS_FS,                          // is floating-point enabled?
+      .FRegWriteM,                         // FP register write enable
+      .FpLoadStoreM,
+      .ForwardedSrcBE,                     // Integer input for intdiv
+      .Funct3E, .Funct3M, .IntDivE, .W64E, // Integer flags and functions
+      .FPUStallD,                          // Stall the decode stage
+      .FWriteIntE, .FCvtIntE,              // integer register write enable, conversion operation
+      .FWriteDataM,                        // Data to be written to memory
+      .FIntResM,                           // data to be written to integer register
+      .FCvtIntResW,                        // fp -> int conversion result to be stored in int register
+      .FCvtIntW,                           // fpu result selection
+      .FDivBusyE,                          // Is the divide/sqrt unit busy (stall execute stage)
+      .IllegalFPUInstrD,                   // Is the instruction an illegal fpu instruction
+      .SetFflagsM,                         // FPU flags (to privileged unit)
+      .FIntDivResultW);
+  end else begin                           // no F_SUPPORTED or D_SUPPORTED; tie outputs low
+    assign {FPUStallD, FWriteIntE, FCvtIntE, FIntResM, FCvtIntW, FRegWriteM,
+            IllegalFPUInstrD, SetFflagsM, FpLoadStoreM,
+            FWriteDataM, FCvtIntResW, FIntDivResultW, FDivBusyE} = '0;
+  end
 
 endmodule

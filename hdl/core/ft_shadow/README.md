@@ -8,12 +8,12 @@ core and read `cvw.sv` before its consumers.
 
 ```
 wallypipelinedcore
-  ALUFi* -> ieu -> dp -> ftalu (ft_alu)
+  fault_inject -> ieu -> dp -> ftalu (ft_alu)
                           replica[0/1].compute (alu)
                           replica[0/1].compare (addsub)
                           alu_ctrl + cmp_ctrl (ft_shadow_ctrl)
-  MULFi* -> mdu.mdu -> ftmul (ft_mul)
-  DIVFi* -> mdu.mdu -> ftdiv (ft_div)
+  fault_inject -> mdu.mdu -> ftmul (ft_mul)
+                         -> ftdiv (ft_div)
 ```
 
 The merged `ft_alu` produces XLEN `ALUResult`, XLEN `Sum`, and
@@ -32,43 +32,39 @@ Datapath, IEU, and core have no widened result ports.
 
 ## Runtime controls
 
-All injectors are always instantiated. Their enable is a driven input; there is
-no elaboration-time injection parameter. Three independent control bundles are
-**intentionally undriven local hooks in `wallypipelinedcore`**, with no ports above
-that module and no RTL constants. A future test/DFT controller supplies these
-signals. Testbenches must explicitly drive every bundle to known values;
-`hvl/common/top_tb.svh` forces all controls to zero for ordinary ISA/Linux runs.
-`ft_core_fault_tb` drives the same hooks for integration tests.
+All injectors are always instantiated. The shared `fault_inject` input replaces
+`ecc_inject_en` through the wrapper, SoC, and core. It enables both the existing
+ECC storage injection and the `fi_enable` inputs of `ft_alu`, `ft_mul`, and
+`ft_div`. There are no undriven core hooks or external bit/kind/channel controls.
 
-A narrow `verilator lint_off UNDRIVEN` region covers only these declarations.
-It documents the deliberate unfinished connection without hiding other undriven
-core signals. The hooks are not a synthesizable stimulus source by themselves;
-connect a controller before using injection in hardware.
+Each `ft_fault_inject` contains a 16-bit Galois LFSR with polynomial
+`x^16 + x^14 + x^13 + x^11 + 1`. The low bits select the physical bit index;
+`[15:14]` selects XOR (`00`), stuck-at-zero (`01`), stuck-at-one (`10`), or
+no corruption (`11`). An out-of-range index skips the event for non-power-of-two
+widths. A nine-bit counter permits a one-cycle event every 512 clocks. LFSR and
+counter run while disabled; enable gates corruption only. Reset restores the
+seed and suppresses corruption. Distinct nonzero seeds stagger events across
+replicas and injection sites, allowing transient faults to clear during retry.
 
-| Bundle | Controls | Bit index width |
-| --- | --- | --- |
-| ALU/CMP | `ALUFiEnable`, `ALUFiTarget[1:0]`, `ALUFiKind[1:0]`, `ALUFiChannel[1:0]`, `ALUFiBit` | `$clog2(XLEN+2)` |
-| MUL | `MULFiEnable`, `MULFiTarget[1:0]`, `MULFiKind[1:0]`, `MULFiBit` | `$clog2(2*XLEN)` |
-| DIV | `DIVFiEnable`, `DIVFiTarget[1:0]`, `DIVFiKind[1:0]`, `DIVFiChannel`, `DIVFiBit` | `$clog2(XLEN)` |
+| Injection site in each replica | Width |
+| --- | --- |
+| Architectural ALU result | XLEN |
+| Extended ALU arithmetic/address computation | XLEN+1 |
+| Physical shift result before slicing/sign extension | XLEN+2 |
+| Extended architectural comparison difference | XLEN+1 |
+| MUL full product | 2*XLEN |
+| DIV quotient and remainder, separately | XLEN each |
 
-`Target = 00` disables replica selection, `01` selects primary, `10` shadow,
-and `11` both. `Kind = 00` XORs the selected bit, `01` forces zero, `10` forces
-one, and `11` is reserved/no-op. Enable zero and out-of-range indices are no-ops.
-The merged wrapper checks the channel width **before narrowing** the index, so
-an extended bit cannot alias architectural bit zero.
+DIV injection applies to the integer divider (`IDIV_ON_FPU=0`); configurations
+using FPU integer division retain their existing path. Shift injection precedes
+normal/alternate slicing; bits discarded by the normal architectural slice
+alone do not create an architectural mismatch.
 
-| ALU/CMP channel | Injected value | Width |
-| --- | --- | --- |
-| `00` | Architectural ALU result | XLEN |
-| `01` | Extended ALU arithmetic/address computation | XLEN+1 |
-| `10` | Physical shift result before slicing/sign extension | XLEN+2 |
-| `11` | Extended architectural comparison difference | XLEN+1 |
-
-MUL injects the full product; DIV channel zero selects quotient and one selects
-remainder in the integer divider (`IDIV_ON_FPU=0`). Configurations using FPU
-integer division retain their existing FPU path. A shift fault uses the same physical position during normal and
-alternate computations, before either is sliced. Bits discarded by the normal
-architectural slice alone do not create an architectural mismatch.
+`hvl/common/top_tb.svh` drives `fault_inject` low for ordinary ISA/Linux runs and
+high with `ECE411_SIM_INJECT`. The existing ECC injection test targets therefore
+exercise ECC and FT injection together. Directed FT tests force private injector
+events and selections to reproduce persistent faults, simultaneous faults, and
+specific boundary bits without exposing those controls in the core interface.
 
 ## Arithmetic and comparison
 
@@ -166,11 +162,13 @@ The custom read-only CSR `mftstatus` stays at `0x7c2`:
 | 1 | CMP replica isolated |
 | 2 | MUL replica isolated (reserved by its current recovery policy) |
 | 3 | DIV replica isolated (reserved by its current recovery policy) |
-| 4 | Register/pipeline ECC SEC |
-| 5 | Register/pipeline ECC DED |
+| 4–5 | Reserved, read as zero |
 | 6 | FT unresolved |
 
-ECC logic, CSR addresses, and ordinary instruction timing are unchanged.
+FTSTATUS contains only `ft_*` events. ECC SEC/DED remain in `MSECFAULT`
+(`0x7c0`, bits 4/5); its contents and write-one-to-clear behavior are unchanged.
+FTSTATUS clears only on reset, rejects writes, and retains the existing bit
+positions and CSR address. Ordinary instruction timing is unchanged.
 Identical faults in both replicas may agree without detection; replication
 cannot identify such common-mode failures from agreement alone. Persistent XOR
 in arithmetic can preserve both complement relations; it correctly produces an
@@ -204,22 +202,24 @@ on the production configuration's optional instruction selection.
 
 The independent core bench uses its own tiny ROM and a retirement scoreboard.
 Its generated configuration enables branch prediction for this fixture. It
-trains branches to predicted-taken, drives only core-local injection hooks,
+trains branches to predicted-taken, forces private injector events/selections,
 and checks simultaneous target/comparison operands, pipeline holding, absence
 of destructive flushes/redirects, correct retirement, BNE/BGE cause-16 trapping,
 precise fault PCs, multiplier and divider faults through MDU, and sticky CSR
 reads. Four terminal-fault cases independently stall the pipeline after ALU,
 CMP, MUL, or DIV diagnosis and disable injection, then verify one precise trap
 when the stall is removed. A hazard
-priority probe covers older CSR/return/trap flushes, including interrupted WFI. Normal ISA/Linux tests explicitly
-disable all three runtime bundles.
+priority probe covers older CSR/return/trap flushes, including interrupted WFI.
+An additional scenario enables the actual shared `fault_inject` input and LFSRs,
+checks 1,024 correctly retired loop branches, and confirms ECC corrections appear
+only in MSECFAULT. The unit bench also checks unforced LFSR operation, event
+spacing, seed reset, disabled pass-through, fault-kind coverage, and invalid indices.
 
 CI runs the complete six-configuration unit matrix and the independent core
 integration bench in the fault-tolerant regression job.
 
-RTL generate regions use explicit boundaries and named branches; the existing
-named injection/recovery hierarchy is preserved. `TE_THRESHOLD` must be positive;
-the simulation entry point and testbench validate it. Parameter diagnostics stay
-out of synthesizable modules. Injector bit indices use `$clog2(WIDTH)` directly
-for the execution-result widths used here. FT width warnings and generate-name
-warnings in the modified execution path are enabled in the Verilator warning configuration.
+RTL uses implicit generate constructs consistent with the surrounding core.
+`TE_THRESHOLD` must be positive; the simulation entry point and testbench
+validate it. Parameter diagnostics stay out of synthesizable modules. Injector
+bit indices use `$clog2(WIDTH)` directly for the execution-result widths used
+here. FT width warnings remain enabled in the Verilator warning configuration.

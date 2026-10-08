@@ -32,12 +32,12 @@
         .ILEN(ILEN)
     ) monitor(.itf(mon_itf));
 
-    // ECC error injection enable: 1 when built with +define+ECE411_SIM_INJECT,
+    // ECC and FT error injection enable: 1 when built with +define+ECE411_SIM_INJECT,
     // 0 otherwise.  Wired as a real port so DFT can substitute a test controller.
 `ifdef ECE411_SIM_INJECT
-    logic ecc_inject_en = 1'b1;
+    logic fault_inject = 1'b1;
 `else
-    logic ecc_inject_en = 1'b0;
+    logic fault_inject = 1'b0;
 `endif
 
     rv64_core_wrapper dut (
@@ -49,29 +49,8 @@
         .mem_rdata (mem_itf.rdata[0]),
         .mem_wdata (mem_itf.wdata[0]),
         .mem_resp  (mem_itf.resp [0]),
-        .ecc_inject_en (ecc_inject_en)
+        .fault_inject (fault_inject)
     );
-
-    // Core-local runtime FT hooks are intentionally undriven in synthesizable
-    // RTL. Ordinary ISA/Linux simulations explicitly disable every bundle.
-    // ALUFi* reaches the merged ALU/CMP through IEU/datapath; MULFi*/DIVFi*
-    // reach the product and quotient/remainder injectors through MDU.
-    initial begin
-        force dut.soc.core.ALUFiEnable = '0;
-        force dut.soc.core.ALUFiTarget = '0;
-        force dut.soc.core.ALUFiKind = '0;
-        force dut.soc.core.ALUFiBit = '0;
-        force dut.soc.core.ALUFiChannel = '0;
-        force dut.soc.core.MULFiEnable = '0;
-        force dut.soc.core.MULFiTarget = '0;
-        force dut.soc.core.MULFiKind = '0;
-        force dut.soc.core.MULFiBit = '0;
-        force dut.soc.core.DIVFiEnable = '0;
-        force dut.soc.core.DIVFiTarget = '0;
-        force dut.soc.core.DIVFiKind = '0;
-        force dut.soc.core.DIVFiBit = '0;
-        force dut.soc.core.DIVFiChannel = '0;
-    end
 
     `include "rvfi_reference.svh"
 

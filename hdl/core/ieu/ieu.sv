@@ -29,15 +29,8 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // ALU/CMP fault-injection path: wallypipelinedcore -> ieu -> dp -> ftalu.
-  // Forward these test controls unchanged; ftalu applies corruption to the
-  // selected replica/result channel before mismatch checking and recovery.
-  input logic ALUFiEnable,
-  input logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel,
-  input logic [$clog2(P.XLEN+2)-1:0] ALUFiBit,
-
-  // ECC inject enable (from top-level, for DFT)
-  input  logic              ecc_inject_en,
+  // Shared ECC and execution-unit fault-injection enable.
+  input  logic              fault_inject,
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
@@ -151,10 +144,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .ecc_inject_en,
-    // Pass the ALU/CMP replica fault-injection controls to the datapath.
-    .ALUFiEnable, .ALUFiTarget, .ALUFiKind, .ALUFiBit, .ALUFiChannel,
-
+    .clk, .reset, .fault_inject,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,

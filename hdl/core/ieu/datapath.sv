@@ -34,15 +34,8 @@
 
 module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // ALU/CMP fault-injection controls forwarded by the IEU from core-local
-  // test hooks. The bundle terminates at ftalu's replica result injectors;
-  // ALUFiChannel selects ALU result, arithmetic, shift, or CMP difference.
-  input logic ALUFiEnable,
-  input logic [1:0] ALUFiTarget, ALUFiKind, ALUFiChannel,
-  input logic [$clog2(P.XLEN+2)-1:0] ALUFiBit,
-
-  // ECC inject enable (from top-level, for DFT)
-  input  logic              ecc_inject_en,
+  // Shared ECC and execution-unit fault-injection enable.
+  input  logic              fault_inject,
   // Decode stage signals
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
@@ -138,16 +131,16 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .wd3(ResultW),
     .DummyW, .DummySelW,
     .rd1(R1D), .rd2(R2D),
-    .inject_en(ecc_inject_en),
+    .inject_en(fault_inject),
     .sec_err_rd1, .ded_err_rd1,
     .sec_err_rd2, .ded_err_rd2
   );
   extend #(P) ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
 
   // Execute stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R1D,             R1E,        sec_rd1e,  ded_rd1e);
-  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R2D,             R2E,        sec_rd2e,  ded_rd2e);
-  flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ecc_inject_en, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
+  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, fault_inject, R1D,             R1E,        sec_rd1e,  ded_rd1e);
+  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, fault_inject, R2D,             R2E,        sec_rd2e,  ded_rd2e);
+  flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, fault_inject, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
 
   mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
   mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
@@ -160,48 +153,39 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
     .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
-    // Runtime test stimulus for the merged ALU/CMP result paths.
-    .fi_enable(ALUFiEnable), .fi_target(ALUFiTarget), .fi_kind(ALUFiKind),
-    .fi_bit(ALUFiBit), .fi_channel(ALUFiChannel),
+    .fi_enable(fault_inject),
     .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(FTStallE),
     .unresolved(FTUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r),
     .cmp_pe_primary(CMP_PE_p), .cmp_pe_shadow(CMP_PE_r));
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
   // Memory stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, ecc_inject_en, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
-  flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
-  flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
+  flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, fault_inject, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
+  flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, fault_inject, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
+  flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, fault_inject, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
 
   // Writeback stage pipeline register (ECC-protected)
-  flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, ecc_inject_en, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
+  flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, fault_inject, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
 
   // floating point inputs: FIntResM comes from fclass, fcmp, fmv; FCvtIntResW comes from fcvt
-  generate
-    if (P.F_SUPPORTED) begin : fpmux
-      mux2  #(P.XLEN)  resultmuxM(IEUResultM, FIntResM, FWriteIntM, IFResultM);
-      mux2  #(P.XLEN)  cvtresultmuxW(IFResultW, FCvtIntResW, FCvtIntW, IFCvtResultW);
-      if (P.IDIV_ON_FPU & P.F_SUPPORTED) begin : fpu_div_result
-        mux2  #(P.XLEN)  divresultmuxW(MDUResultW, FIntDivResultW, IntDivW, MulDivResultW);
-      end else begin : integer_div_result
-        assign MulDivResultW = MDUResultW;
-      end
-    end else begin : fpmux
-      assign IFResultM = IEUResultM;
-      assign IFCvtResultW = IFResultW;
+  if (P.F_SUPPORTED) begin : fpmux
+    mux2  #(P.XLEN)  resultmuxM(IEUResultM, FIntResM, FWriteIntM, IFResultM);
+    mux2  #(P.XLEN)  cvtresultmuxW(IFResultW, FCvtIntResW, FCvtIntW, IFCvtResultW);
+    if (P.IDIV_ON_FPU & P.F_SUPPORTED) begin
+      mux2  #(P.XLEN)  divresultmuxW(MDUResultW, FIntDivResultW, IntDivW, MulDivResultW);
+    end else begin
       assign MulDivResultW = MDUResultW;
     end
-  endgenerate
+  end else begin : fpmux
+    assign IFResultM = IEUResultM;
+    assign IFCvtResultW = IFResultW;
+    assign MulDivResultW = MDUResultW;
+  end
   mux5  #(P.XLEN) resultmuxW(IFCvtResultW, ReadDataW, CSRReadValW, MulDivResultW, SCResultW, ResultSrcW, ResultW);
 
   // handle Store Conditional result if atomic extension supported
-  generate
-    if (P.ZALRSC_SUPPORTED) begin : sc_result
-      assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
-    end else begin : no_sc_result
-      assign SCResultW = '0;
-    end
-  endgenerate
+  if (P.ZALRSC_SUPPORTED) assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
+  else                    assign SCResultW = '0;
 
   // ECC error aggregation
   assign RegEccSecErrW = sec_err_rd1 | sec_err_rd2

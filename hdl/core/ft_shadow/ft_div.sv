@@ -12,14 +12,8 @@ module ft_div import cvw::*; #(
   input  logic              StallM, FlushE,
   input  logic              IntDivE, DivSignedE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
-  // Runtime fault-injection input from core -> MDU. Enable gates corruption
-  // of the selected XLEN quotient/remainder at fi_bit. Target[0]/[1] selects
-  // primary/shadow; Kind 00/01/10/11 is XOR/stuck-at-0/stuck-at-1/no-op.
-  input  logic              fi_enable,
-  input  logic [1:0]        fi_target,
-  input  logic [1:0]        fi_kind,
-  input  logic [$clog2(P.XLEN)-1:0] fi_bit,
-  input  logic              fi_channel, // 0: quotient, 1: remainder
+  // Shared runtime enable; bit and kind are selected inside each injector.
+  input  logic fi_enable,
   output logic              DivBusyE,
   output logic [P.XLEN-1:0] QuotM, RemM,
   output logic              stall_req, unresolved, pe_primary, pe_shadow
@@ -96,18 +90,14 @@ module ft_div import cvw::*; #(
 
   // Faults are placed after independent replicas; shared operands, controls,
   // progress state, and the common divider algorithm remain out of scope.
-  ft_fault_inject #(.WIDTH(P.XLEN)) primary_quot_fi(
-    .data_i(primary_quot_raw), .fi_enable(fi_enable & ~fi_channel & fi_target[0]),
-    .fi_kind, .fi_bit, .data_o(primary_quot));
-  ft_fault_inject #(.WIDTH(P.XLEN)) shadow_quot_fi(
-    .data_i(shadow_quot_raw), .fi_enable(fi_enable & ~fi_channel & fi_target[1]),
-    .fi_kind, .fi_bit, .data_o(shadow_quot));
-  ft_fault_inject #(.WIDTH(P.XLEN)) primary_rem_fi(
-    .data_i(primary_rem_raw), .fi_enable(fi_enable & fi_channel & fi_target[0]),
-    .fi_kind, .fi_bit, .data_o(primary_rem));
-  ft_fault_inject #(.WIDTH(P.XLEN)) shadow_rem_fi(
-    .data_i(shadow_rem_raw), .fi_enable(fi_enable & fi_channel & fi_target[1]),
-    .fi_kind, .fi_bit, .data_o(shadow_rem));
+  ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0A1)) primary_quot_fi(
+    .clk, .reset, .fi_enable, .data_i(primary_quot_raw), .data_o(primary_quot));
+  ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0B1)) shadow_quot_fi(
+    .clk, .reset, .fi_enable, .data_i(shadow_quot_raw), .data_o(shadow_quot));
+  ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0C1)) primary_rem_fi(
+    .clk, .reset, .fi_enable, .data_i(primary_rem_raw), .data_o(primary_rem));
+  ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0D1)) shadow_rem_fi(
+    .clk, .reset, .fi_enable, .data_i(shadow_rem_raw), .data_o(shadow_rem));
 
   // Compare only after both divider FSMs have completed this held instruction;
   // IDLE is also not busy, but does not contain a valid result.

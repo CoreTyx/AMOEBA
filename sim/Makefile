@@ -73,8 +73,8 @@ NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_
 ECC_INJECT_DIR       := build_ecc_inject
 ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
-# Same flags as the Linux boot simulator but with ECE411_SIM_INJECT to enable LFSR
-# bit-flip injection every 2^INJECT_PERIOD cycles.  Waveforms and Spike co-sim are
+# Same flags as the Linux boot simulator but ECE411_SIM_INJECT enables the shared
+# fault_inject input for ECC and FT LFSR injection. Waveforms and Spike co-sim are
 # compiled out; RVFI is suppressed for the same reason as the plain Linux boot.
 LINUX_ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
 	+define+ECE411_LINUX +define+ECE411_NO_TRACE +define+ECE411_NO_RVFI +define+ECE411_SIM_INJECT \
@@ -222,9 +222,8 @@ linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 
 # ── Linux + ECC inject simulator ─────────────────────────────────────────────
 # Combines the Linux boot environment (ECE411_LINUX) with LFSR error injection
-# (ECE411_SIM_INJECT).  The injector fires every 2^INJECT_PERIOD cycles; the
-# ECC pipeline corrects single-bit flips transparently, so a successful boot to
-# userspace proves end-to-end ECC correction under real workloads.
+# (ECE411_SIM_INJECT). Storage ECC corrects single-bit flips and the ft_*
+# execution units retry transient mismatches under the same shared enable.
 verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(LINUX_ECC_INJECT_DIR)
 	python3 check_sus.py

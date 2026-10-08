@@ -56,16 +56,6 @@ lint_off -rule SELRANGE       -file "*/third_party/cvw/*"
 lint_off -rule UNUSEDPARAM    -file "*/third_party/cvw/*"
 lint_off -rule UNUSEDSIGNAL   -file "*/third_party/cvw/*"
 
-// Check FT code without the legacy width waivers above. Generate branches in
-// the modified execution path must have explicit names.
+// Keep width checks enabled for the FT implementation.
 lint_on -rule WIDTHEXPAND -file "*/hdl/core/ft_shadow/*"
 lint_on -rule WIDTHTRUNC -file "*/hdl/core/ft_shadow/*"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ft_shadow/*"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ieu/alu.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ieu/shifter.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ieu/datapath.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ieu/controller.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/ifu/bpred/bpred.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/mdu/mdu.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/mdu/div.sv"
-lint_on -rule GENUNNAMED -file "*/hdl/core/wally/wallypipelinedcore.sv"

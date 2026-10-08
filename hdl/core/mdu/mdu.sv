@@ -29,17 +29,8 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // Runtime fault-injection controls from wallypipelinedcore's local hooks.
-  // MUL drives ftmul's full-product injectors; DIV drives div.ftdiv's
-  // quotient/remainder injectors (Channel 0/1) when integer DIV is present.
-  // Each Enable gates its bundle. Target[0]/[1] enables primary/shadow;
-  // Kind 00/01/10/11 selects XOR/stuck-at-0/stuck-at-1/no-op at Bit.
-  input logic MULFiEnable, DIVFiEnable,
-  input logic [1:0] MULFiTarget, MULFiKind, DIVFiTarget, DIVFiKind,
-  input logic [$clog2(2*P.XLEN)-1:0] MULFiBit,
-  input logic [$clog2(P.XLEN)-1:0] DIVFiBit,
-  input logic DIVFiChannel,
-
+  // Shared enable from the core; each ft_* injector selects faults locally.
+  input  logic              fault_inject,
   input  logic              StallM, StallW,
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
@@ -71,7 +62,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product replica bits before the M-stage checker.
-    .fi_enable(MULFiEnable), .fi_target(MULFiTarget), .fi_kind(MULFiKind), .fi_bit(MULFiBit),
+    .fi_enable(fault_inject),
     .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
     .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
 
@@ -79,30 +70,27 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // Start a divide when a new division instruction is received and the divider isn't already busy or finishing
   // When IDIV_ON_FPU is set, use the FPU divider instead
   // In ZMMUL, with M_SUPPORTED = 0, omit the divider
-  generate
-    if ((P.IDIV_ON_FPU & P.F_SUPPORTED) | (!P.M_SUPPORTED)) begin : nodiv
-      assign QuotM = '0;
-      assign RemM = '0;
-      assign DivBusyE = 1'b0;
-      assign DivFTStallM = 1'b0;
-      assign DivUnresolvedM = 1'b0;
-      assign DIV_PE_p = 1'b0;
-      assign DIV_PE_r = 1'b0;
-    end else begin : div
-      logic DivUnresolvedE;
-      // Corrupt selected quotient/remainder replica bits before the E-stage
-      // completion checker. The resulting fault status is registered into M.
-      ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
-          .ForwardedSrcAE, .ForwardedSrcBE,
-          .fi_enable(DIVFiEnable), .fi_target(DIVFiTarget), .fi_kind(DIVFiKind),
-          .fi_bit(DIVFiBit), .fi_channel(DIVFiChannel),
-          .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
-          .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
-      // Division completes in E. Carry its terminal fault through the same
-      // E->M enable/flush as its instruction and PC before requesting a trap.
-      flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
-    end
-  endgenerate
+  if ((P.IDIV_ON_FPU & P.F_SUPPORTED) | (!P.M_SUPPORTED)) begin : nodiv
+    assign QuotM = '0;
+    assign RemM = '0;
+    assign DivBusyE = 1'b0;
+    assign DivFTStallM = 1'b0;
+    assign DivUnresolvedM = 1'b0;
+    assign DIV_PE_p = 1'b0;
+    assign DIV_PE_r = 1'b0;
+  end else begin : div
+    logic DivUnresolvedE;
+    // Corrupt selected quotient/remainder replica bits before the E-stage
+    // completion checker. The resulting fault status is registered into M.
+    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
+        .ForwardedSrcAE, .ForwardedSrcBE,
+        .fi_enable(fault_inject),
+        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
+        .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
+    // Division completes in E. Carry its terminal fault through the same
+    // E->M enable/flush as its instruction and PC before requesting a trap.
+    flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
+  end
 
   assign FTStallM      = MulFTStallM | DivFTStallM;
   assign FTUnresolvedM = MulUnresolvedM | DivUnresolvedM;
@@ -123,13 +111,11 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
 
   // Handle sign extension for W-type instructions
   flopenrc #(1) W64MReg(clk, reset, FlushM, ~StallM, W64E, W64M);
-  generate
-    if (P.XLEN == 64) begin : resmux // RV64 has W-type instructions
-      assign MDUResultM = W64M ? {{32{PrelimResultM[31]}}, PrelimResultM[31:0]} : PrelimResultM;
-    end else begin : resmux // RV32 has no W-type instructions
-      assign MDUResultM = PrelimResultM;
-    end
-  endgenerate
+  if (P.XLEN == 64) begin : resmux // RV64 has W-type instructions
+    assign MDUResultM = W64M ? {{32{PrelimResultM[31]}}, PrelimResultM[31:0]} : PrelimResultM;
+  end else begin : resmux // RV32 has no W-type instructions
+    assign MDUResultM = PrelimResultM;
+  end
 
   // Writeback stage pipeline register
   flopenrc #(P.XLEN) MDUResultWReg(clk, reset, FlushW, ~StallW, MDUResultM, MDUResultW);

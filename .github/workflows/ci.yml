@@ -488,7 +488,7 @@ jobs:
       - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
         run: touch sim/verilator/build_ecc_inject/Vtop_tb
 
-      - name: Run ECC baremetal test (inject_en=1)
+      - name: Run ECC baremetal test with shared ECC/FT injection (fault_inject=1)
         run: make -C sim run_ecc_inject PROG=../testcode/baremetal_ecc/${{ matrix.test }}.c
 
   # ── Build Linux + ECC inject simulator ──────────────────────────────────────
@@ -604,7 +604,7 @@ jobs:
       - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
         run: touch sim/verilator/build_linux_ecc_inject/Vtop_tb
 
-      - name: Boot Linux with ECC injection
+      - name: Boot Linux with shared ECC/FT injection
         run: |
           make -C sim linux_boot_ecc_inject \
             LINUX_TIMEOUT=800000000
