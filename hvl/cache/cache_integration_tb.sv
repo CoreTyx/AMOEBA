@@ -32,6 +32,7 @@ module cache_integration_tb;
 
   localparam OFFSETLEN = $clog2(LINELEN/8);
   localparam SETLEN = $clog2(NUMSETS);
+  localparam TAGLEN = PA_BITS - SETLEN - OFFSETLEN;
 
   logic clk, reset;
   logic Stall, FlushStage, InvalidateFlushStage;
@@ -60,7 +61,7 @@ module cache_integration_tb;
 
   cache #(.P(P), .PA_BITS(PA_BITS), .LINELEN(LINELEN), .NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS),
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
-          .SCRUB_INTERVAL_CYCLES(0)) dut (
+          .SCRUBBER_ENABLED(1'b1), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .ReadDataWord, .CacheMiss, .CacheAccess, .SelHPTW,
@@ -167,6 +168,7 @@ module cache_integration_tb;
            (dw <= 1013) ? 10 : 11;
   endfunction
   localparam int TB_LINECHECKWIDTH = tbrequiredr(LINELEN) + 1;
+  localparam int TB_TAGCHECKWIDTH = tbrequiredr(TAGLEN) + 1;
 
   function automatic logic [TB_LINECHECKWIDTH-1:0] peekdatacheck(input int w, input int s);
     case (w)
@@ -183,6 +185,24 @@ module cache_integration_tb;
     case (w)
       0: dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s] = v;
       default: dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s] = v;
+    endcase
+  endtask
+
+  function automatic logic [TB_TAGCHECKWIDTH-1:0] peektagcheck(input int w, input int s);
+    case (w)
+      0: return dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s];
+      default: return dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s];
+    endcase
+  endfunction
+
+  task automatic fliptagcheckbits(input int w, input int s, input int bit0, input int bit1 = -1);
+    logic [TB_TAGCHECKWIDTH-1:0] v;
+    v = peektagcheck(w, s);
+    v[bit0] = ~v[bit0];
+    if (bit1 >= 0) v[bit1] = ~v[bit1];
+    case (w)
+      0: dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
+      default: dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
     endcase
   endtask
 
@@ -211,7 +231,8 @@ module cache_integration_tb;
   endfunction
 
   logic [WORDLEN-1:0] result;
-  logic [PA_BITS-1:0] testadr, dirtyadr, scrubadr;
+  logic [PA_BITS-1:0] testadr, dirtyadr, scrubadr, tagsecadr, tagdedadr;
+  logic [PA_BITS-1:0] scrubcleanadr, scrubdirtyadr, scrubverifyadr;
   int way, s;
 
   initial begin
@@ -301,10 +322,131 @@ module cache_integration_tb;
       join
       check("DED dirty: escalated as a fault pulse, not silently refetched", sawfault && !sawmiss);
       check("DED dirty: line remains valid and dirty afterward", peekvalid(way, s) && peekdirty(way, s));
+      flipdatacheckbits(way, s, 2, 5); // restore the line before testing background scrub behavior
     end
 
-    // ── 7. Scrubber: inject into a line NEVER touched by any demand access, then go idle and
-    //       confirm it gets found and fixed without any demand access. ──
+    // ── 7. Scrubber: correct a tag SEC on an otherwise idle line and persist the correction. ──
+    begin
+      logic [TB_TAGCHECKWIDTH-1:0] checkbefore, checkafter;
+      int tagway, tagset;
+      bit found;
+      tagsecadr = 16'h50A0;
+      mem[{tagsecadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] = {NUMWAYS{64'h5151515151515151}};
+      doload(tagsecadr, result);
+      tagway = findway(tagsecadr);
+      tagset = tagsecadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      checkbefore = peektagcheck(tagway, tagset);
+      fliptagcheckbits(tagway, tagset, 1);
+      found = 0;
+      for (int i = 0; i < 20000 && !found; i++) begin
+        @(posedge clk);
+        checkafter = peektagcheck(tagway, tagset);
+        if (checkafter !== (checkbefore ^ (1 << 1))) found = 1;
+      end
+      waitclocks(2);
+      check("scrubber: found and corrected a tag SEC", found);
+      check("scrubber: tag SEC correction increments SEC counter", SecCount == 2);
+      doload(tagsecadr, result);
+      check("scrubber: corrected tag remains accessible", result === 64'h5151515151515151);
+    end
+
+    // ── 8. Scrubber: an uncorrectable tag on a clean line must invalidate, then demand refetch. ──
+    begin
+      int tagway, tagset;
+      bit invalidated;
+      tagdedadr = 16'h60C0;
+      mem[{tagdedadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] = {NUMWAYS{64'h6262626262626262}};
+      doload(tagdedadr, result);
+      tagway = findway(tagdedadr);
+      tagset = tagdedadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      fliptagcheckbits(tagway, tagset, 0, 2);
+      CacheRW = 0;
+      invalidated = 0;
+      for (int i = 0; i < 20000 && !invalidated; i++) begin
+        @(posedge clk);
+        invalidated = !peekvalid(tagway, tagset);
+      end
+      check("scrubber: tag DED invalidates the clean line", invalidated);
+      doload(tagdedadr, result);
+      check("scrubber: invalidated tag DED line is fetched correctly", result === 64'h6262626262626262);
+    end
+
+    // ── 9. Scrubber: a data DED on a clean line invalidates it and a later load refetches it. ──
+    begin
+      int cleanway, cleanset;
+      bit invalidated;
+      scrubcleanadr = 16'h70E0;
+      mem[{scrubcleanadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] = {NUMWAYS{64'h7070707070707070}};
+      doload(scrubcleanadr, result);
+      cleanway = findway(scrubcleanadr);
+      cleanset = scrubcleanadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      flipdatacheckbits(cleanway, cleanset, 0, 2);
+      CacheRW = 0;
+      invalidated = 0;
+      for (int i = 0; i < 20000 && !invalidated; i++) begin
+        @(posedge clk);
+        invalidated = !peekvalid(cleanway, cleanset);
+      end
+      check("scrubber: data DED invalidates a clean line", invalidated);
+      doload(scrubcleanadr, result);
+      check("scrubber: invalidated data DED line is fetched correctly", result === 64'h7070707070707070);
+    end
+
+    // ── 10. If an error disappears between discovery and verification, the scrubber must not
+    //        commit a stale correction. ──
+    begin
+      int verifyway, verifyset;
+      bit sawverify;
+      logic [31:0] countbefore;
+      scrubverifyadr = 16'h90F0;
+      mem[{scrubverifyadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] = {NUMWAYS{64'h9090909090909090}};
+      doload(scrubverifyadr, result);
+      verifyway = findway(scrubverifyadr);
+      verifyset = scrubverifyadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      countbefore = SecCount;
+      flipdatacheckbits(verifyway, verifyset, 1);
+      CacheRW = 0;
+      sawverify = 0;
+      for (int i = 0; i < 20000 && !sawverify; i++) begin
+        @(negedge clk);
+        sawverify = dut.scrubber.VerifyPass;
+      end
+      check("scrubber: a detected error enters the verify pass", sawverify);
+      if (sawverify) flipdatacheckbits(verifyway, verifyset, 1);
+      waitclocks(100);
+      check("scrubber: a vanished error does not cause a stale correction",
+            peekvalid(verifyway, verifyset) && SecCount == countbefore);
+    end
+
+    // ── 11. Scrubber: a data DED on a dirty line must fault without invalidating it. ──
+    begin
+      int dirtyway, dirtyset;
+      bit sawfault, sawrefetch;
+      scrubdirtyadr = 16'h80A0;
+      mem[{scrubdirtyadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] = {NUMWAYS{64'h8080808080808080}};
+      doload(scrubdirtyadr, result);
+      dostore(scrubdirtyadr, 64'h88889999AAAABBBB);
+      dirtyway = findway(scrubdirtyadr);
+      dirtyset = scrubdirtyadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      flipdatacheckbits(dirtyway, dirtyset, 3, 6);
+      CacheRW = 0;
+      sawfault = 0; sawrefetch = 0;
+      for (int i = 0; i < 20000 && !sawfault; i++) begin
+        @(posedge clk);
+        sawfault = EccDedDirtyFault;
+        sawrefetch |= CacheBusRW[1];
+        if (sawfault)
+          check("scrubber: dirty data DED reports the scrubbed line address",
+                EccDedDirtyFaultAdr == {scrubdirtyadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}});
+      end
+      check("scrubber: dirty data DED raises a fault", sawfault);
+      check("scrubber: dirty data DED does not refetch and drop modified data", !sawrefetch);
+      check("scrubber: dirty data DED retains valid and dirty state",
+            peekvalid(dirtyway, dirtyset) && peekdirty(dirtyway, dirtyset));
+    end
+
+    // ── 12. Scrubber: inject into a line NEVER touched by any demand access, then go idle and
+    //        confirm it gets found and fixed without any demand access. ──
     begin
       logic [TB_LINECHECKWIDTH-1:0] checkbefore, checkafter;
       int scrubway, scrubset;
@@ -324,7 +466,7 @@ module cache_integration_tb;
         if (checkafter !== (checkbefore ^ (1 << 4))) found = 1;
       end
       check("scrubber: found and corrected an error on an untouched line", found);
-      check("SEC counter includes scrubber correction", SecCount == 2);
+      check("SEC counter includes scrubber data correction", SecCount == 3);
     end
 
     $display("cache_integration_tb: %0d/%0d checks passed", checks - errors, checks);

@@ -91,6 +91,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   logic              CMOWriteback;
   logic              CMOZeroNoEviction;
   logic              StallConditions;
+  logic              FillBufferReturn;
 
   typedef enum logic [3:0]{STATE_ACCESS, // hit states
                            STATE_TAG_DECODE,    // ECC: tag decode result available this cycle
@@ -137,6 +138,11 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   always_ff @(posedge clk)
     if (reset | FlushStage)    CurrState <= STATE_ACCESS;
     else CurrState <= NextState;
+
+  always_ff @(posedge clk)
+    if (reset | FlushStage) FillBufferReturn <= 1'b0;
+    else if (CurrState == STATE_WRITE_LINE) FillBufferReturn <= 1'b1;
+    else if (CurrState == STATE_ADDRESS_SETUP & ~Stall) FillBufferReturn <= 1'b0;
 
   always_comb begin
     NextState = STATE_ACCESS;
@@ -244,6 +250,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                   (CurrState == STATE_FETCH) |
                   (CurrState == STATE_WRITEBACK) |
                   (CurrState == STATE_WRITE_LINE) |
+                  (CurrState == STATE_ADDRESS_SETUP & Stall & ~FillBufferReturn) |
                   resetDelay;
   assign SelAdrTag = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM))) | // exclusion-tag: icache SelAdrTag // changes if store delay hazard removed
                   (CurrState == STATE_TAG_DECODE) |
@@ -254,7 +261,8 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                   (CurrState == STATE_WRITEBACK) |
                   (CurrState == STATE_WRITE_LINE) |
                   resetDelay;
-  assign SelFetchBuffer = CurrState == STATE_WRITE_LINE | CurrState == STATE_ADDRESS_SETUP;
+  assign SelFetchBuffer = CurrState == STATE_WRITE_LINE |
+                          (CurrState == STATE_ADDRESS_SETUP & FillBufferReturn);
   assign CacheEn = (~Stall | StallConditions) | (CurrState != STATE_ACCESS) | reset | InvalidateCache; // exclusion-tag: dcache CacheEn
 
   // ECC-specific controls

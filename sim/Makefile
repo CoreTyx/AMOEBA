@@ -593,7 +593,7 @@ ecc_secded_dected_test:
 # pass/fail signal either.
 cache_ecc_unit_test:
 	mkdir -p verilator/cache_ecc_unit_tb
-	verilator --binary -O2 --top-module cache_ecc_unit_tb \
+	$(UNIT_TB_VERILATOR) --binary -O2 --top-module cache_ecc_unit_tb \
 	    $(CURDIR)/../hdl/core/cache/cacheeccbits.sv \
 	    $(CURDIR)/../hdl/core/cache/cacheeccenc.sv \
 	    $(CURDIR)/../hdl/core/cache/cacheeccdec.sv \
@@ -625,7 +625,8 @@ cache_integration_test:
 	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x22.sv \
 	    $(CURDIR)/../hvl/common/getenvval_stub.cpp \
 	    $(CURDIR)/../hvl/cache/cache_integration_tb.sv \
-	    -Mdir verilator/cache_integration_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/cache_integration_tb/compile.log
+	    -Mdir verilator/cache_integration_tb --Wall -Wno-fatal -CFLAGS "-std=c++20" \
+	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/cache_integration_tb/compile.log
 	verilator/cache_integration_tb/Vcache_integration_tb
 
 csr_harden_test:

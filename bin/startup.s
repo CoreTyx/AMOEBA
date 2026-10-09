@@ -63,6 +63,7 @@ _setup:
     slti x0, x0, -256
 _fini:
     beq zero, zero, _fini
+.align 2
 _trap_halt:
     slti x0, x0, -256
     beq zero, zero, _trap_halt

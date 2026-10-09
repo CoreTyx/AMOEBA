@@ -84,6 +84,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic [LINELEN-1:0]          LineWriteData,  // Final data written to cache (D$ only)
   input  logic                        SetValid,       // Set the valid bit in the selected way and set
   input  logic                        ClearValid,     // Clear the valid bit in the selected way and set
+  input  logic                        ScrubInvalidate, // Invalidate the scrubber's selected way and set
   input  logic                        SetDirty,       // Set the dirty bit in the selected way and set
   input  logic                        SelVictim,      // Overrides HitWay Tag matching.  Selects selects the victim tag/data regardless of hit
   input  logic                        ClearDirty,     // Clear the dirty bit in the selected way and set
@@ -135,17 +136,21 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic                               SelecteDirty;
   logic                               SelectedWriteWordEn;
   logic [LINELEN/8-1:0]               FinalByteMask;
-  logic                               SetValidEN, ClearValidEN;
+  logic                               SetValidEN, ClearValidEN, ScrubInvalidateWay;
   logic                               SetValidWay;
   logic                               ClearValidWay;
   logic                               SetDirtyWay;
   logic                               ClearDirtyWay;
   logic                               SelectedWay;
+  logic [1:0]                         SelectedWaySel;
   logic                               InvalidateCacheDelay;
 
   if (!READ_ONLY_CACHE) begin : flushlogic
     mux2 #(1) seltagmux(VictimWay, FlushWay, FlushCache, SelecteDirty);
-    mux4 #(1) selectedmux(HitWay, FlushWay, VictimWay, ScrubWay, {SelScrub, (SelVictim | FlushCache)}, SelectedWay);
+    assign SelectedWaySel = SelScrub ? 2'b11 :
+                            SelVictim ? 2'b10 :
+                            FlushCache ? 2'b01 : 2'b00;
+    mux4 #(1) selectedmux(HitWay, FlushWay, VictimWay, ScrubWay, SelectedWaySel, SelectedWay);
     // Widened from the original mux3 to a mux4 with SelScrub as the new top-priority leg. Scrub
     // grants only ever occur when no demand access -- and hence no SelVictim/FlushCache -- is in
     // flight (see cache.sv's ScrubGrant definition), so priority among the other three legs is
@@ -161,6 +166,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
 
   assign SetValidWay = SetValid & SelectedWay;
   assign ClearValidWay = ClearValid & SelectedWay;                             // exclusion-tag: icache ClearValidWay
+  assign ScrubInvalidateWay = ScrubInvalidate & SelectedWay;
   assign SetDirtyWay = SetDirty & SelectedWay;                                 // exclusion-tag: icache SetDirtyWay
   assign ClearDirtyWay = ClearDirty & SelectedWay;
   assign SelectedWriteWordEn = (SetValidWay | SetDirtyWay) & ~FlushStage;  // exclusion-tag: icache SelectedWiteWordEn
@@ -219,7 +225,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   // AND portion of distributed tag multiplexer
   assign TagWay = SelectedWay ? CorrectedTag : '0; // AND part of AOMux
   assign HitDirtyWay = Dirty & ValidWay;
-  assign DirtyWay = SelecteDirty & HitDirtyWay;                               // exclusion-tag: icache DirtyWay
+  assign DirtyWay = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay;        // exclusion-tag: icache DirtyWay
   assign HitWay = ValidWay & (CorrectedTag == PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]) & ~InvalidateCacheDelay & ~TagDedErr; // exclusion-tag: dcache HitWay
 
   flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, 1'b1, InvalidateCache, InvalidateCacheDelay);
@@ -297,7 +303,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       end else if (SetValidEN) begin
         ValidBits[CacheSetData] <= SetValidWay;
         ValidBitsRedundant[CacheSetData] <= SetValidWay;
-      end else if (ClearValidEN) begin
+      end else if (ClearValidEN | ScrubInvalidateWay) begin
         ValidBits[CacheSetData] <= '0; // exclusion-tag: icache ClearValidBits
         ValidBitsRedundant[CacheSetData] <= '0;
       end else if (ValidMismatch & SelectedWay) begin

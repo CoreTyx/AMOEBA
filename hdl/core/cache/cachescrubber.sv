@@ -49,8 +49,8 @@ module cachescrubber #(
   input  logic                DataSecErr,
   input  logic                DataDedErr,
 
-  // Action requests -- one-cycle pulses; cache.sv performs the actual write/invalidate/trap when
-  // it sees one of these asserted during a granted cycle.
+  // Action requests -- one-cycle pulses; cache.sv performs the action on the scrubber's commit
+  // cycle while ScrubBusy keeps the verified set/way selected.
   output logic                ScrubCorrectTag,
   output logic                ScrubCorrectData,
   output logic                ScrubInvalidate,   // clean line (or I$, which has no dirty state): cheap invalidate-and-refetch

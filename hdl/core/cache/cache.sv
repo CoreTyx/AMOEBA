@@ -31,6 +31,7 @@
 
 module cache import cvw::*; #(parameter cvw_t P,
                               parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE,
+                              parameter SCRUBBER_ENABLED = 1'b0,
                               parameter SCRUB_INTERVAL_CYCLES = 0) (
   input  logic                   clk,
   input  logic                   reset,
@@ -133,6 +134,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   // Scrubber / correction-writeback plumbing
   logic                          ScrubReq, ScrubGrant, ScrubBusy;
+  logic                          ScrubOwnsWaySelect;
   logic [SETLEN-1:0]             ScrubSet;
   logic [NUMWAYS-1:0]            ScrubWay;
   logic                          ScrubCorrectTag, ScrubCorrectData, ScrubInvalidate, ScrubTrap;
@@ -163,13 +165,13 @@ module cache import cvw::*; #(parameter cvw_t P,
   mux3 #(SETLEN) AdrSelMuxLRU(NextSet[SETTOP-1:OFFSETLEN], PAdr[SETTOP-1:OFFSETLEN], FlushAdr,
     AdrSelMuxSelLRU, CacheSetLRU);
 
-  // Scrubber gets the address bus only when nothing else needs it this cycle -- a plain mux2 in
-  // front of the existing 3-way selection, since ScrubGrant by construction never overlaps a real
-  // demand/flush/CMO/HPTW access.
-  mux2 #(SETLEN) ScrubAdrMuxData(CacheSetDataDemand, ScrubSet, ScrubGrant, CacheSetData);
-  mux2 #(SETLEN) ScrubAdrMuxTag(CacheSetTagDemand, ScrubSet, ScrubGrant, CacheSetTag);
+  // Scrubber takes the address bus on grant and retains it through decode, verification, and
+  // commit; ScrubGrant never overlaps a real demand/flush/CMO/HPTW access.
+  mux2 #(SETLEN) ScrubAdrMuxData(CacheSetDataDemand, ScrubSet, ScrubOwnsWaySelect, CacheSetData);
+  mux2 #(SETLEN) ScrubAdrMuxTag(CacheSetTagDemand, ScrubSet, ScrubOwnsWaySelect, CacheSetTag);
 
-  assign ScrubGrant = ScrubReq & ~(|CacheRW) & ~FlushCache & ~InvalidateCache & ~(|CMOpM) & ~SelHPTW & ~CacheStall;
+  assign ScrubGrant = SCRUBBER_ENABLED & ScrubReq & ~(|CacheRW) & ~FlushCache & ~InvalidateCache & ~(|CMOpM) & ~SelHPTW & ~CacheStall;
+  assign ScrubOwnsWaySelect = ScrubGrant | ScrubBusy;
 
   // Array of cache ways, along with victim, hit, dirty, and read merging logic
   cacheway #(.P(P), .PA_BITS(PA_BITS), .NUMSETS(NUMSETS), .LINELEN(LINELEN),
@@ -177,9 +179,9 @@ module cache import cvw::*; #(parameter cvw_t P,
              .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
              .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
     .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask,
-    .SetValid, .ClearValid, .SetDirty, .ClearDirty, .VictimWay,
+    .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
     .FlushWay, .FlushCache, .SelVictim,
-    .SelScrub(ScrubGrant), .ScrubWay,
+    .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
     .SelCorrectTag, .CorrectedTagIn, .SelCorrectData, .CorrectedLineIn(CorrectedLine),
     .TagDecodeCaptureEn, .SelectedWayDataQ,
     .ReadDataLineWay, .DataCheckWay, .HitWay, .ValidWay, .ValidMismatch(ValidMismatchWay),
@@ -187,12 +189,10 @@ module cache import cvw::*; #(parameter cvw_t P,
     .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
     .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
 
-  // The scrubber needs the array enabled during its own grant cycles too, which can otherwise fall
-  // in a window cachefsm's own CacheEn would leave deasserted (the pipeline stalled for an unrelated
-  // reason while this cache itself is idle). LRU state, though, should only ever move for demand
-  // evictions -- cacheLRU keeps the un-augmented, cachefsm-only enable.
+  // The scrubber needs the array enabled throughout its operation, including cycles when cachefsm's
+  // own CacheEn would be deasserted. LRU state, though, should only ever move for demand evictions.
   logic CacheEnArray;
-  assign CacheEnArray = CacheEn | ScrubGrant;
+  assign CacheEnArray = CacheEn | ScrubOwnsWaySelect;
 
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict
@@ -208,10 +208,10 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   // Whichever way is currently selected -- the demand hit way, or (mutually exclusive in time,
   // never both meaningful at once) the scrubber's target way -- determines whose tag SEC/DED
-  // status is live. Gated explicitly by ScrubGrant rather than OR'd blindly, since HitWay can be
-  // (harmlessly, but confusingly) nonzero for a stale/unrelated way while a scrub grant is active.
+  // status is live. Gated explicitly by ScrubOwnsWaySelect rather than OR'd blindly, since HitWay
+  // can be nonzero for a stale/unrelated way while a scrub operation is active.
   logic [NUMWAYS-1:0] TagSelWay;
-  assign TagSelWay = ScrubGrant ? ScrubWay : HitWay;
+  assign TagSelWay = ScrubOwnsWaySelect ? ScrubWay : HitWay;
   assign TagSecErr = |(TagSecErrWay & TagSelWay);
   assign TagDedErr = |(TagDedErrWay & TagSelWay);
   logic ValidMismatch, DirtyMismatch;
@@ -253,9 +253,6 @@ module cache import cvw::*; #(parameter cvw_t P,
   // sequence using this same grant cycle's signals -- so a demand request arriving in the exact
   // cycle the scrubber is granted would race ScrubBusy's rising edge. ORing in the live ScrubGrant
   // pulse itself closes that gap: cachefsm treats "about to become busy" the same as "already busy."
-  logic ScrubOwnsWaySelect;
-  assign ScrubOwnsWaySelect = ScrubGrant | ScrubBusy;
-
   // Data cache needs to choose word offset from PAdr or BeatCount to writeback dirty lines
   if (!READ_ONLY_CACHE)
     mux2 #(LOGBWPL) WordAdrrMux(.d0(PAdr[$clog2(LINELEN/8) - 1 : $clog2(MUXINTERVAL/8)]),
@@ -346,6 +343,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   logic SelCorrectTagDemand, SelCorrectDataDemand;
+  logic                          EccDedDirtyFaultDemand;
+  logic [PA_BITS-1:0]             ScrubFaultAdr;
   assign SelCorrectTag = SelCorrectTagDemand | ScrubCorrectTag;
   assign SelCorrectData = SelCorrectDataDemand | ScrubCorrectData;
   assign CorrectedTagIn = Tag; // Tag AO-mux already reflects the corrected tag of whichever way is selected (demand hit way, or scrub target)
@@ -367,9 +366,11 @@ module cache import cvw::*; #(parameter cvw_t P,
     .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr, .HitDirty(HitLineDirty),
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
-    .EccDedDirtyFault);
+    .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
-  assign EccDedDirtyFaultAdr = PAdr;
+  assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
+  assign ScrubFaultAdr = {Tag, ScrubSet, {OFFSETLEN{1'b0}}};
+  assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : PAdr;
 
   always_ff @(posedge clk)
     if (reset) SecCount <= '0;

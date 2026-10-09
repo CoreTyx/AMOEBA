@@ -34,9 +34,10 @@ module cacheeccbits #(
 
   localparam int CWBITS = DATA_WIDTH + R;
 
-  if (2**R < CWBITS + 1)
+  if (2**R < CWBITS + 1) begin : gen_validate_ecc_width
     $error("cacheeccbits: R=%0d is insufficient for DATA_WIDTH=%0d (need 2^R >= DATA_WIDTH+R+1=%0d)",
            R, DATA_WIDTH, CWBITS + 1);
+  end
 
   for (genvar bit_k = 0; bit_k < R; bit_k++) begin : gen_hamming
     logic [CWBITS-1:0] cov;
