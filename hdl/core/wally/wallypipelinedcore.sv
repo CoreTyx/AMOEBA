@@ -78,6 +78,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          LoadMisalignedFaultM, LoadAccessFaultM;
   logic                          StoreAmoMisalignedFaultM, StoreAmoAccessFaultM;
   logic                          InvalidateICacheM, FlushDCacheM;
+  logic                          FenceIWaitDCache, InvalidateICacheF, FlushDCacheF;
   logic                          PCSrcE;
   logic                          CSRWriteFenceM;
   logic                          DivBusyE;
@@ -204,6 +205,17 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          DCacheEccDedFaultM, DCacheEccDedTrapTakenM; // registered trap record and acknowledgement
   logic [P.XLEN-1:0]             DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM;
 
+  // FENCE.I clears its M-stage control as part of the pipeline flush, but the D-cache
+  // writeback continues afterward. Keep the frontend held and the I-cache invalidated
+  // until that writeback has completed.
+  always_ff @(posedge clk)
+    if (reset) FenceIWaitDCache <= 1'b0;
+    else if (InvalidateICacheM) FenceIWaitDCache <= 1'b1;
+    else if (FenceIWaitDCache & ~LSUStallM) FenceIWaitDCache <= 1'b0;
+
+  assign InvalidateICacheF = InvalidateICacheM | FenceIWaitDCache;
+  assign FlushDCacheF = FlushDCacheM | FenceIWaitDCache;
+
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
@@ -216,7 +228,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     // Execute
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
-    .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
+    .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM(InvalidateICacheF), .CSRWriteFenceM,
     .InstrD, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
@@ -279,7 +291,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .MemRWE, .MemRWM, .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
     .FpLoadStoreM, .FWriteDataM, .IEUAdrE, .IEUAdrM, .WriteDataM,
-    .ReadDataW, .FlushDCacheM, .CMOpM, .LSUPrefetchM,
+    .ReadDataW, .FlushDCacheM(FlushDCacheF), .CMOpM, .LSUPrefetchM,
     // connected to ahb (all stay the same)
     .LSUHADDR,  .HRDATA, .LSUHWDATA, .LSUHWSTRB, .LSUHSIZE,
     .LSUHBURST, .LSUHTRANS, .LSUHWRITE, .LSUHREADY,
