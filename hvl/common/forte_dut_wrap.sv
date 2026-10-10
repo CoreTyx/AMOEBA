@@ -17,11 +17,11 @@
 module forte_dut_wrap import forte_link_pkg::*; (
     input  logic        clk,
     input  logic        rst,
-    // Deliberately still ecc_inject_en, not fault_inject: top_tb.svh drives one
-    // shared port list for this DUT and rv64_core_wrapper, and the wrapper is
-    // held byte-identical to their branch.  The pin-side name appears on the
-    // forte_top instantiation below.
-    input  logic        ecc_inject_en,   // driven by top_tb
+    // fault_inject throughout now.  This used to be ecc_inject_en so that
+    // top_tb.svh's single shared port list would fit both this DUT and
+    // rv64_core_wrapper; main's #43 renamed it in the wrapper and in top_tb to
+    // the same name the ASIC side already used, so the special case is gone.
+    input  logic        fault_inject,    // driven by top_tb
 
     output logic [63:0] mem_addr,
     output logic [7:0]  mem_rmask,
@@ -72,7 +72,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
         // link_clk to it internally.  Driving the two domains independently
         // means instantiating forte_chip directly -- which is exactly what the
         // two-clock testbench in docs/impl_plan_link_clocking.md s9a is for.
-        .core_clk(clk), .rst_n(~rst), .fault_inject(ecc_inject_en),
+        .core_clk(clk), .rst_n(~rst), .fault_inject,
         .io, .dir, .req, .wr, .clk_out, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 

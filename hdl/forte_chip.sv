@@ -73,12 +73,11 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // test
   input  logic              test_mode,
   input  logic              scan_en,
-  // Fault injection enable, straight from the pad.  wallypipelinedcore gained
-  // this input on Making_HDL_Synthesizable as ecc_inject_en; forte_soc
-  // instantiates that module directly, so leaving it unconnected would drive X
-  // into the ECC logic.  The name changes at the forte_soc boundary and not
-  // here, because everything from the pin inwards is the ASIC's naming and
-  // everything from wallypipelinedcore outwards is theirs.
+  // Fault injection enable, straight from the pad.  forte_soc instantiates
+  // wallypipelinedcore directly, so leaving this unconnected would drive X into
+  // the ECC and FT logic.  One name the whole way down: this started as the
+  // ASIC side's rename of ecc_inject_en, and main's #43 renamed their end to
+  // the same thing, so there is no longer a translation at any boundary.
   input  logic              fault_inject,
   // status
   output logic              status
