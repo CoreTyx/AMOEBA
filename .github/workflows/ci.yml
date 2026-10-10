@@ -140,6 +140,9 @@ jobs:
       - name: Run 64-bit module tests at mismatch thresholds 1, 2, 3
         run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_regression
 
+      - name: Run per-unit fault-control register tests
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_control_test
+
       - name: Run independent core fault integration test
         run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_test
 

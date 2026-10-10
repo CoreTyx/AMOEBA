@@ -46,6 +46,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   output logic [P.AHBW-1:0]    HRDATA,
   output logic                 HREADY, HRESP,
   output logic                 HSELEXT,
+  output logic [5:0]           FaultInjectMask, // software unit enables; external pin gates these in the core
   // peripheral pins
   output logic                 MTimerInt, MSwInt,         // Timer and software interrupts from CLINT
   output logic                 MExtInt, SExtInt,          // External interrupts from PLIC
@@ -66,7 +67,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
 
   logic [P.XLEN-1:0]           HREADRam, HREADSDC;
 
-  logic [11:0]                 HSELRegions;
+  logic [12:0]                 HSELRegions;
   logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART,HSELSDC, HSELSPI;
   logic                        HSELDTIMD, HSELIROMD, HSELEXTD, HSELRamD, HSELCLINTD, HSELPLICD, HSELGPIOD, HSELUARTD, HSELSDCD, HSELSPID;
   logic                        HRESPRam,  HRESPSDC;
@@ -78,13 +79,13 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   logic                        SDCIntM;
 
   logic                        PCLK, PRESETn, PWRITE, PENABLE;
-  logic [5:0]                  PSEL;
+  logic [6:0]                  PSEL;
   logic [31:0]                 PADDR;
   logic [P.XLEN-1:0]           PWDATA;
   logic [P.XLEN/8-1:0]         PSTRB;
   /* verilator lint_off UNDRIVEN */ // undriven in rv32e configuration
-  logic [5:0]                  PREADY;
-  logic [5:0][P.XLEN-1:0]      PRDATA;
+  logic [6:0]                  PREADY;
+  logic [6:0][P.XLEN-1:0]      PRDATA;
   /* verilator lint_on UNDRIVEN */
   logic [P.XLEN-1:0]           HREADBRIDGE;
   logic                        HRESPBRIDGE, HREADYBRIDGE, HSELBRIDGE, HSELBRIDGED;
@@ -101,11 +102,14 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   assign {HSELSPI, HSELSDC, HSELPLIC, HSELUART, HSELGPIO, HSELCLINT, HSELRam, HSELBootRom, HSELEXT, HSELIROM, HSELDTIM} = HSELRegions[11:1];
 
   // AHB -> APB bridge
-  ahbapbbridge #(P, 6) ahbapbbridge (
-    .HCLK, .HRESETn, .HSEL({HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
+  ahbapbbridge #(P, 7) ahbapbbridge (
+    .HCLK, .HRESETn, .HSEL({HSELRegions[12], HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
     .HRDATA(HREADBRIDGE), .HRESP(HRESPBRIDGE), .HREADYOUT(HREADYBRIDGE),
     .PCLK, .PRESETn, .PSEL, .PWRITE, .PENABLE, .PADDR, .PWDATA, .PSTRB, .PREADY, .PRDATA);
-  assign HSELBRIDGE = HSELGPIO | HSELCLINT | HSELPLIC | HSELUART | HSELSPI | HSELSDC; // if any of the bridge signals are selected
+  assign HSELBRIDGE = HSELRegions[12] | HSELGPIO | HSELCLINT | HSELPLIC | HSELUART | HSELSPI | HSELSDC; // if any of the bridge signals are selected
+
+  fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSEL[6]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    .PRDATA(PRDATA[6]), .PREADY(PREADY[6]), .FaultInjectMask);
 
   // on-chip RAM
   if (P.UNCORE_RAM_SUPPORTED) begin : ram
@@ -204,7 +208,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   // takes more than 1 cycle to respond it needs to hold on to the old select until the
   // device is ready.  Hence this register must be selectively enabled by HREADY.
   // However on reset None must be selected.
-  flopenl #(12) hseldelayreg(HCLK, ~HRESETn, HREADY, HSELRegions, 12'b1,
+  flopenl #(12) hseldelayreg(HCLK, ~HRESETn, HREADY, HSELRegions[11:0], 12'b1,
     {HSELSPID, HSELSDCD, HSELPLICD, HSELUARTD, HSELGPIOD, HSELCLINTD,
       HSELRamD, HSELBootRomD, HSELEXTD, HSELIROMD, HSELDTIMD, HSELNoneD});
   flopenr #(1) hselbridgedelayreg(HCLK, ~HRESETn, HREADY, HSELBRIDGE, HSELBRIDGED);

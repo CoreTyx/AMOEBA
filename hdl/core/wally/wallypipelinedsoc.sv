@@ -30,7 +30,7 @@
 module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   input  logic                clk,
   input  logic                reset_ext,        // external asynchronous reset pin
-  input  logic                fault_inject,     // Shared ECC/FT fault-injection enable
+  input  logic                fault_inject,     // Master pin; core also applies the software unit mask
   output logic                reset,            // reset synchronized to clk to prevent races on release
   // AHB Interface
   input  logic [P.AHBW-1:0]   HRDATAEXT,
@@ -75,12 +75,14 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   logic [63:0]                MTIME_CLINT;      // from CLINT to CSRs
   logic                       MExtInt,SExtInt;  // from PLIC
 
+  logic [5:0] FaultInjectMask; // APB register selects units; core applies fault_inject master gate
+
   // synchronize reset to SOC clock domain
   synchronizer resetsync(.clk, .d(reset_ext), .q(reset));
 
   // instantiate processor and internal memories
   wallypipelinedcore #(P) core(.clk, .reset,
-    .fault_inject,
+    .fault_inject, .FaultInjectMask,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
@@ -89,12 +91,13 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
 
   // instantiate uncore if a bus interface exists
   if (P.BUS_SUPPORTED) begin : uncoregen // Hack to work around Verilator bug https://github.com/verilator/verilator/issues/4769
-    uncore #(P) uncore(.HCLK, .HRESETn, .TIMECLK,
+    uncore #(P) uncore(.HCLK, .HRESETn, .TIMECLK, .FaultInjectMask,
       .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HRDATAEXT,
       .HREADYEXT, .HRESPEXT, .HRDATA, .HREADY, .HRESP, .HSELEXT,
       .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .GPIOIN, .GPIOOUT, .GPIOEN, .UARTSin,
       .UARTSout, .MTIME_CLINT, .SPIIn, .SPIOut, .SPICS, .SPICLK, .SDCIn, .SDCCmd, .SDCCS, .SDCCLK);
   end else begin
+    assign FaultInjectMask = 6'h3f;
     assign {HRDATA, HREADY, HRESP, HSELEXT, MTimerInt, MSwInt, MExtInt, SExtInt,
             MTIME_CLINT, GPIOOUT, GPIOEN, UARTSout, SPIOut, SPICS, SPICLK, SDCCmd, SDCCS, SDCCLK} = '0;
   end

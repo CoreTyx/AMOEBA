@@ -30,7 +30,8 @@
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
    // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
-   input  logic                  fault_inject,
+   input  logic                  fault_inject, // external master enable
+   input  logic [5:0]            FaultInjectMask, // APB unit enables: ALU/CMP/MUL/DIV/regfile ECC/pipeline ECC
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -97,6 +98,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          FTStallE, FTStallM, FTStall;
   logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
+  logic [5:0]                    FaultInjectUnits;
+  // Software can select units without changing the pin. Protection stays active
+  // when injection is disabled; only artificial corruption is gated here.
+  assign FaultInjectUnits = {6{fault_inject}} & FaultInjectMask;
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 
@@ -224,7 +229,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      .FTUnresolvedM,
-     .fault_inject, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+     .fault_inject_alu(FaultInjectUnits[FI_ALU]), .fault_inject_cmp(FaultInjectUnits[FI_CMP]),
+     .fault_inject_regfile(FaultInjectUnits[FI_REGFILE]), .fault_inject_pipeline(FaultInjectUnits[FI_PIPELINE]),
+     .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -426,7 +433,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
-      .fault_inject,
+      .fault_inject_mul(FaultInjectUnits[FI_MUL]), .fault_inject_div(FaultInjectUnits[FI_DIV]),
       .ForwardedSrcAE, .ForwardedSrcBE,
       .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
       .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),

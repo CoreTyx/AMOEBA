@@ -29,8 +29,8 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // Shared enable from the core; each ft_* injector selects faults locally.
-  input  logic              fault_inject,
+  // Per-unit enables from the core; each injector selects bit and kind locally.
+  input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
   input  logic              StallM, StallW,
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
@@ -62,7 +62,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product replica bits before the M-stage checker.
-    .fi_enable(fault_inject),
+    .fi_enable(fault_inject_mul),
     .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
     .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
 
@@ -84,7 +84,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     // completion checker. The resulting fault status is registered into M.
     ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
-        .fi_enable(fault_inject),
+        .fi_enable(fault_inject_div),
         .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
         .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
     // Division completes in E. Carry its terminal fault through the same

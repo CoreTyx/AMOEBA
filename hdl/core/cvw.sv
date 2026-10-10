@@ -34,6 +34,11 @@
 
 package cvw;
 
+  // AMOEBA byte-addressed fault-injection control and unit-mask positions.
+  localparam logic [63:0] FI_CONTROL_ADDR = 64'h1007_000b;
+  localparam int FI_ALU = 0, FI_CMP = 1, FI_MUL = 2, FI_DIV = 3,
+                 FI_REGFILE = 4, FI_PIPELINE = 5;
+
   //`include "../../pkg/BranchPredictorType.vh"
 
 localparam BP_TWOBIT        = (32'd0);

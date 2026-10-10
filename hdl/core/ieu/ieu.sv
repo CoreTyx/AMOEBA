@@ -29,8 +29,9 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // Shared ECC and execution-unit fault-injection enable.
-  input  logic              fault_inject,
+  // Per-unit injection enables after the core applies the software mask and master pin.
+  input  logic              fault_inject_alu, fault_inject_cmp,
+  input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
@@ -144,7 +145,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .fault_inject,
+    .clk, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .InjectD, .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,

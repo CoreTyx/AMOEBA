@@ -579,14 +579,19 @@ Notable settings (see the file for the full parameter list):
 
 ### Memory Map
 
+See [the register and trap reference](docs/memory_map.md) for access sizes,
+register bits, custom CSRs, and trap causes.
+
 | Address range | Peripheral |
 |---|---|
 | `0x80000000–0x8FFFFFFF` | External RAM (256 MB, AHB-Lite) |
 | `0x02000000` | CLINT (core-local interrupt controller) |
 | `0x0C000000` | PLIC (platform-level interrupt controller) |
 | `0x10000000` | UART |
-| `0x10040000` | SPI |
-| `0x10060000` | GPIO |
+| `0x10040000` | SPI (disabled in current configuration) |
+| `0x10060000` | GPIO (disabled in current configuration) |
+| `0x1007000b` | Per-unit fault-injection control byte |
+| `0x0200f000` | DFT lock (ASIC only) |
 
 ---
 

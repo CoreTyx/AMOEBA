@@ -35,7 +35,7 @@ module ft_alu import cvw::*; #(
   input  logic              BMUActive,
   input  logic [1:0]        CZero,
   // Shared runtime enable; each replica/channel selects faults locally.
-  input  logic              fi_enable,
+  input  logic              fi_enable, cmp_fi_enable, // ALU and comparison injection are independently enabled
   output logic [P.XLEN-1:0] ALUResult, Sum,
   output logic [1:0]        flags,  // unchanged comparator schema: {eq, lt}
   output logic              stall_req, unresolved, pe_primary, pe_shadow,
@@ -100,7 +100,7 @@ module ft_alu import cvw::*; #(
     ft_fault_inject #(.WIDTH(P.XLEN+2), .SEED(16'hA021 + 16'(i*64))) shift_fi(
       .clk, .reset, .fi_enable, .data_i(shift_raw[i]), .data_o(shift_live[i]));
     ft_fault_inject #(.WIDTH(P.XLEN+1), .SEED(16'hA031 + 16'(i*64))) cmp_fi(
-      .clk, .reset, .fi_enable, .data_i(cmp_raw[i]), .data_o(cmp_live[i]));
+      .clk, .reset, .fi_enable(cmp_fi_enable), .data_i(cmp_raw[i]), .data_o(cmp_live[i]));
 
     // A shift-channel fault must reach the architectural output, including
     // word sign extension. The injection bit stays physical during diagnosis.

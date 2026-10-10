@@ -69,14 +69,8 @@ module forte_top import forte_link_pkg::*; #(
   input  wire              uart_rx,
   input  wire              test_mode,
   input  wire              scan_en,
-  // Fault injection enable.  Drives wallypipelinedcore's fault_inject, which
-  // reaches both the register-file ECC path and the fault-tolerant shadow
-  // datapath, so the SEC/DED and recompute logic can be proven in silicon
-  // rather than only in simulation.  Named for
-  // what the PIN is for rather than for the one block it reaches today: if a
-  // second injector is ever added, it shares this pad instead of asking for
-  // another.  Still a team decision whether it earns a pad of its own, shares
-  // the DFT mode encoding, or is tied off -- see docs/top_level_plan.md s3.
+  // Fault-injection master enable. The core ANDs this pin with the six unit
+  // enables at MMIO 0x1007_000b; ECC and FT checking remain active when low.
   input  wire              fault_inject,
   output wire              status
 );
