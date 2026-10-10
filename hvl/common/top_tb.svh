@@ -32,12 +32,12 @@
         .ILEN(ILEN)
     ) monitor(.itf(mon_itf));
 
-    // ECC error injection enable: 1 when built with +define+ECE411_SIM_INJECT,
+    // ECC and FT error injection enable: 1 when built with +define+ECE411_SIM_INJECT,
     // 0 otherwise.  Wired as a real port so DFT can substitute a test controller.
 `ifdef ECE411_SIM_INJECT
-    logic ecc_inject_en = 1'b1;
+    logic fault_inject = 1'b1;
 `else
-    logic ecc_inject_en = 1'b0;
+    logic fault_inject = 1'b0;
 `endif
 
     rv64_core_wrapper dut (
@@ -49,7 +49,7 @@
         .mem_rdata (mem_itf.rdata[0]),
         .mem_wdata (mem_itf.wdata[0]),
         .mem_resp  (mem_itf.resp [0]),
-        .ecc_inject_en (ecc_inject_en)
+        .fault_inject (fault_inject)
     );
 
     `include "rvfi_reference.svh"

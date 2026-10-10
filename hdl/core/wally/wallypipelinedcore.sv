@@ -29,8 +29,8 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
-   // ECC inject enable (from top-level, for DFT)
-   input  logic                  ecc_inject_en,
+   // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
+   input  logic                  fault_inject,
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -90,9 +90,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [3:0]                    ENVCFG_CBE;                      // Cache Block operation enables
   logic [3:0]                    CMOpM;                           // 1: cbo.inval; 2: cbo.flush; 4: cbo.clean; 8: cbo.zero
   logic                          IFUPrefetchE, LSUPrefetchM;      // instruction / data prefetch hints
-  // Shadow control is split by detection stage: ALU/compare in E, multiply/
-  // divide in M. FTStall is combined before hazard propagation; unresolved status is
-  // pipelined to M so the existing precise trap machinery can consume it.
+  // Fault-recovery outputs from the protected execution units: ALU/compare
+  // and DIV detect in E, MUL in M. DIV faults reach this interface through
+  // the MDU's E->M register. FTStall holds the pipeline; unresolved status
+  // reaches M for a precise trap, and PE indicators feed sticky CSR status.
   logic                          FTStallE, FTStallM, FTStall;
   logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
@@ -222,7 +223,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
-     .ecc_inject_en, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+     .FTUnresolvedM,
+     .fault_inject, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
@@ -326,10 +328,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign FTUnresolvedM = FTUnresolvedEReg | MDUUnresolvedM;
   assign FTStall = FTStallE | FTStallM;
 
-  // mftstatus (custom read-only CSR) is backed by reset-sticky diagnosis bits:
-  // {shadow unresolved, ECC DED, ECC SEC, div isolated, mul isolated, cmp isolated, alu isolated}.
-  // The ECC bits are supplied by the IEU W-stage aggregate interface.
-  assign FTStatus = {FTUnresolvedM, RegEccDedErrW, RegEccSecErrW, (DIV_PE_p | DIV_PE_r),
+  // MFTSTATUS (0x7C2), reset-sticky ft_* status:
+  // [0] ALU isolated, [1] CMP isolated, [2] MUL isolated, [3] DIV isolated,
+  // [5:4] reserved zero, [6] unresolved FT fault (cause 16).
+  // ECC correction/detection is recorded separately in MSECFAULT (0x7C0).
+  assign FTStatus = {FTUnresolvedM, 2'b00, (DIV_PE_p | DIV_PE_r),
                      (MUL_PE_p | MUL_PE_r), (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
   // Sticky status survives the transient checker pulse and is read via CSR.
   always_ff @(posedge clk) begin
@@ -339,7 +342,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // global stall and flush control
   hazard hzu(
-    .BPWrongE, .CSRWriteFenceM, .RetM, .TrapM,
+    // Untrusted E results must not flush the instruction being diagnosed.
+    .BPWrongE(BPWrongE & ~FTStall & ~FTUnresolvedE & ~FTUnresolvedM),
+    .CSRWriteFenceM, .RetM, .TrapM,
     .StructuralStallD,
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
@@ -421,6 +426,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+      .fault_inject,
       .ForwardedSrcAE, .ForwardedSrcBE,
       .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
       .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),

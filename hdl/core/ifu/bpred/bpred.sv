@@ -217,7 +217,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
     assign BTAWrongM = BPBTAWrongM & PCSrcM;
 
   end else begin
-    assign {BTAWrongM, RASPredPCWrongM} = 0;
+    assign {BPDirWrongM, BTAWrongM, RASPredPCWrongM} = 0;
   end
 
   assign IClassM = {CallM, ReturnM, JumpM, BranchM};

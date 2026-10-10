@@ -110,8 +110,8 @@ NO_SPIKE_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_
 ECC_INJECT_DIR       := build_ecc_inject$(RETIRE_SUFFIX)
 ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT $(TRACE_DEF) +incdir+$(CURDIR)/../hvl/verilator -Wall --timescale 1ps/1ps -Mdir $(ECC_INJECT_DIR) -O3 --output-split 20000 --output-split-cfuncs 200 -CFLAGS "-O3 -flto -DNDEBUG $(TRACE_CFLAGS)" -LDFLAGS "-flto" --x-assign fast --x-initial fast $(TRACE_VFLAGS) --cc --exe ../verilator_warn.vlt +define+ECE411_VERILATOR --threads $(shell nproc)
 LINUX_ECC_INJECT_DIR := build_linux_ecc_inject
-# Same flags as the Linux boot simulator but with ECE411_SIM_INJECT to enable LFSR
-# bit-flip injection every 2^INJECT_PERIOD cycles.  Waveforms and Spike co-sim are
+# Same flags as the Linux boot simulator but ECE411_SIM_INJECT enables the shared
+# fault_inject input for ECC and FT LFSR injection. Waveforms and Spike co-sim are
 # compiled out; RVFI is suppressed for the same reason as the plain Linux boot.
 LINUX_ECC_INJECT_VER_FLAGS = $(COMMON_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER \
 	+define+ECE411_LINUX +define+ECE411_NO_TRACE +define+ECE411_NO_RVFI +define+ECE411_SIM_INJECT \
@@ -259,9 +259,8 @@ linux_boot: verilator/$(LINUX_BUILD_DIR)/Vtop_tb $(LINUX_MEMLST)
 
 # ── Linux + ECC inject simulator ─────────────────────────────────────────────
 # Combines the Linux boot environment (ECE411_LINUX) with LFSR error injection
-# (ECE411_SIM_INJECT).  The injector fires every 2^INJECT_PERIOD cycles; the
-# ECC pipeline corrects single-bit flips transparently, so a successful boot to
-# userspace proves end-to-end ECC correction under real workloads.
+# (ECE411_SIM_INJECT). Storage ECC corrects single-bit flips and the ft_*
+# execution units retry transient mismatches under the same shared enable.
 verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 	mkdir -p verilator/$(LINUX_ECC_INJECT_DIR)
 	python3 check_sus.py
@@ -533,10 +532,18 @@ vcs_regression:
 # ── Standalone RTL unit tests ─────────────────────────────────────────────────
 # Self-checking testbenches live in hvl/; their build/run entry points live here
 # alongside the SoC, ECC, and ISA regression targets.
-.PHONY: ft_shadow_test
+FT_THRESHOLD ?= 2
+FT_TB_DIR = verilator/ft_shadow_tb_64_$(FT_THRESHOLD)
+.PHONY: ft_shadow_test ft_shadow_regression
+# Three standalone 64-bit module runs at mismatch thresholds 1, 2, and 3.
+# These runs do not instantiate a processor or execute instructions.
+ft_shadow_regression:
+	@set -e; for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_THRESHOLD=$$threshold; done
+
 ft_shadow_test:
-	mkdir -p verilator/ft_shadow_tb
-	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module ft_recompute_fault_tb \
+	@test "$(FT_THRESHOLD)" -ge 1 || { echo "FT_THRESHOLD must be a positive integer" >&2; exit 1; }
+	mkdir -p $(FT_TB_DIR)
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) \
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
@@ -548,16 +555,15 @@ ft_shadow_test:
 	    $(wildcard $(CURDIR)/../hdl/core/ieu/bmu/*.sv) \
 	    $(wildcard $(CURDIR)/../hdl/core/ieu/kmu/*.sv) \
 	    $(CURDIR)/../hdl/core/ieu/alu.sv \
-	    $(CURDIR)/../hdl/core/ieu/comparator.sv \
 	    $(CURDIR)/../hdl/core/mdu/mul.sv \
 	    $(CURDIR)/../hdl/core/mdu/divstep.sv \
 	    $(CURDIR)/../hdl/core/mdu/div.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/ft_shadow/*.sv) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_recompute_fault_tb.sv \
 	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
-	    -Mdir verilator/ft_shadow_tb -Wall -Wno-fatal --timescale 1ps/1ps \
-	    2>&1 | tee verilator/ft_shadow_tb/compile.log
-	verilator/ft_shadow_tb/Vft_recompute_fault_tb
+	    -Mdir $(FT_TB_DIR) -Wall -Wno-fatal --timescale 1ps/1ps \
+	    2>&1 | tee $(FT_TB_DIR)/compile.log
+	$(FT_TB_DIR)/Vft_recompute_fault_tb
 
 .PHONY: ecc_baremetal_regression
 ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
@@ -606,3 +612,17 @@ csr_harden_test:
 .PHONY: clean
 clean:
 	rm -rf bin vcs $(VCS_NO_SPIKE_DIR) verdi verilator spike
+
+# Independent full-core runtime-injection/retirement/precise-trap regression.
+.PHONY: ft_core_test
+ft_core_test:
+	mkdir -p verilator/ft_core_tb
+	# Enable prediction only in this processor test to exercise predicted-taken faults.
+	python3 -c 'import pathlib,re; p=pathlib.Path("../pkg/config.vh"); pathlib.Path("verilator/ft_core_tb/config.vh").write_text(re.sub(r"(localparam logic BPRED_SUPPORTED\s*=\s*)[01]", r"\g<1>1", p.read_text()))'
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
+	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
+	    $(CURDIR)/../hvl/ft_shadow/ft_core_fault_tb.sv \
+	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
+	    2>&1 | tee verilator/ft_core_tb/compile.log
+	verilator/ft_core_tb/Vft_core_fault_tb

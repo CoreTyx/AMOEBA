@@ -34,8 +34,8 @@
 
 module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // ECC inject enable (from top-level, for DFT)
-  input  logic              ecc_inject_en,
+  // Shared ECC and execution-unit fault-injection enable.
+  input  logic              fault_inject,
   // Decode stage signals
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
@@ -112,7 +112,6 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] IFResultW;                      // Result from either IEU or single-cycle FPU op writing an integer register
   logic [P.XLEN-1:0] IFCvtResultW;                   // Result from IEU, signle-cycle FPU op, or 2-cycle FCVT float to int
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
-  logic ALUStallE, CMPStallE, ALUUnresolvedE, CMPUnresolvedE;
 
   // ECC error signals from register file read ports
   logic sec_err_rd1, ded_err_rd1;
@@ -134,7 +133,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .wd3(ResultW),
     .DummyW, .DummySelW,
     .rd1(R1DRaw), .rd2(R2DRaw),
-    .inject_en(ecc_inject_en),
+    .inject_en(fault_inject),
     .sec_err_rd1, .ded_err_rd1,
     .sec_err_rd2, .ded_err_rd2
   );
@@ -151,42 +150,34 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   extend #(P) ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
 
   // Execute stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R1D,             R1E,        sec_rd1e,  ded_rd1e);
-  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, ecc_inject_en, R2D,             R2E,        sec_rd2e,  ded_rd2e);
-  flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ecc_inject_en, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
+  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, fault_inject, R1D,             R1E,        sec_rd1e,  ded_rd1e);
+  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, fault_inject, R2D,             R2E,        sec_rd2e,  ded_rd2e);
+  flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, fault_inject, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
 
   mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
   mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
-  // Comparator output controls branches; duplicate it before branch decode.
-  ft_cmp #(.WIDTH(P.XLEN)) ftcmp(
-    .clk, .reset, .flush(FlushE), .valid(InstrValidE),
-    .a(ForwardedSrcAE), .b(ForwardedSrcBE), .sgnd(BranchSignedE), .flags(FlagsE),
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
-    .stall_req(CMPStallE), .unresolved(CMPUnresolvedE), .pe_primary(CMP_PE_p), .pe_shadow(CMP_PE_r));
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
   // ALU drives both the architectural result and LSU address.
   ft_alu #(P) ftalu(
-    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .A(SrcAE), .B(SrcBE),
+    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .advance(~StallM), .A(SrcAE), .B(SrcBE),
+    .cmp_a(ForwardedSrcAE), .cmp_b(ForwardedSrcBE), .cmp_sgnd(BranchSignedE), .flags(FlagsE),
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
     .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
-    .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(ALUStallE),
-    .unresolved(ALUUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r));
+    .fi_enable(fault_inject),
+    .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(FTStallE),
+    .unresolved(FTUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r),
+    .cmp_pe_primary(CMP_PE_p), .cmp_pe_shadow(CMP_PE_r));
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
-  // Either E-stage checker holds the complete pipeline or reports a fault.
-  assign FTStallE = ALUStallE | CMPStallE;
-  assign FTUnresolvedE = ALUUnresolvedE | CMPUnresolvedE;
-
   // Memory stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, ecc_inject_en, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
-  flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
-  flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, ecc_inject_en, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
+  flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, fault_inject, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
+  flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, fault_inject, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
+  flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, fault_inject, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
 
   // Writeback stage pipeline register (ECC-protected)
-  flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, ecc_inject_en, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
+  flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, fault_inject, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
 
   // floating point inputs: FIntResM comes from fclass, fcmp, fmv; FCvtIntResW comes from fcvt
   if (P.F_SUPPORTED) begin : fpmux

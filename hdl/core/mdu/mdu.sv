@@ -29,6 +29,8 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  // Shared enable from the core; each ft_* injector selects faults locally.
+  input  logic              fault_inject,
   input  logic              StallM, StallW,
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
@@ -37,7 +39,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              MDUActiveE,                     // Mul/Div instruction being executed
   output logic [P.XLEN-1:0] MDUResultW,                     // multiply/divide result
   output logic              DivBusyE,                       // busy signal to stall pipeline in Execute stage
-  // M-stage retry/fault status; PE outputs are diagnostic only.
+  // Retry requests and M-aligned terminal faults; PE reports replica isolation.
   output logic              FTStallM, FTUnresolvedM,
   output logic              MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r
 );
@@ -53,12 +55,14 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
 
   // Multiplier.  The shadow wrapper preserves the original E->M PP register
   // timing and retries only a held MUL transaction.
-  // MUL and DIV resolve in M but have different retry mechanisms: MUL reloads
-  // its PP registers, while the iterative DIV wrapper restarts both FSMs.
+  // MUL retries its M-stage transaction by reloading the partial products.
+  // DIV retries the held E-stage transaction by restarting both divider FSMs;
+  // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
-    .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0),
+    // Corrupt selected product replica bits before the M-stage checker.
+    .fi_enable(fault_inject),
     .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM),
     .pe_primary(MUL_PE_p), .pe_shadow(MUL_PE_r));
 
@@ -75,13 +79,17 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign DIV_PE_p = 1'b0;
     assign DIV_PE_r = 1'b0;
   end else begin : div
-    // The production injection controls are tied off.  The direct FT test
-    // enables them only on its local wrapper instance.
-    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
+    logic DivUnresolvedE;
+    // Corrupt selected quotient/remainder replica bits before the E-stage
+    // completion checker. The resulting fault status is registered into M.
+    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .W64E, .IntDivE,
         .ForwardedSrcAE, .ForwardedSrcBE,
-        .fi_enable(1'b0), .fi_target(2'b00), .fi_kind(2'b00), .fi_bit('0), .fi_channel(1'b0),
-        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedM),
+        .fi_enable(fault_inject),
+        .DivBusyE, .QuotM, .RemM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
         .pe_primary(DIV_PE_p), .pe_shadow(DIV_PE_r));
+    // Division completes in E. Carry its terminal fault through the same
+    // E->M enable/flush as its instruction and PC before requesting a trap.
+    flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
   end
 
   assign FTStallM      = MulFTStallM | DivFTStallM;

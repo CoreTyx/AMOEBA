@@ -39,7 +39,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
   input  logic [5:0]               NextCauseM,
   input  logic [P.XLEN-1:0]        CSRWriteValM,
-  input  logic [6:0]               FTStatus,                  // read-only shadow/ECC diagnostic payload
+  input  logic [6:0]               FTStatus,                  // read-only ft_* diagnostic payload; bit map below
   input  logic [11:0]              MIP_REGW, MIE_REGW,
   input  logic [6:0]               SecFaultM,
   output logic [P.XLEN-1:0]        CSRMReadValM, MTVEC_REGW,
@@ -92,10 +92,13 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   localparam MCAUSE        = 12'h342;
   localparam MTVAL         = 12'h343;
   localparam MIP           = 12'h344;
-  // Custom machine read-only diagnostic CSR.  It is not part of the RISC-V
-  // architectural CSR map and is reserved for shadow/ECC diagnostics.
-  // Custom machine CSR map: ECC status at 0x7C0, dummy frequency at 0x7C1,
-  // and shadow diagnostic status at 0x7C2.
+  // MFTSTATUS (0x7C2): read-only, reset-sticky status from the ft_* modules.
+  // [0] ALU replica isolated; [1] CMP replica isolated;
+  // [2] MUL replica isolated; [3] DIV replica isolated (currently reserved:
+  //     MUL/DIV retry and trap, so neither currently isolates a replica).
+  // [5:4] Reserved, read as zero. ECC SEC/DED remain in MSECFAULT[5:4].
+  // [6] Unresolved FT mismatch, reported through the cause-16 trap path.
+  // Bits clear only on reset; writes to this CSR are rejected.
   localparam MFTSTATUS     = 12'h7C2;
   localparam PMPCFG0       = 12'h3A0;
   // .. up to 15 more at consecutive addresses
@@ -291,8 +294,6 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MIDELEG:       CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIDELEG_REGW};
       MIP:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIP_REGW};
       MIE:           CSRMReadValM = {{(P.XLEN-12){1'b0}}, MIE_REGW};
-      // Custom CSR is intentionally read-only; writes are rejected above.
-      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, FTStatus};
       MSCRATCH:      CSRMReadValM = MSCRATCH_REGW;
       MEPC:          CSRMReadValM = MEPC_REGW;
       MCAUSE:        CSRMReadValM = MCAUSE_REGW;
@@ -303,8 +304,10 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
       MENVCFGH:      if (P.U_SUPPORTED & P.XLEN==32) CSRMReadValM = MENVCFGH_REGW;
                      else IllegalCSRMAccessM = 1'b1;
       MCOUNTINHIBIT: CSRMReadValM = {{(P.XLEN-32){1'b0}}, MCOUNTINHIBIT_REGW};
-      RANDINSTRFREQ: CSRMReadValM = {{(P.XLEN-32){1'b0}}, RAND_INSTR_INSERT_FREQ_REGW};
+      // Custom CSRs
+      MFTSTATUS:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, FTStatus};
       MSECFAULT:     CSRMReadValM = {{(P.XLEN-7){1'b0}}, MSECFAULT_REGW};
+      RANDINSTRFREQ: CSRMReadValM = {{(P.XLEN-32){1'b0}}, RAND_INSTR_INSERT_FREQ_REGW};
       default:       IllegalCSRMAccessM = 1'b1;
     endcase
   end
