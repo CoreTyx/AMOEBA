@@ -41,6 +41,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
   input  logic [4:0]        Rs1D, Rs2D, Rs2E,             // Source registers
   input  logic              InjectD,                 // AMOEBA: decode stage holds an injected dummy instruction
+  input  logic              InstrValidD,             // valid Decode-stage instruction
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -89,7 +90,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // ECC error aggregation outputs
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
   output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
-  output logic              RegEccDedErrPipeW        // DED from W-stage pipeline reg only (IFResultM→IFResultW)
+  output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (IFResultM→IFResultW)
+  output logic [31:0]       RegfileSecCount
   // Hazard Unit signals
 );
 
@@ -135,7 +137,9 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .rd1(R1DRaw), .rd2(R2DRaw),
     .inject_en(fault_inject),
     .sec_err_rd1, .ded_err_rd1,
-    .sec_err_rd2, .ded_err_rd2
+    .sec_err_rd2, .ded_err_rd2,
+    .CountReadEnable(InstrValidD & ~StallE & ~FlushE),
+    .SecCount(RegfileSecCount)
   );
 
   // AMOEBA: obfuscate the operands of inserted dummy instructions.  Placed after

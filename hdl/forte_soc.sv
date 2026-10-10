@@ -62,7 +62,12 @@ module forte_soc import cvw::*; #(
     // Register-file ECC fault report, added on Making_HDL_Synthesizable.  Left
     // open as rv64_core_wrapper does: nothing in the ASIC consumes it yet, and
     // routing it to a pad is a decision for the DFT discussion.
-    .PrivModeUncorrectableFaultW ());
+    .PrivModeUncorrectableFaultW (),
+    // SEC (corrected-error) counters for the register file and both caches, added on
+    // swe-cache-ec. wallypipelinedsoc serves them as read-only registers at ECC_COUNTER_BASE via
+    // uncore.sv; forte_uncore has no such slave yet, so they are left open here for the same
+    // reason as above. Exposing them on the ASIC is a separate decision (see forte_uncore.sv).
+    .RegfileSecCount (), .ICacheSecCount (), .DCacheSecCount ());
 
   forte_uncore #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) uncore(
     .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HTRANS,

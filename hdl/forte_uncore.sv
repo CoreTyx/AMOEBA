@@ -72,7 +72,9 @@ module forte_uncore import cvw::*; #(
   // answers for it.
   localparam logic [15:0] DFTLOCK_OFF  = 16'hF000;
 
-  logic [11:0]                 HSELRegions;
+  // Width follows adrdecs. [12] is the ECC-counter region (ECC_COUNTER_BASE, served by uncore.sv on
+  // the legacy SoC); nothing here serves it, so an access there takes the no-region path below.
+  logic [12:0]                 HSELRegions;
   logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART, HSELSDC, HSELSPI;
   logic                        HSELBootRom, HSELEXTRaw;
   logic                        HSELEXTD, HSELBRIDGE, HSELBRIDGED, HSELNoneD;

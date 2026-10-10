@@ -4,6 +4,7 @@
 // Written: Rose Thompson rose@rosethompson.net
 // Created: 25 August 2021
 // Modified: 20 January 2023
+// Modified: SECDED ECC hardening (decode-wait states, correction/trap branching), 2026
 //
 // Purpose: Controller for the cache fsm
 //
@@ -68,7 +69,24 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   output logic       FlushWayCntEn,     // Enable the way counter during a flush
   output logic       FlushCntRst,       // Reset both flush counters
   output logic       SelFetchBuffer,    // Bypass the SRAM for a load hit by directly using the read data from the ahbcacheinterface's FetchBuffer
-  output logic       CacheEn            // Enable the cache memory arrays.  Disable hold read data constant
+  output logic       CacheEn,           // Enable the cache memory arrays.  Disable hold read data constant
+
+  // SECDED ECC
+  input  logic       TagSecErr,         // Selected way's tag codeword has a correctable error
+  input  logic       TagDedErr,         // Selected way's tag codeword has an uncorrectable error (never true when Hit -- see cacheway.sv HitWay)
+  input  logic       DataSecErr,        // Selected way's data codeword has a correctable error
+  input  logic       DataDedErr,        // Selected way's data codeword has an uncorrectable error
+  input  logic       HitDirty,          // Hit way is dirty (D$ only; tied 0 for I$)
+  input  logic       TagDedDirty,       // A valid+dirty way in the set being read (the flush way, during a flush) has an uncorrectable tag
+  output logic       DropTagDedDirty,   // Pulse: invalidate that way -- its data can't be written back without an address
+  output logic       EccDedLostLine,    // Pulse: a dirty line leaving the cache (eviction or flush) had uncorrectable data; it was dropped, not written back
+  output logic       LatchHitWord,      // Capture the word the core will read, before a store/AMO hit's write lands
+  output logic       SelHitWord,        // Return that captured word (ADDRESS_SETUP after a hit) instead of re-reading the array
+  input  logic       ScrubOwnsWaySelect, // The scrubber has an operation in flight (or is being granted this cycle) that needs way-selection state a new demand sequence would otherwise contend for -- hold off starting one until it clears (see cache.sv)
+  output logic       TagDecodeCaptureEn, // Pulse: capture SelectedWay for the data-decode cycle (see cacheway.sv)
+  output logic       SelCorrectTag,     // Pulse: commit a re-encoded tag correction into the hit way
+  output logic       SelCorrectData,    // Pulse: commit a re-encoded data correction into the hit way
+  output logic       EccDedDirtyFault   // Pulse: D$ only, uncorrectable data error on a dirty line -- escalate, do not invalidate
 );
 
   logic              resetDelay;
@@ -78,8 +96,19 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   logic              CMOWriteback;
   logic              CMOZeroNoEviction;
   logic              StallConditions;
+  logic              FillBufferReturn;
+  logic              HitReturn;         // this ADDRESS_SETUP completes a hit (directly or via ECC_WRITEBACK)
+  logic              VictimDed;         // DATA_DECODE: the dirty victim of this miss has uncorrectable data
+  logic              EvictDirty;        // dirty victim that must actually be written back (LineDirty minus VictimDed)
+  logic              FlushDedHit;       // FLUSH_WRITEBACK, first cycle: the flushed line has uncorrectable data -- report and invalidate it, no bus write
+  logic              FlushSkipQ;        // the cycle after FlushDedHit: finish the skipped writeback (advance the flush counters)
+  logic              FlushWbDone;       // flush writeback finished: bus ack, or skipped
 
   typedef enum logic [3:0]{STATE_ACCESS, // hit states
+                           STATE_TAG_DECODE,    // ECC: tag decode result available this cycle
+                           STATE_DATA_DECODE,   // ECC: data decode result available this cycle; branch point
+                           STATE_ECC_WRITEBACK, // ECC: commit a correctable-error fix before completing
+                           STATE_DED_TRAP,       // ECC: D$ dirty line, uncorrectable -- pulse the fault, hold state
                            // miss states
                            STATE_FETCH,
                            STATE_WRITEBACK,
@@ -92,16 +121,24 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
 
   statetype CurrState, NextState;
 
+  // AnyMiss/AnyUpdateHit/AnyHit/CMOWriteback/CMOZeroNoEviction are evaluated once the array read
+  // that STATE_ACCESS issued has been decoded (during STATE_DATA_DECODE), using the corrected
+  // Hit/LineDirty/HitLineDirty that already reflect ECC-corrected values by construction (the
+  // decoders sit unconditionally in front of these signals in cache.sv, not gated by "is this an
+  // ordinary load/store" -- so CMO/flush writebacks also see corrected data for free).
   assign AnyMiss = (CacheRW[0] | CacheRW[1]) & ~Hit & ~InvalidateCache; // exclusion-tag: cache AnyMiss
-  assign AnyUpdateHit = (CacheRW[0]) & Hit;                            // exclusion-tag: icache storeAMO1
-  assign AnyHit = AnyUpdateHit | (CacheRW[1] & Hit);                  // exclusion-tag: icache AnyUpdateHit
+  assign AnyUpdateHit = (CacheRW[0]) & Hit;        // exclusion-tag: icache storeAMO1
+  assign AnyHit = AnyUpdateHit | (CacheRW[1] & Hit); // exclusion-tag: icache AnyUpdateHit
   assign CMOZeroNoEviction = CMOpM[3] & ~LineDirty;   // (hit or miss) with no writeback store zeros now
   assign CMOWriteback = ((CMOpM[1] | CMOpM[2]) & Hit & HitLineDirty) | CMOpM[3] & LineDirty;
 
   assign FlushFlag = FlushAdrFlag & FlushWayFlag;
 
-  // outputs for the performance counters.
-  assign CacheAccess = (|CacheRW) & ((CurrState == STATE_ACCESS & ~Stall & ~FlushStage) | (CurrState == STATE_ADDRESS_SETUP & ~Stall & ~FlushStage)); // exclusion-tag: icache CacheW
+  // outputs for the performance counters. CacheAccess/CacheMiss now fire out of STATE_DATA_DECODE
+  // (where the hit/miss decision is actually made) instead of STATE_ACCESS. STATE_ACCESS only ever
+  // advances to STATE_TAG_DECODE on a real request (see the state-transition case below), so
+  // reaching STATE_DATA_DECODE at all already implies a real, non-flushed access is in flight.
+  assign CacheAccess = (|CacheRW) & ((CurrState == STATE_DATA_DECODE) | (CurrState == STATE_ADDRESS_SETUP & ~Stall & ~FlushStage)); // exclusion-tag: icache CacheW
   assign CacheMiss = CurrState == STATE_ADDRESS_SETUP & ~Stall & ~FlushStage;
 
   // special case on reset. When the fsm first exists reset twayhe
@@ -113,15 +150,45 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
     if (reset | FlushStage)    CurrState <= STATE_ACCESS;
     else CurrState <= NextState;
 
+  always_ff @(posedge clk)
+    if (reset | FlushStage) FillBufferReturn <= 1'b0;
+    else if (CurrState == STATE_WRITE_LINE) FillBufferReturn <= 1'b1;
+    else if (CurrState == STATE_ADDRESS_SETUP & ~Stall) FillBufferReturn <= 1'b0;
+
+  // A hit's read data must be the line as it was BEFORE that access's own write. The write (store,
+  // AMO) lands at the end of DATA_DECODE, but the core only samples read data in ADDRESS_SETUP, by
+  // which point the array already returns the new contents -- so an AMO would hand back its own
+  // result instead of the old value. The word is latched in DATA_DECODE and returned from there.
+  always_ff @(posedge clk)
+    if (reset | FlushStage) HitReturn <= 1'b0;
+    else if (CurrState == STATE_DATA_DECODE)
+      HitReturn <= AnyHit & ((NextState == STATE_ADDRESS_SETUP) | (NextState == STATE_ECC_WRITEBACK));
+    else if (CurrState == STATE_ECC_WRITEBACK) HitReturn <= HitReturn;
+    else if (CurrState == STATE_ADDRESS_SETUP & Stall) HitReturn <= HitReturn;
+    else HitReturn <= 1'b0;
+  assign LatchHitWord = (CurrState == STATE_DATA_DECODE);
+  assign SelHitWord   = (CurrState == STATE_ADDRESS_SETUP) & HitReturn;
+
   always_comb begin
     NextState = STATE_ACCESS;
     case (CurrState)                                                                                        // exclusion-tag: icache state-case
-      STATE_ACCESS:           if(InvalidateCache & ~InvalidateFlushStage)                               NextState = STATE_ACCESS;     // exclusion-tag: dcache InvalidateCheck
-                             else if(FlushCache & ~READ_ONLY_CACHE)            NextState = STATE_FLUSH;     // exclusion-tag: icache FLUSHStatement
-                             else if(AnyMiss & (READ_ONLY_CACHE | ~LineDirty)) NextState = STATE_FETCH;     // exclusion-tag: icache FETCHStatement
+      STATE_ACCESS:          if(InvalidateCache & ~InvalidateFlushStage)                        NextState = STATE_ACCESS;     // exclusion-tag: dcache InvalidateCheck
+                             else if(FlushCache & ~READ_ONLY_CACHE & ~ScrubOwnsWaySelect) NextState = STATE_FLUSH;     // exclusion-tag: icache FLUSHStatement
+                             else if((CacheRW[0] | CacheRW[1] | (|CMOpM)) & ~InvalidateCache & ~ScrubOwnsWaySelect) NextState = STATE_TAG_DECODE; // any real request: go decode (held off while the scrubber owns way-selection state, see cache.sv)
+                             else                                              NextState = STATE_ACCESS;
+      STATE_TAG_DECODE:      if(TagDedDirty & ~READ_ONLY_CACHE)               NextState = STATE_DED_TRAP;    // a dirty line in this set lost its tag: report and drop it, then retry the access
+                             else                                              NextState = STATE_DATA_DECODE; // tag decode (all ways) resolves this cycle; SelectedWay captured for data decode
+      STATE_DATA_DECODE:      if(TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)))
+                                                                                NextState = STATE_FETCH;      // uncorrectable, but safe to discard: refetch. (TagDedErr never coincides with Hit -- see cacheway.sv -- so this always proceeds as a normal compulsory miss.)
+                             else if(DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE)
+                                                                                NextState = STATE_DED_TRAP;   // uncorrectable AND the only copy of modified data -- cannot discard
+                             else if((TagSecErr | DataSecErr) & Hit)           NextState = STATE_ECC_WRITEBACK; // correctable: fix durably before completing
+                             else if(AnyMiss & (READ_ONLY_CACHE | ~EvictDirty)) NextState = STATE_FETCH;    // exclusion-tag: icache FETCHStatement (an uncorrectable dirty victim is dropped, not written back)
                              else if((AnyMiss | CMOWriteback) & ~READ_ONLY_CACHE) NextState = STATE_WRITEBACK; // exclusion-tag: icache WRITEBACKStatement
                              else if((|CMOpM) & ~CMOWriteback)               NextState = STATE_ADDRESS_SETUP; // any CMO without dirty writeback: stall and re-read SRAM next cycle
-                             else                                              NextState = STATE_ACCESS;
+                             else                                              NextState = STATE_ADDRESS_SETUP; // ordinary hit: release CacheStall for one cycle (like every other completion path) before re-checking CacheRW in STATE_ACCESS, so a caller holding CacheRW constant until it sees CacheStall drop doesn't get misread as a brand-new request
+      STATE_ECC_WRITEBACK:                                                    NextState = STATE_ADDRESS_SETUP; // structural hazard on the SRAM write, same as STATE_WRITE_LINE
+      STATE_DED_TRAP:                                                         NextState = STATE_ADDRESS_SETUP; // one-cycle pulse, then resume (re-reads SRAM; the fault is latched externally)
       STATE_FETCH:           if(CacheBusAck)                                   NextState = STATE_WRITE_LINE;
                              else                                              NextState = STATE_FETCH;
       STATE_WRITE_LINE:                                                        NextState = STATE_ADDRESS_SETUP;
@@ -132,11 +199,12 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                              else if(CacheBusAck)                              NextState = STATE_ADDRESS_SETUP; // Read_hold lowers CacheStall
                              else                                              NextState = STATE_WRITEBACK;
       // eviction needs a delay as the bus fsm does not correctly handle sending the write command at the same time as getting back the bus ack.
-      STATE_FLUSH:           if(LineDirty)                                     NextState = STATE_FLUSH_WRITEBACK;
+      STATE_FLUSH:           if(TagDedDirty)                                   NextState = STATE_FLUSH;     // drop the tagless dirty line this cycle; counters hold (see below)
+                             else if(LineDirty)                                NextState = STATE_FLUSH_WRITEBACK;
                              else if (FlushFlag)                               NextState = STATE_ADDRESS_SETUP;
                              else                                              NextState = STATE_FLUSH;
-      STATE_FLUSH_WRITEBACK: if(CacheBusAck & ~FlushFlag)                      NextState = STATE_FLUSH;
-                             else if(CacheBusAck)                              NextState = STATE_ADDRESS_SETUP;
+      STATE_FLUSH_WRITEBACK: if(FlushWbDone & ~FlushFlag)                      NextState = STATE_FLUSH;
+                             else if(FlushWbDone)                              NextState = STATE_ADDRESS_SETUP;
                              else                                              NextState = STATE_FLUSH_WRITEBACK;
       // exclusion-tag-end: icache case
       default:                                                                 NextState = STATE_ACCESS;
@@ -146,7 +214,11 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   // com back to CPU
   assign CacheCommitted = (CurrState != STATE_ACCESS) & ~(READ_ONLY_CACHE & (CurrState == STATE_ADDRESS_SETUP));
   assign StallConditions =  FlushCache | AnyMiss | (|CMOpM);                            // exclusion-tag: icache FlushCache
-  assign CacheStall = (CurrState == STATE_ACCESS & StallConditions) | // exclusion-tag: icache StallStates
+  assign CacheStall = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM) | (FlushCache & ~READ_ONLY_CACHE))) | // exclusion-tag: icache StallStates -- a real request (or a flush) stalls from the moment it's issued
+                      (CurrState == STATE_TAG_DECODE) |
+                      (CurrState == STATE_DATA_DECODE) |
+                      (CurrState == STATE_ECC_WRITEBACK) |
+                      (CurrState == STATE_DED_TRAP) |
                       (CurrState == STATE_FETCH) |
                       (CurrState == STATE_WRITEBACK) |
                       (CurrState == STATE_WRITE_LINE) |  // this cycle writes the sram, must keep stalling so the next cycle can read the next hit/miss unless its a write.
@@ -154,60 +226,97 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                       (CurrState == STATE_FLUSH_WRITEBACK);
   // write enables internal to cache
   assign SetValid = CurrState == STATE_WRITE_LINE |
-                    (CurrState == STATE_ACCESS & CMOZeroNoEviction) |
+                    (CurrState == STATE_DATA_DECODE & CMOZeroNoEviction) |
                     (CurrState == STATE_WRITEBACK & CacheBusAck & CMOpM[3]);
-  assign ClearValid = (CurrState == STATE_ACCESS & (CMOpM[0] | (CMOpM[2] & ~HitLineDirty))) |
-  //assign ClearValid = (CurrState == STATE_ACCESS & (CMOpM[0])) |
-                      (CurrState == STATE_WRITEBACK & CMOpM[2] & CacheBusAck);
-  assign LRUWriteEn = (((CurrState == STATE_ACCESS & (AnyHit | CMOZeroNoEviction)) |
+  assign ClearValid = (CurrState == STATE_DATA_DECODE & ((CMOpM[0] | (CMOpM[2] & ~HitLineDirty)) | TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)))) |
+                      (CurrState == STATE_WRITEBACK & CMOpM[2] & CacheBusAck) |
+                      FlushDedHit; // drop the uncorrectable flushed line rather than leave it valid
+  assign LRUWriteEn = (((CurrState == STATE_DATA_DECODE & (AnyHit | CMOZeroNoEviction) & ~TagSecErr & ~DataSecErr & ~TagDedErr & ~DataDedErr) |
+                       (CurrState == STATE_ECC_WRITEBACK) |
                        (CurrState == STATE_WRITE_LINE)) & ~FlushStage) |
                       (CurrState == STATE_WRITEBACK & CMOpM[3] & CacheBusAck);
   // exclusion-tag-start: icache flushdirtycontrols
-  assign SetDirty = (CurrState == STATE_ACCESS & (AnyUpdateHit | CMOZeroNoEviction)) |         // exclusion-tag: icache SetDirty
+  assign SetDirty = (CurrState == STATE_DATA_DECODE & (AnyUpdateHit | CMOZeroNoEviction) & ~TagDedErr & ~DataDedErr) |         // exclusion-tag: icache SetDirty
                     (CurrState == STATE_WRITE_LINE & (CacheRW[0])) |
                     (CurrState == STATE_WRITEBACK & (CMOpM[3] & CacheBusAck));
   assign ClearDirty = (CurrState == STATE_WRITE_LINE & ~(CacheRW[0])) |   // exclusion-tag: icache ClearDirty
                       (CurrState == STATE_FLUSH & LineDirty) | // This is wrong in a multicore snoop cache protocol.  Dirty must be cleared concurrently and atomically with writeback.  For single core cannot clear after writeback on bus ack and change flushadr.  Clears the wrong set.
   // Flush and eviction controls
                       CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2]) & CacheBusAck;
-  assign SelVictim = (CurrState == STATE_WRITEBACK & ((~CacheBusAck & ~(CMOpM[1] | CMOpM[2])) | (CacheBusAck & CMOpM[3]))) |
-                  (CurrState == STATE_ACCESS & ((AnyMiss & LineDirty) | (CMOZeroNoEviction & ~Hit))) |
+  assign SelVictim = (CurrState == STATE_TAG_DECODE & AnyMiss & LineDirty) |
+                  (CurrState == STATE_WRITEBACK & ((~CacheBusAck & ~(CMOpM[1] | CMOpM[2])) | (CacheBusAck & CMOpM[3]))) |
+                  (CurrState == STATE_DATA_DECODE & ((AnyMiss & LineDirty) | (CMOZeroNoEviction & ~Hit))) |
                   (CurrState == STATE_WRITE_LINE);
   assign SelWriteback = (CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2] | ~CacheBusAck)) |
-                        (CurrState == STATE_ACCESS & AnyMiss & LineDirty);
+                        (CurrState == STATE_DATA_DECODE & AnyMiss & EvictDirty);
   // coverage off -item e 1 -fecexprrow 1
   // (state is always FLUSH_WRITEBACK when FlushWayFlag & CacheBusAck)
-  assign FlushAdrCntEn = (CurrState == STATE_FLUSH_WRITEBACK & FlushWayFlag & CacheBusAck) |
-             (CurrState == STATE_FLUSH & FlushWayFlag & ~LineDirty);
-  assign FlushWayCntEn = (CurrState == STATE_FLUSH & ~LineDirty) |
-             (CurrState == STATE_FLUSH_WRITEBACK & CacheBusAck);
-  assign FlushCntRst = (CurrState == STATE_FLUSH & FlushFlag & ~LineDirty) |
-              (CurrState == STATE_FLUSH_WRITEBACK & FlushFlag & CacheBusAck);
+  assign FlushAdrCntEn = (CurrState == STATE_FLUSH_WRITEBACK & FlushWayFlag & FlushWbDone) |
+             (CurrState == STATE_FLUSH & FlushWayFlag & ~LineDirty & ~TagDedDirty);
+  // FlushAdr is look-ahead (cache.sv shows FlushAdr+1 in the same cycle FlushAdrCntEn is set), so a
+  // cycle that invalidates the current flush line must not also advance the counters, or the write
+  // would land on the next set. Hence ~TagDedDirty here and FlushSkipQ (one cycle late) for data DED.
+  assign FlushWayCntEn = (CurrState == STATE_FLUSH & ~LineDirty & ~TagDedDirty) |
+             (CurrState == STATE_FLUSH_WRITEBACK & FlushWbDone);
+  assign FlushCntRst = (CurrState == STATE_FLUSH & FlushFlag & ~LineDirty & ~TagDedDirty) |
+              (CurrState == STATE_FLUSH_WRITEBACK & FlushFlag & FlushWbDone);
   // exclusion-tag-end: icache flushdirtycontrols
   // Bus interface controls
-  assign CacheBusRW[1] = (CurrState == STATE_ACCESS & AnyMiss & ~LineDirty) | // exclusion-tag: icache CacheBusRCauses
+  assign CacheBusRW[1] = (CurrState == STATE_DATA_DECODE & AnyMiss & ~EvictDirty) | // exclusion-tag: icache CacheBusRCauses
                          (CurrState == STATE_FETCH & ~CacheBusAck) |
                          (CurrState == STATE_WRITEBACK & CacheBusAck & ~(|CMOpM));
 
   logic LoadMiss;
   assign LoadMiss = (CacheRW[1]) & ~Hit & ~InvalidateCache; // exclusion-tag: cache AnyMiss
 
-  assign CacheBusRW[0] = (CurrState == STATE_ACCESS & LoadMiss & LineDirty) | // exclusion-tag: icache CacheBusW
+  assign CacheBusRW[0] = (CurrState == STATE_DATA_DECODE & LoadMiss & EvictDirty) | // exclusion-tag: icache CacheBusW
                          (CurrState == STATE_WRITEBACK & ~CacheBusAck) |
-                         (CurrState == STATE_FLUSH_WRITEBACK & ~CacheBusAck) |
+                         (CurrState == STATE_FLUSH_WRITEBACK & ~CacheBusAck & ~FlushDedHit & ~FlushSkipQ) |
                          (CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2]) & ~CacheBusAck);
 
-  assign SelAdrData = (CurrState == STATE_ACCESS & (CacheRW[0] | AnyMiss | (|CMOpM))) | // exclusion-tag: icache SelAdrCauses // changes if store delay hazard removed
+  assign SelAdrData = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM))) | // exclusion-tag: icache SelAdrCauses // changes if store delay hazard removed
+                  (CurrState == STATE_TAG_DECODE) |
+                  (CurrState == STATE_DATA_DECODE) |
+                  (CurrState == STATE_ECC_WRITEBACK) |
+                  (CurrState == STATE_DED_TRAP) |
+                  (CurrState == STATE_FETCH) |
+                  (CurrState == STATE_WRITEBACK) |
+                  (CurrState == STATE_WRITE_LINE) |
+                  (CurrState == STATE_ADDRESS_SETUP & Stall & ~FillBufferReturn) |
+                  resetDelay;
+  assign SelAdrTag = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM))) | // exclusion-tag: icache SelAdrTag // changes if store delay hazard removed
+                  (CurrState == STATE_TAG_DECODE) |
+                  (CurrState == STATE_DATA_DECODE) |
+                  (CurrState == STATE_ECC_WRITEBACK) |
+                  (CurrState == STATE_DED_TRAP) |
                   (CurrState == STATE_FETCH) |
                   (CurrState == STATE_WRITEBACK) |
                   (CurrState == STATE_WRITE_LINE) |
                   resetDelay;
-  assign SelAdrTag = (CurrState == STATE_ACCESS & (AnyMiss | (|CMOpM))) | // exclusion-tag: icache SelAdrTag // changes if store delay hazard removed
-                  (CurrState == STATE_FETCH) |
-                  (CurrState == STATE_WRITEBACK) |
-                  (CurrState == STATE_WRITE_LINE) |
-                  resetDelay;
-  assign SelFetchBuffer = CurrState == STATE_WRITE_LINE | CurrState == STATE_ADDRESS_SETUP;
+  assign SelFetchBuffer = CurrState == STATE_WRITE_LINE |
+                          (CurrState == STATE_ADDRESS_SETUP & FillBufferReturn);
   assign CacheEn = (~Stall | StallConditions) | (CurrState != STATE_ACCESS) | reset | InvalidateCache; // exclusion-tag: dcache CacheEn
+
+  // ECC-specific controls
+  assign TagDecodeCaptureEn = (CurrState == STATE_TAG_DECODE);
+  assign SelCorrectTag = (CurrState == STATE_ECC_WRITEBACK) & TagSecErr;
+  assign SelCorrectData = (CurrState == STATE_ECC_WRITEBACK) & DataSecErr;
+  // Uncorrectable data on a dirty line that is leaving the cache. The decoder already shows that
+  // line: the victim during DATA_DECODE (SelectedWayDataQ was captured on SelVictim in TAG_DECODE),
+  // the flushed line on FLUSH_WRITEBACK's first cycle. Writing it back would put garbage in memory
+  // as if it were good data, so the line is dropped and the loss is reported instead.
+  assign VictimDed = AnyMiss & LineDirty & DataDedErr & ~READ_ONLY_CACHE;
+  assign EvictDirty = LineDirty & ~VictimDed;
+  assign FlushDedHit = (CurrState == STATE_FLUSH_WRITEBACK) & DataDedErr & ~FlushSkipQ & ~READ_ONLY_CACHE;
+  always_ff @(posedge clk)
+    if (reset | FlushStage) FlushSkipQ <= 1'b0;
+    else FlushSkipQ <= FlushDedHit;
+  assign FlushWbDone = CacheBusAck | FlushSkipQ;
+  assign EccDedLostLine = ((CurrState == STATE_DATA_DECODE) & VictimDed) | FlushDedHit;
+
+  assign DropTagDedDirty = ((CurrState == STATE_TAG_DECODE) | (CurrState == STATE_FLUSH)) & TagDedDirty & ~READ_ONLY_CACHE;
+  assign EccDedDirtyFault = ((CurrState == STATE_DATA_DECODE) & DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE) |
+                            DropTagDedDirty | // modified data lost with its tag: reported, never silently dropped
+                            EccDedLostLine;   // dirty line with uncorrectable data dropped on eviction/flush
 
 endmodule // cachefsm

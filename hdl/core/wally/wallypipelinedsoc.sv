@@ -73,6 +73,7 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   logic                       HRESP;            // response from AHB
   logic                       MTimerInt, MSwInt;// timer and software interrupts from CLINT
   logic [63:0]                MTIME_CLINT;      // from CLINT to CSRs
+  logic [31:0]                RegfileSecCount, ICacheSecCount, DCacheSecCount;
   logic                       MExtInt,SExtInt;  // from PLIC
 
   // synchronize reset to SOC clock domain
@@ -84,7 +85,7 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
-    .PrivModeUncorrectableFaultW
+    .PrivModeUncorrectableFaultW, .RegfileSecCount, .ICacheSecCount, .DCacheSecCount
    );
 
   // instantiate uncore if a bus interface exists
@@ -92,6 +93,7 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
     uncore #(P) uncore(.HCLK, .HRESETn, .TIMECLK,
       .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HRDATAEXT,
       .HREADYEXT, .HRESPEXT, .HRDATA, .HREADY, .HRESP, .HSELEXT,
+      .RegfileSecCount, .ICacheSecCount, .DCacheSecCount,
       .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .GPIOIN, .GPIOOUT, .GPIOEN, .UARTSin,
       .UARTSout, .MTIME_CLINT, .SPIIn, .SPIOut, .SPICS, .SPICLK, .SDCIn, .SDCCmd, .SDCCS, .SDCCLK);
   end else begin

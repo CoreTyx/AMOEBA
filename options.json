@@ -5,7 +5,7 @@
     "f_ext"       : false,
     "zicsr"       : true,
     "zifencei"    : true,
-    "zbkb"        : true,
+    "zbkb"        : false,
     "bmem_0_on_x" : false,
     "dw_ip"       : [],
     "synth": {

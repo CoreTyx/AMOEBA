@@ -47,6 +47,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    output logic [3:0]            HPROT,
    output logic [1:0]            HTRANS,
    output logic                  HMASTLOCK,
+   output logic [31:0]           RegfileSecCount, ICacheSecCount, DCacheSecCount,
    input  logic                  ExternalStall,
    output logic                  PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
@@ -77,6 +78,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          LoadMisalignedFaultM, LoadAccessFaultM;
   logic                          StoreAmoMisalignedFaultM, StoreAmoAccessFaultM;
   logic                          InvalidateICacheM, FlushDCacheM;
+  logic                          FenceIWaitDCache, InvalidateICacheF, FlushDCacheF;
   logic                          PCSrcE;
   logic                          CSRWriteFenceM;
   logic                          DivBusyE;
@@ -197,6 +199,23 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0]             EccDedFaultEPCM, EccDedFaultMtvalM;
   logic                          RegEccDedErrSticky;              // latched DED fault — cleared only by reset
   logic                          PrivModeUncorrectableFaultW_priv; // from privileged unit before ECC OR
+  // D$ SECDED: uncorrectable data error on a dirty line. Independent cause/sticky-capture chain
+  // from the IEU regfile's EccDedFaultM above -- see privileged.sv/trap.sv (own cause, not 19).
+  logic                          DCacheEccDedDirtyFaultM;          // raw pulse from cache.sv (demand or scrub path)
+  logic [P.PA_BITS-1:0]          DCacheEccDedDirtyFaultAdrM;
+  logic                          DCacheEccDedFaultM, DCacheEccDedTrapTakenM; // registered trap record and acknowledgement
+  logic [P.XLEN-1:0]             DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM;
+
+  // FENCE.I clears its M-stage control as part of the pipeline flush, but the D-cache
+  // writeback continues afterward. Keep the frontend held and the I-cache invalidated
+  // until that writeback has completed.
+  always_ff @(posedge clk)
+    if (reset) FenceIWaitDCache <= 1'b0;
+    else if (InvalidateICacheM) FenceIWaitDCache <= 1'b1;
+    else if (FenceIWaitDCache & ~LSUStallM) FenceIWaitDCache <= 1'b0;
+
+  assign InvalidateICacheF = InvalidateICacheM | FenceIWaitDCache;
+  assign FlushDCacheF = FlushDCacheM | FenceIWaitDCache;
 
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
@@ -206,11 +225,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
-    .ICacheAccess, .ICacheMiss,
+    .ICacheAccess, .ICacheMiss, .ICacheSecCount,
     // Execute
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
-    .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
+    .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM(InvalidateICacheF), .CSRWriteFenceM,
     .InstrD, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
@@ -223,6 +242,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
+     .RegfileSecCount,
      .FTUnresolvedM,
      .fault_inject, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
@@ -274,7 +294,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .MemRWE, .MemRWM, .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
     .FpLoadStoreM, .FWriteDataM, .IEUAdrE, .IEUAdrM, .WriteDataM,
-    .ReadDataW, .FlushDCacheM, .CMOpM, .LSUPrefetchM,
+    .ReadDataW, .FlushDCacheM(FlushDCacheF), .CMOpM, .LSUPrefetchM,
     // connected to ahb (all stay the same)
     .LSUHADDR,  .HRDATA, .LSUHWDATA, .LSUHWSTRB, .LSUHSIZE,
     .LSUHBURST, .LSUHTRANS, .LSUHWRITE, .LSUHREADY,
@@ -302,7 +322,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .StoreAmoMisalignedFaultM,    // connects to privilege
     .StoreAmoAccessFaultM,        // connects to privilege
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
-    .LSUStallM);
+    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheSecCount);
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections
@@ -382,6 +402,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .RAND_INSTR_INSERT_FREQ_REGW,
       .RegEccSecErrW, .RegEccDedErrW,
       .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
+      .DCacheEccDedFaultM, .DCacheEccDedFaultEPCM, .DCacheEccDedFaultMtvalM, .DCacheEccDedTrapTakenM,
+      .DCacheEccDedDirtyFaultM,
       .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
@@ -389,7 +411,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
             EPCM, TrapVectorM, RetM, TrapM,
-            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, DCacheEccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
     // Without a CSR to program it, dummy instruction insertion stays disabled.
     assign RAND_INSTR_INSERT_FREQ_REGW = '0;
   end
@@ -419,6 +441,24 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   always_ff @(posedge clk)
     if (reset) RegEccDedErrSticky <= 1'b0;
     else       RegEccDedErrSticky <= RegEccDedErrSticky | RegEccDedErrW;
+
+  // D$ dirty-line uncorrectable data error: independent capture chain from the IEU one above (own
+  // cause, not shared with cause 19 -- see privileged.sv/trap.sv). Same combinational-feedback-
+  // breaking rationale as the block above: DCacheEccDedDirtyFaultM is a raw, same-cycle pulse out
+  // of cache.sv, captured here before it reaches trap logic.
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      DCacheEccDedFaultM      <= 1'b0;
+      DCacheEccDedFaultEPCM   <= '0;
+      DCacheEccDedFaultMtvalM <= '0;
+    end else if (DCacheEccDedTrapTakenM) begin
+      DCacheEccDedFaultM <= 1'b0;
+    end else if (!DCacheEccDedFaultM && DCacheEccDedDirtyFaultM) begin
+      DCacheEccDedFaultM      <= 1'b1;
+      DCacheEccDedFaultEPCM   <= PCM; // D$ faults always surface at the M-stage, unlike the IEU's W-stage-pipeline-register case above
+      DCacheEccDedFaultMtvalM <= {{(P.XLEN-P.PA_BITS){1'b0}}, DCacheEccDedDirtyFaultAdrM};
+    end
+  end
 
   // Combine privilege-mode TMR fault with sticky IEU ECC uncorrectable (DED) fault
   assign PrivModeUncorrectableFaultW = PrivModeUncorrectableFaultW_priv | RegEccDedErrSticky;

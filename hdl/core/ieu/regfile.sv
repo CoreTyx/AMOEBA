@@ -44,7 +44,9 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   output logic [XLEN-1:0]  rd1, rd2,
   input  logic             inject_en,
   output logic             sec_err_rd1, ded_err_rd1,
-  output logic             sec_err_rd2, ded_err_rd2
+  output logic             sec_err_rd2, ded_err_rd2,
+  input  logic             CountReadEnable,
+  output logic [31:0]      SecCount
 );
 
   localparam ARCHREGS = E_SUPPORTED ? 16 : 32;
@@ -66,6 +68,11 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   logic [CW-1:0] rf [NUMREGS-1:1];
   logic [5:0]    WriteIdx;
   integer i;
+
+  always_ff @(posedge clk)
+    if (reset) SecCount <= '0;
+    else if (CountReadEnable && (sec_err_rd1 || sec_err_rd2))
+      SecCount <= SecCount + {30'b0, sec_err_rd1} + {30'b0, sec_err_rd2};
 
   // Dummy writes are redirected to shadow registers and cannot alter
   // architectural register state.
