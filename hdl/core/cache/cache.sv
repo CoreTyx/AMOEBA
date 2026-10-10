@@ -289,15 +289,11 @@ module cache import cvw::*; #(parameter cvw_t P,
 
     assign FetchBufferByteSel = SetDirty ? ~DemuxedByteMask : '1;  // If load miss set all muxes to 1.
 
-    // Merge write data into the line for a store hit or a load-miss fill. Per-line ECC granularity
-    // means a store hit must merge against the CORRECTED line (CorrectedLine, already fixing up any
-    // latent single-bit error) rather than the raw, possibly-uncorrected array contents -- otherwise
-    // a partial-word store could silently re-encode a stale error as if it were newly-written-correct
-    // data. On a load-miss fill there is no existing corrected line to merge against (the line is
-    // being installed fresh), so that path is unchanged and still merges against FetchBuffer.
+    // A store hit merges against the corrected resident line. During a miss refill, including a
+    // store miss, the new line must instead be based on FetchBuffer rather than the victim line.
     for (index = 0; index < LINELEN/8; index++) begin
       mux2 #(8) WriteDataMux(.d0(WriteData[(8*index)%WORDLEN+7:(8*index)%WORDLEN]),
-        .d1(SetDirty ? CorrectedLine[8*index+7:8*index] : FetchBuffer[8*index+7:8*index]),
+        .d1((SetDirty & ~SelFetchBuffer) ? CorrectedLine[8*index+7:8*index] : FetchBuffer[8*index+7:8*index]),
         .s(FetchBufferByteSel[index] & ~CMOpM[3]), .y(LineWriteData[8*index+7:8*index]));
     end
     assign LineByteMask = SetDirty ? DemuxedByteMask : '1;

@@ -232,7 +232,9 @@ module cacheway import cvw::*; #(parameter cvw_t P,
 
   // Registered, one-cycle-delayed SelectedWay used only to gate the data array's AND-part-of-mux.
   // Breaks the tag-decode -> data-decode combinational path into two cycles.
-  flopenr #(1) selectedwaydatareg(clk, reset, TagDecodeCaptureEn, SelectedWay, SelectedWayDataQ);
+  // Victim and flush selections also need refreshing when they bypass tag-hit selection.
+  flopenr #(1) selectedwaydatareg(clk, reset, TagDecodeCaptureEn | SelVictim | FlushCache,
+    SelectedWay, SelectedWayDataQ);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Data Array (SECDED-protected: one codeword per full line; decode is shared across ways in
