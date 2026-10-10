@@ -1,3 +1,11 @@
+`ifndef AMOEBA_CONFIG_VH
+`define AMOEBA_CONFIG_VH
+// INCLUDE GUARD.  config.vh declares its parameters at COMPILATION-UNIT scope,
+// so two files including it in one unit collide on every single localparam.
+// That happens as soon as the design has a second top: hdl/rv64_core_wrapper.sv
+// and hdl/forte_chip.sv both need the config at file scope, and without this
+// guard the build fails with ~50 "Duplicate declaration of signal" errors --
+// for the legacy DUT too, because both files sit in the same source list.
 //////////////////////////////////////////
 // config.vh
 //
@@ -421,3 +429,5 @@ localparam logic USE_SRAM = 0;
 `endif
 
 `include "../pkg/config-shared.vh"
+
+`endif // AMOEBA_CONFIG_VH

@@ -1,12 +1,28 @@
 SHELL=/bin/bash -o pipefail
 .SHELLFLAGS += -e
 
+# forte_link_pkg.sv lives in hdl/ but is a PACKAGE, so it has to be analysed
+# before every module that imports it.  It therefore stays in PKG_SRCS (read
+# first) and is filtered OUT of the hdl glob, or it would be read twice and
+# collide with itself.  Leaving it to the glob alone is what broke lint and
+# synth: `sort` puts forte_link_pkg.sv after forte_chip, forte_link_core and
+# forte_link_phy, every one of which imports it.
+LINK_PKG       := $(CURDIR)/../hdl/forte_link_pkg.sv
 export PKG_SRCS = $(CURDIR)/../pkg/types.sv
 export REPO_ROOT = $(abspath $(CURDIR)/..)
 CVW_SRCS       := $(shell find $(CURDIR)/../third_party/cvw/src -name '*.sv' -o -name '*.v' 2>/dev/null)
-export HDL_SRCS = $(shell find $(CURDIR)/../hdl -name '*.sv') $(CVW_SRCS)
+export HDL_SRCS = $(filter-out $(LINK_PKG),$(shell find $(CURDIR)/../hdl -name '*.sv')) $(CVW_SRCS)
 export SRAM_LIB = $(shell find $(CURDIR)/../sram/output/ -name "*.db")
-export DESIGN_TOP = rv64_core_wrapper
+# Overridable so `make synth DESIGN_TOP=forte_top` synthesizes the ASIC top.
+export DESIGN_TOP ?= rv64_core_wrapper
+
+# Vendored OpenTitan primitives for the link CDC (third_party/opentitan).
+# prim_assert.sv is a macro header included by prim_fifo_async, so it goes on
+# synthesis.tcl's search_path rather than into the source list.
+PRIM_SRCS      := $(CURDIR)/../third_party/opentitan/prim_flop_2sync.sv \
+                  $(CURDIR)/../third_party/opentitan/prim_fifo_async.sv
+export HDL_SRCS := $(HDL_SRCS) $(PRIM_SRCS)
+export PKG_SRCS := $(PKG_SRCS) $(LINK_PKG)
 
 export STD_CELL_LIB=$(FREEPDK45)/stdcells.db
 export STD_CELL_ALIB=$(FREEPDK45)/alib

@@ -36,9 +36,11 @@ on:
 
 # gh run list / gh run download need actions:read.  A repository whose default
 # token is contents-only would otherwise fail at the download step.
+# pull-requests:read is for the changed-file check in "Download boot image".
 permissions:
   contents: read
   actions: read
+  pull-requests: read
 
 jobs:
   boot:
@@ -84,31 +86,14 @@ jobs:
       - name: Download boot image
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p testcode/linux/build
-          # The image must come from this branch.  An unscoped lookup takes the
-          # newest success on any branch, so a PR could silently boot main's
-          # kernel and prove nothing about the change under review.
-          # GITHUB_HEAD_REF is set only for pull_request events; GITHUB_REF_NAME
-          # covers schedule and workflow_dispatch.
-          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          echo "Looking for a boot image built from branch: $BRANCH"
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                     --branch "$BRANCH" \
-                     --workflow linux-image.yml --status success \
-                     --limit 1 --json databaseId --jq '.[0].databaseId')
-          if [ -z "$RUN_ID" ]; then
-            echo "No successful linux-image.yml run on branch '$BRANCH'."
-            echo "That workflow builds on push when testcode/linux/** changes;"
-            echo "otherwise run it manually (Actions -> Linux Boot Image -> Run workflow)."
-            exit 1
-          fi
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name amoeba-linux-boot-image --dir testcode/linux/build
-          ls -la testcode/linux/build
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: .github/scripts/download_boot_image.sh
 
       - name: Show image provenance
-        run: cat testcode/linux/build/boot.provenance
+        run: |
+          echo "Boot image built from branch: ${LINUX_IMAGE_FROM:-unknown}"
+          cat testcode/linux/build/boot.provenance
 
       - name: Build Linux boot simulator
         run: make -C sim build_linux
