@@ -329,7 +329,9 @@ module cache_edge_tb;
 
   task automatic lineclean(input int w, input int s, output bit clean);
     probecw = {peekdata(w, s), peekdatacheck(w, s)};
-    #1;
+    // Let the probe decoder settle by waiting for the next falling edge, like the rest of this
+    // bench samples. (A bare #1 here aborted Verilator's --timing scheduler: "Missed a time slot?")
+    @(negedge clk);
     clean = !probesec && !probeded;
   endtask
 

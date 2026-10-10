@@ -80,6 +80,8 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   input  logic       TagDedDirty,       // A valid+dirty way in the set being read (the flush way, during a flush) has an uncorrectable tag
   output logic       DropTagDedDirty,   // Pulse: invalidate that way -- its data can't be written back without an address
   output logic       EccDedLostLine,    // Pulse: a dirty line leaving the cache (eviction or flush) had uncorrectable data; it was dropped, not written back
+  output logic       LatchHitWord,      // Capture the word the core will read, before a store/AMO hit's write lands
+  output logic       SelHitWord,        // Return that captured word (ADDRESS_SETUP after a hit) instead of re-reading the array
   input  logic       ScrubOwnsWaySelect, // The scrubber has an operation in flight (or is being granted this cycle) that needs way-selection state a new demand sequence would otherwise contend for -- hold off starting one until it clears (see cache.sv)
   output logic       TagDecodeCaptureEn, // Pulse: capture SelectedWay for the data-decode cycle (see cacheway.sv)
   output logic       SelCorrectTag,     // Pulse: commit a re-encoded tag correction into the hit way
@@ -95,6 +97,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   logic              CMOZeroNoEviction;
   logic              StallConditions;
   logic              FillBufferReturn;
+  logic              HitReturn;         // this ADDRESS_SETUP completes a hit (directly or via ECC_WRITEBACK)
   logic              VictimDed;         // DATA_DECODE: the dirty victim of this miss has uncorrectable data
   logic              EvictDirty;        // dirty victim that must actually be written back (LineDirty minus VictimDed)
   logic              FlushDedHit;       // FLUSH_WRITEBACK, first cycle: the flushed line has uncorrectable data -- report and invalidate it, no bus write
@@ -151,6 +154,20 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
     if (reset | FlushStage) FillBufferReturn <= 1'b0;
     else if (CurrState == STATE_WRITE_LINE) FillBufferReturn <= 1'b1;
     else if (CurrState == STATE_ADDRESS_SETUP & ~Stall) FillBufferReturn <= 1'b0;
+
+  // A hit's read data must be the line as it was BEFORE that access's own write. The write (store,
+  // AMO) lands at the end of DATA_DECODE, but the core only samples read data in ADDRESS_SETUP, by
+  // which point the array already returns the new contents -- so an AMO would hand back its own
+  // result instead of the old value. The word is latched in DATA_DECODE and returned from there.
+  always_ff @(posedge clk)
+    if (reset | FlushStage) HitReturn <= 1'b0;
+    else if (CurrState == STATE_DATA_DECODE)
+      HitReturn <= AnyHit & ((NextState == STATE_ADDRESS_SETUP) | (NextState == STATE_ECC_WRITEBACK));
+    else if (CurrState == STATE_ECC_WRITEBACK) HitReturn <= HitReturn;
+    else if (CurrState == STATE_ADDRESS_SETUP & Stall) HitReturn <= HitReturn;
+    else HitReturn <= 1'b0;
+  assign LatchHitWord = (CurrState == STATE_DATA_DECODE);
+  assign SelHitWord   = (CurrState == STATE_ADDRESS_SETUP) & HitReturn;
 
   always_comb begin
     NextState = STATE_ACCESS;

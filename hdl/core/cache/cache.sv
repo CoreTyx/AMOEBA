@@ -120,6 +120,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            TagDedDirtyWay;     // valid+dirty ways whose tag is uncorrectable
   logic                          TagDedDirty, DropTagDedDirty;
   logic                          EccDedLostLine;     // cachefsm: dirty line dropped on eviction/flush (uncorrectable data)
+  logic                          LatchHitWord, SelHitWord;
+  logic [WORDLEN-1:0]            ReadDataWordLine, HitWordQ;
   logic [SETLEN-1:0]             FlushAdr;
   logic                          FlushAdrCntEn, FlushCntRst;
   logic                          FlushAdrFlag, FlushWayFlag;
@@ -278,7 +280,12 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   // Select word from cache line
   subcachelineread #(LINELEN, WORDLEN, MUXINTERVAL) subcachelineread(
-    .PAdr(WordOffsetAddr), .ReadDataLine, .ReadDataWord);
+    .PAdr(WordOffsetAddr), .ReadDataLine, .ReadDataWord(ReadDataWordLine));
+
+  // Hit read data is captured before that access's own write (see cachefsm.sv HitReturn): otherwise
+  // a store/AMO hit would return the post-write word, and AMOs would hand back their own result.
+  flopen #(WORDLEN) HitWordReg(clk, LatchHitWord, ReadDataWordLine, HitWordQ);
+  mux2 #(WORDLEN) HitWordMux(ReadDataWordLine, HitWordQ, SelHitWord, ReadDataWord);
 
   // Bus address for fetch, writeback, or flush writeback
   mux3 #(PA_BITS) CacheBusAdrMux(.d0({PAdr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
@@ -374,7 +381,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr, .HitDirty(HitLineDirty),
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
-    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine,
+    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .LatchHitWord, .SelHitWord,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
