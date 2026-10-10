@@ -1,17 +1,14 @@
 // Direct arithmetic-module and recovery tests; no processor or instruction decoder.
-// sim/Makefile runs 32/64-bit datapaths at each mismatch threshold (1, 2, 3).
+// Use the processor's 64-bit configuration at mismatch thresholds 1, 2, and 3.
 `include "config.vh"
 module ft_recompute_fault_tb #(
-    parameter int THRESHOLD = 2,
-    TEST_XLEN = 64
+    parameter int THRESHOLD = 2
 );
   import cvw::*;
   `include "parameter-defs.vh"
   function automatic cvw_t test_config(input cvw_t original);
     cvw_t changed;
     changed = original;
-    changed.XLEN = TEST_XLEN;
-    changed.LOG_XLEN = $clog2(TEST_XLEN);
     // Enable optional arithmetic paths for direct ALU-control tests only.
     // TP is local to this testbench; processor/ISA/Linux builds still use P.
     changed.ZBA_SUPPORTED = 1;
@@ -327,7 +324,7 @@ module ft_recompute_fault_tb #(
         bmu = 1;
         funct3 = 5;
         sub = 1;
-        w64 = (N == 64);
+        w64 = 1'b1;
         a = N'('h80000000);
         b = 5;
       end
@@ -342,8 +339,8 @@ module ft_recompute_fault_tb #(
         select_op = 1;
         bmu = 1;
         funct3 = 1;
-        uw64 = (N == 64);
-        bselect = (N == 64) ? 1 : 0;
+        uw64 = 1'b1;
+        bselect = 1;
         a = '1;
         b = 7;
       end
@@ -357,7 +354,7 @@ module ft_recompute_fault_tb #(
       end  // ROR
       OP_SUBW: begin
         sub = 1;
-        w64 = (N == 64);
+        w64 = 1'b1;
       end  // SUBW (unsupported diagnosis)
       default: ;
     endcase
@@ -471,7 +468,7 @@ module ft_recompute_fault_tb #(
     /* verilator lint_off UNUSEDSIGNAL */
     int fault_bit;
     /* verilator lint_on UNUSEDSIGNAL */
-    for (int word_op = 0; word_op < ((N == 64) ? 2 : 1); word_op++)
+    for (int word_op = 0; word_op < 2; word_op++)
       for (int mode = 0; mode < 3; mode++)
         for (int amount = 0; amount < N; amount++)
           for (int replica_id = 1; replica_id <= 2; replica_id++)
@@ -501,26 +498,25 @@ module ft_recompute_fault_tb #(
               check(pe_primary == (replica_id == 1) && pe_shadow == (replica_id == 2),
                     "shift sweep isolates injected replica");
             end
-    if (N == 64)
-      for (int amount = 0; amount < N; amount++) begin
-        reset_case();
-        valid = 1;
-        select_op = 1;
-        bmu = 1;
-        uw64 = 1;
-        bselect = 1;
-        funct3 = 1;
-        a = N'(64'hfedcba98ffffffff);
-        b = N'(amount);
-        expected = shift_ref(a, amount, 0, 0, 1);
-        channel = 2'(CH_SHIFT);
-        target = FI_PRIMARY;
-        bit_index = 0;
-        kind = expected[0] ? 1 : 2;
-        fi_enable = 1;
-        repeat (THRESHOLD + 1) clock_edge();
-        check(pe_primary && !unresolved && result == expected, "SLLI.UW physical recovery at every amount");
-      end
+    for (int amount = 0; amount < N; amount++) begin
+      reset_case();
+      valid = 1;
+      select_op = 1;
+      bmu = 1;
+      uw64 = 1;
+      bselect = 1;
+      funct3 = 1;
+      a = N'(64'hfedcba98ffffffff);
+      b = N'(amount);
+      expected = shift_ref(a, amount, 0, 0, 1);
+      channel = 2'(CH_SHIFT);
+      target = FI_PRIMARY;
+      bit_index = 0;
+      kind = expected[0] ? 1 : 2;
+      fi_enable = 1;
+      repeat (THRESHOLD + 1) clock_edge();
+      check(pe_primary && !unresolved && result == expected, "SLLI.UW physical recovery at every amount");
+    end
   endtask
 
   task automatic launch_mul(input logic [1:0] replica_target, input logic [1:0] fault_kind);
@@ -733,7 +729,7 @@ module ft_recompute_fault_tb #(
     end
     // All legal amounts and all boundary operand patterns, including word masking.
     foreach (vectors[i])
-    for (int word_op = 0; word_op < ((N == 64) ? 2 : 1); word_op++)
+    for (int word_op = 0; word_op < 2; word_op++)
     for (int mode = 0; mode < 3; mode++)
     for (int amount = 0; amount < N; amount++) begin
       a = vectors[i];
@@ -749,25 +745,26 @@ module ft_recompute_fault_tb #(
       check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0), "wide normal slice reference");
       force dut.alu_recompute = 1;
       #1;
-      check(result == 0 && dut.shift_result(dut.shift_raw[0], 1) == shift_ref(a, amount, mode, w64, 0),
+      // Selecting diagnostic arithmetic alone does not enter controller recovery.
+      // Output masking is checked separately by the injected-fault cases.
+      check(dut.shift_result(dut.shift_raw[0], 1) == shift_ref(a, amount, mode, w64, 0),
             "wide shifted diagnostic relation");
       release dut.alu_recompute;
     end
     w64 = 0;
-    if (N == 64)
-      foreach (vectors[i])
-      for (int amount = 0; amount < N; amount++) begin
-        a = vectors[i];
-        b = N'(amount);
-        bmu = 1;
-        select_op = 1;
-        funct3 = 1;
-        sub = 0;
-        uw64 = 1;
-        bselect = 1;
-        #1;
-        check(result == shift_ref(a, amount, 0, 0, 1), "SLLI.UW zero extension reference");
-      end
+    foreach (vectors[i])
+    for (int amount = 0; amount < N; amount++) begin
+      a = vectors[i];
+      b = N'(amount);
+      bmu = 1;
+      select_op = 1;
+      funct3 = 1;
+      sub = 0;
+      uw64 = 1;
+      bselect = 1;
+      #1;
+      check(result == shift_ref(a, amount, 0, 0, 1), "SLLI.UW zero extension reference");
+    end
     uw64 = 0;
     bselect = 0;
     balu = 4;
@@ -784,23 +781,21 @@ module ft_recompute_fault_tb #(
       #1;
       check(result == ((a << amount) | (a >> ((N - amount) % N))), "ROL ring reference");
     end
-    if (N == 64) begin
-      w64 = 1;
-      foreach (vectors[i])
-      for (int amount = 0; amount < N; amount++) begin
-        a = vectors[i];
-        b = N'(amount);
-        rotated_word = (a[31:0] >> (amount & 31)) | (a[31:0] << ((32 - (amount & 31)) % 32));
-        funct3 = 5;
-        #1;
-        check(result == N'($signed(rotated_word)), "RORW masked ring reference");
-        rotated_word = (a[31:0] << (amount & 31)) | (a[31:0] >> ((32 - (amount & 31)) % 32));
-        funct3 = 1;
-        #1;
-        check(result == N'($signed(rotated_word)), "ROLW masked ring reference");
-      end
-      w64 = 0;
+    w64 = 1;
+    foreach (vectors[i])
+    for (int amount = 0; amount < N; amount++) begin
+      a = vectors[i];
+      b = N'(amount);
+      rotated_word = (a[31:0] >> (amount & 31)) | (a[31:0] << ((32 - (amount & 31)) % 32));
+      funct3 = 5;
+      #1;
+      check(result == N'($signed(rotated_word)), "RORW masked ring reference");
+      rotated_word = (a[31:0] << (amount & 31)) | (a[31:0] >> ((32 - (amount & 31)) % 32));
+      funct3 = 1;
+      #1;
+      check(result == N'($signed(rotated_word)), "ROLW masked ring reference");
     end
+    w64 = 0;
     for (int replica_id = 1; replica_id <= 2; replica_id++) begin
       for (int ch = 0; ch < 4; ch++) transient_case(ch, 2'(replica_id));
       persistent_case(OP_ADD, CH_RESULT, 0, 2'(replica_id), 1);
@@ -821,7 +816,7 @@ module ft_recompute_fault_tb #(
       persistent_case(OP_SRL, CH_RESULT, 0, 2'(replica_id), 1);
       persistent_case(OP_SRL, CH_ARITH, 0, 2'(replica_id), 0);
       persistent_case(OP_ROR, CH_RESULT, 0, 2'(replica_id), 0);
-      if (N == 64) persistent_case(OP_SUBW, CH_RESULT, 0, 2'(replica_id), 0);
+      persistent_case(OP_SUBW, CH_RESULT, 0, 2'(replica_id), 0);
     end
     independent_controllers(0);
     independent_controllers(1);

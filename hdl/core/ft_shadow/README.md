@@ -20,7 +20,7 @@ with 64-bit integer registers and the dedicated integer divider enabled.
 **XLEN** means the integer register width. A **word operation** computes a 32-bit
 result; a **doubleword operation** computes a 64-bit result. On the 64-bit
 processor, instructions such as ADDW and SRAW sign-extend their word result to
-64 bits. This is distinct from building a processor with 32-bit registers.
+64 bits. The processor and its FT tests use a 64-bit datapath.
 
 ## Testing strategy
 
@@ -39,42 +39,36 @@ These levels have different configurations and do not imply the same coverage.
 | `linux_boot` | Processor with fault injection disabled | Boots the Linux image and waits for the configured success message on the UART serial console |
 | `linux_boot_ecc_inject` | Processor with both execution-result and storage-ECC injection enabled | Same Linux boot criterion, with the hardware-generated injection events active |
 
-### Do the testbenches test both RV32 and RV64 ISAs?
+### Processor width and instruction coverage
 
-The standalone testbench tests **32-bit and 64-bit versions of the arithmetic
-modules**. It does not fetch or decode instructions and does not instantiate a
-processor. Consequently, these runs are not RV32/RV64 instruction-set compliance
-tests. The two widths check parameter sizing, arithmetic boundaries, extension,
-and truncation in the reusable modules.
+All FT tests use the processor's **64-bit datapath**. The standalone testbench
+supplies operands and control signals directly to arithmetic modules. It does
+not fetch or decode instructions or instantiate a processor, so it is not an
+instruction-set compliance test.
 
-The processor testbench instantiates the **64-bit processor only**. It executes
-actual instructions, but its short programs cover the fault-recovery scenarios
-listed below, not the complete ISA. The separate ISA-level software regression
-also uses the processor configuration in `pkg/config.vh`; the standalone
-32-bit module run does not turn it into a 32-bit processor regression.
+The processor testbench executes actual instructions on the 64-bit core. Its
+short programs cover the fault-recovery scenarios listed below, not the complete
+ISA. The separate ISA-level software regression uses the processor configuration
+in `pkg/config.vh`.
 
-Word instructions on the 64-bit processor are a separate subject. The standalone
-64-bit ALU tests include word shifts, word rotations, and sign extension, as well
-as doubleword operations. Testing these word operations does not require an
-RV32 processor.
+The ALU tests cover both doubleword operations and the processor's word operations,
+including word shifts, rotations, and sign extension. Word operations compute
+32-bit results within the 64-bit datapath.
 
-### What are the six configurations?
+### Three mismatch-threshold runs
 
 [sim/Makefile](../../../sim/Makefile), target `ft_shadow_regression`, runs the
-standalone testbench once for each pair below:
+standalone testbench three times with the same 64-bit processor configuration:
 
-| `FT_XLEN` → testbench `TEST_XLEN` | `FT_THRESHOLD` → testbench `THRESHOLD` → module `TE_THRESHOLD` |
+| `FT_THRESHOLD` → testbench `THRESHOLD` → module `TE_THRESHOLD` | Datapath width |
 | --- | --- |
-| 32 | 1 |
-| 32 | 2 |
-| 32 | 3 |
-| 64 | 1 |
-| 64 | 2 |
-| 64 | 3 |
+| 1 | 64 bits |
+| 2 | 64 bits |
+| 3 | 64 bits |
 
-Thus there are **two module widths × three mismatch thresholds = six runs**.
-These are not six processor builds or six Linux boots. All six use the same
-standalone testbench and its local extension settings described below.
+Only the mismatch threshold changes between these runs. All three use the same
+testbench and its local extension settings described below. The processor
+integration test and Linux tests are separate from these three module runs.
 
 `TE_THRESHOLD` is the number of consecutive mismatching observations allowed
 before escalation. The initial mismatch counts as observation one. Threshold 1
@@ -91,8 +85,6 @@ At the top of
 `test_config()` copies the configuration structure and changes these fields:
 
 ```systemverilog
-changed.XLEN = TEST_XLEN;
-changed.LOG_XLEN = $clog2(TEST_XLEN);
 changed.ZBA_SUPPORTED = 1;
 changed.ZBB_SUPPORTED = 1;
 changed.ZBKB_SUPPORTED = 1;
@@ -132,19 +124,18 @@ The checks cover:
 - ADD/SUB, signed and unsigned comparison, SLT/SLTU, and signed/unsigned min/max
   over pairs of the nine operand patterns, including subtraction overflow cases.
 - SLL/SRL/SRA at every legal shift amount, with the operand patterns above.
-  The 64-bit build also checks word-result sign extension, five-bit word shift
+  The test also checks word-result sign extension, five-bit word shift
   amount masking, and SLLI.UW zero extension before shifting. Register and
   immediate instructions share these arithmetic paths; this test supplies
   controls directly and does not test their distinct instruction encodings.
-- Rotations at every legal shift amount, including word rotations in the
-  64-bit build. Rotation recovery uses retry and unresolved reporting, not the
-  shift diagnostic relation.
+- Rotations at every legal shift amount, including word rotations. Rotation
+  recovery uses retry and unresolved reporting, not the shift diagnostic relation.
 - Transient faults on both replicas and all four ALU/comparison injection sites;
   persistent faults in selected result, arithmetic, shift, and comparison bits;
   correct replica selection and its indicators; and output masking during recovery.
 - Shift faults at every shift amount, on both replicas, at selected low and
-  high boundary bits. SLLI.UW has an additional low-bit fault sweep in the
-  64-bit build. This is not an exhaustive test of every bit/operand/fault combination.
+  high boundary bits. SLLI.UW has an additional low-bit fault sweep. This is not
+  an exhaustive test of every bit/operand/fault combination.
 - Independent ALU and comparison recovery: either controller can isolate a
   replica first, then the other can recover and select the opposite replica.
 - First-mismatch capture timing and preservation of the captured values across
@@ -256,9 +247,9 @@ a run with an earlier marker only verifies reaching that milestone. Linux with
 injection enabled exercises naturally scheduled transient events, not directed
 persistent faults or every possible bit position.
 
-[ci.yml](../../../.github/workflows/ci.yml) runs all six standalone width/threshold
-pairs and the 21-scenario processor test in `ci-ft-shadow`. It also contains the
-software/ECC regressions and Linux boot with injection enabled.
+[ci.yml](../../../.github/workflows/ci.yml) runs all three standalone
+mismatch-threshold settings and the 21-scenario processor test in `ci-ft-shadow`.
+It also contains the software/ECC regressions and Linux boot with injection enabled.
 [linux-boot.yml](../../../.github/workflows/linux-boot.yml) provides Linux boot
 with injection disabled. The separate `ecc_secded_dected_test` and
 `csr_harden_test` targets check ECC coding and privilege/security error handling;
@@ -268,11 +259,11 @@ Run from the repository root with the repository's simulation and software-build
 dependencies installed:
 
 ```sh
-# All six standalone module runs.
+# All three 64-bit module runs (thresholds 1, 2, and 3).
 make -C sim ft_shadow_regression
 
 # One standalone run at the processor's width and default threshold.
-make -C sim ft_shadow_test FT_XLEN=64 FT_THRESHOLD=3
+make -C sim ft_shadow_test FT_THRESHOLD=3
 
 # Processor programs and pipeline/trap/status checks.
 make -C sim ft_core_test
@@ -380,8 +371,8 @@ supported diagnostic relation retry and then report unresolved if disagreement
 persists. Their ordinary duplicated execution still checks for disagreement.
 
 [shifter.sv](../ieu/shifter.sv) uses an XLEN+2-bit non-rotate shift result: 66 bits
-for a 64-bit datapath and 34 bits for a 32-bit datapath. Word operands are
-normalized before shifting; SLLI.UW zero-extends its low 32-bit operand. Diagnosis
+for this processor. Word operands are normalized before shifting; SLLI.UW
+zero-extends its low 32-bit operand. Diagnosis
 displaces the normalized input left by two bits and repeats the same shift.
 The check compares ordinary `[XLEN-1:0]` with diagnostic `[XLEN+1:2]`. For word
 results it compares ordinary `[31:0]` with diagnostic `[33:2]` before sign

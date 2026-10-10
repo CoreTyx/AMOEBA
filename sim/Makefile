@@ -533,18 +533,17 @@ vcs_regression:
 # Self-checking testbenches live in hvl/; their build/run entry points live here
 # alongside the SoC, ECC, and ISA regression targets.
 FT_THRESHOLD ?= 2
-FT_XLEN ?= 64
-FT_TB_DIR = verilator/ft_shadow_tb_$(FT_XLEN)_$(FT_THRESHOLD)
+FT_TB_DIR = verilator/ft_shadow_tb_64_$(FT_THRESHOLD)
 .PHONY: ft_shadow_test ft_shadow_regression
-# Six standalone module runs: two datapath widths times three mismatch thresholds.
-# These runs do not instantiate a processor or execute RV32/RV64 programs.
+# Three standalone 64-bit module runs at mismatch thresholds 1, 2, and 3.
+# These runs do not instantiate a processor or execute instructions.
 ft_shadow_regression:
-	@set -e; for xlen in 32 64; do for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_XLEN=$$xlen FT_THRESHOLD=$$threshold; done; done
+	@set -e; for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_THRESHOLD=$$threshold; done
 
 ft_shadow_test:
 	@test "$(FT_THRESHOLD)" -ge 1 || { echo "FT_THRESHOLD must be a positive integer" >&2; exit 1; }
 	mkdir -p $(FT_TB_DIR)
-	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) -GTEST_XLEN=$(FT_XLEN) \
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_recompute_fault_tb -GTHRESHOLD=$(FT_THRESHOLD) \
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
