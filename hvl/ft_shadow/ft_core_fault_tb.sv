@@ -336,7 +336,9 @@ module ft_core_fault_tb;
       held_last = 0;
       repeat (6) @(negedge clk);
       rst = 0;
-      for (int cycle = 0; cycle < 10000 && !finished; cycle++) begin
+      // Hang guard, not a performance check. The slowest scenario (SC_SHARED_INJECTION) needs ~3.1k
+      // cycles on main and ~12.4k with swe-cache-ec's multi-cycle cache hits; 50k leaves headroom.
+      for (int cycle = 0; cycle < 50000 && !finished; cycle++) begin
         @(negedge clk);
         if (!injected && scenario != SC_HEALTHY && scenario < SC_SHARED_INJECTION && !mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE == BRANCH_PC && dut.soc.core.ForwardedSrcAE == 8) begin
           // This loop has trained the predictor before diagnosis begins.
