@@ -108,7 +108,13 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   input  logic              RegEccDedErrW,                                 // IEU ECC DED, retained for MSECFAULT logging
   input  logic              EccDedFaultM,                                  // registered DED fault presented to trap logic
   input  logic [P.XLEN-1:0] EccDedFaultEPCM, EccDedFaultMtvalM,             // captured trap metadata
-  output logic              EccDedTrapTakenM                               // cause 19 was selected and consumed
+  output logic              EccDedTrapTakenM,                              // cause 19 was selected and consumed
+  // D$ SECDED: uncorrectable data error on a dirty line -- own cause (20), independent of the IEU
+  // regfile's ECC DED (cause 19) above.
+  input  logic              DCacheEccDedFaultM,                            // registered D$ dirty-DED fault presented to trap logic
+  input  logic [P.XLEN-1:0] DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM, // captured trap metadata
+  input  logic              DCacheEccDedDirtyFaultM,                       // raw (unregistered) pulse, for MSECFAULT logging
+  output logic              DCacheEccDedTrapTakenM                         // cause 20 was selected and consumed
 );
 
   logic [4:0]               CauseM;                                         // trap cause
@@ -151,6 +157,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .FTStatus,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
     .RegEccSecErrW, .RegEccDedErrW, .EccDedFaultEPCM, .EccDedFaultMtvalM,
+    .DCacheEccDedFaultEPCM, .DCacheEccDedFaultMtvalM, .DCacheEccDedDirtyFaultM,
     .TrapM, .mretM, .sretM, .InterruptM,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
     .MTIME_CLINT, .InstrValidM, .FRegWriteM, .LoadStallD, .StoreStallD,
@@ -177,8 +184,10 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
     .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM), .PrivilegeModeW,
+    .DCacheEccDedFaultM,
     .MIP_REGW, .MIE_REGW, .MIDELEG_REGW, .MEDELEG_REGW, .STATUS_MIE, .STATUS_SIE,
     .InstrValidM, .CommittedM, .CommittedF,
     .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),
+    .DCacheEccDedTrapTakenM,
     .IntPendingM, .DelegateM, .CauseM);
 endmodule

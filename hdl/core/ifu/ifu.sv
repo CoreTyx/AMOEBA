@@ -97,7 +97,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  var logic [P.PA_BITS-3:0] PMPADDR_ARRAY_REGW[P.PMP_ENTRIES-1:0],// PMP address from privileged unit
   output logic                 InstrAccessFaultF,                        // Instruction access fault
   output logic                 ICacheAccess,                             // Report I$ read to performance counters
-  output logic                 ICacheMiss                                // Report I$ miss to performance counters
+  output logic                 ICacheMiss,                               // Report I$ miss to performance counters
+  output logic [31:0]          ICacheSecCount
 );
 
   localparam [31:0]            nop = 32'h00000013;                       // instruction for NOP
@@ -244,10 +245,12 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       localparam            LLENPOVERAHBW = P.LLEN / P.AHBW; // Number of AHB beats in a LLEN word. AHBW cannot be larger than LLEN. (implementation limitation)
       logic [P.PA_BITS-1:0] ICacheBusAdr;
       logic                 ICacheBusAck;
+      logic                 UnusedICacheEccDedDirtyFault;
+      logic [P.PA_BITS-1:0] UnusedICacheEccDedDirtyFaultAdr;
       logic [1:0]           CacheBusRW, BusRW, CacheRWF;
 
-      assign BusRW = ~ITLBMissF & ~CacheableF & ~SelIROM ? IFURWF : '0;
-      assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM ? IFURWF : '0;
+      assign BusRW = ~ITLBMissF & ~CacheableF & ~SelIROM & ~InvalidateICacheM ? IFURWF : '0;
+      assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM & ~InvalidateICacheM ? IFURWF : '0;
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.ICACHE_LINELENINBITS),
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
               .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
@@ -258,13 +261,16 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .ReadDataWord(ICacheInstrF),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
+             .SecCount(ICacheSecCount),
              .ByteMask('0), .BeatCount('0), .SelBusBeat('0),
              .WriteData('0),
              .CacheRW(CacheRWF),
              .FlushCache('0),
              .NextSet(PCSpillNextF[11:0]),
              .PAdr(PCPF),
-             .CacheCommitted(CacheCommittedF), .InvalidateCache(InvalidateICacheM), .InvalidateFlushStage(FlushW), .CMOpM('0));
+             .CacheCommitted(CacheCommittedF), .InvalidateCache(InvalidateICacheM), .InvalidateFlushStage(FlushW), .CMOpM('0),
+             .EccDedDirtyFault(UnusedICacheEccDedDirtyFault),
+             .EccDedDirtyFaultAdr(UnusedICacheEccDedDirtyFaultAdr));
 
       ahbcacheinterface #(P, BEATSPERLINE, AHBWLOGBWPL, LINELEN, LLENPOVERAHBW, 1)
       ahbcacheinterface(.HCLK(clk), .HRESETn(~reset),
@@ -282,7 +288,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     end else begin : passthrough
       assign IFUHADDR = PCPF;
       logic [1:0] BusRW;
-      assign BusRW = ~ITLBMissF & ~SelIROM ? IFURWF : 0;
+      assign BusRW = ~ITLBMissF & ~SelIROM & ~InvalidateICacheM ? IFURWF : 0;
       assign IFUHSIZE = 3'b010;
 
       ahbinterface #(P.XLEN, 1'b0) ahbinterface(.HCLK(clk), .Flush(FlushD), .HRESETn(~reset), .HREADY(IFUHREADY),
@@ -295,6 +301,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       else assign InstrRawF = ShiftUncachedInstr;
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
+      assign ICacheSecCount = '0;
     end
 
     // mux between the alignments of uncached reads.
@@ -306,11 +313,12 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign {IFUHADDR, IFUHWRITE, IFUHSIZE, IFUHBURST, IFUHTRANS,
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
+    assign ICacheSecCount = '0;
     assign InstrRawF = IROMInstrF;
   end
 
   assign IFUCacheBusStallF = ICacheStallF | BusStall;
-  assign IFUStallF = IFUCacheBusStallF | SelSpillNextF;
+  assign IFUStallF = IFUCacheBusStallF | SelSpillNextF | InvalidateICacheM;
   assign GatedStallD = StallD & ~SelSpillNextF;
 
   flopenl #(32) AlignedInstrRawDFlop(clk, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);

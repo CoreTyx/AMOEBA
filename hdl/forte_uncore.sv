@@ -64,7 +64,10 @@ module forte_uncore import cvw::*; #(
   // Taking the DFT address away from CLINT gives each access one responder.
   localparam logic [15:0] DFTLOCK_OFF  = 16'hF000;
 
-  logic [12:0]                 HSELRegions;
+  // Width follows adrdecs. [12] is the ECC-counter region (ECC_COUNTER_BASE, served by uncore.sv on
+  // the legacy SoC); nothing here serves it, so an access there takes the no-region path below.
+  // [13] is FI_CONTROL, routed to the fault-injection APB slot.
+  logic [13:0]                 HSELRegions;
   logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART, HSELSDC, HSELSPI;
   logic                        HSELBootRom, HSELEXTRaw;
   logic                        HSELEXTD, HSELBRIDGE, HSELBRIDGED, HSELNoneD;
@@ -95,8 +98,8 @@ module forte_uncore import cvw::*; #(
   // AHB -> APB for the on-die peripherals.
   // PSEL[0]=CLINT, [1]=PLIC, [2]=UART, [3]=DFT lock, [4]=fault injection.
   logic [PERIPHS-1:0] HSELAPB;
-  assign HSELAPB = PERIPH_ONCHIP ? {HSELRegions[12], HSELDFTLOCK, HSELUART, HSELPLIC, HSELCLINTQ}
-                                 : {HSELRegions[12], HSELDFTLOCK, 2'b00,            HSELCLINTQ};
+  assign HSELAPB = PERIPH_ONCHIP ? {HSELRegions[13], HSELDFTLOCK, HSELUART, HSELPLIC, HSELCLINTQ}
+                                 : {HSELRegions[13], HSELDFTLOCK, 2'b00,            HSELCLINTQ};
 
   ahbapbbridge #(P, PERIPHS) ahbapbbridge (
     .HCLK, .HRESETn, .HSEL(HSELAPB), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,

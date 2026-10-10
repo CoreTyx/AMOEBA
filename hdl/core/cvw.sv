@@ -48,6 +48,12 @@ localparam BP_GSHARE_BASIC  = (32'd3);
 localparam BP_GLOBAL_BASIC  = (32'd4);
 localparam BP_LOCAL_BASIC   = (32'd5);
 localparam BP_LOCAL_AHEAD   = (32'd6);
+
+// MMIO address range reserved for ECC correction counters.
+// Own 4 KiB page, clear of FI_CONTROL (0x1007_000b): FI_CONTROL must reject every non-byte access,
+// and a word-access window covering its address would accept 32-bit accesses there.
+localparam logic [63:0] ECC_COUNTER_BASE  = 64'h1008_0000;
+localparam logic [63:0] ECC_COUNTER_RANGE = 64'h0000_0FFF;
 localparam BP_LOCAL_REPAIR  = (32'd7);
 
 

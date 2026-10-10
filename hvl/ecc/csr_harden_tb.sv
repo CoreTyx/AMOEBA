@@ -60,6 +60,7 @@ module csr_harden_tb;
   logic       ch_InstrValidM;
   logic       ch_RegEccSecErrW;
   logic       ch_RegEccDedErrW;
+  logic       ch_DCacheEccDedErrW;
   logic [6:0] ch_SecFaultM;
 
   csrharden dut_csrharden (
@@ -70,6 +71,7 @@ module csr_harden_tb;
     .InstrValidM                 (ch_InstrValidM),
     .RegEccSecErrW               (ch_RegEccSecErrW),
     .RegEccDedErrW               (ch_RegEccDedErrW),
+    .DCacheEccDedErrW            (ch_DCacheEccDedErrW),
     .SecFaultM                   (ch_SecFaultM)
   );
 
@@ -142,7 +144,7 @@ module csr_harden_tb;
     // All inputs zero → all SecFaultM bits zero
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
-    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0; ch_DCacheEccDedErrW = 0;
     #1;
     check("csrharden all-zero [0]",   ch_SecFaultM[0] == 0);
     check("csrharden all-zero [1]",   ch_SecFaultM[1] == 0);
@@ -218,21 +220,30 @@ module csr_harden_tb;
     check("csrharden RegEccDed→[3:0]=0", ch_SecFaultM[3:0] == 4'b0);
     check("csrharden RegEccDed→[6]=0",   ch_SecFaultM[6] == 0);
 
-    // All faults simultaneously → SecFaultM[5:0]=6'b111111
+    // DCacheEccDedErrW=1 → SecFaultM[6]=1
+    ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
+    ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0; ch_DCacheEccDedErrW = 1;
+    #1;
+    check("csrharden DCacheEccDed→[6]", ch_SecFaultM[6] == 1);
+    check("csrharden DCacheEccDed→[5:0]=0", ch_SecFaultM[5:0] == 6'b0);
+    ch_DCacheEccDedErrW = 0;
+
+    // All faults simultaneously → SecFaultM[6:0]=7'b1111111
     ch_PrivModeSecFaultW = 1; ch_PrivModeUncorrectableFaultW = 1;
     ch_MppReservedM = 1; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 1;
-    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1;
+    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1; ch_DCacheEccDedErrW = 1;
     #1;
     check("csrharden all-fault [3:0]=4'b1111",  ch_SecFaultM[3:0] == 4'b1111);
     check("csrharden all-fault [5:4]=2'b11",     ch_SecFaultM[5:4] == 2'b11);
-    check("csrharden all-fault [6]=0",            ch_SecFaultM[6] == 0);
+    check("csrharden all-fault [6]=1",            ch_SecFaultM[6] == 1);
 
-    // SecFaultM[6] must always be 0
+    // SecFaultM[6] clears when the D-cache DED input is low
     ch_PrivModeSecFaultW = 1; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 1;
-    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1;
+    ch_RegEccSecErrW = 1; ch_RegEccDedErrW = 1; ch_DCacheEccDedErrW = 0;
     #1;
-    check("csrharden reserved bits 1", ch_SecFaultM[6] == 0);
+    check("csrharden DCache DED low 1", ch_SecFaultM[6] == 0);
 
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 1;
     ch_MppReservedM = 1; ch_IllegalCSRAccessM = 1; ch_InstrValidM = 1;
@@ -243,7 +254,7 @@ module csr_harden_tb;
     // Restore to zero
     ch_PrivModeSecFaultW = 0; ch_PrivModeUncorrectableFaultW = 0;
     ch_MppReservedM = 0; ch_IllegalCSRAccessM = 0; ch_InstrValidM = 0;
-    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0;
+    ch_RegEccSecErrW = 0; ch_RegEccDedErrW = 0; ch_DCacheEccDedErrW = 0;
   endtask
 
   // ── Part 2: privmode functional path tests ────────────────────────────────────

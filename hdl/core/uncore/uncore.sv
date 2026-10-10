@@ -43,6 +43,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   input  logic                 HMASTLOCK,
   input  logic [P.AHBW-1:0]    HRDATAEXT,
   input  logic                 HREADYEXT, HRESPEXT,
+  input  logic [31:0]          RegfileSecCount, ICacheSecCount, DCacheSecCount,
   output logic [P.AHBW-1:0]    HRDATA,
   output logic                 HREADY, HRESP,
   output logic                 HSELEXT,
@@ -67,9 +68,9 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
 
   logic [P.XLEN-1:0]           HREADRam, HREADSDC;
 
-  logic [12:0]                 HSELRegions;
-  logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART,HSELSDC, HSELSPI;
-  logic                        HSELDTIMD, HSELIROMD, HSELEXTD, HSELRamD, HSELCLINTD, HSELPLICD, HSELGPIOD, HSELUARTD, HSELSDCD, HSELSPID;
+  logic [13:0]                 HSELRegions;
+  logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART,HSELSDC, HSELSPI, HSELECC, HSELFI;
+  logic                        HSELDTIMD, HSELIROMD, HSELEXTD, HSELRamD, HSELCLINTD, HSELPLICD, HSELGPIOD, HSELUARTD, HSELSDCD, HSELSPID, HSELECCD, HSELFID;
   logic                        HRESPRam,  HRESPSDC;
   logic                        HREADYRam, HRESPSDCD;
   logic [P.XLEN-1:0]           HREADBootRom;
@@ -79,15 +80,16 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   logic                        SDCIntM;
 
   logic                        PCLK, PRESETn, PWRITE, PENABLE;
-  logic [6:0]                  PSEL;
+  logic [7:0]                  PSEL;
   logic [31:0]                 PADDR;
   logic [P.XLEN-1:0]           PWDATA;
   logic [P.XLEN/8-1:0]         PSTRB;
   /* verilator lint_off UNDRIVEN */ // undriven in rv32e configuration
-  logic [6:0]                  PREADY;
-  logic [6:0][P.XLEN-1:0]      PRDATA;
+  logic [7:0]                  PREADY;
+  logic [7:0][P.XLEN-1:0]      PRDATA;
   /* verilator lint_on UNDRIVEN */
   logic [P.XLEN-1:0]           HREADBRIDGE;
+  logic [31:0]                 EccCounterReadData;
   logic                        HRESPBRIDGE, HREADYBRIDGE, HSELBRIDGE, HSELBRIDGED;
   /* SDC Interrupt (SPI Controller) */
   logic                        SDCIntr;
@@ -99,17 +101,18 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   adrdecs #(P) adrdecs(HADDR, 1'b1, 1'b1, 1'b1, HSIZE[1:0], HSELRegions);
 
   // unswizzle HSEL signals
-  assign {HSELSPI, HSELSDC, HSELPLIC, HSELUART, HSELGPIO, HSELCLINT, HSELRam, HSELBootRom, HSELEXT, HSELIROM, HSELDTIM} = HSELRegions[11:1];
+  assign {HSELFI, HSELECC, HSELSPI, HSELSDC, HSELPLIC, HSELUART, HSELGPIO, HSELCLINT, HSELRam, HSELBootRom, HSELEXT, HSELIROM, HSELDTIM} = HSELRegions[13:1];
 
   // AHB -> APB bridge
-  ahbapbbridge #(P, 7) ahbapbbridge (
-    .HCLK, .HRESETn, .HSEL({HSELRegions[12], HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
+  // APB slots: 0 GPIO, 1 CLINT, 2 PLIC, 3 UART, 4 SPI, 5 SDC, 6 ECC counters, 7 FI_CONTROL.
+  ahbapbbridge #(P, 8) ahbapbbridge (
+    .HCLK, .HRESETn, .HSEL({HSELFI, HSELECC, HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
     .HRDATA(HREADBRIDGE), .HRESP(HRESPBRIDGE), .HREADYOUT(HREADYBRIDGE),
     .PCLK, .PRESETn, .PSEL, .PWRITE, .PENABLE, .PADDR, .PWDATA, .PSTRB, .PREADY, .PRDATA);
-  assign HSELBRIDGE = HSELRegions[12] | HSELGPIO | HSELCLINT | HSELPLIC | HSELUART | HSELSPI | HSELSDC; // if any of the bridge signals are selected
+  assign HSELBRIDGE = HSELGPIO | HSELCLINT | HSELPLIC | HSELUART | HSELSPI | HSELSDC | HSELECC | HSELFI; // if any of the bridge signals are selected
 
-  fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSEL[6]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
-    .PRDATA(PRDATA[6]), .PREADY(PREADY[6]), .FaultInjectMask);
+  fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSEL[7]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    .PRDATA(PRDATA[7]), .PREADY(PREADY[7]), .FaultInjectMask);
 
   // on-chip RAM
   if (P.UNCORE_RAM_SUPPORTED) begin : ram
@@ -185,6 +188,20 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
     assign PRDATA[5] = '0; assign PREADY[5] = 1'b1;
   end
 
+  // Read-only ECC correction counters at ECC_COUNTER_BASE + {0, 4, 8}.
+  assign PREADY[6] = 1'b1;
+  always_comb begin
+    EccCounterReadData = '0;
+    case (PADDR[3:2])
+      2'd0: EccCounterReadData = RegfileSecCount;
+      2'd1: EccCounterReadData = ICacheSecCount;
+      2'd2: EccCounterReadData = DCacheSecCount;
+      default: ;
+    endcase
+    if (P.XLEN == 64) PRDATA[6] = {EccCounterReadData, EccCounterReadData};
+    else              PRDATA[6] = EccCounterReadData;
+  end
+
 
   // AHB Read Multiplexer
   assign HRDATA = ({P.XLEN{HSELRamD}} & HREADRam) |
@@ -208,8 +225,8 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   // takes more than 1 cycle to respond it needs to hold on to the old select until the
   // device is ready.  Hence this register must be selectively enabled by HREADY.
   // However on reset None must be selected.
-  flopenl #(12) hseldelayreg(HCLK, ~HRESETn, HREADY, HSELRegions[11:0], 12'b1,
-    {HSELSPID, HSELSDCD, HSELPLICD, HSELUARTD, HSELGPIOD, HSELCLINTD,
+  flopenl #(14) hseldelayreg(HCLK, ~HRESETn, HREADY, HSELRegions, 14'b1,
+    {HSELFID, HSELECCD, HSELSPID, HSELSDCD, HSELPLICD, HSELUARTD, HSELGPIOD, HSELCLINTD,
       HSELRamD, HSELBootRomD, HSELEXTD, HSELIROMD, HSELDTIMD, HSELNoneD});
   flopenr #(1) hselbridgedelayreg(HCLK, ~HRESETn, HREADY, HSELBRIDGE, HSELBRIDGED);
 endmodule

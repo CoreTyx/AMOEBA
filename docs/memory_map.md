@@ -14,6 +14,7 @@ uncached, non-idempotent, non-executable, and do not support atomics.
 | `0x0c00_0000–0x0fff_ffff` | PLIC | Simulation SoC; ASIC on-chip with `PERIPH_ONCHIP=1`, external with `=0` |
 | `0x1000_0000–0x1000_0007` | UART | Same placement as PLIC |
 | `0x1007_000b` | FI_CONTROL | Both SoCs, always on-chip |
+| `0x1008_0000–0x1008_0fff` | ECC SEC counters: read-only, 32-bit reads at `+0` register file, `+4` I$, `+8` D$ | Simulation SoC; not routed on the ASIC |
 | `0x8000_0000–0x8fff_ffff` | External memory, 256 MiB | Both SoCs |
 
 Reset PC: `0x8000_0000`. Simulation completion address `0x8080_0000` is ordinary
