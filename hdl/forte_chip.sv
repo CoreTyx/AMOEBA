@@ -30,7 +30,7 @@
 // LENGTH PER BUILD" in pkg/forte_link_pkg.sv.
 ///////////////////////////////////////////////////////////////////////////////
 
-`include "config.vh"
+`include "../pkg/config.vh"
 
 module forte_chip import cvw::*; import forte_link_pkg::*; #(
   parameter logic PERIPH_ONCHIP = 1'b1,
@@ -84,7 +84,7 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   output logic              status
 );
 
-  `include "parameter-defs.vh"
+  `include "../pkg/parameter-defs.vh"
 
   // ---- link geometry, from the core config ----------------------------------
   // A cache line is moved as LINK_BEATS AHBW-wide beats, which is exactly what
