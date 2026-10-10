@@ -102,7 +102,7 @@ module rv64_core_wrapper import cvw::*; (
     input  logic [63:0]  minstret_rdata,
     output logic [63:0]  minstret_wdata,
 
-    input  logic         fault_inject      // Shared ECC/FT fault-injection enable
+    input  logic         fault_inject      // Master ECC/FT injection enable; software selects units at 0x1007_000b
 );
 
     `include "parameter-defs.vh"

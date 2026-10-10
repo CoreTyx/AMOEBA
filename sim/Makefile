@@ -796,3 +796,15 @@ ft_core_test:
 	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_core_tb/compile.log
 	verilator/ft_core_tb/Vft_core_fault_tb
+
+# Per-unit fault-control register: legacy/ASIC APB buses and physical access checks.
+.PHONY: ft_control_test
+ft_control_test:
+	mkdir -p verilator/ft_control_tb
+	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_control_tb $(CURDIR)/verilator_warn.vlt \
+	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
+	    $(CURDIR)/../hvl/ft_shadow/ft_control_tb.sv \
+	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    -Mdir verilator/ft_control_tb -Wall --timescale 1ps/1ps \
+	    2>&1 | tee verilator/ft_control_tb/compile.log
+	verilator/ft_control_tb/Vft_control_tb

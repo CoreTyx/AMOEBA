@@ -17,10 +17,7 @@ module forte_soc import cvw::*; #(
   input  logic                  reset_ext,        // external asynchronous reset
   output logic                  reset,            // reset synchronised to core_clk
   input  logic                  ExternalStall,
-  // Fault injection enable (DFT / ECC / FT test).  The name now runs
-  // end-to-end: main renamed wallypipelinedcore's port from ecc_inject_en to
-  // fault_inject in #43, independently and to the same name, so the translation
-  // this instantiation used to do is gone and the port connects by name.
+// Master fault-injection pin; the core ANDs it with the per-unit APB mask.
   input  logic                  fault_inject,
   // external AHB-Lite port
   input  logic [P.AHBW-1:0]     HRDATAEXT,
@@ -52,10 +49,12 @@ module forte_soc import cvw::*; #(
   logic [63:0]                MTIME_CLINT;
   logic                       MExtInt, SExtInt;
 
+  logic [5:0] FaultInjectMask; // software unit enables from the on-die APB register
+
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
   synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
 
-  wallypipelinedcore #(P) core(.clk(core_clk), .reset, .fault_inject,
+  wallypipelinedcore #(P) core(.clk(core_clk), .reset, .fault_inject, .FaultInjectMask,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
@@ -73,7 +72,7 @@ module forte_soc import cvw::*; #(
     .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HTRANS,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT,
     .HRDATA, .HREADY, .HRESP,
-    .dft_unlocked,
+    .dft_unlocked, .FaultInjectMask,
     .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .MTIME_CLINT,
     .UARTSin, .UARTSout, .ExtIrq, .MExtIntIn, .SExtIntIn);
 

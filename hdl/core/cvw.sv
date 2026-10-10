@@ -34,6 +34,11 @@
 
 package cvw;
 
+  // AMOEBA byte-addressed fault-injection control and unit-mask positions.
+  localparam logic [63:0] FI_CONTROL_ADDR = 64'h1007_000b;
+  localparam int FI_ALU = 0, FI_CMP = 1, FI_MUL = 2, FI_DIV = 3,
+                 FI_REGFILE = 4, FI_PIPELINE = 5;
+
   //`include "../../pkg/BranchPredictorType.vh"
 
 localparam BP_TWOBIT        = (32'd0);
@@ -45,7 +50,9 @@ localparam BP_LOCAL_BASIC   = (32'd5);
 localparam BP_LOCAL_AHEAD   = (32'd6);
 
 // MMIO address range reserved for ECC correction counters.
-localparam logic [63:0] ECC_COUNTER_BASE  = 64'h1007_0000;
+// Own 4 KiB page, clear of FI_CONTROL (0x1007_000b): FI_CONTROL must reject every non-byte access,
+// and a word-access window covering its address would accept 32-bit accesses there.
+localparam logic [63:0] ECC_COUNTER_BASE  = 64'h1008_0000;
 localparam logic [63:0] ECC_COUNTER_RANGE = 64'h0000_0FFF;
 localparam BP_LOCAL_REPAIR  = (32'd7);
 

@@ -73,11 +73,8 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // test
   input  logic              test_mode,
   input  logic              scan_en,
-  // Fault injection enable, straight from the pad.  forte_soc instantiates
-  // wallypipelinedcore directly, so leaving this unconnected would drive X into
-  // the ECC and FT logic.  One name the whole way down: this started as the
-  // ASIC side's rename of ecc_inject_en, and main's #43 renamed their end to
-  // the same thing, so there is no longer a translation at any boundary.
+  // Fault-injection master enable from the pad. The core applies the per-unit
+  // software mask at MMIO 0x1007_000b before driving ECC and FT injectors.
   input  logic              fault_inject,
   // status
   output logic              status

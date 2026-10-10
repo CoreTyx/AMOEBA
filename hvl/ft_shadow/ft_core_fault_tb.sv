@@ -47,7 +47,9 @@ module ft_core_fault_tb;
   localparam int SC_LATE_REM_INJECTION = 18;
   localparam int SC_LATE_DIV_BACKPRESSURE = 19;
   localparam int SC_LATE_REM_BACKPRESSURE = 20;
-  localparam int SCENARIO_COUNT = 21;
+  localparam int SC_FAULT_CONTROL = 21;
+  localparam int SCENARIO_COUNT = 22;
+  int control_reads;
 
   int checks = 0, scenario, held_cycles, retired_branches, trap_count;
   logic injected, finished, held_last;
@@ -232,7 +234,8 @@ module ft_core_fault_tb;
   endfunction
   function automatic logic mdu_case(input int test_case);
     return (test_case >= SC_MUL_TRAP && test_case <= SC_DIV_REM_TRAP) ||
-        (test_case >= SC_MUL_BACKPRESSURE && test_case <= SC_DIV_BACKPRESSURE) || test_case >= SC_LATE_DIV_INJECTION;
+        (test_case >= SC_MUL_BACKPRESSURE && test_case <= SC_DIV_BACKPRESSURE) ||
+        (test_case >= SC_LATE_DIV_INJECTION && test_case <= SC_LATE_REM_BACKPRESSURE);
   endfunction
   function automatic logic trap_case(input int test_case);
     return test_case == SC_BNE_TRAP || test_case == SC_BGE_TRAP ||
@@ -243,6 +246,32 @@ module ft_core_fault_tb;
     checks++;
     if (condition !== 1'b1) $fatal(1, "scenario=%0d %s at %0t", scenario, label_text, $time);
   endtask
+  task automatic check_unit_enables(input logic [5:0] expected);
+    check(dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].result_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].result_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].arith_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[1].arith_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].arith_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[0].shift_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].shift_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].shift_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[0].cmp_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[1].cmp_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.primary_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.shadow_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable");
+    check(dut.soc.core.ieu.dp.regf.inj1.inject_en == expected[4], "unit gate: ieu.dp.regf.inj1.inject_en");
+    check(dut.soc.core.ieu.dp.regf.inj2.inject_en == expected[4], "unit gate: ieu.dp.regf.inj2.inject_en");
+    check(dut.soc.core.ieu.dp.RD1EReg.inject_en == expected[5], "unit gate: ieu.dp.RD1EReg.inject_en");
+    check(dut.soc.core.ieu.dp.RD2EReg.inject_en == expected[5], "unit gate: ieu.dp.RD2EReg.inject_en");
+    check(dut.soc.core.ieu.dp.ImmExtEReg.inject_en == expected[5], "unit gate: ieu.dp.ImmExtEReg.inject_en");
+    check(dut.soc.core.ieu.dp.SrcAMReg.inject_en == expected[5], "unit gate: ieu.dp.SrcAMReg.inject_en");
+    check(dut.soc.core.ieu.dp.IEUResultMReg.inject_en == expected[5], "unit gate: ieu.dp.IEUResultMReg.inject_en");
+    check(dut.soc.core.ieu.dp.WriteDataMReg.inject_en == expected[5], "unit gate: ieu.dp.WriteDataMReg.inject_en");
+    check(dut.soc.core.ieu.dp.IFResultWReg.inject_en == expected[5], "unit gate: ieu.dp.IFResultWReg.inject_en");
+  endtask
+
   task automatic load_program(input logic bge);
     foreach (rom[i]) rom[i] = 32'h00000013;
     rom[0]  = 32'h00000297;  // auipc t0,0
@@ -270,15 +299,21 @@ module ft_core_fault_tb;
       retired_branches = 0;
       trap_count = 0;
       finished = 0;
+      control_reads = 0;
     end else if (monitor_valid) begin
       if (monitor_rd_addr != 0 && !monitor_trap) regs[monitor_rd_addr] = monitor_rd_wdata;
+      if (scenario == SC_FAULT_CONTROL && monitor_rd_addr == 10 && !monitor_trap) begin
+        check(monitor_rd_wdata == ((control_reads == 0 || control_reads == 8) ? 63 :
+              ((control_reads == 1) ? 0 : (1 << (control_reads - 2)))), "software byte readback of unit mask");
+        control_reads++;
+      end
       if (monitor_trap) begin
         trap_count++;
         check(monitor_pc_rdata == (mdu_case(scenario) ? BASE + 20 : BRANCH_PC),
               "fault trap retains original instruction PC");
       end
       if (!mdu_case(scenario) && monitor_pc_rdata == BRANCH_PC && !monitor_trap) retired_branches++;
-      if (monitor_pc_rdata == (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40)) ||
+      if (monitor_pc_rdata == ((scenario == SC_FAULT_CONTROL) ? BASE + 108 : (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40))) ||
               monitor_pc_rdata == BASE + 268)
         finished = 1;
     end
@@ -300,7 +335,7 @@ module ft_core_fault_tb;
     for (scenario = SC_HEALTHY; scenario < SCENARIO_COUNT; scenario++) begin
       @(negedge clk);
       rst = 1;
-      directed = (scenario != SC_SHARED_INJECTION);
+      directed = (scenario != SC_SHARED_INJECTION && scenario != SC_FAULT_CONTROL);
       fault_inject = (scenario == SC_SHARED_INJECTION);
       fi_enable = 0;
       mul_fi_enable = 0;
@@ -330,6 +365,18 @@ module ft_core_fault_tb;
         };
         rom[6] = csr_read(11, 'h7c2);
         rom[7] = 32'h0000006f;
+      end
+      if (scenario == SC_FAULT_CONTROL) begin
+        foreach (rom[i]) rom[i] = 32'h00000013;
+        rom[0] = 32'h100702b7; // lui t0,0x10070
+        rom[1] = addi(5, 5, 11);
+        rom[2] = 32'h0002c503; // lbu a0,0(t0): reset mask
+        for (int unit_index = 0; unit_index < 8; unit_index++) begin
+          rom[3 + 3*unit_index] = addi(6, 0, (unit_index == 0) ? 0 : ((unit_index == 7) ? 63 : (1 << (unit_index-1))));
+          rom[4 + 3*unit_index] = 32'h00628023; // sb t1,0(t0)
+          rom[5 + 3*unit_index] = 32'h0002c503; // lbu a0,0(t0)
+        end
+        rom[27] = 32'h0000006f;
       end
       held_cycles = 0;
       injected = 0;
@@ -375,7 +422,7 @@ module ft_core_fault_tb;
         // The instruction has already passed its E-stage comparison. A later
         // injector event must not change the accepted M-stage result, including
         // when an unrelated stall extends its lifetime in M.
-        if (!injected && scenario >= SC_LATE_DIV_INJECTION && dut.soc.core.InstrValidM &&
+        if (!injected && scenario >= SC_LATE_DIV_INJECTION && scenario <= SC_LATE_REM_BACKPRESSURE && dut.soc.core.InstrValidM &&
             dut.soc.core.PCM == BASE + 20) begin
           div_fi_enable = 1;
           div_fi_target = 1;
@@ -410,6 +457,11 @@ module ft_core_fault_tb;
           backpressure_cycles--;
           if (backpressure_cycles == 0) force dut.soc.core.ExternalStall = 1'b0;
         end
+        if (scenario == SC_FAULT_CONTROL) begin
+          fault_inject = cycle[0]; // verify the pin gates every programmed mask
+          #1;
+          check_unit_enables(dut.soc.FaultInjectMask & {6{fault_inject}});
+        end
         #1;
         if (held_last) check(dut.soc.core.PCE == held_pc, "execute PC holds across FT stall edge");
         if (dut.soc.core.FTStall && !dut.soc.core.TrapM) begin
@@ -443,6 +495,9 @@ module ft_core_fault_tb;
         check(trap_count == 1 && regs[12] == 16 && regs[13] == (mdu_case(scenario) ? BASE + 20 : BRANCH_PC),
               "precise machine cause-16 trap");
         check(regs[14][6] && regs[10] == 0, "unresolved sticky status and no younger retirement");
+      end else if (scenario == SC_FAULT_CONTROL) begin
+        check(trap_count == 0 && control_reads == 9 && regs[10] == 63,
+              "byte stores/loads control all six units without traps");
       end else if (scenario >= SC_LATE_DIV_INJECTION) begin
         check(
             injected && trap_count == 0 && regs[11] == 0 &&

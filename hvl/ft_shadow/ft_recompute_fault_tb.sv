@@ -77,7 +77,7 @@ module ft_recompute_fault_tb #(
     .advance, .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
     .W64(w64), .UW64(uw64), .SubArith(sub), .ALUSelect(select_op), .BSelect(bselect),
     .ZBBSelect(zbbselect), .Funct3(funct3), .BALUControl(balu), .Funct7(7'b0), .Rs2E(5'b0),
-    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .ALUResult(result), .Sum(sum), .flags,
+    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
     .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
