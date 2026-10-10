@@ -624,6 +624,11 @@ jobs:
     permissions:
       contents: read
       actions: read
+      # For the changed-file check in .github/scripts/download_boot_image.sh.
+      # This job's permissions are declared locally, so it does NOT inherit the
+      # ones linux-boot.yml sets -- which is exactly why fixing that workflow
+      # alone left this one failing.
+      pull-requests: read
     needs:
       - ci-ecc-unit
       - ci-baremetal-ecc
@@ -647,26 +652,14 @@ jobs:
       - name: Download boot image
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p testcode/linux/build
-          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          echo "Looking for a boot image built from branch: $BRANCH"
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                     --branch "$BRANCH" \
-                     --workflow linux-image.yml --status success \
-                     --limit 1 --json databaseId --jq '.[0].databaseId')
-          if [ -z "$RUN_ID" ]; then
-            echo "No successful linux-image.yml run on branch '$BRANCH'."
-            echo "That workflow builds on push when testcode/linux/** changes;"
-            echo "otherwise run it manually (Actions -> Linux Boot Image -> Run workflow)."
-            exit 1
-          fi
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name amoeba-linux-boot-image --dir testcode/linux/build
-          ls -la testcode/linux/build
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: .github/scripts/download_boot_image.sh
 
       - name: Show image provenance
-        run: cat testcode/linux/build/boot.provenance
+        run: |
+          echo "Boot image built from branch: ${LINUX_IMAGE_FROM:-unknown}"
+          cat testcode/linux/build/boot.provenance
 
       - name: Restore Linux+ECC inject build cache
         uses: actions/cache@v4
