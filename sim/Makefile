@@ -629,6 +629,33 @@ cache_integration_test:
 	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/cache_integration_tb/compile.log
 	verilator/cache_integration_tb/Vcache_integration_tb
 
+# Demand-path edge cases with the scrubber disabled (as the real D$ is instantiated), against a bus
+# model that records writebacks, plus a seeded random run with injected errors (SEED=n).
+# Compiler note: g++-12 (12.5) miscompiles this testbench's --timing coroutine and the binary
+# segfaults at startup; build it with another compiler, e.g. `make cache_edge_test CXX=g++-10`.
+# UNIT_TB_CFLAGS adds -fcoroutines when $(CXX) needs it (g++-10/11).
+SEED ?= 1
+.PHONY: cache_edge_test
+cache_edge_test:
+	mkdir -p verilator/cache_edge_tb
+	verilator $(UNIT_TB_CFLAGS) --binary -O2 --top-module cache_edge_tb \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    $(wildcard $(CURDIR)/../pkg/*.sv) \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/cache/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/flop/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x128.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x44.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x22.sv \
+	    $(CURDIR)/../hvl/common/getenvval_stub.cpp \
+	    $(CURDIR)/../hvl/cache/cache_edge_tb.sv \
+	    -Mdir verilator/cache_edge_tb --Wall -Wno-fatal -CFLAGS "-std=c++20" \
+	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/cache_edge_tb/compile.log
+	verilator/cache_edge_tb/Vcache_edge_tb +SEED=$(SEED)
+
 csr_harden_test:
 	mkdir -p verilator/csr_harden_tb
 	$(UNIT_TB_VERILATOR) --binary --timing -O2 --top-module csr_harden_tb \

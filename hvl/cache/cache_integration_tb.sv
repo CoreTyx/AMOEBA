@@ -177,6 +177,13 @@ module cache_integration_tb;
     endcase
   endfunction
 
+  function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
+    case (w)
+      0: return dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s];
+      default: return dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s];
+    endcase
+  endfunction
+
   task automatic flipdatacheckbits(input int w, input int s, input int bit0, input int bit1 = -1);
     logic [TB_LINECHECKWIDTH-1:0] v;
     v = peekdatacheck(w, s);
@@ -233,6 +240,7 @@ module cache_integration_tb;
   logic [WORDLEN-1:0] result;
   logic [PA_BITS-1:0] testadr, dirtyadr, scrubadr, tagsecadr, tagdedadr;
   logic [PA_BITS-1:0] scrubcleanadr, scrubdirtyadr, scrubverifyadr;
+  logic [PA_BITS-1:0] evictadrA, evictadrB, evictadrC;
   int way, s;
 
   initial begin
@@ -467,6 +475,97 @@ module cache_integration_tb;
       end
       check("scrubber: found and corrected an error on an untouched line", found);
       check("SEC counter includes scrubber data correction", SecCount == 3);
+    end
+
+    // ── 13. Dirty miss: select and write back the victim data before the bus's first beat, then
+    //        preserve the fetched line when the miss itself is a store. ──
+    begin
+      logic [LINELEN-1:0] expectedvictimline;
+      int victimway, evictset;
+      bit writebackseen;
+
+      evictadrA = 16'h10F0;
+      evictadrB = 16'h18F0;
+      evictadrC = 16'h20F0; // all three addresses map to the same set
+      mem[{evictadrA[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] =
+        128'hA1A1A1A1A1A1A1A1_A0A0A0A0A0A0A0A0;
+      mem[{evictadrB[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] =
+        128'hB1B1B1B1B1B1B1B1_B0B0B0B0B0B0B0B0;
+      mem[{evictadrC[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] =
+        128'hC1C1C1C1C1C1C1C1_C0C0C0C0C0C0C0C0;
+
+      doload(evictadrA, result);
+      dostore(evictadrA + 8, 64'hA2A2A2A2A2A2A2A2);
+      doload(evictadrB, result);
+      dostore(evictadrB, 64'hB2B2B2B2B2B2B2B2);
+
+      evictset = evictadrA[SETLEN+OFFSETLEN-1:OFFSETLEN];
+      victimway = dut.VictimWay[0] ? 0 : 1;
+      expectedvictimline = peekdata(victimway, evictset);
+      writebackseen = 0;
+      fork
+        begin : observe_dirty_writeback
+          for (int i = 0; i < 50 && !writebackseen; i++) begin
+            @(negedge clk);
+            if (CacheBusRW[0]) begin
+              writebackseen = 1;
+              check("dirty eviction: victim data way selected before first writeback beat",
+                    dut.SelectedWayDataQ === (2'b01 << victimway));
+              check("dirty eviction: first writeback line matches the dirty victim",
+                    dut.ReadDataLineCache === expectedvictimline);
+            end
+          end
+        end
+        begin : issue_store_miss
+          dostore(evictadrC + 8, 64'hC2C2C2C2C2C2C2C2);
+        end
+      join
+      check("dirty eviction: writeback request was observed", writebackseen);
+      doload(evictadrC, result);
+      check("store miss: untouched word came from the fetched line",
+            result === 64'hC0C0C0C0C0C0C0C0);
+      doload(evictadrC + 8, result);
+      check("store miss: requested word was stored", result === 64'hC2C2C2C2C2C2C2C2);
+    end
+
+    // ── 14. Flush: every dirty line must use its flush-way selection for the whole writeback. ──
+    begin
+      int flushwrites;
+
+      flushwrites = 0;
+      fork
+        begin : observe_flush_writebacks
+          bit previouswrite;
+          wait (FlushCache);
+          previouswrite = 0;
+          for (int i = 0; i < 20000 && (FlushCache || CacheStall); i++) begin
+            int flushway, flushset;
+            @(negedge clk);
+            if (CacheBusRW[0] && !previouswrite) begin
+              flushway = dut.FlushWay[0] ? 0 : 1;
+              flushset = dut.FlushAdr;
+              flushwrites++;
+              check("flush: selected data way matches flush-way counter",
+                    dut.SelectedWayDataQ === dut.FlushWay);
+              check("flush: writeback line matches selected dirty cache line",
+                    dut.ReadDataLineCache === peekdata(flushway, flushset));
+            end
+            previouswrite = CacheBusRW[0];
+          end
+        end
+        begin : issue_flush
+          FlushCache = 1;
+          @(negedge clk);
+          $display("DBG flush start: state=%0d stall=%b dirty=%b", dut.cachefsm.CurrState,
+                   CacheStall, dut.LineDirty);
+          waitidle();
+          $display("DBG flush end: state=%0d stall=%b dirty=%b", dut.cachefsm.CurrState,
+                   CacheStall, dut.LineDirty);
+          FlushCache = 0;
+          @(posedge clk);
+        end
+      join
+      check("flush: at least one dirty line was written back", flushwrites > 0);
     end
 
     $display("cache_integration_tb: %0d/%0d checks passed", checks - errors, checks);

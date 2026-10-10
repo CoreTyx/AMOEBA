@@ -125,6 +125,11 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   output logic                        DirtyMismatch,  // The selected way's two dirty-bit copies disagree
   output logic                        TagSecErr,      // This way's tag codeword has a correctable error
   output logic                        TagDedErr,       // This way's tag codeword has an uncorrectable error
+  // A valid, dirty line whose tag is uncorrectable cannot be written back (its address is lost).
+  // It is excluded from DirtyWay so no eviction or flush ever writes it to a wrong address, flagged
+  // here, and dropped when cachefsm pulses DropTagDedDirty (which also raises the dirty-data fault).
+  output logic                        TagDedDirtyWay,  // This way holds a valid, dirty line with an uncorrectable tag
+  input  logic                        DropTagDedDirty, // cachefsm: invalidate this way if TagDedDirtyWay (gated to FlushWay during a flush)
   output logic [TAGLEN-1:0]           TagWay);        // This way's corrected tag if selected (AND part of AO mux)
 
   logic [NUMSETS-1:0]                ValidBits, ValidBitsRedundant;
@@ -144,6 +149,8 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic                               SelectedWay;
   logic [1:0]                         SelectedWaySel;
   logic                               InvalidateCacheDelay;
+  logic                               DirtyEff;        // effective dirty: either copy set (safe direction)
+  logic                               TagDedDropWay;
 
   if (!READ_ONLY_CACHE) begin : flushlogic
     mux2 #(1) seltagmux(VictimWay, FlushWay, FlushCache, SelecteDirty);
@@ -224,8 +231,10 @@ module cacheway import cvw::*; #(parameter cvw_t P,
 
   // AND portion of distributed tag multiplexer
   assign TagWay = SelectedWay ? CorrectedTag : '0; // AND part of AOMux
-  assign HitDirtyWay = Dirty & ValidWay;
-  assign DirtyWay = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay;        // exclusion-tag: icache DirtyWay
+  assign HitDirtyWay = DirtyEff & ValidWay;
+  assign TagDedDirtyWay = HitDirtyWay & TagDedErr;
+  assign DirtyWay = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErr;        // exclusion-tag: icache DirtyWay
+  assign TagDedDropWay = DropTagDedDirty & TagDedDirtyWay & (~FlushCache | FlushWay);
   assign HitWay = ValidWay & (CorrectedTag == PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]) & ~InvalidateCacheDelay & ~TagDedErr; // exclusion-tag: dcache HitWay
 
   flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, 1'b1, InvalidateCache, InvalidateCacheDelay);
@@ -284,9 +293,12 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign DataCheckWay = SelectedWayDataQ ? ReadDataCheck : '0;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
-  // Valid Bits -- 2-copy redundancy. Mismatch always resolves to the safe direction (invalid),
-  // since a 0->1 flip (garbage line looking like a hit) is the dangerous one; 1->0 is just a
-  // spurious miss.
+  // Valid Bits -- 2-copy redundancy. A mismatch on a CLEAN line resolves to invalid, since a 0->1
+  // flip (garbage line looking like a hit) is the dangerous one and a spurious miss is harmless.
+  // A mismatch on a DIRTY line resolves to valid: dirty implies valid, and treating it as invalid
+  // would silently replace the only copy of modified data with stale memory contents. That rule
+  // relies on the invariant "dirty => valid", which the dirty block below maintains by clearing a
+  // way's dirty copies whenever its valid bit is cleared.
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   logic ValidRaw, ValidRedundantRaw;
@@ -305,19 +317,19 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       end else if (SetValidEN) begin
         ValidBits[CacheSetData] <= SetValidWay;
         ValidBitsRedundant[CacheSetData] <= SetValidWay;
-      end else if (ClearValidEN | ScrubInvalidateWay) begin
+      end else if (ClearValidEN | ScrubInvalidateWay | TagDedDropWay) begin
         ValidBits[CacheSetData] <= '0; // exclusion-tag: icache ClearValidBits
         ValidBitsRedundant[CacheSetData] <= '0;
       end else if (ValidMismatch & SelectedWay) begin
-        // Resync both copies to the safe (invalid) value on a detected mismatch.
-        ValidBits[CacheSetData] <= 1'b0;
-        ValidBitsRedundant[CacheSetData] <= 1'b0;
+        // Resync both copies to the resolved value (see ValidWay) on a detected mismatch.
+        ValidBits[CacheSetData] <= ValidWay;
+        ValidBitsRedundant[CacheSetData] <= ValidWay;
       end
     end
   end
 
   assign ValidMismatch = ValidRaw ^ ValidRedundantRaw;
-  assign ValidWay = ValidRaw & ValidRedundantRaw; // safe direction: only a hit if BOTH copies agree it's valid
+  assign ValidWay = (ValidRaw & ValidRedundantRaw) | (ValidMismatch & DirtyEff);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Dirty Bits -- same 2-copy redundancy, mismatch resolves to the safe direction (dirty), since
@@ -326,11 +338,27 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   if (!READ_ONLY_CACHE) begin : dirty
+    logic ClearDirtyOnInvalidate;
+    assign ClearDirtyOnInvalidate = ClearValidEN | ScrubInvalidateWay | TagDedDropWay;
     always_ff @(posedge clk) begin
-      if (CacheEn) begin
+      if (reset) begin
+        DirtyBits <= '0;
+        DirtyBitsRedundant <= '0;
+      end else if (CacheEn) begin
         Dirty          <= DirtyBits[CacheSetTag];
         DirtyRedundant <= DirtyBitsRedundant[CacheSetTag];
-        if ((SetDirtyWay | ClearDirtyWay) & ~FlushStage) begin
+        if (InvalidateCache & ~InvalidateFlushStage) begin
+          DirtyBits <= '0;
+          DirtyBitsRedundant <= '0;
+        end else if (ClearDirtyOnInvalidate) begin
+          // Keep "dirty => valid": a way losing its valid bit loses its dirty bit with it.
+          DirtyBits[CacheSetData] <= 1'b0;
+          DirtyBitsRedundant[CacheSetData] <= 1'b0;
+          if (CacheSetData == CacheSetTag) begin
+            Dirty <= 1'b0;
+            DirtyRedundant <= 1'b0;
+          end
+        end else if ((SetDirtyWay | ClearDirtyWay) & ~FlushStage) begin
           DirtyBits[CacheSetData] <= SetDirtyWay; // exclusion-tag: cache UpdateDirty
           DirtyBitsRedundant[CacheSetData] <= SetDirtyWay;
           if (CacheSetData == CacheSetTag) begin
@@ -350,9 +378,11 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       end
     end
     assign DirtyMismatch = Dirty ^ DirtyRedundant;
+    assign DirtyEff = Dirty | DirtyRedundant;
   end else begin
     assign Dirty = 1'b0;
     assign DirtyRedundant = 1'b0;
     assign DirtyMismatch = 1'b0;
+    assign DirtyEff = 1'b0;
   end
 endmodule

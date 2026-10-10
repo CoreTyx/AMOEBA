@@ -117,6 +117,9 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [TAGLEN-1:0]             TagWay [NUMWAYS-1:0];
   logic [TAGLEN-1:0]             Tag;
   logic [NUMWAYS-1:0]            TagSecErrWay, TagDedErrWay;
+  logic [NUMWAYS-1:0]            TagDedDirtyWay;     // valid+dirty ways whose tag is uncorrectable
+  logic                          TagDedDirty, DropTagDedDirty;
+  logic                          EccDedLostLine;     // cachefsm: dirty line dropped on eviction/flush (uncorrectable data)
   logic [SETLEN-1:0]             FlushAdr;
   logic                          FlushAdrCntEn, FlushCntRst;
   logic                          FlushAdrFlag, FlushWayFlag;
@@ -187,6 +190,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .ReadDataLineWay, .DataCheckWay, .HitWay, .ValidWay, .ValidMismatch(ValidMismatchWay),
     .DirtyWay, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
     .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
+    .TagDedDirtyWay, .DropTagDedDirty,
     .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
 
   // The scrubber needs the array enabled throughout its operation, including cycles when cachefsm's
@@ -262,7 +266,15 @@ module cache import cvw::*; #(parameter cvw_t P,
     assign WordOffsetAddr = PAdr[$clog2(LINELEN/8) - 1 : $clog2(MUXINTERVAL/8)];
 
   // Bypass cache array to save a cycle when finishing a load miss
-  mux2 #(LINELEN) EarlyReturnMux(ReadDataLineCache, FetchBuffer, SelFetchBuffer, ReadDataLine);
+  // Everything leaving the cache from the arrays -- load data to the core and eviction/flush
+  // writeback data to the bus -- takes the ECC-corrected line, so a latent single-bit error is never
+  // handed out or written to (unprotected) memory.
+  mux2 #(LINELEN) EarlyReturnMux(CorrectedLine, FetchBuffer, SelFetchBuffer, ReadDataLine);
+
+  // A dirty line with an uncorrectable tag can't be written back (its address is lost). Any access
+  // to its set, or a flush reaching it, reports it and drops it; cacheway.sv already keeps it out
+  // of DirtyWay so it is never written back to a wrong address.
+  assign TagDedDirty = FlushCache ? |(TagDedDirtyWay & FlushWay) : |TagDedDirtyWay;
 
   // Select word from cache line
   subcachelineread #(LINELEN, WORDLEN, MUXINTERVAL) subcachelineread(
@@ -362,11 +374,16 @@ module cache import cvw::*; #(parameter cvw_t P,
     .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr, .HitDirty(HitLineDirty),
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
+    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
   assign ScrubFaultAdr = {Tag, ScrubSet, {OFFSETLEN{1'b0}}};
-  assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : PAdr;
+  // For a line dropped on eviction/flush, report that line's own address (the selected way's tag is
+  // the victim's or flush way's), not the access that caused the eviction.
+  logic [PA_BITS-1:0]            LostLineAdr;
+  assign LostLineAdr = FlushCache ? {Tag, FlushAdr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
+  assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : EccDedLostLine ? LostLineAdr : PAdr;
 
   always_ff @(posedge clk)
     if (reset) SecCount <= '0;
