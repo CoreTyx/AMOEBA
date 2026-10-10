@@ -536,6 +536,8 @@ FT_THRESHOLD ?= 2
 FT_XLEN ?= 64
 FT_TB_DIR = verilator/ft_shadow_tb_$(FT_XLEN)_$(FT_THRESHOLD)
 .PHONY: ft_shadow_test ft_shadow_regression
+# Six standalone module runs: two datapath widths times three mismatch thresholds.
+# These runs do not instantiate a processor or execute RV32/RV64 programs.
 ft_shadow_regression:
 	@set -e; for xlen in 32 64; do for threshold in 1 2 3; do $(MAKE) ft_shadow_test FT_XLEN=$$xlen FT_THRESHOLD=$$threshold; done; done
 
@@ -616,7 +618,7 @@ clean:
 .PHONY: ft_core_test
 ft_core_test:
 	mkdir -p verilator/ft_core_tb
-	# Enable prediction only in this fixture to exercise predicted-taken faults.
+	# Enable prediction only in this processor test to exercise predicted-taken faults.
 	python3 -c 'import pathlib,re; p=pathlib.Path("../pkg/config.vh"); pathlib.Path("verilator/ft_core_tb/config.vh").write_text(re.sub(r"(localparam logic BPRED_SUPPORTED\s*=\s*)[01]", r"\g<1>1", p.read_text()))'
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \

@@ -1,5 +1,5 @@
-// Independent arithmetic oracle and deterministic runtime-injection regression.
-// Run with THRESHOLD=1/2/3 and TEST_XLEN=32/64 via sim/Makefile.
+// Direct arithmetic-module and recovery tests; no processor or instruction decoder.
+// sim/Makefile runs 32/64-bit datapaths at each mismatch threshold (1, 2, 3).
 `include "config.vh"
 module ft_recompute_fault_tb #(
     parameter int THRESHOLD = 2,
@@ -12,8 +12,8 @@ module ft_recompute_fault_tb #(
     changed = original;
     changed.XLEN = TEST_XLEN;
     changed.LOG_XLEN = $clog2(TEST_XLEN);
-    // Exercise optional ALU operations even when the production configuration
-    // omits them. This fixture does not change the core's feature selection.
+    // Enable optional arithmetic paths for direct ALU-control tests only.
+    // TP is local to this testbench; processor/ISA/Linux builds still use P.
     changed.ZBA_SUPPORTED = 1;
     changed.ZBB_SUPPORTED = 1;
     changed.ZBKB_SUPPORTED = 1;

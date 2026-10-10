@@ -107,7 +107,7 @@ jobs:
           path: sim/verilator/build_no_spike
           key: no-spike-build-${{ runner.os }}-${{ github.sha }}
 
-  # ── Fault-tolerant unit matrix and core integration ──────────────────
+  # ── FT module tests (two widths x three thresholds) and core integration ──
   ci-ft-shadow:
     name: Fault-Tolerant Unit and Core Regression
     runs-on: ubuntu-latest
@@ -137,7 +137,7 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Run RV32/RV64 fault injection matrix (thresholds 1, 2, 3)
+      - name: Run 32/64-bit module tests at mismatch thresholds 1, 2, 3
         run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_regression
 
       - name: Run independent core fault integration test
