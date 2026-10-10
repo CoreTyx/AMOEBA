@@ -738,8 +738,9 @@ cache_integration_test:
 
 # Demand-path edge cases with the scrubber disabled (as the real D$ is instantiated), against a bus
 # model that records writebacks, plus a seeded random run with injected errors (SEED=n).
-# Compiler note: g++-12 (12.5) miscompiles this testbench's --timing coroutine and the binary
-# segfaults at startup; build it with another compiler, e.g. `make cache_edge_test CXX=g++-10`.
+# Compiler note: on Ubuntu 20.04 both g++-10 and g++-12 have miscompiled this testbench's --timing
+# coroutine (which one depends on the exact generated code); the binary then segfaults at startup
+# before any check runs. If that happens, rebuild with the other, e.g. `make cache_edge_test CXX=g++-12`.
 # UNIT_TB_CFLAGS adds -fcoroutines when $(CXX) needs it (g++-10/11).
 SEED ?= 1
 .PHONY: cache_edge_test
