@@ -95,7 +95,10 @@ module hazard (
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
   // Use normal backward stall propagation to freeze F through W.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | FTStall;
+  // An older M-stage trap/return/CSR flush cancels younger FT diagnosis. A fresh
+  // mismatch in E must not hold the flushing instruction forever; flopenrc clears
+  // only when enabled, so trap flushing must also release the stall.
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | (FTStall & ~FlushMCause);
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0

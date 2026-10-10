@@ -29,8 +29,8 @@
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  // ECC inject enable (from top-level, for DFT)
-  input  logic              ecc_inject_en,
+  // Shared ECC and execution-unit fault-injection enable.
+  input  logic              fault_inject,
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
@@ -45,6 +45,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                             // PC
   input  logic [P.XLEN-1:0] PCLinkE,                         // PC + 4
+  input  logic              FTUnresolvedM,                   // older FT fault suppresses E redirects
   input  logic              FTStallM,                         // M-stage retry freezes E control
   output logic              PCSrcE,                          // Select next PC (between PC+4 and IEUAdrE)
   input  logic              FWriteIntE, FCvtIntE,            // FPU writes to integer register file, FPU converts float to int
@@ -133,7 +134,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .InjectD, .DummySelD, .DummyW, .DummySelW,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
-    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM),
+    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
     .BranchSignedE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE, .MDUActiveE,
@@ -144,7 +145,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .ecc_inject_en,
+    .clk, .reset, .fault_inject,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .InjectD, .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,

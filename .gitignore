@@ -1,8 +1,6 @@
 .claude/
-/.envrc
 formal/freertos/build/
 formal/freertos/dump.fst
 *.elf
-.codex/
 hvl/ft_shadow/build/
 hdl/cvw/addins/

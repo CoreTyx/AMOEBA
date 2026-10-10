@@ -102,7 +102,7 @@ module rv64_core_wrapper import cvw::*; (
     input  logic [63:0]  minstret_rdata,
     output logic [63:0]  minstret_wdata,
 
-    input  logic         ecc_inject_en     // ECC inject enable (for DFT / ECC test)
+    input  logic         fault_inject      // Shared ECC/FT fault-injection enable
 );
 
     `include "parameter-defs.vh"
@@ -196,7 +196,7 @@ module rv64_core_wrapper import cvw::*; (
         .SDCCmd     (),
         .SDCCS      (),
         .SDCCLK     (),
-        .ecc_inject_en (ecc_inject_en),
+        .fault_inject (fault_inject),
         .PrivModeUncorrectableFaultW ()
     );
 

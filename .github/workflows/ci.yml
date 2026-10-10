@@ -107,9 +107,9 @@ jobs:
           path: sim/verilator/build_no_spike
           key: no-spike-build-${{ runner.os }}-${{ github.sha }}
 
-  # ── Shadow-protected execution unit test ───────────────────────────────────
+  # ── FT 64-bit module tests (three thresholds) and core integration ──
   ci-ft-shadow:
-    name: Shadow Execution Unit Test
+    name: Fault-Tolerant Unit and Core Regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +119,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ make autoconf flex bison libfl-dev help2man zlib1g-dev
+          sudo apt-get install -y python3 gcc g++ make autoconf flex bison libfl-dev help2man zlib1g-dev
 
       - name: Cache Verilator v5.026
         id: cache-verilator
@@ -137,8 +137,11 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Run shadow execution unit test
-        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_test
+      - name: Run 64-bit module tests at mismatch thresholds 1, 2, 3
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_shadow_regression
+
+      - name: Run independent core fault integration test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim ft_core_test
 
   # ── Discover all baremetal tests ────────────────────────────────────────────
   ci-discover-tests:
@@ -167,7 +170,11 @@ jobs:
       - name: Discover ISA-level tests
         id: discover
         run: |
-          TESTS=$(find testcode/isa_level_testing -name "*.c" -type f ! -name "test_utils.h" | sed 's|testcode/isa_level_testing/||g' | sed 's|\.c$||g' | jq -R -s -c 'split("\n")[:-1]')
+          # tcf_* are forte-only: they exercise hardware that exists only in
+          # the ASIC hierarchy, and this matrix runs the DEFAULT DUT (legacy).
+          # The ci-forte job below runs them.  Excluded by prefix rather than by
+          # name so adding the next one needs no edit here.
+          TESTS=$(find testcode/isa_level_testing -name "*.c" -type f ! -name "test_utils.h" ! -name "tcf_*.c" | sed 's|testcode/isa_level_testing/||g' | sed 's|\.c$||g' | jq -R -s -c 'split("\n")[:-1]')
           echo "tests=${TESTS}" >> $GITHUB_OUTPUT
 
   # ── Discover all FreeRTOS tests ──────────────────────────────────────────────
@@ -254,6 +261,76 @@ jobs:
 
       - name: Run ISA-level test
         run: make -C sim run_verilator_top_tb_no_spike PROG=../testcode/isa_level_testing/${{ matrix.test }}.c
+
+  # ── The ASIC top ───────────────────────────────────────────────────────────
+  # Nothing else in this file builds DUT=forte, and that gap has already cost
+  # real time: the link was hardcoded to INCR8, a cache-line resize made that
+  # silently wrong, and tc_compressed/tc_insert_trace hung on the ASIC top while
+  # every job here stayed green because they all run the legacy DUT.
+  #
+  # One job rather than a matrix: the forte build is the expensive part and the
+  # tests are quick once it exists.  make cdc is the two-clock CDC run
+  # (docs/impl_plan_link_clocking.md s9a) -- without it the async FIFOs' Gray
+  # pointers are never exercised at a non-integer ratio, because forte_top ties
+  # link_clk to core_clk and RTL simulation then sees zero skew.  The six-ratio
+  # sweep (make cdc_sweep) is deliberately NOT here; it belongs in a nightly.
+  ci-forte:
+    name: ASIC top (DUT=forte)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch riscv-formal submodule
+        run: git submodule update --init third_party/riscv-formal
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 python3-pip gcc g++ make \
+            autoconf flex bison libfl-dev help2man zlib1g-dev \
+            gcc-riscv64-unknown-elf device-tree-compiler
+          pip3 install --quiet pyyaml
+
+      - name: Cache Verilator v5.026
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.026-${{ runner.os }}
+
+      - name: Build Verilator v5.026 from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+          cd /tmp/verilator-src && autoconf
+          ./configure --prefix=/opt/verilator
+          make -j$(nproc)
+          make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> $GITHUB_PATH
+
+      # Includes the tcf_* forte-only tests, via sim/Makefile's prefix split.
+      - name: ISA regression on the ASIC top
+        run: make -C sim isa_regression DUT=forte TIMEOUT=4000000
+
+      # Gated on aborted != 0, so it fails if the abort path stops being
+      # exercised rather than silently proving nothing.
+      - name: Link abort torture
+        run: make -C sim link_abort DUT=forte
+
+      - name: Two-clock CDC run
+        run: make -C sim cdc
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forte-logs
+          path: sim/verilator/tc_*/simulation.log
+          retention-days: 14
 
   # ── Baremetal regression: run tests with cached Spike DPI simulator ────────
   ci-baremetal:
@@ -485,7 +562,7 @@ jobs:
       - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
         run: touch sim/verilator/build_ecc_inject/Vtop_tb
 
-      - name: Run ECC baremetal test (inject_en=1)
+      - name: Run ECC baremetal test with shared ECC/FT injection (fault_inject=1)
         run: make -C sim run_ecc_inject PROG=../testcode/baremetal_ecc/${{ matrix.test }}.c
 
   # ── Build Linux + ECC inject simulator ──────────────────────────────────────
@@ -547,6 +624,11 @@ jobs:
     permissions:
       contents: read
       actions: read
+      # For the changed-file check in .github/scripts/download_boot_image.sh.
+      # This job's permissions are declared locally, so it does NOT inherit the
+      # ones linux-boot.yml sets -- which is exactly why fixing that workflow
+      # alone left this one failing.
+      pull-requests: read
     needs:
       - ci-ecc-unit
       - ci-baremetal-ecc
@@ -570,26 +652,14 @@ jobs:
       - name: Download boot image
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p testcode/linux/build
-          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          echo "Looking for a boot image built from branch: $BRANCH"
-          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
-                     --branch "$BRANCH" \
-                     --workflow linux-image.yml --status success \
-                     --limit 1 --json databaseId --jq '.[0].databaseId')
-          if [ -z "$RUN_ID" ]; then
-            echo "No successful linux-image.yml run on branch '$BRANCH'."
-            echo "That workflow builds on push when testcode/linux/** changes;"
-            echo "otherwise run it manually (Actions -> Linux Boot Image -> Run workflow)."
-            exit 1
-          fi
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name amoeba-linux-boot-image --dir testcode/linux/build
-          ls -la testcode/linux/build
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: .github/scripts/download_boot_image.sh
 
       - name: Show image provenance
-        run: cat testcode/linux/build/boot.provenance
+        run: |
+          echo "Boot image built from branch: ${LINUX_IMAGE_FROM:-unknown}"
+          cat testcode/linux/build/boot.provenance
 
       - name: Restore Linux+ECC inject build cache
         uses: actions/cache@v4
@@ -601,7 +671,7 @@ jobs:
       - name: Touch Vtop_tb to prevent timestamp-triggered rebuild
         run: touch sim/verilator/build_linux_ecc_inject/Vtop_tb
 
-      - name: Boot Linux with ECC injection
+      - name: Boot Linux with shared ECC/FT injection
         run: |
           make -C sim linux_boot_ecc_inject \
             LINUX_TIMEOUT=800000000

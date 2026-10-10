@@ -29,57 +29,52 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module shifter import cvw::*; #(parameter cvw_t P) (
-  input  logic [P.XLEN-1:0]     A,                             // shift Source
-  input  logic [P.LOG_XLEN-1:0] Amt,                           // Shift amount
-  input  logic                 Right, Rotate, W64, SubArith,  // Shift right, rotate, W64-type operation, arithmetic shift
-  output logic [P.XLEN-1:0]     Y);                            // Shifted result
+  input  logic [P.XLEN-1:0] A,
+  input  logic [P.LOG_XLEN-1:0] Amt,
+  input  logic Right, Rotate, W64, SubArith,
+  input  logic Recompute,
+  output logic [P.XLEN-1:0] Y,
+  // Private diagnostic result: consumed only within the enclosing ft_alu.
+  output logic [P.XLEN+1:0] WideY
+);
+  logic [P.XLEN-1:0] normalized_a, rotate_a, rotate_y;
+  logic [P.XLEN+1:0] shift_input;
+  logic [P.LOG_XLEN-1:0] amount;
+  logic arithmetic;
 
-  logic [2*P.XLEN-2:0]          Z, ZShift;                     // Input to funnel shifter, shifted amount before truncated to 32 or 64 bits
-  logic [P.LOG_XLEN-1:0]        TruncAmt, Offset;              // Shift amount adjusted for RV64, right-shift amount
-  logic                        Sign;                          // Sign bit for sign extension
+  // Normalize word operands before displacement. SLLI.UW's zero extension
+  // already occurs in bitmanipalu's CondShiftA, upstream of this shifter.
+  if (P.XLEN == 64) begin : word_input
+    assign normalized_a = W64 ? (SubArith ? {{32{A[31]}}, A[31:0]} :
+                                                      {32'b0, A[31:0]}) : A;
+    assign rotate_a = W64 ? {A[31:0], A[31:0]} : A;
+    assign amount = W64 ? {1'b0, Amt[4:0]} : Amt;
+  end else begin : full_input
+    assign normalized_a = A;
+    assign rotate_a = A;
+    assign amount = Amt;
+  end
+  assign arithmetic = Right & SubArith;
+  assign shift_input = Recompute ? {normalized_a, 2'b00} :
+                      {{2{arithmetic & normalized_a[P.XLEN-1]}}, normalized_a};
 
-  assign Sign = A[P.XLEN-1] & SubArith;  // sign bit for sign extension
-  if (P.XLEN==32) begin // rv32
-    if (P.ZBB_SUPPORTED | P.ZBKB_SUPPORTED) begin : rotfunnel32 //rv32 shifter with rotates
-      always_comb  // funnel mux
-        case({Right, Rotate})
-          2'b00: Z = {A[31:0], 31'b0};
-          2'b01: Z = {A[31:0], A[31:1]};
-          2'b10: Z = {{31{Sign}}, A[31:0]};
-          2'b11: Z = {A[30:0], A[31:0]};
-        endcase
-    end else begin : norotfunnel32 //rv32 shifter without rotates
-      always_comb  // funnel mux
-        if (Right)  Z = {{31{Sign}}, A[31:0]};
-        else        Z = {A[31:0], 31'b0};
-    end
-    assign TruncAmt = Amt; // shift amount
-  end else begin // rv64
-    logic [P.XLEN-1:0]         A64;
-    mux3 #(64) extendmux({{32{1'b0}}, A[31:0]}, {{32{A[31]}}, A[31:0]}, A, {~W64, SubArith}, A64); // bottom 32 bits are always A[31:0], so effectively a 32-bit upper mux
-    if (P.ZBB_SUPPORTED | P.ZBKB_SUPPORTED) begin : rotfunnel64 // rv64 shifter with rotates
-      // shifter rotate source select mux
-      logic [P.XLEN-1:0]   RotA;                          // rotate source
-      mux2 #(P.XLEN) rotmux(A, {A[31:0], A[31:0]}, W64, RotA); // W64 rotations
-      always_comb  // funnel mux
-        case ({Right, Rotate})
-          2'b00: Z = {A64[63:0],{63'b0}};
-          2'b01: Z = {RotA[63:0], RotA[63:1]};
-          2'b10: Z = {{63{Sign}}, A64[63:0]};
-          2'b11: Z = {RotA[62:0], RotA[63:0]};
-        endcase
-    end else begin : norotfunnel64 // rv64 shifter without rotates
-      always_comb  // funnel mux
-        if (Right)  Z = {{63{Sign}}, A64[63:0]};
-        else        Z = {A64[63:0], {63'b0}};
-    end
-    assign TruncAmt = W64 ? {1'b0, Amt[4:0]} : Amt; // 32- or 64-bit shift
+  always_comb begin
+    if (!Right)          WideY = shift_input << amount;
+    else if (arithmetic) WideY = $signed(shift_input) >>> amount;
+    else                 WideY = shift_input >> amount;
   end
 
-  // Opposite offset for right shifts
-  assign Offset = Right ? TruncAmt : ~TruncAmt;
+  // Preserve the n-bit rotation ring (word rings are repeated twice). The
+  // widened-shift relation is not valid for rotations, so they never diagnose.
+  if (P.ZBB_SUPPORTED | P.ZBKB_SUPPORTED) begin : rotation
+    always_comb begin
+      if (amount == '0) rotate_y = rotate_a;
+      else if (Right) rotate_y = (rotate_a >> amount) |
+                                (rotate_a << (P.XLEN - int'(amount)));
+      else rotate_y = (rotate_a << amount) |
+                      (rotate_a >> (P.XLEN - int'(amount)));
+    end
+  end else assign rotate_y = '0;
 
-  // Funnel operation
-  assign ZShift = Z >> Offset;
-  assign Y = ZShift[P.XLEN-1:0];
+  assign Y = Rotate ? rotate_y : (Recompute ? WideY[P.XLEN+1:2] : WideY[P.XLEN-1:0]);
 endmodule
