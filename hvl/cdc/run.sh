@@ -36,7 +36,11 @@ mapfile -t SRAM_SRCS < <(find "$R/sram/output" -name '*.v' 2>/dev/null | sort)
 # success with no ASIC sources at all.  forte_top is excluded on purpose -- this
 # bench instantiates forte_chip directly to get at the two clocks, so the pad
 # ring is not part of it and would only show up as a second unused top.
-mapfile -t FORTE_SRCS < <(find "$R/hdl" -maxdepth 1 -name 'forte_*.sv' ! -name 'forte_top.sv' | sort)
+# forte_link_pkg.sv is excluded here and listed explicitly before the modules
+# below: it is a package, so analysis order matters and `sort` would place it
+# after its own importers.
+mapfile -t FORTE_SRCS < <(find "$R/hdl" -maxdepth 1 -name 'forte_*.sv' \
+                            ! -name 'forte_top.sv' ! -name 'forte_link_pkg.sv' | sort)
 
 cd "$OUT"
 echo "=== building in $OUT ==="
@@ -46,7 +50,7 @@ verilator --binary -j "$(nproc)" --timing --timescale 1ns/1ps \
   +incdir+"$R/pkg" +incdir+"$R/hdl/core" +incdir+"$R/hdl/core/ifu/bpred" \
   +incdir+"$R/third_party/cvw/config/rv64gc" +incdir+"$R/third_party/opentitan" \
   +incdir+"$R/hvl/common" \
-  "$R/pkg/types.sv" "$R/pkg/forte_link_pkg.sv" "$CORE_SV" "${CORE_SRCS[@]}" \
+  "$R/pkg/types.sv" "$R/hdl/forte_link_pkg.sv" "$CORE_SV" "${CORE_SRCS[@]}" \
   ${SRAM_SRCS[0]+"${SRAM_SRCS[@]}"} \
   "${FORTE_SRCS[@]}" \
   "$R/third_party/opentitan/prim_flop_2sync.sv" \

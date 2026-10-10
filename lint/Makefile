@@ -7,6 +7,13 @@ SHELL=/bin/bash -o pipefail
 export LINT_DIR   := $(CURDIR)
 export REPO_ROOT  := $(shell cd $(CURDIR)/.. && pwd)
 
+# forte_link_pkg.sv lives in hdl/ but is a PACKAGE, so it has to be analysed
+# before every module that imports it.  It therefore stays in PKG_SRCS (read
+# first) and is filtered OUT of the hdl glob, or it would be read twice and
+# collide with itself.  Leaving it to the glob alone is what broke lint and
+# synth: `sort` puts forte_link_pkg.sv after forte_chip, forte_link_core and
+# forte_link_phy, every one of which imports it.
+LINK_PKG          := $(REPO_ROOT)/hdl/forte_link_pkg.sv
 export PKG_SRCS   := $(REPO_ROOT)/pkg/types.sv
 # cvw.sv holds the cvw package and must be read before any module that imports it.
 CORE_PKG          := $(REPO_ROOT)/hdl/core/cvw.sv
@@ -27,8 +34,8 @@ export LINT_DEFINES := $(patsubst +define+%,%,$(shell python3 $(REPO_ROOT)/bin/g
 ifeq ($(DESIGN_TOP),forte_top)
   PRIM_SRCS        := $(REPO_ROOT)/third_party/opentitan/prim_flop_2sync.sv \
                       $(REPO_ROOT)/third_party/opentitan/prim_fifo_async.sv
-  export PKG_SRCS  := $(PKG_SRCS) $(REPO_ROOT)/pkg/forte_link_pkg.sv
-  export HDL_SRCS  := $(HDL_SRCS) $(sort $(wildcard $(REPO_ROOT)/hdl/forte_*.sv)) $(PRIM_SRCS)
+  export PKG_SRCS  := $(PKG_SRCS) $(LINK_PKG)
+  export HDL_SRCS  := $(HDL_SRCS) $(filter-out $(LINK_PKG),$(sort $(wildcard $(REPO_ROOT)/hdl/forte_*.sv))) $(PRIM_SRCS)
   export INCDIRS   := $(INCDIRS) $(REPO_ROOT)/third_party/opentitan
 endif
 

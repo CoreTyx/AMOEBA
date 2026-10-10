@@ -2,7 +2,7 @@
 // forte_link_model.sv
 //
 // Testbench slave for the off-chip link: the FPGA, as far as the ASIC can
-// tell.  Speaks pkg/forte_link_pkg.sv on one side and the testbench's
+// tell.  Speaks hdl/forte_link_pkg.sv on one side and the testbench's
 // mem_itf_w_mask on the other, so the whole existing regression runs through
 // the real protocol with the memory model, tohost snoop and RVFI unchanged.
 //
@@ -15,7 +15,7 @@
 //              and streamed as they arrive, after dir has fallen and TA has
 //              elapsed; the bus is released after the last word
 //   ready      "may start", asserted only while the queue can take TWO lines.
-//              See "the ready guard band" in pkg/forte_link_pkg.sv: the ASIC
+//              See "the ready guard band" in hdl/forte_link_pkg.sv: the ASIC
 //              samples ready through two registers and issues req a cycle
 //              later, so a req can arrive up to GUARD cycles after ready fell.
 //              Keeping a spare line in reserve makes that race a non-event
@@ -32,7 +32,7 @@
 // the regression hangs rather than failing.  hvl/common/forte_dut_wrap.sv passes
 // it from config.vh for exactly that reason.  This module was written when the
 // count was hardcoded to 8 in three places at once; see "ONE BURST LENGTH PER
-// BUILD" in pkg/forte_link_pkg.sv for what that cost.
+// BUILD" in hdl/forte_link_pkg.sv for what that cost.
 ///////////////////////////////////////////////////////////////////////////////
 
 module forte_link_model import forte_link_pkg::*; #(
@@ -98,7 +98,7 @@ module forte_link_model import forte_link_pkg::*; #(
   logic             rd_start;             // pulse: new read transaction
 
   // ---- link state ------------------------------------------------------------
-  link_slave_st_t lst;                 // states in pkg/forte_link_pkg.sv
+  link_slave_st_t lst;                 // states in hdl/forte_link_pkg.sv
   logic [15:0] hdr_hi;
   logic [31:0] taddr;
   logic        twr;

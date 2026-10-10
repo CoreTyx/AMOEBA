@@ -1,12 +1,19 @@
 SHELL=/bin/bash -o pipefail
 .SHELLFLAGS += -e
 
-PKG_SRCS  := $(shell find $(CURDIR)/../pkg -name '*.sv')
+# forte_link_pkg.sv lives in hdl/ but is a PACKAGE, so it has to be analysed
+# before every module that imports it.  It therefore stays in PKG_SRCS (read
+# first) and is filtered OUT of the hdl glob, or it would be read twice and
+# collide with itself.  Leaving it to the glob alone is what broke lint and
+# synth: `sort` puts forte_link_pkg.sv after forte_chip, forte_link_core and
+# forte_link_phy, every one of which imports it.
+LINK_PKG  := $(CURDIR)/../hdl/forte_link_pkg.sv
+PKG_SRCS  := $(shell find $(CURDIR)/../pkg -name '*.sv') $(LINK_PKG)
 CORE_SV   := $(CURDIR)/../hdl/core/cvw.sv
 # cvw.sv listed explicitly first in VER/VCS_SRCS (package must precede modules); exclude from CORE_SRCS.
 CORE_SRCS := $(filter-out $(CORE_SV), $(shell find $(CURDIR)/../hdl/core -name '*.sv' -o -name '*.v' 2>/dev/null))
 # Exclude hdl/cvw/ and hdl/core/ from generic hdl find; CORE_SV + CORE_SRCS handle hdl/core/.
-HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/%, $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
+HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/% $(LINK_PKG), $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
 COMM_HVL  := $(shell find $(CURDIR)/../hvl/common                -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VCS_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/vcs       -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VER_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/verilator -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so' -o -name '*.cpp')

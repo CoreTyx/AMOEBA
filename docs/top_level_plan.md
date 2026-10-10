@@ -417,7 +417,7 @@ forte_top                      ASIC top, pads only. DESIGN_TOP for synth/lint.
    ├─ irq_sync                  meip/seip 2-FF
    └─ scan_mux                  test_mode: io[7:0] -> scan_in, scan_out -> io[15:8]
 
-pkg/forte_link_pkg.sv          TA, word counts, size-in-address encoding: one source of
+hdl/forte_link_pkg.sv          TA, word counts, size-in-address encoding: one source of
                                 truth for the bridge, the TB link model, and the VCU118 link_slave
 ```
 

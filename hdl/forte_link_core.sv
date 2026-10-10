@@ -57,7 +57,7 @@ module forte_link_core import forte_link_pkg::*; #(
   parameter HADDR_W = 56,
   // Beats per transaction.  Set by hdl/forte_chip.sv from the core config as
   // DCACHE_LINELENINBITS / AHBW; see "ONE BURST LENGTH PER BUILD" in
-  // pkg/forte_link_pkg.sv.  The default matches a 512-bit line and is here only
+  // hdl/forte_link_pkg.sv.  The default matches a 512-bit line and is here only
   // because SystemVerilog requires one -- forte_chip always overrides it.
   parameter BEATS   = 8
 )(
@@ -94,7 +94,7 @@ module forte_link_core import forte_link_pkg::*; #(
   logic unused_attrs;
   assign unused_attrs = ^{HSIZE, HBURST};
 
-  link_core_st_t st;                   // states in pkg/forte_link_pkg.sv
+  link_core_st_t st;                   // states in hdl/forte_link_pkg.sv
 
   // No addr_r/wr_r: the command flit is pushed in the cycle the address phase
   // is accepted, so the address never needs holding, and after that LC_WDATA vs
@@ -157,7 +157,7 @@ module forte_link_core import forte_link_pkg::*; #(
 
   // ---- AHB response ---------------------------------------------------------
   // Stalling on ~ocmd_ready in LC_IDLE cannot deadlock: the FIFO is sized to
-  // BEATS+2 (pkg/forte_link_pkg.sv fifo_depth), one transaction plus the next
+  // BEATS+2 (hdl/forte_link_pkg.sv fifo_depth), one transaction plus the next
   // command, and only one transaction is ever in flight.  It is gated anyway
   // rather than assumed -- the margin is now one slot, not seven.
   assign HREADYOUT = ((st == LC_IDLE) & ~pending & ocmd_ready)

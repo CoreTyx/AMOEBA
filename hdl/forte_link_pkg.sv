@@ -72,18 +72,18 @@
 ///////////////////////////////////////////////////////////////////////////////
 package forte_link_pkg;
 
-  localparam int LINK_W          = 16;      // io[LINK_W-1:0]
-  localparam int ADDR_WORDS      = 2;       // 32-bit address on a 16-bit bus
-  localparam int WORDS_PER_BEAT  = 64 / LINK_W;              // 4
+  localparam LINK_W          = 16;      // io[LINK_W-1:0]
+  localparam ADDR_WORDS      = 2;       // address words on the 16-wide bus
+  localparam WORDS_PER_BEAT  = 64 / LINK_W;              // 4
   // Beats per transaction is a per-build PARAMETER, not a constant -- see "ONE
   // BURST LENGTH PER BUILD" above.  MAX_BEATS only bounds the widths that have
   // to be fixed at package scope.
-  localparam int MAX_BEATS       = 16;      // INCR16, the largest AHB burst
-  localparam int TA              = 2;       // turnaround idle cycles per dir change
+  localparam MAX_BEATS       = 16;      // INCR16, the largest AHB burst
+  localparam TA              = 2;       // turnaround idle cycles per dir change
 
   // Cycles after a slave deasserts ready in which it must still accept a req:
   // the ASIC's two inbound capture registers plus the START -> HDR0 edge.
-  localparam int GUARD = 3;
+  localparam GUARD = 3;
 
   // The two FSMs' state encodings live here, not inside their modules, so the
   // testbench can NAME a state instead of numbering it.  hvl/common/
@@ -108,7 +108,7 @@ package forte_link_pkg;
   //
   // The crossing deals in transactions and beats, never in 16-bit link words:
   // serialization is a link-domain implementation detail.
-  localparam int FLIT_W   = 65;
+  localparam FLIT_W   = 65;
 
   // The outbound FIFO must hold a whole transaction -- 1 command + BEATS data
   // flits -- because the phy may not start one until all of it is buffered
@@ -117,8 +117,8 @@ package forte_link_pkg;
   // AHB side never stalls on a full FIFO.  prim_fifo_async requires a power of
   // two.  At a 128-bit line this is 4 deep, not 16: the old constant was sized
   // for 512-bit lines and was pure area at any smaller one.
-  function automatic int fifo_depth(input int beats);
-    int d;
+  function automatic integer fifo_depth(input integer beats);
+    integer d;
     d = 4;
     while (d < beats + 2) d = d * 2;
     return d;
@@ -126,14 +126,14 @@ package forte_link_pkg;
 
   // prim_fifo_async's own DepthW.  Occupancy runs 0..Depth inclusive, so this is
   // $clog2(Depth+1) and NOT $clog2(Depth).
-  function automatic int fifo_depth_w(input int depth);
+  function automatic integer fifo_depth_w(input integer depth);
     return $clog2(depth + 1);
   endfunction
 
   // Width every module uses for an occupancy it compares against BEATS+1,
   // regardless of the FIFO it came from: one width means forte_chip can pad a
   // narrow rdepth_o once instead of every consumer tracking the FIFO's size.
-  localparam int DEPTH_W = 6;      // fifo_depth_w(fifo_depth(MAX_BEATS)) = 6
+  localparam DEPTH_W = 6;      // fifo_depth_w(fifo_depth(MAX_BEATS)) = 6
 
   function automatic logic [FLIT_W-1:0] cmd_flit(input logic wr, input logic [31:0] addr);
     return {1'b1, wr, 31'b0, addr};
@@ -153,7 +153,7 @@ package forte_link_pkg;
   // through to INCR-without-end.  Kept as a function rather than a constant
   // because it is the one place the two sides' idea of burst length is compared,
   // and a constant could only ever be right for one line length.
-  function automatic logic [2:0] hburst_for(input int beats);
+  function automatic logic [2:0] hburst_for(input integer beats);
     case (beats)
       1:       return 3'b000;      // SINGLE
       4:       return 3'b011;      // INCR4

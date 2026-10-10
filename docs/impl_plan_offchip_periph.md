@@ -34,7 +34,7 @@ configs differ by one parameter, `PERIPH_ONCHIP`, so both come from one tree.
 | File | Change |
 |---|---|
 | `pkg/config_asic.vh` ◆ | Done. Open item in the header: `*_WAYSIZEINBYTES` 2048 vs 4096 (BRINGUP.md §3 and the measured 2.57× boot say 4096; area says decide after macros). |
-| `pkg/forte_link_pkg.sv` ◆ new | `LINK_W=16`, `TA=2`, `WORDS_PER_BEAT=4`, `WORDS_PER_LINE=32`, `PERIPH_ONCHIP`; `link_addr_pack(HADDR[31:0], HSIZE[1:0])` → two words, size in bits 30:29 of the high word; `link_size_to_mask(size, offset)`. One source of truth for the bridge, the TB model and the FPGA slave. |
+| `hdl/forte_link_pkg.sv` ◆ new | `LINK_W=16`, `TA=2`, `WORDS_PER_BEAT=4`, `WORDS_PER_LINE=32`, `PERIPH_ONCHIP`; `link_addr_pack(HADDR[31:0], HSIZE[1:0])` → two words, size in bits 30:29 of the high word; `link_size_to_mask(size, offset)`. One source of truth for the bridge, the TB model and the FPGA slave. |
 
 ### 1.2 SoC (new files under `hdl/`; `hdl/core/` gets only the bpred fix)
 

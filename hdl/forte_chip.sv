@@ -19,7 +19,7 @@
 //
 // Bus ownership: forte_link_phy is the only driver.  There is no training FSM
 // to arbitrate with -- the core leaves reset as soon as rst_n is released, and
-// it is the FPGA that decides when that happens (pkg/forte_link_pkg.sv).
+// it is the FPGA that decides when that happens (hdl/forte_link_pkg.sv).
 //
 // THE BURST LENGTH IS DECIDED HERE.  This is the only module that sees both the
 // core config and the link, so it is where DCACHE_LINELENINBITS / AHBW becomes
@@ -27,7 +27,7 @@
 // the bridge and to the FIFO sizing.  Nothing downstream hardcodes 8 any more:
 // the link was INCR8-only, which was correct at a 512-bit line and became
 // quietly wrong when the line shrank to 128 bits for area.  See "ONE BURST
-// LENGTH PER BUILD" in pkg/forte_link_pkg.sv.
+// LENGTH PER BUILD" in hdl/forte_link_pkg.sv.
 ///////////////////////////////////////////////////////////////////////////////
 
 `include "../pkg/config.vh"

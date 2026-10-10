@@ -6,7 +6,7 @@
 // word accounting, the dir control and the negedge inbound capture are all the
 // same logic, because none of it was ever AHB-specific.
 //
-//   LM_START     wait for ready (see "ready" in pkg/forte_link_pkg.sv: a hint
+//   LM_START     wait for ready (see "ready" in hdl/forte_link_pkg.sv: a hint
 //                with a guard band, not a handshake)
 //   LM_HDR0/1    req=1, io = A[31:16], A[15:0]
 //   LM_WDATA     WORDS words, LSW first, back to back; a new data flit is
@@ -15,7 +15,7 @@
 //   LM_RD_DATA   collect rvalid words; push a beat every fourth
 //   LM_RD_TA2    TA idle cycles after the last word, then dir=1
 //
-// THE BUFFERING INVARIANT.  pkg/forte_link_pkg.sv and top_level_plan.md s4:
+// THE BUFFERING INVARIANT.  hdl/forte_link_pkg.sv and top_level_plan.md s4:
 // "there is no mid-transaction handshake in either direction, so the ASIC never
 // stalls once started".  The FPGA cannot absorb an underrun -- there is no pin
 // for it.  So this module must not begin a transaction until the WHOLE thing is
@@ -24,7 +24,7 @@
 // load-bearing rather than decorative.
 //
 // BEATS is a per-build parameter, not 8 -- see "ONE BURST LENGTH PER BUILD" in
-// pkg/forte_link_pkg.sv.  Nothing in this module needs to know WHY the count is
+// hdl/forte_link_pkg.sv.  Nothing in this module needs to know WHY the count is
 // what it is; it only has to agree with forte_link_core and the slave, and
 // forte_chip drives all three from one expression.
 //
@@ -92,7 +92,7 @@ module forte_link_phy import forte_link_pkg::*; #(
   always_ff @(posedge link_clk) {io_s, ready_s, rvalid_s} <= {io_n, ready_n, rvalid_n};
 
   // ---- state ----------------------------------------------------------------
-  link_st_t st;                        // states in pkg/forte_link_pkg.sv
+  link_st_t st;                        // states in hdl/forte_link_pkg.sv
 
   logic [31:0]     addr_r;
   logic            wr_r;

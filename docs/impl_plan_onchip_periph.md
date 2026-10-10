@@ -15,7 +15,7 @@ that plan (merge, config, `CONFIG=asic`, bpred fix) applies here unchanged.
 
 | Item | State |
 |---|---|
-| `pkg/forte_link_pkg.sv`, `hdl/amoeba_{uncore,soc,link_master,link_train,rst_sync,chip,top}.sv` | Written. `PERIPH_ONCHIP` knob in RTL; TB exercises `=1` only. |
+| `hdl/forte_link_pkg.sv`, `hdl/amoeba_{uncore,soc,link_master,link_train,rst_sync,chip,top}.sv` | Written. `PERIPH_ONCHIP` knob in RTL; TB exercises `=1` only. |
 | `hdl/rvfi_tap.sv` + `rv64_core_wrapper.sv` refactor (Phase 0) | Done; wrapper instantiates the tap. |
 | `hvl/common/forte_dut_wrap.sv`, `forte_link_model.sv` | Written. Wrapper is port-compatible with `rv64_core_wrapper`, so `top_tb.svh` swaps one module name; `rvfi_reference.svh` untouched. Model drives `mem_itf` directly (decision: sim speed over FPGA parity). No `amoeba_ext_bus` needed for this config. `+LINK_TRACE` prints transactions; `+LINK_GAPS`/`+LINK_SEED` randomise `ready`/`rvalid`. |
 | `sim/Makefile` | `DUT=legacy\|amoeba`, `LINK_ARGS`; build dirs keyed on DUT. Pruned configs skip `tc_branch_prediction` (`rdcycle`, no ZICNTR) and `tc_zbkb_and_smc` (no B/K) — both hang on the legacy DUT too. |
@@ -35,7 +35,7 @@ that plan (merge, config, `CONFIG=asic`, bpred fix) applies here unchanged.
 | File | Change |
 |---|---|
 | `pkg/config_asic.vh` ◆ | Done, same file. Under `PERIPH_ONCHIP=1` the PLIC/UART decodes feed on-die instances. `PLIC_GPIO_ID=3`, `PLIC_SPI_ID=6` become the two external IRQ IDs. |
-| `pkg/forte_link_pkg.sv` ◆ | Same; `PERIPH_ONCHIP=1`. |
+| `hdl/forte_link_pkg.sv` ◆ | Same; `PERIPH_ONCHIP=1`. |
 | `testcode/linux/dts/amoeba_baremetal_linux.dts` | **Changes** under this config if interrupt-driven UART is wanted: restore the plic node and the UART `interrupts` property (both were removed for `PLIC_SUPPORTED=0`). Polled UART with no DTS change also works. |
 
 ### 1.2 SoC
