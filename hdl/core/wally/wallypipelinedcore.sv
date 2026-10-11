@@ -103,7 +103,12 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [5:0]                    FaultInjectUnits;
   // Software can select units without changing the pin. Protection stays active
   // when injection is disabled; only artificial corruption is gated here.
-  assign FaultInjectUnits = {6{fault_inject}} & FaultInjectMask;
+  // Registered: the enables fan out to an injector on every protected datapath,
+  // so they must leave a flop rather than arrive with the pin's (or the APB
+  // register's) delay. A change on the pin or the mask takes effect one cycle
+  // later. No reset: the injectors gate themselves off during reset, and the
+  // value is resampled every cycle.
+  flop #(6) faultinjectreg(clk, {6{fault_inject}} & FaultInjectMask, FaultInjectUnits);
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 

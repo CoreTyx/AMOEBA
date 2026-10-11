@@ -21,7 +21,8 @@ create_generated_clock -name link_fwd -source [get_ports core_clk] -divide_by 1 
 set_false_path -from [get_ports rst_n]
 set_false_path -from [get_ports {irq[*] uart_rx test_mode scan_en}]
 
-# fault_inject: a synchronous input from the board until it gets a synchroniser.
+# fault_inject: synchronised on the die like irq and uart_rx.  The else branch
+# times it as a synchronous input, which is what it was before the synchroniser.
 if {$TECH(FI_SYNCHRONISED)} {
    set_false_path -from [get_ports fault_inject]
 } else {

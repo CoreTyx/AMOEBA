@@ -21,6 +21,7 @@ module ft_core_fault_tb;
   logic [1:0] div_fi_target = 1, div_fi_kind = 0;
   logic [5:0] div_fi_bit = 0;
   logic fault_inject = 0, directed = 1;
+  logic [5:0] fi_units_expected = 0;  // mask & pin as the core's enable register will have sampled them
   logic fi_enable = 0;
   logic [1:0] fi_target = 1, fi_kind = 0, fi_channel = 0;
   logic [6:0] fi_bit = 0;
@@ -337,6 +338,7 @@ module ft_core_fault_tb;
       rst = 1;
       directed = (scenario != SC_SHARED_INJECTION && scenario != SC_FAULT_CONTROL);
       fault_inject = (scenario == SC_SHARED_INJECTION);
+      fi_units_expected = 0;
       fi_enable = 0;
       mul_fi_enable = 0;
       div_fi_enable = 0;
@@ -458,9 +460,13 @@ module ft_core_fault_tb;
           if (backpressure_cycles == 0) force dut.soc.core.ExternalStall = 1'b0;
         end
         if (scenario == SC_FAULT_CONTROL) begin
+          // The core registers the unit enables, so what the injectors see now is
+          // the mask and pin as they stood at the last rising edge -- the values
+          // this loop left in place half a cycle before it.
+          check_unit_enables(fi_units_expected);
           fault_inject = cycle[0]; // verify the pin gates every programmed mask
           #1;
-          check_unit_enables(dut.soc.FaultInjectMask & {6{fault_inject}});
+          fi_units_expected = dut.soc.FaultInjectMask & {6{fault_inject}};
         end
         #1;
         if (held_last) check(dut.soc.core.PCE == held_pc, "execute PC holds across FT stall edge");

@@ -35,8 +35,10 @@ Wider accesses and neighboring addresses are rejected; neighboring bytes are not
 | 5 | Pipeline ECC: `RD1EReg`, `RD2EReg`, `ImmExtEReg`, `SrcAMReg`, `IEUResultMReg`, `WriteDataMReg`, `IFResultWReg` |
 | 7:6 | Reserved: read zero, writes ignored |
 
-Each injector enable is `fault_inject & FI_CONTROL[bit]`. Readback returns the
-stored mask regardless of the master pin. Writing `0x04` selects MUL only;
+Each injector enable is `fault_inject & FI_CONTROL[bit]`, registered in the core:
+a change to the mask or the pin reaches the injectors one cycle later (the pin
+additionally passes a two-flop synchroniser in `forte_chip`). Readback returns
+the stored mask regardless of the master pin. Writing `0x04` selects MUL only;
 writing zero disables all injection. The DFT lock does not gate injection.
 
 The mask controls artificial corruption only. Detection, recovery, trapping,
@@ -47,7 +49,7 @@ replica, fault bit, or fault kind.
 
 ```text
 AHB decode -> APB bridge -> fault_inject_apb.FaultInjectMask
-  -> wallypipelinedsoc / forte_soc -> wallypipelinedcore: AND with fault_inject
+  -> wallypipelinedsoc / forte_soc -> wallypipelinedcore: AND with fault_inject, then a flop
        bits 0,1,4,5 -> IEU -> datapath -> ALU, CMP, register-file ECC, pipeline ECC
        bits 2,3     -> MDU -> MUL, DIV
 ```

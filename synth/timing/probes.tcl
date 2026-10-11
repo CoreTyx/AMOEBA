@@ -56,6 +56,7 @@ set TIMING_PROBES [subst -nocommands {
    priv_internal       {probe_ck $core/priv.priv/*}           {}                                   {probe_d $core/priv.priv/*}
    "Pads"
    fault_inject        {get_ports fault_inject}               {}                                   {}
+   fault_inject_units  {probe_ck $core/faultinjectreg/*}      {}                                   {}
    link_in             {get_ports {io[*] ready rvalid}}       {}                                   {}
    link_out            {}                                     {}                                   {get_ports {io[*] dir req wr}}
 }]
