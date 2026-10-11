@@ -2,8 +2,8 @@
 # hvl/pin/images.sh -- build every program the pin bench runs into
 # sim/pin/images/, so a machine without a RISC-V toolchain (the VCS VMs) can
 # run them.  Each image is <name>.lst plus an optional <name>.cmd (a script,
-# with $MEM expanding to the image).  MANIFEST lists one name per line in run
-# order; vm_run.sh runs exactly what MANIFEST names.
+# with $MEM expanding to the image).  MANIFEST lists "<name> <duts...>" per
+# line in run order; vm_run.sh runs exactly what MANIFEST names, on those DUTs.
 #
 #   hvl/pin/images.sh            build all tiers
 #   hvl/pin/images.sh pack       ... and tar them to sim/pin/images.tgz for the VM
@@ -16,11 +16,11 @@ OUT="$R/sim/pin/images"
 rm -rf "$OUT"; mkdir -p "$OUT"
 : > "$OUT/MANIFEST"
 
-add() {  # $1 = name, $2 = .lst, [$3 = .cmd]
+add() {  # $1 = name, $2 = .lst, [$3 = .cmd], [$4 = DUTs, default "rtl gate"]
   cp "$2" "$OUT/$1.lst"
   [ -z "${3:-}" ] || cp "$3" "$OUT/$1.cmd"
-  echo "$1" >> "$OUT/MANIFEST"
-  echo "  $1"
+  echo "$1 ${4:-rtl gate}" >> "$OUT/MANIFEST"
+  echo "  $1 (${4:-rtl gate})"
 }
 
 gen() {  # $1 = source; prints the .lst path
@@ -51,9 +51,12 @@ for f in "$R"/testcode/freertos/tc_*.c; do
   add "rtos_$n" "$(gen "$R/testcode/freertos/freertos_wally.elf")"
 done
 
-if [ -f "$R/testcode/linux/build/boot.lst" ] && [ -f "$R/hvl/pin/tests/linux.cmd" ]; then
+if [ -f "$R/testcode/linux/build/boot.lst" ]; then
+  # The full boot (linux.cmd, 416M cycles) is a local Verilator run; the VM
+  # gets the two prefixes that fit its time budget.  One image, two scripts.
   echo "== linux"
-  add linux "$R/testcode/linux/build/boot.lst" "$R/hvl/pin/tests/linux.cmd"
+  add linux_m0 "$R/testcode/linux/build/boot.lst" "$R/hvl/pin/tests/linux_m0.cmd" "rtl gate"
+  add linux_m3 "$R/testcode/linux/build/boot.lst" "$R/hvl/pin/tests/linux_m3.cmd" "rtl"
 fi
 
 echo "$(wc -l < "$OUT/MANIFEST") images in $OUT"

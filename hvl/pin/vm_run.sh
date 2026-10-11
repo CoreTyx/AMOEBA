@@ -65,18 +65,20 @@ for st in "${STAGES[@]}"; do
     done;;
   regress)
     pass=0; fail=0
-    while read -r name; do
+    while read -r name duts; do
       [ -n "$name" ] || continue
       [[ -z "${ONLY:-}" || "$name" =~ ${ONLY} ]] || continue
       args=("$IMG/$name.lst"); [ -f "$IMG/$name.cmd" ] && args+=("$IMG/$name.cmd")
       t0=$(date +%s)
-      r_rtl="skip"; r_gate="FAIL"; r_cmp="-"
-      if [ -z "${SKIP_RTL:-}" ]; then
+      r_rtl="skip"; r_gate="skip"; r_cmp="-"
+      if [ -z "${SKIP_RTL:-}" ] && [[ " $duts " == *" rtl "* ]]; then
         SIM=vcs DUT=rtl "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && r_rtl=PASS || r_rtl=FAIL
       fi
-      SIM=vcs DUT=gate "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && r_gate=PASS
-      if python3 "$R/bin/pin_trace_cmp.py" "$R/sim/pin/runs/vcs_rtl/$name" "$R/sim/pin/runs/vcs_gate/$name" >"$OUT/cmp_$name.log" 2>&1
-      then r_cmp=MATCH; else r_cmp=DIFF; fi
+      if [[ " $duts " == *" gate "* ]]; then
+        SIM=vcs DUT=gate "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && r_gate=PASS || r_gate=FAIL
+        if python3 "$R/bin/pin_trace_cmp.py" "$R/sim/pin/runs/vcs_rtl/$name" "$R/sim/pin/runs/vcs_gate/$name" >"$OUT/cmp_$name.log" 2>&1
+        then r_cmp=MATCH; else r_cmp=DIFF; fi
+      fi
       verdict=PASS; [[ "$r_rtl" == FAIL || "$r_gate" == FAIL || "$r_cmp" == DIFF ]] && verdict=FAIL
       [ $verdict = PASS ] && pass=$((pass+1)) || fail=$((fail+1))
       line="$(printf '%-4s %-36s rtl=%-4s gate=%-4s trace=%-5s %5ss' $verdict "$name" $r_rtl $r_gate $r_cmp $(( $(date +%s) - t0 )))"
@@ -93,7 +95,7 @@ for st in "${STAGES[@]}"; do
   xstress|xmem)
     pass=0; fail=0
     xa=("${XARGS[@]}"); [ "$st" = xmem ] && xa+=(+FPGA_MEM=x)
-    while read -r name; do
+    while read -r name _; do
       [[ -n "$name" && "$name" =~ $XLIST ]] || continue
       args=("$IMG/$name.lst"); [ -f "$IMG/$name.cmd" ] && args+=("$IMG/$name.cmd")
       for d in rtl gate; do
