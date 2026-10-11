@@ -23,7 +23,7 @@ CC      := $(firstword $(foreach t,riscv64-unknown-elf-gcc riscv64-elf-gcc,$(if 
 OBJDUMP := $(firstword $(foreach t,riscv64-unknown-elf-objdump riscv64-elf-objdump,$(if $(shell which $(t) 2>/dev/null),$(t))))
 
 # ---- ISA: rv64imac (no FPU, matches AMOEBA amoeba config) ----
-MARCH := rv64imac_zicsr
+MARCH := rv64imac_zicsr_zifencei
 MABI  := lp64
 
 CFLAGS := -march=$(MARCH) -mabi=$(MABI) -mcmodel=medany \
