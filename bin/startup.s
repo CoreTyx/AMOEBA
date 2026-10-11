@@ -55,18 +55,30 @@ _setup:
     la sp, _stack_top
     add s0, sp, zero
     call main
-    # Signal exit via HTif tohost protocol: write 1 (exit(0)) to tohost
-    li t0, 1
+    # Exit via HTIF tohost: (main's return value << 1) | 1, so return 0 -> 1.
+    slli t0, a0, 1
+    ori  t0, t0, 1
+_exit:
     la t1, tohost
     sd t0, 0(t1)
+    # fence.i writes the whole D$ back to memory (Wally: FenceI -> FlushDCache),
+    # so the tohost store reaches the pins.  Without it the store sits in the
+    # cache and a pin-level testbench never sees the program finish.
+    fence.i
     # Fallback halt for monitor
     slti x0, x0, -256
 _fini:
     beq zero, zero, _fini
 .align 2
 _trap_halt:
-    slti x0, x0, -256
-    beq zero, zero, _trap_halt
+    # Unexpected trap: exit code 0x400 | mcause[9:0], so a trap is a FAIL at
+    # the pins instead of a silent spin that only a timeout would catch.
+    csrr t0, mcause
+    andi t0, t0, 0x3ff
+    ori  t0, t0, 0x400
+    slli t0, t0, 1
+    ori  t0, t0, 1
+    j _exit
     .cfi_endproc
 
 .globl _sbrk
