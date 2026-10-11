@@ -304,11 +304,16 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic ValidRaw, ValidRedundantRaw;
 
   always_ff @(posedge clk) begin // Valid bit array,
+    // The read registers are cleared with the arrays, and nothing below runs during reset.
+    // Otherwise their power-up value makes ValidMismatch fire in reset, and the resync write
+    // below lands after the clear in the same cycle and overrides it for one entry. In 4-state
+    // simulation that entry then holds X forever (X ^ X = X keeps the mismatch alive).
     if (reset) begin
       ValidBits <= '0;
       ValidBitsRedundant <= '0;
-    end
-    if (CacheEn) begin
+      ValidRaw <= 1'b0;
+      ValidRedundantRaw <= 1'b0;
+    end else if (CacheEn) begin
       ValidRaw          <= ValidBits[CacheSetTag];
       ValidRedundantRaw <= ValidBitsRedundant[CacheSetTag];
       if(InvalidateCache & ~InvalidateFlushStage) begin
@@ -344,6 +349,10 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       if (reset) begin
         DirtyBits <= '0;
         DirtyBitsRedundant <= '0;
+        // Cleared for the same reason as ValidRaw above: an unreset read register makes
+        // DirtyMismatch fire on the first cycle after reset and resync-write the array.
+        Dirty <= 1'b0;
+        DirtyRedundant <= 1'b0;
       end else if (CacheEn) begin
         Dirty          <= DirtyBits[CacheSetTag];
         DirtyRedundant <= DirtyBitsRedundant[CacheSetTag];

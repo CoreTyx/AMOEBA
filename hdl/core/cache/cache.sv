@@ -178,6 +178,11 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign ScrubGrant = SCRUBBER_ENABLED & ScrubReq & ~(|CacheRW) & ~FlushCache & ~InvalidateCache & ~(|CMOpM) & ~SelHPTW & ~CacheStall;
   assign ScrubOwnsWaySelect = ScrubGrant | ScrubBusy;
 
+  // The scrubber needs the array enabled throughout its operation, including cycles when cachefsm's
+  // own CacheEn would be deasserted. LRU state, though, should only ever move for demand evictions.
+  logic CacheEnArray;
+  assign CacheEnArray = CacheEn | ScrubOwnsWaySelect;
+
   // Array of cache ways, along with victim, hit, dirty, and read merging logic
   cacheway #(.P(P), .PA_BITS(PA_BITS), .NUMSETS(NUMSETS), .LINELEN(LINELEN),
              .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
@@ -194,11 +199,6 @@ module cache import cvw::*; #(parameter cvw_t P,
     .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
     .TagDedDirtyWay, .DropTagDedDirty,
     .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
-
-  // The scrubber needs the array enabled throughout its operation, including cycles when cachefsm's
-  // own CacheEn would be deasserted. LRU state, though, should only ever move for demand evictions.
-  logic CacheEnArray;
-  assign CacheEnArray = CacheEn | ScrubOwnsWaySelect;
 
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict

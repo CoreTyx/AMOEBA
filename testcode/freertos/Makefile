@@ -2,7 +2,7 @@ SHELL=/bin/bash -o pipefail
 .SHELLFLAGS += -e
 
 # ---- Repo layout ----
-REPO_ROOT := $(abspath ../..)
+REPO_ROOT := $(CURDIR)/../..
 BIN_DIR   := $(REPO_ROOT)/bin
 HVL_DIR   := $(REPO_ROOT)/hvl
 HDL_DIR   := $(REPO_ROOT)/hdl
@@ -16,7 +16,7 @@ FREERTOS_PORT       := $(FREERTOS_KERNEL_DIR)/portable/GCC/RISC-V
 FREERTOS_PORT_CHIP  := $(FREERTOS_PORT)/chip_specific_extensions/RISCV_MTIME_CLINT_no_extensions
 
 # ---- Userland workload (must define int app_main(void)) ----
-PROG ?= $(abspath sorting_algo_app.c)
+PROG ?= $(CURDIR)/sorting_algo_app.c
 
 # ---- Toolchain ----
 CC      := $(firstword $(foreach t,riscv64-unknown-elf-gcc riscv64-elf-gcc,$(if $(shell which $(t) 2>/dev/null),$(t))))
@@ -36,10 +36,10 @@ CFLAGS := -march=$(MARCH) -mabi=$(MABI) -mcmodel=medany \
 # Add stub headers when the cross-sysroot lacks newlib (e.g. Ubuntu gcc-riscv64-unknown-elf)
 _SYSROOT := $(shell $(CC) -print-sysroot 2>/dev/null)
 ifeq ($(wildcard $(_SYSROOT)/include/stdlib.h),)
-_STUB_INC := -isystem $(abspath stub_include)
+_STUB_INC := -isystem $(CURDIR)/stub_include
 endif
 
-INC := -I$(abspath .) \
+INC := -I$(CURDIR) \
        -I$(FREERTOS_KERNEL_DIR)/include \
        -I$(FREERTOS_PORT) \
        -I$(FREERTOS_PORT_CHIP) \

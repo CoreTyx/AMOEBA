@@ -482,7 +482,7 @@ RVFIMON_ISA          ?= rv64imafdc_zb
 # Local fixes on top of the generated monitor, applied in order.  Applied by
 # generated-files and re-applied by check-generated, so regenerating cannot
 # silently drop them.
-RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch
 
 .PHONY: generate-rtl
 generate-rtl:
@@ -625,10 +625,140 @@ vcs_isa_regression: $(VCS_NO_SPIKE_DIR)/top_tb
 	echo "=== VCS ISA Regression Summary: $$pass/$$total tests passed ==="; \
 	[ $$fail -eq 0 ] || exit 1
 
+# FreeRTOS tier on VCS: same per-test ELF rebuild as freertos_regression, run on
+# the no-Spike VCS build (the apps touch MMIO).  The ELF build and the simulation
+# each log to $(VCS_NO_SPIKE_DIR)/<test>.{build,sim}.log so a failure says which step broke.
+.PHONY: vcs_freertos_regression
+vcs_freertos_regression: $(VCS_NO_SPIKE_DIR)/top_tb
+	@pass=0; fail=0; total=0; \
+	root=$$(cd $(CURDIR)/.. && pwd); \
+	elf=$$root/testcode/freertos/freertos_wally.elf; \
+	for test in $(FREERTOS_TESTS); do \
+		total=$$((total+1)); \
+		name=$$(basename $$test .c); \
+		blog=$(VCS_NO_SPIKE_DIR)/$$name.build.log; \
+		echo "=== [$$total] VCS: $$name ==="; \
+		rm -f $$elf; \
+		if ! $(MAKE) -s -C $$root/testcode/freertos build REPO_ROOT=$$root PROG=$$test > $$blog 2>&1 || [ ! -f $$elf ]; then \
+			echo "  FAIL: $$name -- ELF build failed (see sim/$$blog)"; tail -15 $$blog; fail=$$((fail+1)); continue; \
+		fi; \
+		if $(MAKE) -s run_vcs_top_tb_no_spike PROG=$$elf > $(VCS_NO_SPIKE_DIR)/$$name.sim.log 2>&1 && grep -q "test PASSED" $(VCS_NO_SPIKE_DIR)/simulation.log; then \
+			echo "  PASS: $$name"; pass=$$((pass+1)); \
+		else \
+			echo "  FAIL: $$name -- simulation (see sim/$(VCS_NO_SPIKE_DIR)/$$name.sim.log)"; fail=$$((fail+1)); \
+			cp $(VCS_NO_SPIKE_DIR)/simulation.log $(VCS_NO_SPIKE_DIR)/$$name.fail.log 2>/dev/null || true; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== VCS FreeRTOS Regression Summary: $$pass/$$total tests passed ==="; \
+	[ $$fail -eq 0 ] || exit 1
+
+# ECC-inject tier on VCS: ECE411_SIM_INJECT ties inject_en high in the testbench.
+VCS_ECC_INJECT_DIR := vcs_ecc_inject
+$(VCS_ECC_INJECT_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
+	mkdir -p $(VCS_ECC_INJECT_DIR)
+	$(call vcs_msg_config,$(VCS_ECC_INJECT_DIR))
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
+	cd $(VCS_ECC_INJECT_DIR) && vcs $(VCS_SRCS) $(VCS_FLAGS) +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_SIM_INJECT -l compile.log -top top_tb -o top_tb
+	bash check_compile_error.sh $(VCS_ECC_INJECT_DIR)
+
+.PHONY: run_vcs_ecc_inject
+run_vcs_ecc_inject: $(VCS_ECC_INJECT_DIR)/top_tb $(PROG)
+	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	rm -f $(VCS_ECC_INJECT_DIR)/dump.fsdb
+	python3 $(CURDIR)/../bin/get_options.py clock
+	python3 $(CURDIR)/../bin/get_options.py bmem_x
+	cd $(VCS_ECC_INJECT_DIR) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
+		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
+		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst"
+
+.PHONY: vcs_ecc_baremetal_regression
+vcs_ecc_baremetal_regression: $(VCS_ECC_INJECT_DIR)/top_tb
+	@pass=0; fail=0; total=0; \
+	for src in $(CURDIR)/../testcode/baremetal_ecc/*.c; do \
+		total=$$((total+1)); \
+		name=$$(basename $$src .c); \
+		echo "=== [$$total] VCS ECC inject: $$name ==="; \
+		if $(MAKE) -s run_vcs_ecc_inject PROG=$$src > /dev/null 2>&1 && grep -q "test PASSED" $(VCS_ECC_INJECT_DIR)/simulation.log; then \
+			echo "  PASS: $$name"; pass=$$((pass+1)); \
+		else \
+			echo "  FAIL: $$name (see sim/$(VCS_ECC_INJECT_DIR)/simulation.log)"; fail=$$((fail+1)); \
+			cp $(VCS_ECC_INJECT_DIR)/simulation.log $(VCS_ECC_INJECT_DIR)/$$name.fail.log 2>/dev/null || true; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== VCS ECC Baremetal Regression: $$pass/$$total tests passed ==="; \
+	[ $$fail -eq 0 ] || exit 1
+
+# Linux tier on VCS (plain boot and boot under ECC injection).  Same defines as the
+# Verilator Linux builds.  Waveforms are switched off at run time (+NO_DUMP_ALL_ECE411).
+# A 4-state, debug-enabled VCS run is far slower than Verilator, so a boot can take
+# many hours; vcs_regression includes these unless VCS_LINUX=0.
+VCS_LINUX_DIR            := vcs_linux
+VCS_LINUX_ECC_INJECT_DIR := vcs_linux_ecc_inject
+VCS_LINUX_DEFS           := +define+ECE411_NO_SPIKE_DPI +define+ECE411_NO_SPIKE_PRINTER +define+ECE411_LINUX +define+ECE411_NO_RVFI
+
+$(VCS_LINUX_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
+	mkdir -p $(VCS_LINUX_DIR)
+	$(call vcs_msg_config,$(VCS_LINUX_DIR))
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
+	cd $(VCS_LINUX_DIR) && vcs $(VCS_SRCS) $(VCS_FLAGS) $(VCS_LINUX_DEFS) -l compile.log -top top_tb -o top_tb
+	bash check_compile_error.sh $(VCS_LINUX_DIR)
+
+$(VCS_LINUX_ECC_INJECT_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefile
+	mkdir -p $(VCS_LINUX_ECC_INJECT_DIR)
+	$(call vcs_msg_config,$(VCS_LINUX_ECC_INJECT_DIR))
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
+	cd $(VCS_LINUX_ECC_INJECT_DIR) && vcs $(VCS_SRCS) $(VCS_FLAGS) $(VCS_LINUX_DEFS) +define+ECE411_SIM_INJECT -l compile.log -top top_tb -o top_tb
+	bash check_compile_error.sh $(VCS_LINUX_ECC_INJECT_DIR)
+
+define vcs_linux_run
+	cd $(1) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO +NO_DUMP_ALL_ECE411 \
+		+TIMEOUT_ECE411=$(LINUX_TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+MEMLST_ECE411="$(LINUX_MEMLST)" \
+		+UART_PASS_ECE411="$(LINUX_PASS)" \
+		+UART_FAIL_ECE411="$(LINUX_FAIL)" \
+		+UARTLOG_ECE411="$(CURDIR)/$(1)/boot_uart.log"
+	grep -q "test PASSED" $(1)/simulation.log
+endef
+
+.PHONY: vcs_linux_boot vcs_linux_boot_ecc_inject
+vcs_linux_boot: $(VCS_LINUX_DIR)/top_tb $(LINUX_MEMLST)
+	$(call vcs_linux_run,$(VCS_LINUX_DIR))
+
+vcs_linux_boot_ecc_inject: $(VCS_LINUX_ECC_INJECT_DIR)/top_tb $(LINUX_MEMLST)
+	$(call vcs_linux_run,$(VCS_LINUX_ECC_INJECT_DIR))
+
+# Standalone RTL unit testbenches (Verilator --binary; no VCS variant exists).
+.PHONY: vcs_unit_tests
+vcs_unit_tests: ft_shadow_test ecc_secded_dected_test csr_harden_test
+
+# Everything, on VCS.  Every tier runs even if an earlier one fails, so one broken
+# test does not hide the rest; the target fails at the end if any tier failed.
+# Skip the (very slow) Linux boots with:  make vcs_regression VCS_LINUX=0
+VCS_LINUX ?= 1
+VCS_REGRESSION_TIERS := vcs_baremetal_regression vcs_isa_regression vcs_freertos_regression \
+                        vcs_ecc_baremetal_regression vcs_unit_tests
+ifeq ($(VCS_LINUX),1)
+  VCS_REGRESSION_TIERS += vcs_linux_boot vcs_linux_boot_ecc_inject
+endif
+
 .PHONY: vcs_regression
 vcs_regression:
-	$(MAKE) vcs_baremetal_regression
-	$(MAKE) vcs_isa_regression
+	@failed=""; \
+	for tier in $(VCS_REGRESSION_TIERS); do \
+		echo "######## $$tier ########"; \
+		$(MAKE) $$tier || failed="$$failed $$tier"; \
+	done; \
+	echo ""; \
+	if [ -n "$$failed" ]; then echo "=== VCS Regression FAILED tiers:$$failed ==="; exit 1; fi; \
+	echo "=== VCS Regression: all tiers passed ==="
 
 # ── Standalone RTL unit tests ─────────────────────────────────────────────────
 # Self-checking testbenches live in hvl/; their build/run entry points live here

@@ -742,12 +742,12 @@ module ft_recompute_fault_tb #(
       #1;
       check(result == shift_ref(a, amount, mode, w64, 0), "shift architectural reference");
       // The healthy diagnostic relation must hold at each legal amount.
-      check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0), "wide normal slice reference");
+      check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0, w64), "wide normal slice reference");
       force dut.alu_recompute = 1;
       #1;
       // Selecting diagnostic arithmetic alone does not enter controller recovery.
       // Output masking is checked separately by the injected-fault cases.
-      check(dut.shift_result(dut.shift_raw[0], 1) == shift_ref(a, amount, mode, w64, 0),
+      check(dut.shift_result(dut.shift_raw[0], 1, w64) == shift_ref(a, amount, mode, w64, 0),
             "wide shifted diagnostic relation");
       release dut.alu_recompute;
     end
