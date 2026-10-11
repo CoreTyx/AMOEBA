@@ -4,3 +4,4 @@ formal/freertos/dump.fst
 *.elf
 hvl/ft_shadow/build/
 hdl/cvw/addins/
+sim/pin/
