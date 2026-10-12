@@ -170,6 +170,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic                  LSULoadPageFaultQ, LSUStoreAmoPageFaultQ;
   logic                  OwnLoadAccessFaultM, OwnStoreAmoAccessFaultM; // ... presented to the trap unit once checked
   logic                  OwnLoadPageFaultM, OwnStoreAmoPageFaultM;
+  logic                  OwnFaultM;                              // any of the four
   logic                  DTLBMissOrUpdateDAM;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -289,8 +290,15 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // this instruction is only meaningful once the walk has filled the TLB.
   //
   // Nothing irreversible happens in the check cycle: the bus request waits for it (BusRW below),
-  // and the cache only reads until a store hit writes two states later -- a fault flushes it
-  // first.  Faults found by the page walker are not affected; it presents them from its own
+  // and the cache only reads until a store hit writes two states later.  From the second cycle
+  // on a registered fault itself holds the cache, the bus and the reservation off (OwnFaultM
+  // in LSUFlushW).  The trap's flush alone does not do that: the trap unit takes an exception
+  // only when the fetch side has no access under way (CommittedF).  A fault known in an
+  // instruction's first cycle in Memory always finds it so, because the fetch of the next
+  // instruction starts in that same cycle; one that shows a cycle later finds the instruction
+  // cache in the middle of that fetch, and in the two cycles the trap then waits a store hit
+  // reaches its write and an uncached store the bus.
+  // Faults found by the page walker are not affected; it presents them from its own
   // registers (hptw.sv).
   /////////////////////////////////////////////////////////////////////////////////////////////
   //
@@ -305,6 +313,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   assign OwnStoreAmoAccessFaultM = LSUStoreAmoAccessFaultQ & MemCheckedQ;
   assign OwnLoadPageFaultM       = LSULoadPageFaultQ       & MemCheckedQ;
   assign OwnStoreAmoPageFaultM   = LSUStoreAmoPageFaultQ   & MemCheckedQ;
+  assign OwnFaultM = OwnLoadAccessFaultM | OwnStoreAmoAccessFaultM | OwnLoadPageFaultM | OwnStoreAmoPageFaultM;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // MMU and misalignment fault logic required if privileged unit exists
@@ -357,7 +366,9 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
 
   // Pause IEU memory request if TLB miss.  After TLB fill, replay request.
   // Discard memory request on pipeline flush
-  assign LSUFlushW = HPTWFlushW | FlushW;
+  // ... and for as long as the instruction waits in Memory with a fault of its own (the page
+  // walker's accesses are not the instruction's, and are left alone).
+  assign LSUFlushW = HPTWFlushW | FlushW | (OwnFaultM & ~SelHPTW);
 
   if (P.DTIM_SUPPORTED) begin : dtim
     logic [P.PA_BITS-1:0] DTIMAdr;
