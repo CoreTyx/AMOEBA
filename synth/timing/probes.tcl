@@ -26,13 +26,13 @@ set mul  $core/mdu.mdu/ftmul
 set TIMING_PROBES [subst -nocommands {
    "Register file"
    regfile_read        {probe_ck $dp/regf/rf_reg*}            {probe_pin $dp/regf/rd1*}            {probe_d $dp/RD1EReg/cw_stored*}
-   regfile_write       {probe_ck $dp/IFResultWReg/cw_stored*} {probe_pin $dp/regf/wd3*}            {probe_d $dp/regf/rf_reg*}
-   regfile_bypass      {probe_ck $dp/IFResultWReg/cw_stored*} {probe_pin $dp/regf/rd1*}            {probe_d $dp/RD1EReg/cw_stored*}
+   regfile_write       {probe_ck $dp/IFResultWReg/*cw_stored*} {probe_pin $dp/regf/wd3*}            {probe_d $dp/regf/rf_reg*}
+   regfile_bypass      {probe_ck $dp/IFResultWReg/*cw_stored*} {probe_pin $dp/regf/rd1*}            {probe_d $dp/RD1EReg/cw_stored*}
    instr_to_operand    {probe_ck $core/ifu/AlignedInstrRawDFlop/*} {probe_pin $dp/regf/rd1*}       {probe_d $dp/RD1EReg/cw_stored*}
    "Execute"
-   alu_result          {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $dp/ftalu/ALUResult*}     {probe_d $dp/IEUResultMReg/cw_stored*}
-   alu_result_fwd_M    {probe_ck $dp/IEUResultMReg/cw_stored*} {probe_pin $dp/ftalu/ALUResult*}    {probe_d $dp/IEUResultMReg/cw_stored*}
-   alu_result_fwd_W    {probe_ck $dp/IFResultWReg/cw_stored*} {probe_pin $dp/ftalu/ALUResult*}     {probe_d $dp/IEUResultMReg/cw_stored*}
+   alu_result          {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $dp/ftalu/ALUResult*}     {probe_d $dp/IEUResultMReg/*cw_stored*}
+   alu_result_fwd_M    {probe_ck $dp/IEUResultMReg/*cw_stored*} {probe_pin $dp/ftalu/ALUResult*}    {probe_d $dp/IEUResultMReg/*cw_stored*}
+   alu_result_fwd_W    {probe_ck $dp/IFResultWReg/*cw_stored*} {probe_pin $dp/ftalu/ALUResult*}     {probe_d $dp/IEUResultMReg/*cw_stored*}
    alu_to_ft_stall     {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $dp/ftalu/stall_req}      {}
    alu_to_dcache_addr  {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $core/lsu/IEUAdrE*}       {probe_pin $dc/*/sramIP/A*}
    branch_to_pc        {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $core/ifu/PCSrcE}         {probe_d $core/ifu/pcreg/*}

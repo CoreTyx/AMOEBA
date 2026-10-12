@@ -42,7 +42,6 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
   input  logic [4:0]        Rs1D, Rs2D, Rs2E,             // Source registers
   input  logic              InjectD,                 // AMOEBA: decode stage holds an injected dummy instruction
-  input  logic              InstrValidD,             // valid Decode-stage instruction
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -99,8 +98,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   // Fetch stage signals
   // Decode stage signals
-  logic [P.XLEN-1:0] R1D, R2D;                       // Read data from Rs1 (RD1), Rs2 (RD2)
-  logic [P.XLEN-1:0] R1DRaw, R2DRaw;                 // Register file read data before dummy operand masking
+  // SECDED codeword of an XLEN-bit value: {data, overall parity, ECC_R Hamming bits}
+  localparam int ECC_R  = (P.XLEN <= 57) ? 6 : 7;
+  localparam int ECC_CW = P.XLEN + ECC_R + 1;
+  logic [ECC_CW-1:0] R1D, R2D;                       // Codewords read from Rs1 (RD1), Rs2 (RD2)
+  logic [ECC_CW-1:0] R1DRaw, R2DRaw;                 // Register file read codewords before dummy operand masking
   logic [P.XLEN-1:0] ImmExtD;                        // Extended immediate in Decode stage
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
@@ -120,8 +122,6 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
 
   // ECC error signals from register file read ports
-  logic sec_err_rd1, ded_err_rd1;
-  logic sec_err_rd2, ded_err_rd2;
 
   // ECC error signals from the 7 pipeline registers (sec / ded per instance)
   logic sec_rd1e, ded_rd1e;   // R1D → R1E
@@ -139,17 +139,13 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .wd3(ResultW),
     .DummyW, .DummySelW,
     .rd1(R1DRaw), .rd2(R2DRaw),
-    .inject_en(fault_inject_regfile),
-    .sec_err_rd1, .ded_err_rd1,
-    .sec_err_rd2, .ded_err_rd2,
-    .CountReadEnable(InstrValidD & ~StallE & ~FlushE),
-    .SecCount(RegfileSecCount)
+    .inject_en(fault_inject_regfile)
   );
 
-  // AMOEBA: obfuscate the operands of inserted dummy instructions.  Placed after
-  // the register file's SECDED decoder so that the ECC check still sees the true
-  // stored codeword -- masking the codeword itself would look like a burst error
-  // and would spray sec/ded reports on every injection.
+  // AMOEBA: obfuscate the operands of inserted dummy instructions.  The mask is
+  // applied as a codeword, so the operand registers still receive a valid
+  // codeword -- masking the data bits alone would look like a burst error and
+  // would spray sec/ded reports on every injection.
   dummymask #(P.XLEN) dmask(
     .clk, .reset, .InjectD,
     .Rd1D(R1DRaw), .Rd2D(R2DRaw),
@@ -166,10 +162,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // the one cycle that register takes to repair itself (EccStallE, below).
   // Corrected outputs are still used wherever a value has an effect of its own:
   // store data, CSR write data and the register file write.
-  flopenrc_ecc #(P.XLEN) RD1EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
-    .d(R1D), .q(), .q_raw(R1E), .sec_err_o(sec_rd1e), .ded_err_o(ded_rd1e));
-  flopenrc_ecc #(P.XLEN) RD2EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
-    .d(R2D), .q(), .q_raw(R2E), .sec_err_o(sec_rd2e), .ded_err_o(ded_rd2e));
+  //
+  // The two operand registers take the register file's codeword as it was read,
+  // so a register file error is not looked for in Decode: it arrives here with
+  // the operand and is found, stalled on and repaired like an error in the
+  // operand register itself.
+  flopenrc_cw #(P.XLEN) RD1EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
+    .cw(R1D), .q(), .q_raw(R1E), .sec_err_o(sec_rd1e), .ded_err_o(ded_rd1e));
+  flopenrc_cw #(P.XLEN) RD2EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
+    .cw(R2D), .q(), .q_raw(R2E), .sec_err_o(sec_rd2e), .ded_err_o(ded_rd2e));
   flopenrc_ecc #(P.XLEN) ImmExtEReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
     .d(ImmExtD), .q(), .q_raw(ImmExtE), .sec_err_o(sec_imme), .ded_err_o(ded_imme));
 
@@ -233,13 +234,19 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   if (P.ZALRSC_SUPPORTED) assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
   else                    assign SCResultW = '0;
 
-  // ECC error aggregation
-  assign RegEccSecErrW = sec_err_rd1 | sec_err_rd2
-                       | sec_rd1e | sec_rd2e | sec_imme
+  // ECC error aggregation.  Register file errors are reported by the operand
+  // registers that carry them into Execute (sec_rd1e, sec_rd2e).
+  assign RegEccSecErrW = sec_rd1e | sec_rd2e | sec_imme
                        | sec_srcam | sec_ieumm | sec_wdm | sec_ifrw;
-  assign RegEccDedErrW = ded_err_rd1 | ded_err_rd2
-                       | ded_rd1e | ded_rd2e | ded_imme
+  assign RegEccDedErrW = ded_rd1e | ded_rd2e | ded_imme
                        | ded_srcam | ded_ieumm | ded_wdm | ded_ifrw;
+
+  // Single-bit errors corrected on the two register operands: errors read out of
+  // the register file, and errors in the operand registers themselves.  Each one
+  // is flagged for exactly one cycle, the cycle the operand register repairs it.
+  always_ff @(posedge clk)
+    if (reset) RegfileSecCount <= '0;
+    else       RegfileSecCount <= RegfileSecCount + {31'b0, sec_rd1e} + {31'b0, sec_rd2e};
   // Separate W-stage pipeline reg DED: instruction in W when this fires, so MEPC should use PCW
   assign RegEccDedErrPipeW = ded_ifrw;
 

@@ -12,6 +12,7 @@
 //          Internal pipeline (purely combinational except the storage FF):
 //            d[WIDTH-1:0]
 //            → ecc_secded_enc  (XOR tree, no FF)
+//            → flopenrc_cw, which is everything from here down:
 //            → always_ff       (stores CW_WIDTH bits: WIDTH + R + 1)
 //            → ecc_bit_flip    (combinational, clocked LFSR inside)
 //            → q_raw[WIDTH-1:0]                       (data bits as stored)
@@ -69,46 +70,13 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
                      (WIDTH <=  57) ? 6 :
                      (WIDTH <= 120) ? 7 : 8;
 
-  localparam int CW_WIDTH = WIDTH + R + 1;  // data + R Hamming bits + 1 overall parity
-
-  // ── Encode ────────────────────────────────────────────────────────────────────
-  logic [CW_WIDTH-1:0] cw_enc;
+  // Encode here; storage, injection, decode and repair are flopenrc_cw's.
+  logic [WIDTH+R:0] cw_enc;
   ecc_secded_enc #(.DATA_WIDTH(WIDTH)) enc (.data_i(d), .codeword_o(cw_enc));
 
-  // ── Storage FF (holds CW_WIDTH bits) ─────────────────────────────────────────
-  // All-zeros is the valid codeword for data=0 (Hamming bits and parity all 0).
-  logic [CW_WIDTH-1:0] cw_stored, cw_repair;
-
-  always_ff @(posedge clk)
-    if (reset)          cw_stored <= '0;
-    else if (en)
-      if (clear)        cw_stored <= '0;
-      else              cw_stored <= cw_enc;
-    else if (sec_err_o) cw_stored <= cw_repair;
-
-  // ── Error injection (optional, gated by inject_en) ───────────────────────────
-  logic [CW_WIDTH-1:0] cw_inj;
-  // The flip mask is registered: cw_stored is a register output, and q_raw has
-  // nothing but this injector between it and the pipeline.
-  ecc_bit_flip #(.CW_WIDTH(CW_WIDTH), .REG_MASK(1'b1)) flip (
-    .clk, .reset, .inject_en,
-    .codeword_i(cw_stored),
-    .codeword_o(cw_inj)
+  flopenrc_cw #(.WIDTH(WIDTH)) store (
+    .clk, .reset, .clear, .en, .inject_en,
+    .cw(cw_enc), .q, .sec_err_o, .ded_err_o, .q_raw
   );
-
-  // Data bits sit above the R Hamming bits and the overall parity bit.
-  assign q_raw = cw_inj[CW_WIDTH-1 : R+1];
-
-  // ── Decode ────────────────────────────────────────────────────────────────────
-  ecc_secded_dec #(.DATA_WIDTH(WIDTH)) dec (
-    .codeword_i(cw_inj),
-    .data_o    (q),
-    .sec_err_o,
-    .ded_err_o
-  );
-
-  // ── Repair ────────────────────────────────────────────────────────────────────
-  // The corrected data re-encoded, which also repairs an error in a check bit.
-  ecc_secded_enc #(.DATA_WIDTH(WIDTH)) repair_enc (.data_i(q), .codeword_o(cw_repair));
 
 endmodule

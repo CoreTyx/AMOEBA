@@ -156,5 +156,5 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
     .InstrValidE, .FTStallE, .FTUnresolvedE, .EccStallE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
-    .InstrValidD, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
+    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
 endmodule
