@@ -52,6 +52,10 @@ set TIMING_PROBES [subst -nocommands {
    ic_data_to_word     {probe_pin $ic/*/wordram.CacheDataMem/*/sramIP/CLK} {}                      {probe_d $ic/HitWordReg/*}
    ic_read_to_instr    {}                                     {probe_pin $ic/ReadDataWord*}        {probe_d $core/ifu/AlignedInstrRawDFlop/*}
    pc_to_pc            {probe_ck $core/ifu/pcreg/*}           {}                                   {probe_d $core/ifu/pcreg/*}
+   "MMU checks into their registers"
+   fetch_fault         {}                                     {}                                   {probe_d $core/ifu/fetchfaultreg/*}
+   fetch_fault_from_pc {probe_ck $core/ifu/pcreg/*}           {}                                   {probe_d $core/ifu/fetchfaultreg/*}
+   data_fault          {}                                     {}                                   {probe_d $core/lsu/ownfaultreg/*}
    "Stall network and privileged"
    stall_from_hazard   {}                                     {probe_pin $core/hzu/StallW}         {}
    through_InjectD     {}                                     {probe_pin $core/ieu/InjectD}        {}

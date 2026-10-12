@@ -55,7 +55,9 @@ module pmpadrdec import cvw::*;  #(parameter cvw_t P) (
 
   // Top-of-range (TOR)
   // Append two implicit trailing 0's to PMPAdr value
-  assign PAltPMPAdr = {1'b0, PhysicalAddress} < {1'b0, PMPAdr, 2'b00}; // unsigned comparison
+  // Unsigned comparison, as a tree: with sixteen of these in front of the priority encoder
+  // and the fault, a borrow chain along all of PA_BITS does not fit in the cycle.
+  lessthan #(P.PA_BITS) palt(.a(PhysicalAddress), .b({PMPAdr, 2'b00}), .y(PAltPMPAdr));
   assign PAgePMPAdrOut = ~PAltPMPAdr;
   assign TORMatch = PAgePMPAdrIn & PAltPMPAdr; // exclusion-tag: PAgePMPAdrIn
 
