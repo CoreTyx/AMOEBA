@@ -104,9 +104,9 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          SelAdrData;
   logic                          SelAdrTag;
   logic [1:0]                    AdrSelMuxSelData;
-  logic [1:0]                    AdrSelMuxSelTag, AdrSelMuxSelLRU;
+  logic [1:0]                    AdrSelMuxSelTag;
   logic [SETLEN-1:0]             CacheSetDataDemand, CacheSetData;
-  logic [SETLEN-1:0]             CacheSetTagDemand, CacheSetTag, CacheSetLRU;
+  logic [SETLEN-1:0]             CacheSetTagDemand, CacheSetTag;
   logic [LINELEN-1:0]            LineWriteData;
   logic                          ClearDirty, SetDirty, SetValid, ClearValid;
   logic [LINELEN-1:0]            CorrectedLineWay [NUMWAYS-1:0];
@@ -169,10 +169,6 @@ module cache import cvw::*; #(parameter cvw_t P,
   mux3 #(SETLEN) AdrSelMuxTag(NextSet[SETTOP-1:OFFSETLEN], PAdr[SETTOP-1:OFFSETLEN], FlushAdr,
     AdrSelMuxSelTag, CacheSetTagDemand);
 
-  assign AdrSelMuxSelLRU = {FlushCache, ((SelAdrTag | SelHPTW | Stall) & ~((READ_ONLY_CACHE == 1) & FlushStage))};
-  mux3 #(SETLEN) AdrSelMuxLRU(NextSet[SETTOP-1:OFFSETLEN], PAdr[SETTOP-1:OFFSETLEN], FlushAdr,
-    AdrSelMuxSelLRU, CacheSetLRU);
-
   // Scrubber takes the address bus on grant and retains it through decode, verification, and
   // commit; ScrubGrant never overlaps a real demand/flush/CMO/HPTW access.
   mux2 #(SETLEN) ScrubAdrMuxData(CacheSetDataDemand, ScrubSet, ScrubOwnsWaySelect, CacheSetData);
@@ -207,7 +203,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict
     cacheLRU #(NUMWAYS, SETLEN, NUMSETS) cacheLRU(
-      .clk, .reset, .CacheEn, .HitWay, .ValidWay, .VictimWay, .CacheSetLRU, .LRUWriteEn,
+      .clk, .reset, .CacheEn, .HitWay, .ValidWay, .VictimWay, .LRUWriteEn,
       .SetValid, .PAdr(PAdr[SETTOP-1:OFFSETLEN]), .InvalidateCache, .InvalidateFlushStage);
   end else
     assign VictimWay = 1'b1; // one hot.
