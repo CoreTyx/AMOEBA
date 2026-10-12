@@ -74,7 +74,7 @@ module cache_edge_tb;
           .SCRUBBER_ENABLED(1'b0), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
-    .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .CacheMiss, .CacheAccess, .SelHPTW,
+    .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
     .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );

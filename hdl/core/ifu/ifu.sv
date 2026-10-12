@@ -272,7 +272,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
              .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF), .CacheBusy(ICacheBusyF),
              .CacheBusRW,
-             .ReadDataWord(ICacheInstrF), .AmoWord(),
+             .ReadDataWord(ICacheInstrF), .AmoWord(), .AmoOffset('0),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
              .SecCount(ICacheSecCount),

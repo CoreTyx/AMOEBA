@@ -428,7 +428,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         .CacheStall(DCacheStallM), .CacheBusy(DCacheBusyM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
         .SecCount(DCacheSecCount),
         .CacheCommitted(DCacheCommittedM),
-        .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM),
+        .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM), .AmoOffset(IEUAdrM[$clog2(LINELEN/8)-1:0]),
         .FetchBuffer, .CacheBusRW(CacheBusRW),
         .CacheBusAck(DCacheBusAck), .InvalidateCache(1'b0), .InvalidateFlushStage(LSUFlushW), .CMOpM(CacheCMOpM),
         .EccDedDirtyFault(DCacheEccDedDirtyFaultM), .EccDedDirtyFaultAdr(DCacheEccDedDirtyFaultAdrM));
