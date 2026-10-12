@@ -51,6 +51,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              PCSrcE,                          // Select next PC (between PC+4 and IEUAdrE)
   input  logic              FWriteIntE, FCvtIntE,            // FPU writes to integer register file, FPU converts float to int
   output logic              FTStallE, FTUnresolvedE,          // shadow execution control/fault status
+  output logic              EccStallE,                        // Execute read a register with a single-bit error; hold while it repairs
   output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, // diagnosis bits
   output logic [P.XLEN-1:0] IEUAdrE,                         // Memory address
   output logic              IntDivE, W64E,                   // Integer divide, RV64 W-type instruction
@@ -135,7 +136,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .InjectD, .DummySelD, .DummyW, .DummySelW,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
-    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
+    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM | EccStallE), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
     .BranchSignedE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE, .MDUActiveE,
@@ -154,6 +155,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
-    .InstrValidE, .FTStallE, .FTUnresolvedE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
+    .InstrValidE, .FTStallE, .FTUnresolvedE, .EccStallE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
     .InstrValidD, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
 endmodule

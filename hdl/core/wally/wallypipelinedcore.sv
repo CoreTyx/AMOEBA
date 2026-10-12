@@ -98,6 +98,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // the MDU's E->M register. FTStall holds the pipeline; unresolved status
   // reaches M for a precise trap, and PE indicators feed sticky CSR status.
   logic                          FTStallE, FTStallM, FTStall;
+  logic                          EccStallE;                       // Execute read a pipeline register with a single-bit error
   logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
   logic [5:0]                    FaultInjectUnits;
@@ -261,7 +262,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
-     .PCE, .PCLinkE, .FTStallM, .FWriteIntE, .FCvtIntE, .FTStallE, .FTUnresolvedE,
+     .PCE, .PCLinkE, .FTStallM, .FWriteIntE, .FCvtIntE, .FTStallE, .FTUnresolvedE, .EccStallE,
      .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r, .IEUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
      // Memory stage interface
@@ -360,7 +361,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // exactly once to become a precise trap.
   flopenrc #(1) FTUnresolvedERegPipe(clk, reset, FlushM, ~StallM, FTUnresolvedE, FTUnresolvedEReg);
   assign FTUnresolvedM = FTUnresolvedEReg | MDUUnresolvedM;
-  assign FTStall = FTStallE | FTStallM;
+  // An ECC stall is the same situation as a shadow mismatch -- what Execute
+  // computed this cycle cannot be trusted -- and takes the same path: hold the
+  // pipeline and suppress the redirect.  It lasts one cycle and is not a fault.
+  assign FTStall = FTStallE | FTStallM | EccStallE;
 
   // MFTSTATUS (0x7C2), reset-sticky ft_* status:
   // [0] ALU isolated, [1] CMP isolated, [2] MUL isolated, [3] DIV isolated,

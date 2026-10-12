@@ -5,20 +5,29 @@
 // Modified:
 //
 // Purpose: SECDED-protected D flip-flop with enable, synchronous reset, and
-//          enabled clear.  Drop-in data-path replacement for flopenrc with two
-//          additional output ports (sec_err_o, ded_err_o) and one additional
-//          input port (inject_en).
+//          enabled clear.  Drop-in data-path replacement for flopenrc with
+//          three additional output ports (sec_err_o, ded_err_o, q_raw) and one
+//          additional input port (inject_en).
 //
 //          Internal pipeline (purely combinational except the storage FF):
 //            d[WIDTH-1:0]
 //            → ecc_secded_enc  (XOR tree, no FF)
 //            → always_ff       (stores CW_WIDTH bits: WIDTH + R + 1)
 //            → ecc_bit_flip    (combinational, clocked LFSR inside)
+//            → q_raw[WIDTH-1:0]                       (data bits as stored)
 //            → ecc_secded_dec  (syndrome + correction, no FF)
 //            → q[WIDTH-1:0], sec_err_o, ded_err_o
 //
-//          The encoding/decoding adds combinational delay on either side of
-//          the flip-flop but does not insert a pipeline stage.
+//          q is always correct for a single-bit error, but arrives a full
+//          decode later than q_raw.  q_raw is correct only while sec_err_o and
+//          ded_err_o are low.  A consumer may use q_raw if nothing it computes
+//          is kept in a cycle where sec_err_o is high -- the pipeline does this
+//          by stalling on sec_err_o.  Anything with an effect of its own
+//          (a memory, CSR or register file write) must use q.
+//
+//          Self-repair: while the register is holding (en low) and reports a
+//          single-bit error, it rewrites itself with the corrected codeword.
+//          A consumer stalled on sec_err_o therefore waits one cycle.
 //
 //          When inject_en = 0 the ecc_bit_flip module is a wire, so the
 //          decode path sees clean (uncorrupted) codewords.  In this case
@@ -46,9 +55,10 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
   input  logic             clk, reset, clear, en,
   input  logic             inject_en,
   input  logic [WIDTH-1:0] d,
-  output logic [WIDTH-1:0] q,
+  output logic [WIDTH-1:0] q,          // corrected data
   output logic             sec_err_o,
-  output logic             ded_err_o
+  output logic             ded_err_o,
+  output logic [WIDTH-1:0] q_raw       // data as stored: one decode earlier than q, wrong while an error flag is high
 );
 
   // Number of Hamming check bits for this data width
@@ -67,13 +77,14 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
 
   // ── Storage FF (holds CW_WIDTH bits) ─────────────────────────────────────────
   // All-zeros is the valid codeword for data=0 (Hamming bits and parity all 0).
-  logic [CW_WIDTH-1:0] cw_stored;
+  logic [CW_WIDTH-1:0] cw_stored, cw_repair;
 
   always_ff @(posedge clk)
-    if (reset)       cw_stored <= '0;
+    if (reset)          cw_stored <= '0;
     else if (en)
-      if (clear)     cw_stored <= '0;
-      else           cw_stored <= cw_enc;
+      if (clear)        cw_stored <= '0;
+      else              cw_stored <= cw_enc;
+    else if (sec_err_o) cw_stored <= cw_repair;
 
   // ── Error injection (optional, gated by inject_en) ───────────────────────────
   logic [CW_WIDTH-1:0] cw_inj;
@@ -83,6 +94,9 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
     .codeword_o(cw_inj)
   );
 
+  // Data bits sit above the R Hamming bits and the overall parity bit.
+  assign q_raw = cw_inj[CW_WIDTH-1 : R+1];
+
   // ── Decode ────────────────────────────────────────────────────────────────────
   ecc_secded_dec #(.DATA_WIDTH(WIDTH)) dec (
     .codeword_i(cw_inj),
@@ -90,5 +104,9 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
     .sec_err_o,
     .ded_err_o
   );
+
+  // ── Repair ────────────────────────────────────────────────────────────────────
+  // The corrected data re-encoded, which also repairs an error in a check bit.
+  ecc_secded_enc #(.DATA_WIDTH(WIDTH)) repair_enc (.data_i(q), .codeword_o(cw_repair));
 
 endmodule

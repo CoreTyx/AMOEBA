@@ -68,6 +68,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // ALU sources before the mux chooses between them and PCE to put in srcA/B
   // FT control feeds hazard/trap handling; PE bits are diagnostic only.
   output logic              FTStallE, FTUnresolvedE,
+  output logic              EccStallE,               // an operand of Execute is uncorrected this cycle; hold the pipeline while its register repairs itself
   output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r,
   // Memory stage signals
   input  logic              StallM, FlushM,          // Stall, flush Memory stage
@@ -109,11 +110,13 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Memory stage signals
   logic [P.XLEN-1:0] IEUResultM;                     // Result from execution stage
   logic [P.XLEN-1:0] IFResultM;                      // Result from either IEU or single-cycle FPU op writing an integer register
+  logic [P.XLEN-1:0] IEUResultRawM, IFResultRawM;    // The same before ECC correction, for forwarding
   // Writeback stage signals
   logic [P.XLEN-1:0] SCResultW;                      // Store Conditional result
   logic [P.XLEN-1:0] ResultW;                        // Result to write to register file
   logic [P.XLEN-1:0] IFResultW;                      // Result from either IEU or single-cycle FPU op writing an integer register
   logic [P.XLEN-1:0] IFCvtResultW;                   // Result from IEU, signle-cycle FPU op, or 2-cycle FCVT float to int
+  logic [P.XLEN-1:0] IFResultRawW, IFCvtResultRawW, ResultRawW; // IFResultW, IFCvtResultW and ResultW before ECC correction, for forwarding
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
 
   // ECC error signals from register file read ports
@@ -155,12 +158,23 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   extend #(P) ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
 
   // Execute stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) RD1EReg   (clk, reset, FlushE, ~StallE, fault_inject_pipeline, R1D,             R1E,        sec_rd1e,  ded_rd1e);
-  flopenrc_ecc #(P.XLEN) RD2EReg   (clk, reset, FlushE, ~StallE, fault_inject_pipeline, R2D,             R2E,        sec_rd2e,  ded_rd2e);
-  flopenrc_ecc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, fault_inject_pipeline, ImmExtD,         ImmExtE,    sec_imme,  ded_imme);
+  //
+  // Execute works on register contents before ECC correction (q_raw).  The
+  // correction is a full decode, and here it would sit in front of the ALU on the
+  // forwarding loop.  Everything Execute computes ends in a pipeline register, so
+  // instead a single-bit error in any register it reads stalls the pipeline for
+  // the one cycle that register takes to repair itself (EccStallE, below).
+  // Corrected outputs are still used wherever a value has an effect of its own:
+  // store data, CSR write data and the register file write.
+  flopenrc_ecc #(P.XLEN) RD1EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
+    .d(R1D), .q(), .q_raw(R1E), .sec_err_o(sec_rd1e), .ded_err_o(ded_rd1e));
+  flopenrc_ecc #(P.XLEN) RD2EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
+    .d(R2D), .q(), .q_raw(R2E), .sec_err_o(sec_rd2e), .ded_err_o(ded_rd2e));
+  flopenrc_ecc #(P.XLEN) ImmExtEReg(.clk, .reset, .clear(FlushE), .en(~StallE), .inject_en(fault_inject_pipeline),
+    .d(ImmExtD), .q(), .q_raw(ImmExtE), .sec_err_o(sec_imme), .ded_err_o(ded_imme));
 
-  mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
-  mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
+  mux3  #(P.XLEN)  faemux(R1E, ResultRawW, IFResultRawM, ForwardAE, ForwardedSrcAE);
+  mux3  #(P.XLEN)  fbemux(R2E, ResultRawW, IFResultRawM, ForwardBE, ForwardedSrcBE);
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
   // ALU drives both the architectural result and LSU address.
@@ -177,17 +191,27 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
   // Memory stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) SrcAMReg     (clk, reset, FlushM, ~StallM, fault_inject_pipeline, SrcAE,          SrcAM,      sec_srcam, ded_srcam);
-  flopenrc_ecc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, fault_inject_pipeline, IEUResultE,     IEUResultM, sec_ieumm, ded_ieumm);
-  flopenrc_ecc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, fault_inject_pipeline, ForwardedSrcBE, WriteDataM, sec_wdm,   ded_wdm);
+  flopenrc_ecc #(P.XLEN) SrcAMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .inject_en(fault_inject_pipeline),
+    .d(SrcAE), .q(SrcAM), .q_raw(), .sec_err_o(sec_srcam), .ded_err_o(ded_srcam));
+  flopenrc_ecc #(P.XLEN) IEUResultMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .inject_en(fault_inject_pipeline),
+    .d(IEUResultE), .q(IEUResultM), .q_raw(IEUResultRawM), .sec_err_o(sec_ieumm), .ded_err_o(ded_ieumm));
+  flopenrc_ecc #(P.XLEN) WriteDataMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .inject_en(fault_inject_pipeline),
+    .d(ForwardedSrcBE), .q(WriteDataM), .q_raw(), .sec_err_o(sec_wdm), .ded_err_o(ded_wdm));
 
   // Writeback stage pipeline register (ECC-protected)
-  flopenrc_ecc #(P.XLEN) IFResultWReg (clk, reset, FlushW, ~StallW, fault_inject_pipeline, IFResultM,      IFResultW,  sec_ifrw,  ded_ifrw);
+  flopenrc_ecc #(P.XLEN) IFResultWReg(.clk, .reset, .clear(FlushW), .en(~StallW), .inject_en(fault_inject_pipeline),
+    .d(IFResultM), .q(IFResultW), .q_raw(IFResultRawW), .sec_err_o(sec_ifrw), .ded_err_o(ded_ifrw));
+
+  // The registers Execute reads uncorrected.  SrcAM and WriteDataM are not among
+  // them: nothing is forwarded from either.
+  assign EccStallE = sec_rd1e | sec_rd2e | sec_imme | sec_ieumm | sec_ifrw;
 
   // floating point inputs: FIntResM comes from fclass, fcmp, fmv; FCvtIntResW comes from fcvt
   if (P.F_SUPPORTED) begin : fpmux
     mux2  #(P.XLEN)  resultmuxM(IEUResultM, FIntResM, FWriteIntM, IFResultM);
+    mux2  #(P.XLEN)  resultrawmuxM(IEUResultRawM, FIntResM, FWriteIntM, IFResultRawM);
     mux2  #(P.XLEN)  cvtresultmuxW(IFResultW, FCvtIntResW, FCvtIntW, IFCvtResultW);
+    mux2  #(P.XLEN)  cvtresultrawmuxW(IFResultRawW, FCvtIntResW, FCvtIntW, IFCvtResultRawW);
     if (P.IDIV_ON_FPU & P.F_SUPPORTED) begin
       mux2  #(P.XLEN)  divresultmuxW(MDUResultW, FIntDivResultW, IntDivW, MulDivResultW);
     end else begin
@@ -195,10 +219,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     end
   end else begin : fpmux
     assign IFResultM = IEUResultM;
+    assign IFResultRawM = IEUResultRawM;
     assign IFCvtResultW = IFResultW;
+    assign IFCvtResultRawW = IFResultRawW;
     assign MulDivResultW = MDUResultW;
   end
+  // ResultW is written to the register file, ResultRawW is forwarded to Execute.
+  // They differ only in which copy of the W-stage pipeline register they select.
   mux5  #(P.XLEN) resultmuxW(IFCvtResultW, ReadDataW, CSRReadValW, MulDivResultW, SCResultW, ResultSrcW, ResultW);
+  mux5  #(P.XLEN) resultrawmuxW(IFCvtResultRawW, ReadDataW, CSRReadValW, MulDivResultW, SCResultW, ResultSrcW, ResultRawW);
 
   // handle Store Conditional result if atomic extension supported
   if (P.ZALRSC_SUPPORTED) assign SCResultW = {{(P.XLEN-1){1'b0}}, SquashSCW};
