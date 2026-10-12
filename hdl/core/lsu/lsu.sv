@@ -157,6 +157,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic                  HPTWFlushW;                             // HPTW needs to flush operation
   logic                  LSUFlushW;                              // HPTW or hazard unit flushes operation
   logic                  SelDTIM;                                // Select DTIM rather than bus or D$
+  logic [P.XLEN-1:0]     WriteDataQ;                             // WriteDataM as of last cycle
   logic [P.XLEN-1:0]     WriteDataZM;
   logic                  LSULoadPageFaultM, LSUStoreAmoPageFaultM;
   logic                  MemCheckedQ;                            // the instruction in Memory has had a full cycle for its access checks
@@ -196,10 +197,26 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign IEUAdrxTvalM = IEUAdrM;
   end
 
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Store data
+  //
+  // WriteDataM comes out of the ECC decoder of the Memory stage's data register, and the path
+  // on from there -- AMO, sub-word and spill alignment, the merge into the cache line, the line's
+  // ECC encoder -- is another cycle's worth of logic.  The LSU therefore works from a copy that
+  // is one cycle old.  A memory instruction does nothing with its data in its first cycle in
+  // Memory (it is held there by MemCheckStall, and neither the cache nor the bus writes in it),
+  // and from the second cycle on the copy is the value the instruction arrived with.
+  //
+  // The copy is a plain register: an upset in it while a store waits in Memory goes into the
+  // cache or onto the bus uncorrected, where an upset in the ECC register behind it would have
+  // been corrected on the way out.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  flop #(P.XLEN) writedatareg(clk, WriteDataM, WriteDataQ);
+
     if(P.ZICBOZ_SUPPORTED) begin : cboz
-      assign WriteDataZM = LSUCMOpM[3] ? 0 : WriteDataM;
+      assign WriteDataZM = LSUCMOpM[3] ? 0 : WriteDataQ;
    end else begin : cboz
-      assign WriteDataZM = WriteDataM;
+      assign WriteDataZM = WriteDataQ;
     end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
