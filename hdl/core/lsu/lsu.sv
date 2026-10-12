@@ -159,6 +159,12 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic                  SelDTIM;                                // Select DTIM rather than bus or D$
   logic [P.XLEN-1:0]     WriteDataZM;
   logic                  LSULoadPageFaultM, LSUStoreAmoPageFaultM;
+  logic                  MemCheckedQ;                            // the instruction in Memory has had a full cycle for its access checks
+  logic                  MemCheckStall;                          // ... it has not: hold it there
+  logic                  LSULoadAccessFaultQ, LSUStoreAmoAccessFaultQ; // the MMU's faults as of the last cycle
+  logic                  LSULoadPageFaultQ, LSUStoreAmoPageFaultQ;
+  logic                  OwnLoadAccessFaultM, OwnStoreAmoAccessFaultM; // ... presented to the trap unit once checked
+  logic                  OwnLoadPageFaultM, OwnStoreAmoPageFaultM;
   logic                  DTLBMissOrUpdateDAM;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -210,6 +216,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       .IEUAdrExtM, .PTE, .IHWriteDataM, .PageType, .PreLSURWM, .LSUAtomicM,
       .IHAdrM, .CMOpM, .LSUCMOpM, .HPTWStall, .SelHPTW,
       .HPTWFlushW, .LSULoadAccessFaultM, .LSUStoreAmoAccessFaultM,
+      .OwnLoadAccessFaultM, .OwnStoreAmoAccessFaultM, .OwnLoadPageFaultM, .OwnStoreAmoPageFaultM,
       .LoadAccessFaultM, .StoreAmoAccessFaultM, .HPTWInstrAccessFaultF,
       .LoadPageFaultM, .StoreAmoPageFaultM, .LSULoadPageFaultM, .LSUStoreAmoPageFaultM, .HPTWInstrPageFaultF
 );
@@ -221,10 +228,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign LSUAtomicM = AtomicM;
     assign LSUCMOpM = CMOpM;
     assign IHWriteDataM = WriteDataZM;
-    assign LoadAccessFaultM = LSULoadAccessFaultM;
-    assign StoreAmoAccessFaultM = LSUStoreAmoAccessFaultM;
-    assign LoadPageFaultM = LSULoadPageFaultM;
-    assign StoreAmoPageFaultM = LSUStoreAmoPageFaultM;
+    assign LoadAccessFaultM = OwnLoadAccessFaultM;
+    assign StoreAmoAccessFaultM = OwnStoreAmoAccessFaultM;
+    assign LoadPageFaultM = OwnLoadPageFaultM;
+    assign StoreAmoPageFaultM = OwnStoreAmoPageFaultM;
     assign {HPTWStall, SelHPTW, PTE, PageType, DTLBWriteM, ITLBWriteF, HPTWFlushW} = '0;
     assign {HPTWInstrAccessFaultF, HPTWInstrPageFaultF} = '0;
    end
@@ -237,7 +244,36 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   assign GatedStallW = StallW & ~SelHPTW;
   assign DCacheBusStallM = DCacheStallM | LSUBusStallM;
   assign CacheBusHPWTStall = DCacheBusStallM | HPTWStall;
-  assign LSUStallM = CacheBusHPWTStall | SpillStallM;
+  assign LSUStallM = CacheBusHPWTStall | SpillStallM | MemCheckStall;
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Access check cycle
+  //
+  // The MMU's access and page faults for the instruction in Memory come out of the TLB, the PMP
+  // and the PMA checkers, and they used to go straight on into the trap unit, the flush, the
+  // hazard unit and every stage of the pipeline in the same cycle.  They now reach the trap unit
+  // from a register, one cycle after the MMU produces them.
+  //
+  // For that the instruction must still be in Memory a cycle later, whatever the MMU says, so a
+  // memory instruction is held for its first cycle there (MemCheckStall, which depends on
+  // registers only).  A cached access was already held in that cycle; an uncached one is now a
+  // cycle longer.  The check starts again after a page-table walk, because the MMU's answer for
+  // this instruction is only meaningful once the walk has filled the TLB.
+  //
+  // Nothing irreversible happens in the check cycle: the bus request waits for it (BusRW below),
+  // and the cache only reads until a store hit writes two states later -- a fault flushes it
+  // first.  Faults found by the page walker are not affected; it presents them from its own
+  // registers (hptw.sv).
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  flopr #(1) memcheckedreg(clk, reset, StallM & ~SelHPTW, MemCheckedQ);
+  assign MemCheckStall = ((|MemRWM) | (|CMOpM)) & ~MemCheckedQ;
+  flopr #(4) ownfaultreg(clk, reset,
+    {LSULoadAccessFaultM, LSUStoreAmoAccessFaultM, LSULoadPageFaultM, LSUStoreAmoPageFaultM},
+    {LSULoadAccessFaultQ, LSUStoreAmoAccessFaultQ, LSULoadPageFaultQ, LSUStoreAmoPageFaultQ});
+  assign OwnLoadAccessFaultM     = LSULoadAccessFaultQ     & MemCheckedQ;
+  assign OwnStoreAmoAccessFaultM = LSUStoreAmoAccessFaultQ & MemCheckedQ;
+  assign OwnLoadPageFaultM       = LSULoadPageFaultQ       & MemCheckedQ;
+  assign OwnStoreAmoPageFaultM   = LSUStoreAmoPageFaultQ   & MemCheckedQ;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // MMU and misalignment fault logic required if privileged unit exists
@@ -332,7 +368,8 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         assign CacheCMOpM = '0;
         assign BusAtomic = 1'b0;
       end
-      assign BusRW = (~CacheableM & ~SelDTIM )? LSURWM : '0;
+      // An uncached access of the instruction's own waits for the access check cycle.
+      assign BusRW = (~CacheableM & ~SelDTIM & (MemCheckedQ | SelHPTW)) ? LSURWM : '0;
       assign CacheableOrFlushCacheM = CacheableM | FlushDCacheM;
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW
@@ -374,7 +411,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     end else begin : passthrough // No Cache, use simple ahbinterface instead of ahbcacheinterface
       logic [1:0] BusRW;                    // Non-DTIM memory access, ignore cacheableM
       logic [P.XLEN-1:0] FetchBuffer;
-      assign BusRW = ~SelDTIM ? LSURWM : 0;
+      assign BusRW = (~SelDTIM & (MemCheckedQ | SelHPTW)) ? LSURWM : 0;
 
       assign LSUHADDR = PAdrM;
       assign LSUHSIZE = LSUFunct3M;

@@ -68,6 +68,11 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   output logic              HPTWStall,
   input  logic              LSULoadAccessFaultM, LSUStoreAmoAccessFaultM,
   input  logic              LSULoadPageFaultM, LSUStoreAmoPageFaultM,
+  // The same four faults for the instruction's own access, registered by the LSU (see lsu.sv).
+  // The walker itself reacts to the live ones above; what goes to the trap unit when no walk is
+  // in progress is the registered copy.
+  input  logic              OwnLoadAccessFaultM, OwnStoreAmoAccessFaultM,
+  input  logic              OwnLoadPageFaultM, OwnStoreAmoPageFaultM,
   output logic              LoadAccessFaultM, StoreAmoAccessFaultM, HPTWInstrAccessFaultF,
   output logic              LoadPageFaultM, StoreAmoPageFaultM, HPTWInstrPageFaultF
 );
@@ -133,11 +138,11 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   assign TakeHPTWFault = WalkerState != IDLE;
 
   // Improve timing by taking HPTW faults off critical path because these are multicycle operations anyway
-  assign LoadAccessFaultM      = TakeHPTWFault ? HPTWLoadAccessFaultDelay : LSULoadAccessFaultM;
-  assign StoreAmoAccessFaultM  = TakeHPTWFault ? HPTWStoreAmoAccessFaultDelay : LSUStoreAmoAccessFaultM;
+  assign LoadAccessFaultM      = TakeHPTWFault ? HPTWLoadAccessFaultDelay : OwnLoadAccessFaultM;
+  assign StoreAmoAccessFaultM  = TakeHPTWFault ? HPTWStoreAmoAccessFaultDelay : OwnStoreAmoAccessFaultM;
   assign HPTWInstrAccessFaultF = TakeHPTWFault ? HPTWInstrAccessFaultDelay : 1'b0;
-  assign LoadPageFaultM        = TakeHPTWFault ? HPTWLoadPageFaultDelay : LSULoadPageFaultM;
-  assign StoreAmoPageFaultM    = TakeHPTWFault ? HPTWStoreAmoPageFaultDelay : LSUStoreAmoPageFaultM;
+  assign LoadPageFaultM        = TakeHPTWFault ? HPTWLoadPageFaultDelay : OwnLoadPageFaultM;
+  assign StoreAmoPageFaultM    = TakeHPTWFault ? HPTWStoreAmoPageFaultDelay : OwnStoreAmoPageFaultM;
   assign HPTWInstrPageFaultF   = TakeHPTWFault ? HPTWInstrPageFaultDelay : 1'b0;
 
   // Extract bits from CSRs and inputs
