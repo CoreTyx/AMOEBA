@@ -114,6 +114,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            HitWayLive, DirtyWayLive;
   logic                          HitLive, LineDirtyLive;
   logic                          StoreRepairsData;
+  logic [LINELEN-1:0]            LineEncodedData, LineCorrectionData, LineWriteFinal;
+  logic [LINECHECKWIDTH-1:0]     LineEncodedCheck, LineCorrectionCheck, LineCheckWriteFinal;
   logic [NUMWAYS-1:0]            HitWay, ValidWay, ValidMismatchWay;
   logic                          Hit;
   logic [NUMWAYS-1:0]            VictimWay, DirtyWay, HitDirtyWay, DirtyMismatchWay;
@@ -187,11 +189,11 @@ module cache import cvw::*; #(parameter cvw_t P,
              .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
              .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
              .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
-    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask,
+    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteFinal, .LineCheckWriteFinal, .LineByteMask,
     .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
     .FlushWay, .FlushCache, .SelVictim, .SelVictimLive,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
-    .SelCorrectTag, .CorrectedTagIn, .SelCorrectData, .CorrectedLineIn(CorrectedLine),
+    .SelCorrectTag, .CorrectedTagIn, .SelCorrectData,
     .TagDecodeCaptureEn, .SelectedWayDataQ,
     .CorrectedLineWay, .DataSecErrWay, .DataDedErrWay, .HitWay, .HitWayLive, .ValidWay, .ValidMismatch(ValidMismatchWay),
     .DirtyWay, .DirtyWayLive, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
@@ -326,6 +328,25 @@ module cache import cvw::*; #(parameter cvw_t P,
     assign LineWriteData = FetchBuffer;
     assign LineByteMask = '1;
   end
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Line encode
+  //
+  // What is written to the data array is either new data (LineWriteData) or the corrected copy
+  // of the line that was read (a correction writeback).  Both are the same for every way -- the
+  // way is chosen by the write enable -- so they are encoded once here.  Each way used to carry
+  // its own copy of both encoders.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) dataenc (
+    .data_i     (LineWriteData),
+    .codeword_o ({LineEncodedData, LineEncodedCheck})
+  );
+  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datacorrectionenc (
+    .data_i     (CorrectedLine),
+    .codeword_o ({LineCorrectionData, LineCorrectionCheck})
+  );
+  mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteFinal);
+  mux2 #(LINECHECKWIDTH) linecheckdinmux(LineEncodedCheck, LineCorrectionCheck, SelCorrectData, LineCheckWriteFinal);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Flush logic

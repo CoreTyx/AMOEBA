@@ -82,7 +82,8 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic [$clog2(NUMSETS)-1:0]  CacheSetData,       // Cache address, the output of the address select mux, NextAdr, PAdr, or FlushAdr
   input  logic [$clog2(NUMSETS)-1:0]  CacheSetTag,       // Cache address, the output of the address select mux, NextAdr, PAdr, or FlushAdr
   input  logic [PA_BITS-1:0]          PAdr,           // Physical address
-  input  logic [LINELEN-1:0]          LineWriteData,  // Final data written to cache (D$ only)
+  input  logic [LINELEN-1:0]          LineWriteFinal, // Final data written to the data array: new data, or a corrected line (see cache.sv)
+  input  logic [LINECHECKWIDTH-1:0]   LineCheckWriteFinal, // ... and its check bits.  Encoded once in cache.sv: every way is given the same line
   input  logic                        SetValid,       // Set the valid bit in the selected way and set
   input  logic                        ClearValid,     // Clear the valid bit in the selected way and set
   input  logic                        ScrubInvalidate, // Invalidate the scrubber's selected way and set
@@ -101,14 +102,12 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        SelScrub,       // Scrubber is driving CacheSetTag/CacheSetData this cycle
   input  logic                        ScrubWay,       // This way is the scrubber's current target (one-hot across ways)
 
-  // Correction writeback: re-encode and commit a corrected line (tag or data) into the currently
-  // selected way. Tag correction is self-contained per way (this way's own decode result); data
-  // correction's re-encoded value is supplied by cache.sv, which owns the single shared data
-  // encoder/decoder pair.
+  // Correction writeback: commit a corrected line (tag or data) into the currently selected way.
+  // Tag correction is re-encoded per way; a corrected data line arrives already encoded, on
+  // LineWriteFinal, from the one pair of line encoders in cache.sv.
   input  logic                        SelCorrectTag,  // Commit CorrectedTagIn (re-encoded) into the tag array
   input  logic [TAGLEN-1:0]           CorrectedTagIn,         // Re-encoded tag input for a tag-codeword correction writeback
-  input  logic                        SelCorrectData, // Commit CorrectedLineIn (re-encoded externally) into the data array
-  input  logic [LINELEN-1:0]          CorrectedLineIn,         // Data payload for a data-codeword correction writeback (already the corrected value; this module re-encodes it)
+  input  logic                        SelCorrectData, // Commit a corrected line into the data array (it is what LineWriteFinal carries then)
 
   // A second, held-one-cycle-later copy of "which way is selected," used only to gate the data
   // array's AND-part-of-mux. This breaks the tag-decode -> data-decode combinational path into two
@@ -275,25 +274,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   // Data Array (SECDED-protected: one codeword per full line; each way decodes its own line into
   // a register -- see the data decode register below)
   /////////////////////////////////////////////////////////////////////////////////////////////
-
-  logic [LINELEN-1:0] LineEncodedData;
-  logic [LINECHECKWIDTH-1:0] LineEncodedCheck;
-  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) dataenc (
-    .data_i     (LineWriteData),
-    .codeword_o ({LineEncodedData, LineEncodedCheck})
-  );
-
-  logic [LINELEN-1:0] LineCorrectionData;
-  logic [LINECHECKWIDTH-1:0] LineCorrectionCheck;
-  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datacorrectionenc (
-    .data_i     (CorrectedLineIn),
-    .codeword_o ({LineCorrectionData, LineCorrectionCheck})
-  );
-
-  logic [LINELEN-1:0] LineWriteFinal;
-  logic [LINECHECKWIDTH-1:0] LineCheckWriteFinal;
-  mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteFinal);
-  mux2 #(LINECHECKWIDTH) linecheckdinmux(LineEncodedCheck, LineCorrectionCheck, SelCorrectData, LineCheckWriteFinal);
 
   logic DataWe;
   assign DataWe = SelectedWriteWordEn | (SelCorrectData & SelectedWay);
