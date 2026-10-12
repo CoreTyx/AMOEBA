@@ -88,6 +88,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        ScrubInvalidate, // Invalidate the scrubber's selected way and set
   input  logic                        SetDirty,       // Set the dirty bit in the selected way and set
   input  logic                        SelVictim,      // Overrides HitWay Tag matching.  Selects selects the victim tag/data regardless of hit
+  input  logic                        SelVictimLive,  // SelVictim as decided in the tag cycle; affects SelectedWayDataQ only
   input  logic                        ClearDirty,     // Clear the dirty bit in the selected way and set
   input  logic                        FlushCache,       // [0] Use SelAdr, [1] SRAM reads/writes from FlushAdr
   input  logic                        VictimWay,      // LRU selected this way as victim to evict
@@ -170,7 +171,8 @@ module cacheway import cvw::*; #(parameter cvw_t P,
                             SelVictim ? 2'b10 :
                             FlushCache ? 2'b01 : 2'b00;
     mux4 #(1) selectedmux(HitWay, FlushWay, VictimWay, ScrubWay, SelectedWaySel, SelectedWay);
-    mux4 #(1) selectedlivemux(HitWayLive, FlushWay, VictimWay, ScrubWay, SelectedWaySel, SelectedWayLive);
+    mux4 #(1) selectedlivemux(HitWayLive, FlushWay, VictimWay, ScrubWay,
+      (SelVictimLive & ~SelScrub) ? 2'b10 : SelectedWaySel, SelectedWayLive);
     // Widened from the original mux3 to a mux4 with SelScrub as the new top-priority leg. Scrub
     // grants only ever occur when no demand access -- and hence no SelVictim/FlushCache -- is in
     // flight (see cache.sv's ScrubGrant definition), so priority among the other three legs is
@@ -178,7 +180,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   end else begin : flushlogic // no flush operation for read-only caches.
     assign SelecteDirty = VictimWay;
     mux3 #(1) selectedwaymux(HitWay, SelecteDirty, ScrubWay, {SelScrub, SelVictim}, SelectedWay);
-    mux3 #(1) selectedwaylivemux(HitWayLive, SelecteDirty, ScrubWay, {SelScrub, SelVictim}, SelectedWayLive);
+    mux3 #(1) selectedwaylivemux(HitWayLive, SelecteDirty, ScrubWay, {SelScrub, SelVictim | SelVictimLive}, SelectedWayLive);
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -266,7 +268,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   // Registered, one-cycle-delayed SelectedWay used only to gate the data array's AND-part-of-mux.
   // Breaks the tag-decode -> data-decode combinational path into two cycles.
   // Victim and flush selections also need refreshing when they bypass tag-hit selection.
-  flopenr #(1) selectedwaydatareg(clk, reset, TagDecodeCaptureEn | SelVictim | FlushCache,
+  flopenr #(1) selectedwaydatareg(clk, reset, TagDecodeCaptureEn | SelVictim | SelVictimLive | FlushCache,
     SelectedWayLive, SelectedWayDataQ);
 
   /////////////////////////////////////////////////////////////////////////////////////////////

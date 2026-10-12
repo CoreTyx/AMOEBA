@@ -65,6 +65,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   output logic       SelWriteback,      // Overrides cached tag check to select a specific way and set for writeback
   output logic       LRUWriteEn,        // Update the LRU state
   output logic       SelVictim,         // Overrides HitWay Tag matching.  Selects selects the victim tag/data regardless of hit
+  output logic       SelVictimLive,     // The same decision in the tag cycle, from the tags as they are read: it steers only which way's data is decoded next
   output logic       FlushAdrCntEn,     // Enable the counter for Flush Adr
   output logic       FlushWayCntEn,     // Enable the way counter during a flush
   output logic       FlushCntRst,       // Reset both flush counters
@@ -261,7 +262,11 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                       (CurrState == STATE_FLUSH & LineDirtyLive) | // This is wrong in a multicore snoop cache protocol.  Dirty must be cleared concurrently and atomically with writeback.  For single core cannot clear after writeback on bus ack and change flushadr.  Clears the wrong set.
   // Flush and eviction controls
                       CurrState == STATE_WRITEBACK & (CMOpM[1] | CMOpM[2]) & CacheBusAck;
-  assign SelVictim = (CurrState == STATE_TAG_DECODE & AnyMissLive & LineDirtyLive) |
+  // In the tag cycle the victim is chosen from the live tags, and only for the data read that
+  // follows (cacheway.sv's SelectedWayDataQ).  Keeping that out of SelVictim keeps the tag SRAM
+  // out of everything else SelVictim steers -- the tag driven onto the bus address, for one.
+  assign SelVictimLive = (CurrState == STATE_TAG_DECODE & AnyMissLive & LineDirtyLive);
+  assign SelVictim =
                   (CurrState == STATE_WRITEBACK & ((~CacheBusAck & ~(CMOpM[1] | CMOpM[2])) | (CacheBusAck & CMOpM[3]))) |
                   (CurrState == STATE_DATA_DECODE & ((AnyMiss & LineDirty) | (CMOZeroNoEviction & ~Hit))) |
                   (CurrState == STATE_WRITE_LINE);

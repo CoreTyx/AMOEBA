@@ -135,7 +135,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [LINELEN-1:0]            ReadDataLine;
   logic                          SelFetchBuffer;
   logic                          CacheEn;
-  logic                          SelVictim;
+  logic                          SelVictim, SelVictimLive;
   logic [LINELEN/8-1:0]          LineByteMask;
   logic [$clog2(LINELEN/8) - $clog2(MUXINTERVAL/8) - 1:0] WordOffsetAddr;
   genvar                         index;
@@ -192,7 +192,7 @@ module cache import cvw::*; #(parameter cvw_t P,
              .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
     .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask,
     .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
-    .FlushWay, .FlushCache, .SelVictim,
+    .FlushWay, .FlushCache, .SelVictim, .SelVictimLive,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
     .SelCorrectTag, .CorrectedTagIn, .SelCorrectData, .CorrectedLineIn(CorrectedLine),
     .TagDecodeCaptureEn, .SelectedWayDataQ,
@@ -372,7 +372,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .CacheBusRW, .CacheBusAck,
     .FlushStage, .InvalidateFlushStage, .CacheRW, .Stall,
     .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheCommitted,
-    .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim,
+    .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim, .SelVictimLive,
     .ClearDirty, .SetDirty, .SetValid, .ClearValid, .SelWriteback,
     .FlushAdrCntEn, .FlushWayCntEn, .FlushCntRst,
     .FlushAdrFlag, .FlushWayFlag, .FlushCache, .SelFetchBuffer,
