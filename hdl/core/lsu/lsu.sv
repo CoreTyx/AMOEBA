@@ -433,9 +433,13 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
 
   subwordread #(P) subwordread(.ReadDataWordMuxM(LittleEndianReadDataWordM), .PAdrM(PAdrM[3:0]), .BigEndianM,
     .FpLoadStoreM, .Funct3M(LSUFunct3M), .ReadDataM);
-  // A second copy for the AMO ALU's operand (see AmoDataMux).
-  subwordread #(P) amosubwordread(.ReadDataWordMuxM(LittleEndianAmoReadWordM), .PAdrM(PAdrM[3:0]), .BigEndianM,
-    .FpLoadStoreM, .Funct3M(LSUFunct3M), .ReadDataM(AmoReadDataM));
+  // A second copy for the AMO ALU's operand (see AmoDataMux).  Its sub-word select comes from
+  // the instruction's own address and size registers: an AMO is never a page-table access, and
+  // the low address bits are the page offset, which translation does not change.  PAdrM and
+  // LSUFunct3M carry the same values for an AMO but arrive through the page walker's and the
+  // MMU's address selection.
+  subwordread #(P) amosubwordread(.ReadDataWordMuxM(LittleEndianAmoReadWordM), .PAdrM(IEUAdrM[3:0]), .BigEndianM,
+    .FpLoadStoreM, .Funct3M(Funct3M), .ReadDataM(AmoReadDataM));
   subwordwrite #(P.LLEN) subwordwrite(.LSUFunct3M, .IMAFWriteDataM, .LittleEndianWriteDataM);
 
   // Compute byte masks
