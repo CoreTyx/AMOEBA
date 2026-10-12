@@ -135,6 +135,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic [P.LLEN-1:0]     ReadDataWordMuxM;                       // DTIM or D$ read data
   logic [P.LLEN-1:0]     LittleEndianReadDataWordM;              // Endian-swapped read data
   logic [P.LLEN-1:0]     ReadDataM;                              // Final read data
+  logic [MLEN-1:0]       DCacheAmoWordM;                         // D$ word an AMO operates on (registered; see cache.sv)
+  logic [P.LLEN-1:0]     AmoReadWordMuxM;                        // ReadDataWordMuxM for the AMO ALU
+  logic [P.LLEN-1:0]     LittleEndianAmoReadWordM;               // ... endian-swapped
+  logic [P.LLEN-1:0]     AmoReadDataM;                           // ReadDataM for the AMO ALU
 
   logic [P.XLEN-1:0]     IHWriteDataM;                           // IEU or HPTW write data
   logic [P.XLEN-1:0]     IMAWriteDataM;                          // IEU, HPTW, or AMO write data
@@ -344,7 +348,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         .CacheStall(DCacheStallM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
         .SecCount(DCacheSecCount),
         .CacheCommitted(DCacheCommittedM),
-        .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM),
+        .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM),
         .FetchBuffer, .CacheBusRW(CacheBusRW),
         .CacheBusAck(DCacheBusAck), .InvalidateCache(1'b0), .InvalidateFlushStage(LSUFlushW), .CMOpM(CacheCMOpM),
         .EccDedDirtyFault(DCacheEccDedDirtyFaultM), .EccDedDirtyFaultAdr(DCacheEccDedDirtyFaultAdrM));
@@ -362,6 +366,11 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       mux3 #(P.LLEN) UnCachedDataMux(.d0(DCacheReadDataWordSpillM), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
                                     .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
                                     .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(ReadDataWordMuxM));
+      // The same selection for the AMO ALU's operand, with the cache's registered AMO word in
+      // place of its read data.  AMOs are aligned, so there is no spill to undo.
+      mux3 #(P.LLEN) AmoDataMux(.d0(DCacheAmoWordM[P.LLEN-1:0]), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
+                                .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
+                                .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(AmoReadWordMuxM));
     end else begin : passthrough // No Cache, use simple ahbinterface instead of ahbcacheinterface
       logic [1:0] BusRW;                    // Non-DTIM memory access, ignore cacheableM
       logic [P.XLEN-1:0] FetchBuffer;
@@ -380,12 +389,16 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       else assign ReadDataWordMuxM[P.XLEN-1:0] = FetchBuffer[P.XLEN-1:0];
       assign LSUHBURST = 3'b0;
       assign {DCacheStallM, DCacheCommittedM, DCacheMiss, DCacheAccess, DCacheReadDataWordM} = '0;
+      assign DCacheAmoWordM = '0;
+      assign AmoReadWordMuxM = ReadDataWordMuxM; // no cache: the read data already comes from a register
       assign DCacheSecCount = '0;
     end
   end else begin : nobus // block: bus, only DTIM
     assign {LSUHWDATA, LSUHADDR, LSUHWRITE, LSUHSIZE, LSUHBURST, LSUHTRANS, LSUHWSTRB} = '0;
     assign DCacheReadDataWordM = '0;
+    assign DCacheAmoWordM = '0;
     assign ReadDataWordMuxM = DTIMReadDataWordM;
+    assign AmoReadWordMuxM = ReadDataWordMuxM;
     assign {LSUBusStallM, BusCommittedM} = '0;
     assign {DCacheMiss, DCacheAccess} = '0;
     assign DCacheSecCount = '0;
@@ -397,7 +410,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   if (P.ZAAMO_SUPPORTED | P.ZALRSC_SUPPORTED) begin : atomic
-    atomic #(P) atomic(.clk, .reset, .StallW, .ReadDataM(ReadDataM[P.XLEN-1:0]), .IHWriteDataM, .PAdrM,
+    atomic #(P) atomic(.clk, .reset, .StallW, .ReadDataM(AmoReadDataM[P.XLEN-1:0]), .IHWriteDataM, .PAdrM,
       .LSUFunct7M, .LSUFunct3M, .LSUAtomicM, .PreLSURWM, .LSUFlushW,
       .IMAWriteDataM, .SquashSCW, .LSURWM);
   end else begin : lrsc
@@ -420,6 +433,9 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
 
   subwordread #(P) subwordread(.ReadDataWordMuxM(LittleEndianReadDataWordM), .PAdrM(PAdrM[3:0]), .BigEndianM,
     .FpLoadStoreM, .Funct3M(LSUFunct3M), .ReadDataM);
+  // A second copy for the AMO ALU's operand (see AmoDataMux).
+  subwordread #(P) amosubwordread(.ReadDataWordMuxM(LittleEndianAmoReadWordM), .PAdrM(PAdrM[3:0]), .BigEndianM,
+    .FpLoadStoreM, .Funct3M(LSUFunct3M), .ReadDataM(AmoReadDataM));
   subwordwrite #(P.LLEN) subwordwrite(.LSUFunct3M, .IMAFWriteDataM, .LittleEndianWriteDataM);
 
   // Compute byte masks
@@ -440,8 +456,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   if (P.BIGENDIAN_SUPPORTED) begin : endian
     endianswap #(P.LLEN) storeswap(.BigEndianM, .a(LittleEndianWriteDataM), .y(LSUWriteDataM));
     endianswap #(P.LLEN) loadswap(.BigEndianM, .a(ReadDataWordMuxM), .y(LittleEndianReadDataWordM));
+    endianswap #(P.LLEN) amoloadswap(.BigEndianM, .a(AmoReadWordMuxM), .y(LittleEndianAmoReadWordM));
   end else begin
     assign LSUWriteDataM = LittleEndianWriteDataM;
     assign LittleEndianReadDataWordM = ReadDataWordMuxM;
+    assign LittleEndianAmoReadWordM = AmoReadWordMuxM;
   end
 endmodule

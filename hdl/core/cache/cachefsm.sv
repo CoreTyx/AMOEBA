@@ -115,6 +115,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   typedef enum logic [3:0]{STATE_ACCESS, // hit states
                            STATE_TAG_DECODE,    // ECC: tag decode result available this cycle
                            STATE_DATA_DECODE,   // ECC: data decode result available this cycle; branch point
+                           STATE_AMO_WRITE,     // an AMO hit writes its result here, the cycle after its operand was captured
                            STATE_ECC_WRITEBACK, // ECC: commit a correctable-error fix before completing
                            STATE_DED_TRAP,       // ECC: D$ dirty line, uncorrectable -- pulse the fault, hold state
                            // miss states
@@ -142,16 +143,22 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
 
   assign FlushFlag = FlushAdrFlag & FlushWayFlag;
 
-  logic AnyMissLive, UpdateHitWrite, WroteLineQ;
+  logic AnyMissLive, UpdateHitWrite, WroteLineQ, AmoHit;
   assign AnyMissLive = (CacheRW[0] | CacheRW[1]) & ~HitLive & ~InvalidateCache;
   // The line write a store, AMO or cbo.zero hit makes in DATA_DECODE.  It writes the corrected
   // line with the new data merged in, so if that line had a correctable error the write is also
   // the repair; ECC_WRITEBACK must then not write the pre-store line back over it.
-  assign UpdateHitWrite = (CurrState == STATE_DATA_DECODE) & (AnyUpdateHit | CMOZeroNoEviction) & ~TagDedErr & ~DataDedErr;
+  // An AMO reads and writes: CacheRW is 2'b11.  Its write data is computed from the word it
+  // read, so the write waits one state for that word to be in a register (HitWordQ); done in
+  // DATA_DECODE, the word went from the line register through the AMO ALU, the merge and the
+  // encoder into the arrays in a single cycle.
+  assign AmoHit = AnyUpdateHit & CacheRW[1];
+  assign UpdateHitWrite = ((CurrState == STATE_DATA_DECODE) & ((AnyUpdateHit & ~CacheRW[1]) | CMOZeroNoEviction) & ~TagDedErr & ~DataDedErr) |
+                          (CurrState == STATE_AMO_WRITE);
   assign StoreRepairsData = UpdateHitWrite & DataSecErr;
   always_ff @(posedge clk)
     if (reset | FlushStage) WroteLineQ <= 1'b0;
-    else if (CurrState == STATE_DATA_DECODE) WroteLineQ <= UpdateHitWrite;
+    else if ((CurrState == STATE_DATA_DECODE) | (CurrState == STATE_AMO_WRITE)) WroteLineQ <= UpdateHitWrite;
 
   // outputs for the performance counters. CacheAccess/CacheMiss now fire out of STATE_DATA_DECODE
   // (where the hit/miss decision is actually made) instead of STATE_ACCESS. STATE_ACCESS only ever
@@ -181,8 +188,9 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   always_ff @(posedge clk)
     if (reset | FlushStage) HitReturn <= 1'b0;
     else if (CurrState == STATE_DATA_DECODE)
-      HitReturn <= AnyHit & ((NextState == STATE_ADDRESS_SETUP) | (NextState == STATE_ECC_WRITEBACK));
+      HitReturn <= AnyHit & ((NextState == STATE_ADDRESS_SETUP) | (NextState == STATE_ECC_WRITEBACK) | (NextState == STATE_AMO_WRITE));
     else if (CurrState == STATE_ECC_WRITEBACK) HitReturn <= HitReturn;
+    else if (CurrState == STATE_AMO_WRITE) HitReturn <= HitReturn;
     else if (CurrState == STATE_ADDRESS_SETUP & Stall) HitReturn <= HitReturn;
     else HitReturn <= 1'b0;
   assign LatchHitWord = (CurrState == STATE_DATA_DECODE);
@@ -201,11 +209,14 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                                                                                 NextState = STATE_FETCH;      // uncorrectable, but safe to discard: refetch. (TagDedErr never coincides with Hit -- see cacheway.sv -- so this always proceeds as a normal compulsory miss.)
                              else if(DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE)
                                                                                 NextState = STATE_DED_TRAP;   // uncorrectable AND the only copy of modified data -- cannot discard
+                             else if(AmoHit)                                   NextState = STATE_AMO_WRITE;     // the word just read is the AMO's operand; it is in HitWordQ next cycle
                              else if((TagSecErr | DataSecErr) & Hit)           NextState = STATE_ECC_WRITEBACK; // correctable: fix durably before completing
                              else if(AnyMiss & (READ_ONLY_CACHE | ~EvictDirty)) NextState = STATE_FETCH;    // exclusion-tag: icache FETCHStatement (an uncorrectable dirty victim is dropped, not written back)
                              else if((AnyMiss | CMOWriteback) & ~READ_ONLY_CACHE) NextState = STATE_WRITEBACK; // exclusion-tag: icache WRITEBACKStatement
                              else if((|CMOpM) & ~CMOWriteback)               NextState = STATE_ADDRESS_SETUP; // any CMO without dirty writeback: stall and re-read SRAM next cycle
                              else                                              NextState = STATE_ADDRESS_SETUP; // ordinary hit: release CacheStall for one cycle (like every other completion path) before re-checking CacheRW in STATE_ACCESS, so a caller holding CacheRW constant until it sees CacheStall drop doesn't get misread as a brand-new request
+      STATE_AMO_WRITE:       if((TagSecErr | DataSecErr) & Hit)                NextState = STATE_ECC_WRITEBACK; // as from DATA_DECODE
+                             else                                              NextState = STATE_ADDRESS_SETUP;
       STATE_ECC_WRITEBACK:                                                    NextState = STATE_ADDRESS_SETUP; // structural hazard on the SRAM write, same as STATE_WRITE_LINE
       STATE_DED_TRAP:                                                         NextState = STATE_ADDRESS_SETUP; // one-cycle pulse, then resume (re-reads SRAM; the fault is latched externally)
       STATE_FETCH:           if(CacheBusAck)                                   NextState = STATE_WRITE_LINE;
@@ -236,6 +247,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign CacheStall = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM) | (FlushCache & ~READ_ONLY_CACHE))) | // exclusion-tag: icache StallStates -- a real request (or a flush) stalls from the moment it's issued
                       (CurrState == STATE_TAG_DECODE) |
                       (CurrState == STATE_DATA_DECODE) |
+                      (CurrState == STATE_AMO_WRITE) |
                       (CurrState == STATE_ECC_WRITEBACK) |
                       (CurrState == STATE_DED_TRAP) |
                       (CurrState == STATE_FETCH) |
@@ -300,6 +312,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign SelAdrData = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM))) | // exclusion-tag: icache SelAdrCauses // changes if store delay hazard removed
                   (CurrState == STATE_TAG_DECODE) |
                   (CurrState == STATE_DATA_DECODE) |
+                  (CurrState == STATE_AMO_WRITE) |
                   (CurrState == STATE_ECC_WRITEBACK) |
                   (CurrState == STATE_DED_TRAP) |
                   (CurrState == STATE_FETCH) |
@@ -310,6 +323,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign SelAdrTag = (CurrState == STATE_ACCESS & (CacheRW[0] | CacheRW[1] | (|CMOpM))) | // exclusion-tag: icache SelAdrTag // changes if store delay hazard removed
                   (CurrState == STATE_TAG_DECODE) |
                   (CurrState == STATE_DATA_DECODE) |
+                  (CurrState == STATE_AMO_WRITE) |
                   (CurrState == STATE_ECC_WRITEBACK) |
                   (CurrState == STATE_DED_TRAP) |
                   (CurrState == STATE_FETCH) |

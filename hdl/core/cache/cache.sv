@@ -50,6 +50,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   output logic                   CacheCommitted,    // Cache has started bus operation that shouldn't be interrupted
   output logic                   CacheStall,        // Cache stalls pipeline during multicycle operation
   output logic [WORDLEN-1:0]     ReadDataWord,      // Word read from cache (goes to CPU and bus)
+  output logic [WORDLEN-1:0]     AmoWord,           // The word an AMO operates on, from a register: the hit word, or the fetched one on a miss
   // to performance counters to cpu
   output logic                   CacheMiss,         // Cache miss
   output logic                   CacheAccess,       // Cache access
@@ -284,6 +285,15 @@ module cache import cvw::*; #(parameter cvw_t P,
   // a store/AMO hit would return the post-write word, and AMOs would hand back their own result.
   flopen #(WORDLEN) HitWordReg(clk, LatchHitWord, ReadDataWordLine, HitWordQ);
   mux2 #(WORDLEN) HitWordMux(ReadDataWordLine, HitWordQ, SelHitWord, ReadDataWord);
+
+  // The AMO's operand.  An AMO hit writes in STATE_AMO_WRITE, when HitWordQ holds the word it
+  // read; an AMO miss writes with the refill (STATE_WRITE_LINE), from the fetch buffer.  Either
+  // way the operand starts at a register and does not come through ReadDataWord, so the AMO
+  // ALU is not on a path from the arrays or from the bus-beat word select.
+  logic [WORDLEN-1:0] FetchBufferWord;
+  subcachelineread #(LINELEN, WORDLEN, MUXINTERVAL) fetchbufferwordread(
+    .PAdr(PAdr[$clog2(LINELEN/8) - 1 : $clog2(MUXINTERVAL/8)]), .ReadDataLine(FetchBuffer), .ReadDataWord(FetchBufferWord));
+  mux2 #(WORDLEN) AmoWordMux(HitWordQ, FetchBufferWord, SelFetchBuffer, AmoWord);
 
   // Bus address for fetch, writeback, or flush writeback
   mux3 #(PA_BITS) CacheBusAdrMux(.d0({PAdr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
