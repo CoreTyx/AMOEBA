@@ -405,9 +405,15 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
                                     .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(ReadDataWordMuxM));
       // The same selection for the AMO ALU's operand, with the cache's registered AMO word in
       // place of its read data.  AMOs are aligned, so there is no spill to undo.
+      // Which memory the operand comes from is known from the instruction's first cycle in
+      // Memory, and an AMO's write is several cycles after that, so the select is registered:
+      // it comes out of the MMU's PMA check, late, and would otherwise sit in front of the AMO
+      // ALU on the way to the store data.
+      logic       AmoSelDTIMQ, AmoUncachedQ;
+      flop #(2) amoselreg(clk, {SelDTIM, ~(CacheableOrFlushCacheM)}, {AmoSelDTIMQ, AmoUncachedQ});
       mux3 #(P.LLEN) AmoDataMux(.d0(DCacheAmoWordM[P.LLEN-1:0]), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
                                 .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
-                                .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(AmoReadWordMuxM));
+                                .s({AmoSelDTIMQ, AmoUncachedQ}), .y(AmoReadWordMuxM));
     end else begin : passthrough // No Cache, use simple ahbinterface instead of ahbcacheinterface
       logic [1:0] BusRW;                    // Non-DTIM memory access, ignore cacheableM
       logic [P.XLEN-1:0] FetchBuffer;
