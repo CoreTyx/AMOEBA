@@ -562,6 +562,16 @@ module ft_recompute_fault_tb #(
     end
   endtask
 
+  // The multiplier wrapper evaluates a product over two clock edges (SUM, then
+  // COMPARE), and after a mismatch takes one more to reload its partial products
+  // before evaluating again.
+  task automatic mul_eval;
+    repeat (2) clock_edge();
+  endtask
+  task automatic mul_retry;
+    repeat (3) clock_edge();
+  endtask
+
   task automatic mul_transient(input logic [1:0] replica_target, input string test_id);
     begin
       reset_case();
@@ -569,12 +579,11 @@ module ft_recompute_fault_tb #(
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
       // First edge fills the M-stage partial-product registers.  Keep the
-      // fault through the next edge so the controller actually enters RETRY.
-      @(posedge clk);
-      #1;
-      @(posedge clk);
-      #1;
+      // fault through the evaluation so the controller actually enters RETRY.
+      clock_edge();
+      mul_eval();
       if (THRESHOLD == 1) begin
+        mul_retry();  // the evaluation that ends in the unresolved state is released
         check(mul_unresolved && !mul_stall && mul_prod == '0, {
               test_id, ": threshold-one sampled transient traps without diagnosis"});
         $display("PASS %s threshold=1 (no MUL isolation relation)", test_id);
@@ -586,8 +595,7 @@ module ft_recompute_fault_tb #(
                mul_stall);
       @(negedge clk);
       mul_fi_enable = 1'b0;
-      @(posedge clk);
-      #1;
+      mul_retry();
       check(!mul_stall && !mul_unresolved && mul_prod == (2*N)'(143), {test_id, ": replay restores product"});
       $display("  recovered: fault disabled; product=%0h stall=%b unresolved=%b", mul_prod, mul_stall, mul_unresolved);
       $display("PASS %s", test_id);
@@ -602,15 +610,14 @@ module ft_recompute_fault_tb #(
       mul_bit = 4;
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
-      @(posedge clk);
-      #1;
-      @(posedge clk);
-      #1;
-      check(mul_stall || (THRESHOLD == 1 && mul_unresolved), {test_id, ": initial mismatch contained"});
+      clock_edge();
+      mul_eval();
+      check(mul_stall && mul_prod == '0, {test_id, ": initial mismatch contained"});
       $display("  injected: primary raw/product=%0h/%0h shadow raw/product=%0h/%0h; arch product=%0h stall=%b",
                mul_dut.primary_prod_raw, mul_dut.primary_prod, mul_dut.shadow_prod_raw, mul_dut.shadow_prod, mul_prod,
                mul_stall);
-      repeat (THRESHOLD - 1) clock_edge();
+      repeat (THRESHOLD - 1) mul_retry();
+      mul_retry();  // the evaluation that ends in the unresolved state is released
       check(mul_unresolved && !mul_stall && mul_prod == '0, {test_id, ": persistent fault traps"});
       check(!mul_pe_primary && !mul_pe_shadow, {test_id, ": no unsupported isolation"});
       $display("  outcome: product=%0h unresolved=%b (MUL has no isolation relation)", mul_prod, mul_unresolved);
