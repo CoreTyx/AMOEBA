@@ -131,6 +131,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          LatchHitWord, SelHitWord;
   logic [WORDLEN-1:0]            ReadDataWordLine, HitWordQ;
   logic [SETLEN-1:0]             FlushAdr;
+  logic [SETLEN-1:0]             FlushAdrCurr;      // the set being flushed (FlushAdr looks one ahead for the next read)
   logic                          FlushAdrCntEn, FlushCntRst;
   logic                          FlushAdrFlag, FlushWayFlag;
   logic [NUMWAYS-1:0]            FlushWay, NextFlushWay;
@@ -298,7 +299,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // Bus address for fetch, writeback, or flush writeback
   mux3 #(PA_BITS) CacheBusAdrMux(.d0({PAdr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
     .d1({Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
-    .d2({Tag, FlushAdr, {OFFSETLEN{1'b0}}}),
+    .d2({Tag, FlushAdrCurr, {OFFSETLEN{1'b0}}}),
     .s({FlushCache, SelWriteback}), .y(CacheBusAdr));
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -364,6 +365,10 @@ module cache import cvw::*; #(parameter cvw_t P,
     mux2    #(SETLEN) FlushAdrMux(NextFlushAdr, FlushAdrP1, FlushAdrCntEn, FlushAdr);
     assign FlushAdrP1 = NextFlushAdr + 1'b1;
     assign FlushAdrFlag = (NextFlushAdr == FLUSHADRTHRESHOLD[SETLEN-1:0]);
+    // The line being written back is in the set the counter holds.  FlushAdr moves to the
+    // next set in the cycle the counter is told to advance, so that the arrays read it early;
+    // that decision comes from the tags as they are read, and has no business on the bus address.
+    assign FlushAdrCurr = NextFlushAdr;
 
     // Flush way
     flopenl #(NUMWAYS) FlushWayReg(clk, FlushWayCntEn, ResetOrFlushCntRst, {{NUMWAYS-1{1'b0}}, 1'b1}, NextFlushWay, FlushWay);
@@ -376,6 +381,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     assign FlushWayFlag = 1'b0;
     assign FlushAdrFlag = 1'b0;
     assign FlushAdr = '0;
+    assign FlushAdrCurr = '0;
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -422,7 +428,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // For a line dropped on eviction/flush, report that line's own address (the selected way's tag is
   // the victim's or flush way's), not the access that caused the eviction.
   logic [PA_BITS-1:0]            LostLineAdr;
-  assign LostLineAdr = FlushCache ? {Tag, FlushAdr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
+  assign LostLineAdr = FlushCache ? {Tag, FlushAdrCurr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
   assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : EccDedLostLine ? LostLineAdr : PAdr;
 
   always_ff @(posedge clk)
