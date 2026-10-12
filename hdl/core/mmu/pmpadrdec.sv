@@ -61,9 +61,15 @@ module pmpadrdec import cvw::*;  #(parameter cvw_t P) (
 
   // Naturally aligned regions
   logic [P.PA_BITS-1:0] NAMask, NABase;
+  logic [P.PA_BITS-3:0] LowOnes;  // LowOnes[i]: every bit of PMPAdr below bit i is one
+
+  // The NAPOT mask covers the trailing ones of PMPAdr and the zero above them,
+  // which is (PMPAdr + 1) ^ PMPAdr.  It is computed as a prefix AND instead: the
+  // adder was a ripple the length of the address, in front of every PMP check.
+  lowones #(P.PA_BITS-2) lowones(.a(PMPAdr), .y(LowOnes));
 
   assign NAMask[1:0] = {2'b11};
-  assign NAMask[P.PA_BITS-1:2] = (PMPAdr + {{(P.PA_BITS-3){1'b0}}, (AdrMode == NAPOT)}) ^ PMPAdr;
+  assign NAMask[P.PA_BITS-1:2] = LowOnes & {(P.PA_BITS-2){AdrMode == NAPOT}};
   // form a mask where the bottom k bits are 1, corresponding to a size of 2^k bytes for this memory region.
   // This assumes we're using at least an NA4 region, but works for any size NAPOT region.
   assign NABase = {(PMPAdr & ~NAMask[P.PA_BITS-1:2]), 2'b00}; // base physical address of the pmp region
