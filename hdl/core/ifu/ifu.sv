@@ -142,7 +142,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic                        CacheableFQ;                              // CacheableF as of last cycle
   logic                        UncachedFQ;                               // "fetch this address over the bus" as of last cycle
   logic                        HPTWFaultF;                               // the page walker ended this fetch's walk with a fault
-  logic                        InstrAccessFaultRawF, InstrPageFaultRawF; // the MMU's fetch faults this cycle
+  logic                        InstrPageFaultRawF;                       // the MMU's fetch page fault this cycle
   logic                        GatedStallD;                              // StallD gated by selected next spill
   // branch predictor signal
   logic                        BusCommittedF;                            // Bus memory operation in flight, delay interrupts
@@ -211,7 +211,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
          .PhysicalAddress(PCPF),
          .TLBMiss(ITLBMissF),
          .Cacheable(CacheableF), .Idempotent(), .SelTIM(SelIROM),
-         .InstrAccessFaultF(InstrAccessFaultRawF), .LoadAccessFaultM(), .StoreAmoAccessFaultM(),
+         .InstrAccessFaultF, .LoadAccessFaultM(), .StoreAmoAccessFaultM(),
          .InstrPageFaultF(InstrPageFaultRawF), .LoadPageFaultM(), .StoreAmoPageFaultM(),
          .LoadMisalignedFaultM(), .StoreAmoMisalignedFaultM(),
          .UpdateDA(InstrUpdateAF), .CMOpM(4'b0),
@@ -220,7 +220,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
      assign ITLBMissOrUpdateAF = ITLBMissF | (P.SVADU_SUPPORTED & InstrUpdateAF);
   end else begin
-    assign {ITLBMissF, InstrAccessFaultRawF, InstrPageFaultRawF, InstrUpdateAF} = '0;
+    assign {ITLBMissF, InstrAccessFaultF, InstrPageFaultRawF, InstrUpdateAF} = '0;
     assign PCPF = PCFExt[P.PA_BITS-1:0];
     assign CacheableF = 1'b1;
     assign SelIROM = '0;
@@ -349,8 +349,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     StallF & ~FlushD & SpillStateHoldsF & ~ITLBMissOrUpdateAF & ~InvalidateICacheM, FetchCheckedQ);
   flop #(2) fetchwherereg(clk, {CacheableF, ~ITLBMissF & ~CacheableF & ~SelIROM}, {CacheableFQ, UncachedFQ});
   // The faults are captured into Decode when the fetch completes, which is at least a cycle
-  // after its check cycle, so Decode is given last cycle's answer.
-  flopr #(2) fetchfaultreg(clk, reset, {InstrAccessFaultRawF, InstrPageFaultRawF}, {InstrAccessFaultF, InstrPageFaultF});
+  // after its check cycle, so Decode is given last cycle's answer.  The page fault is
+  // registered here; the access fault already comes out of the MMU a cycle late (mmu.sv).
+  flopr #(1) fetchfaultreg(clk, reset, InstrPageFaultRawF, InstrPageFaultF);
 
   // "The fetch is not finished": in the middle of a cache or bus access, or still in its check
   // cycle.  (ICacheStallF also covers the cycle a request is first seen, from the live request.)

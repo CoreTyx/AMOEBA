@@ -54,7 +54,8 @@ set TIMING_PROBES [subst -nocommands {
    pc_to_pc            {probe_ck $core/ifu/pcreg/*}           {}                                   {probe_d $core/ifu/pcreg/*}
    "MMU checks into their registers"
    fetch_fault         {}                                     {}                                   {probe_d $core/ifu/fetchfaultreg/*}
-   fetch_fault_from_pc {probe_ck $core/ifu/pcreg/*}           {}                                   {probe_d $core/ifu/fetchfaultreg/*}
+   fetch_pmp_match     {}                                     {}                                   {probe_d $core/ifu/immu.immu/pmp.pmpchecker/matchreg.matchreg/*}
+   fetch_pmp_fault     {probe_ck $core/ifu/immu.immu/pmp.pmpchecker/matchreg.matchreg/*} {}        {}
    data_fault          {}                                     {}                                   {probe_d $core/lsu/ownfaultreg/*}
    "Stall network and privileged"
    stall_from_hazard   {}                                     {probe_pin $core/hzu/StallW}         {}
