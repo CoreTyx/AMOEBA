@@ -160,6 +160,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]     WriteDataZM;
   logic                  LSULoadPageFaultM, LSUStoreAmoPageFaultM;
   logic                  MemCheckedQ;                            // the instruction in Memory has had a full cycle for its access checks
+  logic                  DCacheBusyM;                            // D$ in the middle of an access (DCacheStallM without the cycle a request is first seen)
   logic                  MemCheckStall;                          // ... it has not: hold it there
   logic                  LSULoadAccessFaultQ, LSUStoreAmoAccessFaultQ; // the MMU's faults as of the last cycle
   logic                  LSULoadPageFaultQ, LSUStoreAmoPageFaultQ;
@@ -244,7 +245,11 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   assign GatedStallW = StallW & ~SelHPTW;
   assign DCacheBusStallM = DCacheStallM | LSUBusStallM;
   assign CacheBusHPWTStall = DCacheBusStallM | HPTWStall;
-  assign LSUStallM = CacheBusHPWTStall | SpillStallM | MemCheckStall;
+  // The cycle a memory request first reaches the cache or the bus is covered by MemCheckStall
+  // (the instruction's own access) or HPTWStall (a page walk's), so the pipeline's stall uses the
+  // cache's busy state and not its full stall output: whether an address is cacheable comes
+  // late out of the MMU, and that cycle is the only one in which the stall depends on it.
+  assign LSUStallM = HPTWStall | DCacheBusyM | LSUBusStallM | SpillStallM | MemCheckStall;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Access check cycle
@@ -266,7 +271,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // registers (hptw.sv).
   /////////////////////////////////////////////////////////////////////////////////////////////
   flopr #(1) memcheckedreg(clk, reset, StallM & ~SelHPTW, MemCheckedQ);
-  assign MemCheckStall = ((|MemRWM) | (|CMOpM)) & ~MemCheckedQ;
+  assign MemCheckStall = ((|MemRWM) | (|CMOpM) | FlushDCacheM) & ~MemCheckedQ;
   flopr #(4) ownfaultreg(clk, reset,
     {LSULoadAccessFaultM, LSUStoreAmoAccessFaultM, LSULoadPageFaultM, LSUStoreAmoPageFaultM},
     {LSULoadAccessFaultQ, LSUStoreAmoAccessFaultQ, LSULoadPageFaultQ, LSUStoreAmoPageFaultQ});
@@ -368,8 +373,13 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         assign CacheCMOpM = '0;
         assign BusAtomic = 1'b0;
       end
-      // An uncached access of the instruction's own waits for the access check cycle.
-      assign BusRW = (~CacheableM & ~SelDTIM & (MemCheckedQ | SelHPTW)) ? LSURWM : '0;
+      // An uncached access of the instruction's own waits for the access check cycle.  By then
+      // (and by the read state of a page-walk step, whose address is presented a state earlier)
+      // where the address lives is known from last cycle, so the bus request uses a registered
+      // copy and does not wait for the MMU.
+      logic UncachedQ;
+      flop #(1) uncachedreg(clk, ~CacheableM & ~SelDTIM, UncachedQ);
+      assign BusRW = (UncachedQ & (MemCheckedQ | SelHPTW)) ? LSURWM : '0;
       assign CacheableOrFlushCacheM = CacheableM | FlushDCacheM;
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW
@@ -382,7 +392,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         .FlushCache(FlushDCache), .NextSet(IEUAdrExtE[11:0]), .PAdr(PAdrM),
         .ByteMask(ByteMaskSpillM), .BeatCount(BeatCount[AHBWLOGBWPL-1:AHBWLOGBWPL-LLENLOGBWPL]),
         .WriteData(LSUWriteDataSpillM), .SelHPTW,
-        .CacheStall(DCacheStallM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
+        .CacheStall(DCacheStallM), .CacheBusy(DCacheBusyM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
         .SecCount(DCacheSecCount),
         .CacheCommitted(DCacheCommittedM),
         .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM),
@@ -432,6 +442,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       else assign ReadDataWordMuxM[P.XLEN-1:0] = FetchBuffer[P.XLEN-1:0];
       assign LSUHBURST = 3'b0;
       assign {DCacheStallM, DCacheCommittedM, DCacheMiss, DCacheAccess, DCacheReadDataWordM} = '0;
+      assign DCacheBusyM = 1'b0;
       assign DCacheAmoWordM = '0;
       assign AmoReadWordMuxM = ReadDataWordMuxM; // no cache: the read data already comes from a register
       assign DCacheSecCount = '0;
@@ -446,6 +457,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign {DCacheMiss, DCacheAccess} = '0;
     assign DCacheSecCount = '0;
     assign {DCacheStallM, DCacheCommittedM} = '0;
+    assign DCacheBusyM = 1'b0;
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////

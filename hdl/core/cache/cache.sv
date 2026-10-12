@@ -49,6 +49,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   input  logic [WORDLEN-1:0]     WriteData,    // Data to write to cache (D$ only)
   output logic                   CacheCommitted,    // Cache has started bus operation that shouldn't be interrupted
   output logic                   CacheStall,        // Cache stalls pipeline during multicycle operation
+  output logic                   CacheBusy,         // CacheStall without the cycle a request is first seen (see cachefsm.sv)
   output logic [WORDLEN-1:0]     ReadDataWord,      // Word read from cache (goes to CPU and bus)
   output logic [WORDLEN-1:0]     AmoWord,           // The word an AMO operates on, from a register: the hit word, or the fetched one on a miss
   // to performance counters to cpu
@@ -114,6 +115,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            HitWayLive, DirtyWayLive;
   logic                          HitLive, LineDirtyLive;
   logic                          StoreRepairsData;
+  logic                          CacheBusyFsm;
   logic [LINELEN-1:0]            LineEncodedData, LineCorrectionData, LineWriteFinal;
   logic [LINECHECKWIDTH-1:0]     LineEncodedCheck, LineCorrectionCheck, LineCheckWriteFinal;
   logic [NUMWAYS-1:0]            HitWay, ValidWay, ValidMismatchWay;
@@ -398,7 +400,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .CacheBusRW, .CacheBusAck,
     .FlushStage, .InvalidateFlushStage, .CacheRW, .Stall,
-    .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheCommitted,
+    .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheBusy(CacheBusyFsm), .CacheCommitted,
     .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim, .SelVictimLive,
     .ClearDirty, .SetDirty, .SetValid, .ClearValid, .SelWriteback,
     .FlushAdrCntEn, .FlushWayCntEn, .FlushCntRst,
@@ -412,6 +414,10 @@ module cache import cvw::*; #(parameter cvw_t P,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
+  // While the scrubber has the arrays a demand request waits in ACCESS, so the cache is busy
+  // then too.  (ScrubBusy is scrubber state; its grant cycle needs no cover, because a grant
+  // requires that there be no request.)
+  assign CacheBusy = CacheBusyFsm | ScrubBusy;
   assign ScrubFaultAdr = {Tag, ScrubSet, {OFFSETLEN{1'b0}}};
   // For a line dropped on eviction/flush, report that line's own address (the selected way's tag is
   // the victim's or flush way's), not the access that caused the eviction.
