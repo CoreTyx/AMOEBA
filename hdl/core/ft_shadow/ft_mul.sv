@@ -51,7 +51,10 @@ module ft_mul import cvw::*; #(
   //   DONE     the captured product is presented and the stall released.
   typedef enum logic [2:0] {SUM, COMPARE, REPLAY, LOAD, DONE} phase_t;
   phase_t phase;
-  logic check, retry, replay_sel, e_ready;
+  logic check, retry, replay_sel;
+  logic [P.XLEN-1:0] e_a_q, e_b_q;                   // Execute's operands and multiply type, registered
+  logic [2:0]        e_funct3_q;
+  logic [1:0]        e_cnt;                          // full cycles the multipliers have had on this instruction (saturates at 2)
 
   // Save the transaction that produced the current partial product. A retry
   // must replay these exact operands while the architectural stages are held.
@@ -97,16 +100,25 @@ module ft_mul import cvw::*; #(
   assign replay_sel  = (phase == REPLAY) | (phase == LOAD);
   assign replay_load = (phase == LOAD);
   assign internal_stall_m = StallM & ~replay_load;
-  assign mul_a = replay_sel ? saved_a : ForwardedSrcAE;
-  assign mul_b = replay_sel ? saved_b : ForwardedSrcBE;
-  assign mul_funct3 = replay_sel ? saved_funct3 : Funct3E;
-  // The same two cycles for a multiply arriving in Execute: e_ready says the
-  // multipliers were looking at this instruction's operands, clean and
-  // unchanged, for the whole of the last cycle -- that is, the pipeline did not
-  // move at the last edge and neither a replay nor an ECC stall was in the way.
+  // A multiply arriving in Execute takes three cycles to reach the
+  // partial-product registers: its operands are registered here (so the
+  // multipliers start at a register and not behind the forwarding muxes), the
+  // half products are registered in mul.sv, and their sum loads when the
+  // pipeline advances.  e_cnt counts the cycles the chain has had since the
+  // instruction arrived; an ECC stall dirties the operand register and starts
+  // the count again, and a replay borrows the multipliers, costing one cycle.
+  always_ff @(posedge clk) begin
+    e_a_q      <= ForwardedSrcAE;
+    e_b_q      <= ForwardedSrcBE;
+    e_funct3_q <= Funct3E;
+  end
+  assign mul_a = replay_sel ? saved_a : e_a_q;
+  assign mul_b = replay_sel ? saved_b : e_b_q;
+  assign mul_funct3 = replay_sel ? saved_funct3 : e_funct3_q;
   always_ff @(posedge clk)
-    if (reset) e_ready <= 1'b0;
-    else       e_ready <= StallM & ~replay_sel & ~HoldE;
+    if (reset | ~StallM | HoldE) e_cnt <= 2'd0;
+    else if (replay_sel)         e_cnt <= 2'd1;
+    else if (e_cnt != 2'd2)      e_cnt <= e_cnt + 2'd1;
   // Permit the internal PP registers to load the saved retry transaction even
   // when the architectural hazard unit is asserting StallM.
   mul #(P.XLEN) primary(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
@@ -135,8 +147,8 @@ module ft_mul import cvw::*; #(
   /* verilator lint_on PINCONNECTEMPTY */
 
   // The pipeline waits for a multiply's evaluation in Memory to finish, and for
-  // the multipliers to have had their full cycle with a multiply in Execute.
-  assign stall_req = (mul_active_m & (phase != DONE)) | (MulActiveE & ~e_ready);
+  // the multipliers to have had their cycles with a multiply in Execute.
+  assign stall_req = (mul_active_m & (phase != DONE)) | (MulActiveE & (e_cnt != 2'd2));
   // The product reads as zero until the evaluation is DONE, and stays zero if it
   // ended unresolved.  Both conditions, and the product itself, are registers.
   assign ProdM = ((phase != DONE) | unresolved) ? '0 : (use_shadow ? shadow_q : primary_q);

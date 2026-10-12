@@ -580,7 +580,7 @@ module ft_recompute_fault_tb #(
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
       // First edge fills the M-stage partial-product registers.  Keep the
       // fault through the evaluation so the controller actually enters RETRY.
-      repeat (2) clock_edge();  // the multipliers' two Execute cycles
+      repeat (3) clock_edge();  // operand register, half products, partial-product registers
       mul_eval();
       if (THRESHOLD == 1) begin
         mul_retry();  // the evaluation that ends in the unresolved state is released
@@ -610,7 +610,7 @@ module ft_recompute_fault_tb #(
       mul_bit = 4;
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
-      repeat (2) clock_edge();  // the multipliers' two Execute cycles
+      repeat (3) clock_edge();  // operand register, half products, partial-product registers
       mul_eval();
       check(mul_stall && mul_prod == '0, {test_id, ": initial mismatch contained"});
       $display("  injected: primary raw/product=%0h/%0h shadow raw/product=%0h/%0h; arch product=%0h stall=%b",

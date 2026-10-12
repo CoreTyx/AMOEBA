@@ -62,12 +62,12 @@ module mul #(parameter XLEN) (
 
   assign Aprime = {1'b0, ForwardedSrcAE[XLEN-2:0]};
   assign Bprime = {1'b0, ForwardedSrcBE[XLEN-2:0]};
-  // Aprime * Bprime takes two Execute cycles.  In the first, the four products of
-  // the operands' halves go into registers; from the second on, PP1E is their sum.
-  // One full-width multiply did not fit a 2.5 ns cycle after the forwarding muxes.
+  // Aprime * Bprime takes two cycles.  In the first, the four products of the
+  // operands' halves go into registers; from the second on, PP1E is their sum.
+  // One full-width multiply did not fit a 2.5 ns cycle.
   // The registers run freely, so the operands must have been presented, unchanged,
   // for a full cycle before the partial-product registers below load PP1E.  ft_mul
-  // holds the pipeline until that is so.
+  // registers the operands and holds the pipeline until that is so.
   localparam HALF = XLEN/2;
   logic [XLEN-1:0]    LLE, LHE, HLE, HHE;                   // products of the halves
   logic [XLEN-1:0]    LLQ, LHQ, HLQ, HHQ;                   // ... registered
