@@ -15,6 +15,20 @@
 // for diagnosis, and isolates a uniquely identified failing replica. Holds
 // or masks public results during recovery/unresolved faults; private widened
 // results and first-mismatch snapshots terminate inside this wrapper.
+//
+// Timing: an evaluation takes three cycles, and nothing in it crosses from
+// the ALU to the rest of the core inside one cycle.
+//   COMPUTE  both replicas run; their channels are captured into registers.
+//   COMPARE  the registered channels are compared and the controllers act.
+//   DONE     the registered result of the selected replica is presented and
+//            the stall released.  A failed evaluation returns to COMPUTE.
+// stall_req is high from the cycle an instruction arrives until DONE, and
+// comes from the phase register alone, so the hazard unit sees it early.
+// The results are registers too, so the paths out of Execute (the next
+// pipeline register, the data cache address, the branch decision) start
+// here and not at the operands.  Every valid instruction therefore spends
+// at least three cycles in Execute; the pipeline is held while it does, and
+// an instruction fetch takes longer than that, so the cycles overlap.
 ///////////////////////////////////////////
 
 module ft_alu import cvw::*; #(
@@ -22,6 +36,8 @@ module ft_alu import cvw::*; #(
   parameter int TE_THRESHOLD = 3
 ) (
   input  logic              clk, reset, flush, valid, advance,
+  input  logic              load,                     // Execute takes its next instruction at this clock edge
+  input  logic              hold,                     // the operands cannot be used this cycle: do not capture from them
   input  logic [P.XLEN-1:0] A, B,
   // Branches need PC+immediate and register comparison simultaneously.
   input  logic [P.XLEN-1:0] cmp_a, cmp_b,
@@ -44,6 +60,14 @@ module ft_alu import cvw::*; #(
   logic [P.XLEN-1:0] result_raw[2], result_pre_fi[2], result_live[2];
   logic [P.XLEN:0] arith_raw[2], arith_live[2], cmp_raw[2], cmp_live[2];
   logic [P.XLEN+1:0] shift_raw[2], shift_live[2];
+  // The channels as captured in COMPUTE.  Everything downstream -- the compare,
+  // the diagnosis, the snapshots and the outputs -- reads these.
+  logic [P.XLEN-1:0] result_q[2];
+  logic [P.XLEN:0] arith_q[2], cmp_q[2];
+  logic [P.XLEN+1:0] shift_q[2];
+  typedef enum logic [1:0] {COMPUTE, COMPARE, DONE} phase_t;
+  phase_t phase;
+  logic check, retry, accepted;
   logic [P.XLEN-1:0] normal_result[2];
   logic [P.XLEN:0] normal_arith[2], normal_cmp[2];
   logic [P.XLEN+1:0] normal_shift[2];
@@ -64,7 +88,7 @@ module ft_alu import cvw::*; #(
       ((BSelect == 4'b0000) | ((BSelect == 4'b0001) & UW64));
   // A shift relation gives no evidence about a faulty independent address
   // channel. Such disagreement must trap, even if the shift itself is healthy.
-  assign alu_supported = arithmetic_operation | (shift_operation & (arith_live[0] == arith_live[1]));
+  assign alu_supported = arithmetic_operation | (shift_operation & (arith_q[0] == arith_q[1]));
   assign arith_recompute = alu_recompute & arithmetic_operation;
   assign shift_recompute = alu_recompute & shift_operation;
   assign cmp_extended_a = {cmp_sgnd & cmp_a[P.XLEN-1], cmp_a};
@@ -105,20 +129,28 @@ module ft_alu import cvw::*; #(
     // A shift-channel fault must reach the architectural output, including
     // word sign extension. The injection bit stays physical during diagnosis.
     assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute) : result_raw[i];
-    assign cmp_ok[i] = (cmp_live[i] == ~normal_cmp[i]);
+    // No reset: nothing reads these before a COMPUTE cycle has written them.
+    always_ff @(posedge clk)
+      if (phase == COMPUTE) begin
+        result_q[i] <= result_live[i];
+        arith_q[i]  <= arith_live[i];
+        shift_q[i]  <= shift_live[i];
+        cmp_q[i]    <= cmp_live[i];
+      end
+    assign cmp_ok[i] = (cmp_q[i] == ~normal_cmp[i]);
     always_comb begin
       alu_ok[i] = 1'b0;
       if (arithmetic_operation) begin
-        alu_ok[i] = (arith_live[i] == ~normal_arith[i]);
+        alu_ok[i] = (arith_q[i] == ~normal_arith[i]);
         if (slt_operation) begin
           alu_ok[i] &= (normal_result[i] == {{(P.XLEN-1){1'b0}}, normal_arith[i][P.XLEN]}) &
-                       (result_live[i] == {{(P.XLEN-1){1'b0}}, arith_live[i][P.XLEN]});
-        end else alu_ok[i] &= (result_live[i] == ~normal_result[i]);
+                       (result_q[i] == {{(P.XLEN-1){1'b0}}, arith_q[i][P.XLEN]});
+        end else alu_ok[i] &= (result_q[i] == ~normal_result[i]);
       end else if (shift_operation) begin
-        alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_live[i], 1'b1)) &
+        alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_q[i], 1'b1)) &
                     (normal_result[i] == shift_result(normal_shift[i], 1'b0)) &
-                    (result_live[i] == shift_result(shift_live[i], 1'b1)) &
-                    (arith_live[i] == normal_arith[i]) & (arith_live[0] == arith_live[1]);
+                    (result_q[i] == shift_result(shift_q[i], 1'b1)) &
+                    (arith_q[i] == normal_arith[i]) & (arith_q[0] == arith_q[1]);
       end
     end
     always_ff @(posedge clk) begin
@@ -129,44 +161,59 @@ module ft_alu import cvw::*; #(
         normal_cmp[i] <= '0;
       end else begin
         if (alu_capture_normal) begin
-          normal_result[i] <= result_live[i];
-          normal_arith[i] <= arith_live[i];
-          normal_shift[i] <= shift_live[i];
+          normal_result[i] <= result_q[i];
+          normal_arith[i] <= arith_q[i];
+          normal_shift[i] <= shift_q[i];
         end
-        if (cmp_capture_normal) normal_cmp[i] <= cmp_live[i];
+        if (cmp_capture_normal) normal_cmp[i] <= cmp_q[i];
       end
     end
   end
 
+  // One evaluation: COMPUTE, COMPARE, then DONE if both controllers accept the
+  // result or back to COMPUTE if either wants it run again (a retry, or the
+  // pass after a diagnosis).  A new instruction, or a flush, starts over.  A
+  // COMPUTE cycle whose operands are held back is simply repeated.
+  assign check = (phase == COMPARE);
+  assign retry = alu_stall | cmp_stall;
+  // The pipeline can only accept what has been presented.
+  assign accepted = advance & (phase == DONE);
+  always_ff @(posedge clk)
+    if (reset | flush | load) phase <= COMPUTE;
+    else case (phase)
+      COMPUTE: if (~hold) phase <= COMPARE;
+      COMPARE: phase <= retry ? COMPUTE : DONE;
+      DONE:    phase <= DONE;
+      default: phase <= COMPUTE;
+    endcase
+
   assign alu_mismatch = valid & ~alu_recompute & ~alu_isolated &
-                       ((result_live[0] != result_live[1]) | (arith_live[0] != arith_live[1]));
-  assign cmp_mismatch = valid & ~cmp_recompute & ~cmp_isolated & (cmp_live[0] != cmp_live[1]);
+                       ((result_q[0] != result_q[1]) | (arith_q[0] != arith_q[1]));
+  assign cmp_mismatch = valid & ~cmp_recompute & ~cmp_isolated & (cmp_q[0] != cmp_q[1]);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) alu_ctrl(
-    .clk, .reset, .flush, .valid, .advance, .mismatch(alu_mismatch), .recompute_supported(alu_supported),
+    .clk, .reset, .flush, .valid, .check, .advance(accepted), .mismatch(alu_mismatch), .recompute_supported(alu_supported),
     .recompute_primary_ok(alu_ok[0]), .recompute_shadow_ok(alu_ok[1]),
     .recompute_mode(alu_recompute), .capture_normal(alu_capture_normal),
     .stall_req(alu_stall), .unresolved(alu_unresolved), .isolated(alu_isolated),
     .use_shadow(alu_use_shadow), .pe_primary, .pe_shadow);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) cmp_ctrl(
-    .clk, .reset, .flush, .valid, .advance, .mismatch(cmp_mismatch), .recompute_supported(1'b1),
+    .clk, .reset, .flush, .valid, .check, .advance(accepted), .mismatch(cmp_mismatch), .recompute_supported(1'b1),
     .recompute_primary_ok(cmp_ok[0]), .recompute_shadow_ok(cmp_ok[1]),
     .recompute_mode(cmp_recompute), .capture_normal(cmp_capture_normal),
     .stall_req(cmp_stall), .unresolved(cmp_unresolved), .isolated(cmp_isolated),
     .use_shadow(cmp_use_shadow), .pe_primary(cmp_pe_primary), .pe_shadow(cmp_pe_shadow));
 
-  assign stall_req = alu_stall | cmp_stall;
+  // The pipeline waits for a valid instruction's evaluation to finish.
+  assign stall_req = valid & (phase != DONE);
   assign unresolved = alu_unresolved | cmp_unresolved;
-  // Outputs read as zero while they are not a result: during a diagnosis, when
-  // the replicas are computing test patterns, and once a fault is unresolved.
-  // Both conditions are controller state.  The cycle in which a mismatch is
-  // first seen is deliberately not masked: stall_req holds the pipeline in that
-  // cycle, so nothing captures the disagreeing value, and masking it would put
-  // the replica compare in front of every consumer of the ALU.
+  // Outputs read as zero until the evaluation is DONE, and stay zero if it ended
+  // unresolved; otherwise they are the registered channels of the selected
+  // replica.  Both conditions are register outputs.
   always_comb begin
-    ALUResult = result_live[alu_use_shadow];
-    Sum = arith_live[alu_use_shadow][P.XLEN-1:0];
-    flags = {cmp_live[cmp_use_shadow] == '0, cmp_live[cmp_use_shadow][P.XLEN]};
-    if (alu_recompute | cmp_recompute | unresolved) begin
+    ALUResult = result_q[alu_use_shadow];
+    Sum = arith_q[alu_use_shadow][P.XLEN-1:0];
+    flags = {cmp_q[cmp_use_shadow] == '0, cmp_q[cmp_use_shadow][P.XLEN]};
+    if ((phase != DONE) | unresolved) begin
       ALUResult = '0;
       Sum = '0;
       flags = '0;

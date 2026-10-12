@@ -35,6 +35,7 @@ module ft_recompute_fault_tb #(
   localparam int CH_CMP = 3;
 
   logic clk = 0, reset, flush, valid, advance;
+  logic load;
   logic [N-1:0] a, b, ca, cb, result, sum;
   logic signed_cmp, w64, uw64, sub, bmu;
   logic [2:0] select_op, funct3, balu;
@@ -74,7 +75,7 @@ module ft_recompute_fault_tb #(
 
     ft_alu #(.P(TP), .TE_THRESHOLD(THRESHOLD)) dut(
     .clk, .reset, .flush, .valid,
-    .advance, .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
+    .advance, .load, .hold(1'b0), .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
     .W64(w64), .UW64(uw64), .SubArith(sub), .ALUSelect(select_op), .BSelect(bselect),
     .ZBBSelect(zbbselect), .Funct3(funct3), .BALUControl(balu), .Funct7(7'b0), .Rs2E(5'b0),
     .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .ALUResult(result), .Sum(sum), .flags,
@@ -182,6 +183,7 @@ module ft_recompute_fault_tb #(
   endfunction
   task automatic drive_defaults;
     flush = 0;
+    load = 0;
     valid = 0;
     advance = 1;
     a = 0;
@@ -235,6 +237,26 @@ module ft_recompute_fault_tb #(
   task automatic clock_edge;
     @(posedge clk);
     #1;
+  endtask
+  // The ALU wrapper evaluates an operation over two clock edges: COMPUTE captures
+  // the replicas' channels, COMPARE checks them and steps the controllers.  It
+  // then either presents the result (stall low) or is back in COMPUTE to run the
+  // operation again (stall high).  The fault cases below step by evaluations.
+  task automatic alu_eval;
+    repeat (2) clock_edge();
+  endtask
+  // Present the inputs as they now stand as a new instruction: the wrapper
+  // restarts in COMPUTE.  Needed once a result has been presented, because the
+  // wrapper does not look at its inputs again until the next instruction.
+  task automatic alu_load;
+    load = 1;
+    clock_edge();
+    load = 0;
+  endtask
+  // A new instruction, evaluated once.
+  task automatic alu_run;
+    alu_load();
+    alu_eval();
   endtask
   task automatic random_injector_test;
     logic transparent, single_bit, staggered, skipped_invalid;
@@ -368,7 +390,7 @@ module ft_recompute_fault_tb #(
     logic [N:0] saved_arithmetic, saved_compare;
     reset_case();
     set_operation(op);
-    #1;
+    alu_eval();  // without the fault: the reference outputs
     expected_result = result;
     expected_sum = sum;
     expected_flags = flags;
@@ -383,21 +405,22 @@ module ft_recompute_fault_tb #(
     endcase
     kind = initial_bit ? 1 : 2;
     fi_enable = 1;
-    #1;
-    // The first mismatch cycle stalls; the outputs are not masked until the
-    // controller has registered the mismatch (the stall keeps them from being used).
-    check(stall, "mismatch stalls");
+    alu_load();   // the same operation again, now with the fault
+    clock_edge();
+    // COMPARE: the mismatch is in front of the controllers, the result is withheld.
+    check(stall && result == '0 && sum == '0 && flags == '0, "mismatch stalls and nothing is presented");
     clock_edge();
     saved_arithmetic = dut.normal_arith[0];
     saved_compare = dut.normal_cmp[0];
     check(!dut.alu_capture_normal && !dut.cmp_capture_normal, "capture is a first-edge pulse");
     repeat (THRESHOLD - 1) begin
-      clock_edge();
+      alu_eval();
       check(dut.normal_arith[0] == saved_arithmetic && dut.normal_cmp[0] == saved_compare, "retry preserves snapshots");
     end
     if (expect_isolation) begin
       check(stall && !unresolved, "diagnostic cycle holds transaction");
-      clock_edge();
+      alu_eval();  // the diagnosis
+      alu_eval();  // the operation again, on the replica it selected
       check(!stall && !unresolved && result == expected_result && sum == expected_sum && flags == expected_flags,
             "isolation selects original healthy outputs");
       if (selected_channel == CH_CMP)
@@ -411,11 +434,13 @@ module ft_recompute_fault_tb #(
       b  = b + N'(1);
       ca = ca + N'(5);
       cb = cb + N'(5);
-      #1;
+      alu_run();
       check(!stall && !unresolved, "subsequent operation retains selected replica");
-    end else
+    end else begin
+      alu_eval();  // the evaluation that ends in the unresolved state is released
       check(unresolved && !stall && result == '0 && sum == '0 && flags == '0,
             "unsupported operation releases only masked fault");
+    end
     $display("PASS persistent op=%0d channel=%0d bit=%0d replica=%s kind=%s result=%h flags=%b", op, selected_channel,
              physical_bit, target_name(target), kind_name(kind), expected_result, expected_flags);
   endtask
@@ -428,12 +453,12 @@ module ft_recompute_fault_tb #(
     bit_index = 0;
     kind = FI_XOR;
     fi_enable = 1;
-    #1;
-    check(stall, "runtime enable activates mismatch");
+    clock_edge();
+    check(stall && (dut.alu_mismatch || dut.cmp_mismatch), "runtime enable activates mismatch");
     clock_edge();
     @(negedge clk);
     fi_enable = 0;
-    repeat (THRESHOLD + 2) clock_edge();
+    repeat (THRESHOLD + 2) alu_eval();
     check(!stall && !unresolved && flags == 2'b01, "transient recovers");
     check(result == (selected_channel == CH_SHIFT ? shift_ref(a, int'(b), 1, 0, 0) : a + b),
           "transient returns independent oracle result");
@@ -447,12 +472,13 @@ module ft_recompute_fault_tb #(
     kind = 2;
     bit_index = 0;
     fi_enable = 1;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
     check(cmp_first ? cmp_pe_primary : pe_primary, "first lane isolates");
     @(negedge clk);
     channel = 2'(cmp_first ? CH_RESULT : CH_CMP);
     target  = FI_SHADOW;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
+    alu_eval();  // the operation again, on the replicas now selected
     check((cmp_first ? (cmp_pe_primary && pe_shadow) : (pe_primary && cmp_pe_shadow)) && !stall && !unresolved,
           "other lane recovers with different replica selection");
     check(result == a + b && flags == compare_ref(ca, cb, signed_cmp), "independent selected outputs are correct");
@@ -486,15 +512,16 @@ module ft_recompute_fault_tb #(
               sub = (mode == 2);
               expected = shift_ref(a, amount, mode, w64, 0);
               fault_bit = (boundary != 0) ? ((word_op != 0) ? 31 : N - 1) : 0;
-              #1;
               channel = 2'(CH_SHIFT);
               target = 2'(replica_id);
               bit_index = $clog2(N + 2)'(fault_bit);
               kind = expected[fault_bit] ? 1 : 2;
               fi_enable = 1;
-              #1;
-              check(stall, "physical shift fault detected at every amount");
-              repeat (THRESHOLD + 1) clock_edge();
+              clock_edge();
+              check(stall && dut.alu_mismatch, "physical shift fault detected at every amount");
+              clock_edge();
+              repeat (THRESHOLD) alu_eval();
+              alu_eval();  // the operation again, on the replica the diagnosis selected
               check(!stall && !unresolved && result == expected,
                     "physical shift recovery matches independent reference");
               check(pe_primary == (replica_id == 1) && pe_shadow == (replica_id == 2),
@@ -516,7 +543,8 @@ module ft_recompute_fault_tb #(
       bit_index = 0;
       kind = expected[0] ? 1 : 2;
       fi_enable = 1;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
+      alu_eval();  // the operation again, on the replica the diagnosis selected
       check(pe_primary && !unresolved && result == expected, "SLLI.UW physical recovery at every amount");
     end
   endtask
@@ -704,16 +732,16 @@ module ft_recompute_fault_tb #(
         signed_cmp = 1'(sg);
         sub = 1;
         select_op = (sg != 0) ? 2 : 3;
-        #1;
+        alu_run();
         check(flags == compare_ref(ca, cb, signed_cmp), "extended comparison reference");
         check(result == (signed_cmp ? N'($signed(a) < $signed(b)) : N'(a < b)), "SLT/SLTU reference");
       end
       select_op = 0;
       sub = 0;
-      #1;
+      alu_run();
       check(result == a + b && sum == a + b, "ADD reference");
       sub = 1;
-      #1;
+      alu_run();
       check(result == a - b && sum == a - b, "SUB reference");
       bmu = 1;
       bselect = 2;
@@ -721,7 +749,7 @@ module ft_recompute_fault_tb #(
       for (int maximum = 0; maximum < 2; maximum++) begin
         funct3 = (sg != 0) ? 4 : 5;
         zbbselect = 4'(3 + 4 * maximum);
-        #1;
+        alu_run();
         check(result == ((((sg != 0) ? ($signed(a) < $signed(b)) : (a < b)) ^ (maximum != 0)) ? a : b),
               "signed/unsigned min/max reference");
       end
@@ -741,7 +769,7 @@ module ft_recompute_fault_tb #(
       select_op = 1;
       funct3 = (mode == 0) ? 1 : 5;
       sub = (mode == 2);
-      #1;
+      alu_run();
       check(result == shift_ref(a, amount, mode, w64, 0), "shift architectural reference");
       // The healthy diagnostic relation must hold at each legal amount.
       check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0), "wide normal slice reference");
@@ -764,7 +792,7 @@ module ft_recompute_fault_tb #(
       sub = 0;
       uw64 = 1;
       bselect = 1;
-      #1;
+      alu_run();
       check(result == shift_ref(a, amount, 0, 0, 1), "SLLI.UW zero extension reference");
     end
     uw64 = 0;
@@ -777,10 +805,10 @@ module ft_recompute_fault_tb #(
       b = N'(amount);
       sub = 0;
       funct3 = 5;
-      #1;
+      alu_run();
       check(result == ((a >> amount) | (a << ((N - amount) % N))), "ROR ring reference");
       funct3 = 1;
-      #1;
+      alu_run();
       check(result == ((a << amount) | (a >> ((N - amount) % N))), "ROL ring reference");
     end
     w64 = 1;
@@ -790,11 +818,11 @@ module ft_recompute_fault_tb #(
       b = N'(amount);
       rotated_word = (a[31:0] >> (amount & 31)) | (a[31:0] << ((32 - (amount & 31)) % 32));
       funct3 = 5;
-      #1;
+      alu_run();
       check(result == N'($signed(rotated_word)), "RORW masked ring reference");
       rotated_word = (a[31:0] << (amount & 31)) | (a[31:0] >> ((32 - (amount & 31)) % 32));
       funct3 = 1;
-      #1;
+      alu_run();
       check(result == N'($signed(rotated_word)), "ROLW masked ring reference");
     end
     w64 = 0;
@@ -831,7 +859,7 @@ module ft_recompute_fault_tb #(
       kind = FI_XOR;
       channel = 2'(ch);
       bit_index = 0;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
       if (ch == CH_SHIFT) check(pe_primary && !unresolved, "physical shift XOR diagnosed");
       else check(unresolved && !pe_primary && !cmp_pe_primary, "both-pass diagnosis traps");
     end
@@ -845,7 +873,7 @@ module ft_recompute_fault_tb #(
     bit_index = 0;
     fi_enable = 1;
     second_result_fault = 1;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
     check(unresolved && !pe_primary && !pe_shadow, "both-fail diagnosis is unresolved");
     second_result_fault = 0;
     // A changing persistent fault must not replace the first mismatch snapshot.
@@ -856,14 +884,15 @@ module ft_recompute_fault_tb #(
     kind = 2;
     bit_index = 0;
     fi_enable = 1;
-    #1;
+    clock_edge();
     check(dut.alu_capture_normal && !dut.cmp_capture_normal, "independent first ALU capture pulse");
     clock_edge();
     @(negedge clk);
     bit_index = 3;
-    repeat (THRESHOLD - 1) clock_edge();
+    repeat (THRESHOLD - 1) alu_eval();
     check(dut.normal_arith[0] == {1'b0, (a + b) | N'(1)}, "first snapshot survives changed retry fault");
-    clock_edge();
+    alu_eval();  // the diagnosis
+    alu_eval();  // the operation again, on the replica it selected
     check(pe_primary && !unresolved && result == a + b, "changed retry fault still selects healthy replica");
     // Flush cancels an in-flight comparison diagnosis as well as isolation.
     reset_case();
@@ -873,12 +902,16 @@ module ft_recompute_fault_tb #(
     kind = 0;
     bit_index = 0;
     fi_enable = 1;
-    clock_edge();
+    alu_eval();
     @(negedge clk);
     flush = 1;
     fi_enable = 0;
     clock_edge();
-    check(!stall && !unresolved && dut.normal_cmp[0] == '0, "flush cancels in-flight diagnosis and snapshots");
+    check(!unresolved && dut.normal_cmp[0] == '0, "flush cancels in-flight diagnosis and snapshots");
+    @(negedge clk);
+    flush = 0;
+    alu_eval();
+    check(!stall && !unresolved && result == a + b, "operation completes cleanly after the flush");
     // Range checks and reserved encodings are no-ops, including narrower channels.
     reset_case();
     set_operation(OP_ADD);
@@ -888,12 +921,12 @@ module ft_recompute_fault_tb #(
       channel = 2'(ch);
       kind = 3;
       bit_index = 0;
-      #1;
+      alu_run();
       check(!stall && result == a + b, "reserved kind no-op");
       if (ch != CH_RESULT) begin  // All result-channel indices are valid for power-of-two XLEN.
         kind = 0;
         bit_index = $clog2(N + 2)'((ch == CH_SHIFT) ? N + 2 : N + 1);
-        #1;
+        alu_run();
         check(!stall && result == a + b, "invalid index does not alias");
       end
     end
@@ -905,10 +938,12 @@ module ft_recompute_fault_tb #(
     target = 1;
     channel = 2'(CH_CMP);
     kind = 2;
-    #1;
+    clock_edge();
     check(!stall && !dut.cmp_capture_normal, "invalid execute instruction cannot capture");
+    clock_edge();
     valid = 1;
-    #1;
+    alu_load();
+    clock_edge();
     check(dut.cmp_capture_normal && !dut.alu_capture_normal, "independent first CMP capture pulse");
     clock_edge();
     @(negedge clk);
@@ -926,7 +961,7 @@ module ft_recompute_fault_tb #(
       kind = FI_XOR;
       bit_index = 0;
       fi_enable = 1;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
       check(unresolved, "ambiguous diagnosis reaches terminal fault");
       @(negedge clk);
       fi_enable = 0;

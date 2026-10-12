@@ -86,7 +86,7 @@ module ft_mul import cvw::*; #(
   // MUL retries without recomputation or first-mismatch diagnostic snapshots.
   /* verilator lint_off PINCONNECTEMPTY */
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
-    .clk, .reset, .flush(FlushM & ~StallM), .valid(mul_active_m), .advance(~StallM), .mismatch,
+    .clk, .reset, .flush(FlushM & ~StallM), .valid(mul_active_m), .check(1'b1), .advance(~StallM), .mismatch,
     .recompute_supported(1'b0), .recompute_primary_ok(1'b0), .recompute_shadow_ok(1'b0),
     .recompute_mode(), .capture_normal(), .stall_req, .unresolved, .isolated, .use_shadow,
     .pe_primary, .pe_shadow);

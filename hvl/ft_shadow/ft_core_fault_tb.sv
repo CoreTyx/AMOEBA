@@ -389,9 +389,18 @@ module ft_core_fault_tb;
       // cycles on main and ~12.4k with swe-cache-ec's multi-cycle cache hits; 50k leaves headroom.
       for (int cycle = 0; cycle < 50000 && !finished; cycle++) begin
         @(negedge clk);
+        // The ALU wrapper only sees a fault that is present in the cycle it captures
+        // the replicas (one cycle in each instruction's stay in Execute), and this
+        // loop runs at a fixed number of cycles per instruction that divides the
+        // injectors' 512-cycle period.  Left alone, every injector event lands on
+        // the same cycle of that rhythm.  A one-cycle stall now and then slides the
+        // program across the injectors' phase so that the events are actually seen.
+        if (scenario == SC_SHARED_INJECTION) force dut.soc.core.ExternalStall = (cycle % 37 == 0);
         if (!injected && scenario != SC_HEALTHY && scenario < SC_SHARED_INJECTION && !mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE == BRANCH_PC && dut.soc.core.ForwardedSrcAE == 8) begin
-          // This loop has trained the predictor before diagnosis begins.
-          check(!dut.soc.core.BPWrongE && dut.soc.core.PCSrcE, "faulted branch is predicted taken");
+          // This is the branch's first cycle in Execute: its evaluation has only
+          // begun, so the outcome is still withheld and the pipeline is waiting.
+          check(!dut.soc.core.PCSrcE && dut.soc.core.FTStallE,
+                "branch outcome is withheld until its evaluation completes");
           check(dut.soc.core.ieu.dp.SrcAE == BRANCH_PC && dut.soc.core.ieu.dp.SrcBE == 64'hfffffffffffffff8,
                 "branch target and comparison have independent operands");
           fi_target = (scenario == SC_CMP_ISOLATION) ? 2 : 1;
@@ -470,8 +479,19 @@ module ft_core_fault_tb;
         end
         #1;
         if (held_last) check(dut.soc.core.PCE == held_pc, "execute PC holds across FT stall edge");
-        if (dut.soc.core.FTStall && !dut.soc.core.TrapM) begin
-          held_cycles++;
+        // An older trap, return or CSR write in Memory flushes Execute and with it
+        // whatever the FT units there were doing, so the stall is not applied.
+        if (dut.soc.core.FTStall && !dut.soc.core.TrapM && !dut.soc.core.RetM && !dut.soc.core.CSRWriteFenceM) begin
+          // Every instruction is held while the ALU wrapper evaluates it.  Only a
+          // hold caused by a fault counts here: the multiplier or divider stalling
+          // in Memory, or the ALU wrapper finding a mismatch (the COMPARE cycle
+          // that ends in a retry) or still retrying or diagnosing one.
+          if (dut.soc.core.FTStallM ||
+              (dut.soc.core.FTStallE &&
+               ((dut.soc.core.ieu.dp.ftalu.check && dut.soc.core.ieu.dp.ftalu.retry) ||
+                dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd2 ||
+                dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd2)))
+            held_cycles++;
           check(
               dut.soc.core.StallF && dut.soc.core.StallD && dut.soc.core.StallE && dut.soc.core.StallM &&
                   dut.soc.core.StallW,
