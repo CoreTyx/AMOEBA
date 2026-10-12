@@ -10,6 +10,11 @@
 //           ecc_bit_flip instances (one per read port) inject pseudo-random
 //           single-bit errors when inject_en is asserted, allowing the ECC
 //           correction path to be exercised in simulation and DFT.
+// Modified: 11 October 2026
+//           Timing: the array is written on the rising edge and a read of the
+//           register being written is bypassed from wd3.  The falling-edge
+//           write gave the write (decode, mux, encode) and the read that
+//           followed it (mux, decode, encode) half a cycle each.
 //
 // Purpose: 3-port register file with SECDED error correction
 //
@@ -79,16 +84,32 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   assign WriteIdx = DummyW ? (SHADOW0 | {5'b0, DummySelW}) : {1'b0, a3};
 
   // ── Write path ────────────────────────────────────────────────────────────────
-  // Encode wd3 combinationally, then latch the codeword on the falling clock edge.
+  // Encode wd3 combinationally, then store the codeword on the rising clock edge.
   logic [CW-1:0] cw_wr3;
+  logic          WriteEn;
   ecc_secded_enc #(.DATA_WIDTH(XLEN)) enc_wr (.data_i(wd3), .codeword_o(cw_wr3));
 
-  always_ff @(negedge clk)
+  assign WriteEn = we3 & (WriteIdx != '0);
+
+  always_ff @(posedge clk)
     if (reset) for (i = 1; i < NUMREGS; i++) rf[i] <= '0;
-    else       if (we3 & (WriteIdx != '0))    rf[WriteIdx] <= cw_wr3;
+    else       if (WriteEn)                   rf[WriteIdx] <= cw_wr3;
+
+  // ── Write-to-read bypass ──────────────────────────────────────────────────────
+  // The array does not hold this cycle's write until the next edge, so a read of
+  // the register being written takes wd3 instead.  The array entry it replaces is
+  // about to be overwritten, so that entry's decoder flags are dropped too: an
+  // error in a value nobody uses is not an error.  The index compare is on the
+  // array index, as the read is, so a dummy write to a shadow register can never
+  // be bypassed into a read of an architectural one.
+  logic Bypass1, Bypass2;
+  assign Bypass1 = WriteEn & ({1'b0, a1} == WriteIdx);
+  assign Bypass2 = WriteEn & ({1'b0, a2} == WriteIdx);
 
   // ── Read port 1 ───────────────────────────────────────────────────────────────
-  logic [CW-1:0] cw_rd1_raw, cw_rd1_inj;
+  logic [CW-1:0]   cw_rd1_raw, cw_rd1_inj;
+  logic [XLEN-1:0] rd1_array;
+  logic            sec_err_array1, ded_err_array1;
 
   assign cw_rd1_raw = (a1 != '0) ? rf[a1] : '0;
 
@@ -100,13 +121,19 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
 
   ecc_secded_dec #(.DATA_WIDTH(XLEN)) dec1 (
     .codeword_i(cw_rd1_inj),
-    .data_o    (rd1),
-    .sec_err_o (sec_err_rd1),
-    .ded_err_o (ded_err_rd1)
+    .data_o    (rd1_array),
+    .sec_err_o (sec_err_array1),
+    .ded_err_o (ded_err_array1)
   );
 
+  assign rd1         = Bypass1 ? wd3 : rd1_array;
+  assign sec_err_rd1 = sec_err_array1 & ~Bypass1;
+  assign ded_err_rd1 = ded_err_array1 & ~Bypass1;
+
   // ── Read port 2 ───────────────────────────────────────────────────────────────
-  logic [CW-1:0] cw_rd2_raw, cw_rd2_inj;
+  logic [CW-1:0]   cw_rd2_raw, cw_rd2_inj;
+  logic [XLEN-1:0] rd2_array;
+  logic            sec_err_array2, ded_err_array2;
 
   assign cw_rd2_raw = (a2 != '0) ? rf[a2] : '0;
 
@@ -118,9 +145,13 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
 
   ecc_secded_dec #(.DATA_WIDTH(XLEN)) dec2 (
     .codeword_i(cw_rd2_inj),
-    .data_o    (rd2),
-    .sec_err_o (sec_err_rd2),
-    .ded_err_o (ded_err_rd2)
+    .data_o    (rd2_array),
+    .sec_err_o (sec_err_array2),
+    .ded_err_o (ded_err_array2)
   );
+
+  assign rd2         = Bypass2 ? wd3 : rd2_array;
+  assign sec_err_rd2 = sec_err_array2 & ~Bypass2;
+  assign ded_err_rd2 = ded_err_array2 & ~Bypass2;
 
 endmodule

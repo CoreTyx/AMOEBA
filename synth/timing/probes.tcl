@@ -27,6 +27,7 @@ set TIMING_PROBES [subst -nocommands {
    "Register file"
    regfile_read        {probe_ck $dp/regf/rf_reg*}            {probe_pin $dp/regf/rd1*}            {probe_d $dp/RD1EReg/cw_stored*}
    regfile_write       {probe_ck $dp/IFResultWReg/cw_stored*} {probe_pin $dp/regf/wd3*}            {probe_d $dp/regf/rf_reg*}
+   regfile_bypass      {probe_ck $dp/IFResultWReg/cw_stored*} {probe_pin $dp/regf/rd1*}            {probe_d $dp/RD1EReg/cw_stored*}
    instr_to_operand    {probe_ck $core/ifu/AlignedInstrRawDFlop/*} {probe_pin $dp/regf/rd1*}       {probe_d $dp/RD1EReg/cw_stored*}
    "Execute"
    alu_result          {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $dp/ftalu/ALUResult*}     {probe_d $dp/IEUResultMReg/cw_stored*}
