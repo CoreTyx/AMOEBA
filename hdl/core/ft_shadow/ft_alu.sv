@@ -156,11 +156,17 @@ module ft_alu import cvw::*; #(
 
   assign stall_req = alu_stall | cmp_stall;
   assign unresolved = alu_unresolved | cmp_unresolved;
+  // Outputs read as zero while they are not a result: during a diagnosis, when
+  // the replicas are computing test patterns, and once a fault is unresolved.
+  // Both conditions are controller state.  The cycle in which a mismatch is
+  // first seen is deliberately not masked: stall_req holds the pipeline in that
+  // cycle, so nothing captures the disagreeing value, and masking it would put
+  // the replica compare in front of every consumer of the ALU.
   always_comb begin
     ALUResult = result_live[alu_use_shadow];
     Sum = arith_live[alu_use_shadow][P.XLEN-1:0];
     flags = {cmp_live[cmp_use_shadow] == '0, cmp_live[cmp_use_shadow][P.XLEN]};
-    if (stall_req | unresolved) begin
+    if (alu_recompute | cmp_recompute | unresolved) begin
       ALUResult = '0;
       Sum = '0;
       flags = '0;

@@ -384,7 +384,9 @@ module ft_recompute_fault_tb #(
     kind = initial_bit ? 1 : 2;
     fi_enable = 1;
     #1;
-    check(stall && result == '0 && sum == '0 && flags == '0, "mismatch masks all outputs");
+    // The first mismatch cycle stalls; the outputs are not masked until the
+    // controller has registered the mismatch (the stall keeps them from being used).
+    check(stall, "mismatch stalls");
     clock_edge();
     saved_arithmetic = dut.normal_arith[0];
     saved_compare = dut.normal_cmp[0];

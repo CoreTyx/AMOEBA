@@ -92,6 +92,8 @@ module ft_mul import cvw::*; #(
     .pe_primary, .pe_shadow);
   /* verilator lint_on PINCONNECTEMPTY */
 
-  // Mask stale/untrusted products while held or unresolved.
-  assign ProdM = (stall_req | unresolved) ? '0 : (use_shadow ? shadow_prod : primary_prod);
+  // Mask the product once a fault is unresolved.  A mismatch that is still being
+  // retried is not masked: stall_req holds the pipeline, so the product is not
+  // captured, and masking it would put the replica compare in front of the result.
+  assign ProdM = unresolved ? '0 : (use_shadow ? shadow_prod : primary_prod);
 endmodule
