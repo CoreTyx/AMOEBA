@@ -41,6 +41,7 @@ set TIMING_PROBES [subst -nocommands {
    mul_M_result        {probe_ck $mul/primary/PP*Reg/*}       {probe_pin $mul/ProdM*}              {probe_d $core/mdu.mdu/MDUResultWReg/*}
    mul_M_to_ft_stall   {probe_ck $mul/primary/PP*Reg/*}       {probe_pin $mul/stall_req}           {}
    div_internal        {probe_ck $core/mdu.mdu/div.ftdiv/*}   {}                                   {probe_d $core/mdu.mdu/div.ftdiv/*}
+   div_step            {probe_ck $core/mdu.mdu/div.ftdiv/primary/dabsreg/*} {}                     {probe_d $core/mdu.mdu/div.ftdiv/primary/wreg/*}
    "Data cache"
    dc_tag_to_way       {probe_pin $dc/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $dc/CacheWays*/selectedwaydatareg/*}
    dc_data_to_word     {probe_pin $dc/*/wordram.CacheDataMem/*/sramIP/CLK} {}                      {probe_d $dc/HitWordReg/*}

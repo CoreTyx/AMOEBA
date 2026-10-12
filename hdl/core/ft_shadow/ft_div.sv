@@ -48,6 +48,18 @@ module ft_div import cvw::*; #(
   logic [P.XLEN-1:0] primary_quot_raw, primary_rem_raw;
   logic [P.XLEN-1:0] shadow_quot_raw, shadow_rem_raw;
   logic [P.XLEN-1:0] primary_quot, primary_rem, shadow_quot, shadow_rem;
+  // The completed results as captured for checking.  As in ft_alu and ft_mul,
+  // the compare works on these registers and the stall and the outputs come
+  // from registers, so nothing crosses from the dividers to the rest of the
+  // core inside one cycle:
+  //   WAIT     the dividers are running (or idle).  The cycle both are done,
+  //            their results are captured.
+  //   COMPARE  the captured results are compared and the retry controller acts.
+  //   DONE     the captured result is presented and the pipeline released.
+  logic [P.XLEN-1:0] primary_quot_q, primary_rem_q, shadow_quot_q, shadow_rem_q;
+  typedef enum logic [1:0] {WAIT, COMPARE, DONE} phase_t;
+  phase_t phase;
+  logic check;
 
   // A retry owns both divider FSMs while the architectural pipeline remains
   // frozen.  Remove the external M-stage stall only for these private FSMs so
@@ -56,8 +68,10 @@ module ft_div import cvw::*; #(
   // relaunch the same divide instead of releasing its completed result.
   // Threshold one bypasses RETRY; its zero retry limit is intentional.
   /* verilator lint_off UNSIGNED */
-  assign internal_stall_m = (state == RETRY) ?
-      (result_valid & (~mismatch | (mismatch_count >= RETRY_LIMIT))) : StallM;
+  // In RETRY the dividers run free of the pipeline's stall until both are done,
+  // then hold their results for the check; a failed check restarts them through
+  // retry_reset.
+  assign internal_stall_m = (state == RETRY) ? result_valid : StallM;
   /* verilator lint_on UNSIGNED */
 
   // Forwarding sources can disappear while division holds E and older stages
@@ -80,7 +94,7 @@ module ft_div import cvw::*; #(
       saved_b <= ForwardedSrcBE;
       saved_signed <= DivSignedE;
       saved_w64 <= W64E;
-    end else if (result_valid & ~stall_req & ~StallM) begin
+    end else if ((phase == DONE) & ~StallM) begin
       saved_valid <= 1'b0;
     end
   end
@@ -89,9 +103,9 @@ module ft_div import cvw::*; #(
   // The next cycle sees both FSMs idle and reissues the unchanged IntDivE.
   // Threshold one bypasses RETRY; its zero retry limit is intentional.
   /* verilator lint_off UNSIGNED */
-  assign retry_again = (state == RETRY) & result_valid & mismatch &
+  assign retry_again = (state == RETRY) & check & mismatch &
                        (mismatch_count < RETRY_LIMIT);
-  assign retry_reset = ((state == NORMAL) & mismatch & (TE_THRESHOLD != 1)) |
+  assign retry_reset = ((state == NORMAL) & check & mismatch & (TE_THRESHOLD != 1)) |
                        retry_again;
   /* verilator lint_on UNSIGNED */
 
@@ -119,18 +133,34 @@ module ft_div import cvw::*; #(
   ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0D1)) shadow_rem_fi(
     .clk, .reset, .fi_enable, .data_i(shadow_rem_raw), .data_o(shadow_rem));
 
-  // Compare only after both divider FSMs have completed this held instruction;
+  // Check only after both divider FSMs have completed this held instruction;
   // IDLE is also not busy, but does not contain a valid result.
   assign result_valid = IntDivE & primary_done & shadow_done;
-  assign mismatch = result_valid & ((primary_quot != shadow_quot) |
-                                    (primary_rem  != shadow_rem));
+  assign check = (phase == COMPARE);
+  always_ff @(posedge clk)
+    if (reset | FlushE) phase <= WAIT;
+    else case (phase)
+      WAIT:    if (result_valid) phase <= COMPARE;
+      COMPARE: phase <= retry_reset ? WAIT : DONE;   // a retry restarts the dividers
+      DONE:    if (~StallM) phase <= WAIT;           // the instruction leaves Execute
+      default: phase <= WAIT;
+    endcase
+  // No reset: nothing reads these before a completed divide has written them.
+  always_ff @(posedge clk)
+    if ((phase == WAIT) & result_valid) begin
+      primary_quot_q <= primary_quot;
+      primary_rem_q  <= primary_rem;
+      shadow_quot_q  <= shadow_quot;
+      shadow_rem_q   <= shadow_rem;
+    end
+  assign mismatch = (primary_quot_q != shadow_quot_q) | (primary_rem_q != shadow_rem_q);
   assign DivBusyE = primary_busy | shadow_busy;
-
-  // Initial and retry mismatches hold the full pipeline.  A final failed
+  // A completed divide holds the full pipeline until its check is DONE, and a
+  // retry holds it while the dividers run again.  A final failed
   // attempt holds an E-stage fault until E can advance; the MDU registers it
   // alongside the instruction. No guessed replica result
   // is allowed to enter the normal MDU result mux.
-  assign stall_req = ((state == NORMAL) & mismatch) | (state == RETRY);
+  assign stall_req = (result_valid & (phase != DONE)) | (state == RETRY);
   assign unresolved = (state == UNRESOLVED);
   assign pe_primary = 1'b0;
   assign pe_shadow = 1'b0;
@@ -141,7 +171,7 @@ module ft_div import cvw::*; #(
       mismatch_count <= '0;
     end else begin
       case (state)
-        NORMAL: begin
+        NORMAL: if (check) begin
           mismatch_count <= '0;
           if (mismatch) begin
             if (TE_THRESHOLD == 1) state <= UNRESOLVED;
@@ -154,7 +184,7 @@ module ft_div import cvw::*; #(
         // Threshold one bypasses RETRY; its zero retry limit is intentional.
         /* verilator lint_off UNSIGNED */
         RETRY: begin
-          if (result_valid) begin
+          if (check) begin
             if (!mismatch) begin
               state          <= NORMAL;
               mismatch_count <= '0;
@@ -172,12 +202,12 @@ module ft_div import cvw::*; #(
     end
   end
 
-  // The checker validates E-stage results. Capture that exact pair when the
-  // instruction advances into M; live injectors may change on the next cycle,
-  // when IntDivE no longer enables the checker. Holding these registers also
+  // The checker validated the captured E-stage results. Pass that exact pair on
+  // when the instruction advances into M; live injectors may change at any time
+  // after the capture. Holding these registers also
   // protects an older M-stage divide while a younger divide retries in E.
   flopenrc #(P.XLEN) quotreg(clk, reset, FlushM, ~StallM,
-    (result_valid & ~stall_req & ~unresolved) ? primary_quot : '0, QuotM);
+    ((phase == DONE) & ~unresolved) ? primary_quot_q : '0, QuotM);
   flopenrc #(P.XLEN) remreg(clk, reset, FlushM, ~StallM,
-    (result_valid & ~stall_req & ~unresolved) ? primary_rem : '0, RemM);
+    ((phase == DONE) & ~unresolved) ? primary_rem_q : '0, RemM);
 endmodule

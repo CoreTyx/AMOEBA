@@ -668,6 +668,8 @@ module ft_recompute_fault_tb #(
         $display("PASS %s threshold=1 (no DIV isolation relation)", test_id);
         return;
       end
+      // The completed results have been captured, fault included; the wrapper
+      // checks the captured copies on the next edge.
       check(div_stall, {test_id, ": completed mismatch stalls"});
       $display(
           "  injected: primary raw q/r=%0h/%0h injected=%0h/%0h shadow raw q/r=%0h/%0h injected=%0h/%0h; arch q/r=%0h/%0h",
@@ -676,6 +678,7 @@ module ft_recompute_fault_tb #(
       @(negedge clk);
       div_fi_enable = 1'b0;
       wait_div_complete();
+      clock_edge();  // the captured retry results are checked
       clock_edge();  // accept the checked E-stage result into the M-stage output
       check(!div_stall && !div_unresolved && div_quot == N'(14) && div_rem == N'(2), {
             test_id, ": retry restores quotient and remainder"});
