@@ -81,7 +81,7 @@ module ft_recompute_fault_tb #(
     .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
-    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
+    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .HoldE(1'b0), .ForwardedSrcAE(mul_a),
     .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .MulActiveE(mul_active),
     .fi_enable(mul_fi_enable),
     .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved),
@@ -563,13 +563,13 @@ module ft_recompute_fault_tb #(
   endtask
 
   // The multiplier wrapper evaluates a product over two clock edges (SUM, then
-  // COMPARE), and after a mismatch takes one more to reload its partial products
-  // before evaluating again.
+  // COMPARE), and after a mismatch takes two more to reload its partial products
+  // (REPLAY, LOAD) before evaluating again.
   task automatic mul_eval;
     repeat (2) clock_edge();
   endtask
   task automatic mul_retry;
-    repeat (3) clock_edge();
+    repeat (4) clock_edge();
   endtask
 
   task automatic mul_transient(input logic [1:0] replica_target, input string test_id);
@@ -580,7 +580,7 @@ module ft_recompute_fault_tb #(
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
       // First edge fills the M-stage partial-product registers.  Keep the
       // fault through the evaluation so the controller actually enters RETRY.
-      clock_edge();
+      repeat (2) clock_edge();  // the multipliers' two Execute cycles
       mul_eval();
       if (THRESHOLD == 1) begin
         mul_retry();  // the evaluation that ends in the unresolved state is released
@@ -610,7 +610,7 @@ module ft_recompute_fault_tb #(
       mul_bit = 4;
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
-      clock_edge();
+      repeat (2) clock_edge();  // the multipliers' two Execute cycles
       mul_eval();
       check(mul_stall && mul_prod == '0, {test_id, ": initial mismatch contained"});
       $display("  injected: primary raw/product=%0h/%0h shadow raw/product=%0h/%0h; arch product=%0h stall=%b",

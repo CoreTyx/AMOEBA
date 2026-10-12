@@ -23,6 +23,7 @@ module ft_mul import cvw::*; #(
   // Preserve Wally's E-input/M-output boundary while adding replay control.
   input  logic                clk, reset,
   input  logic                StallM, FlushM,
+  input  logic                HoldE,                  // Execute's operands cannot be used this cycle (ECC stall)
   input  logic [P.XLEN-1:0]   ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0]          Funct3E,
   input  logic                MulActiveE,
@@ -45,12 +46,12 @@ module ft_mul import cvw::*; #(
   // the adder to the rest of the core inside one cycle:
   //   SUM      both replicas add their partial products; the products are captured.
   //   COMPARE  the captured products are compared and the controller acts.
-  //   REPLAY   after a mismatch: the partial-product registers reload from the
-  //            saved operands, then SUM again.
+  //   REPLAY   after a mismatch: the multipliers are given the saved operands
+  //   LOAD     ... and the partial-product registers reload; then SUM again.
   //   DONE     the captured product is presented and the stall released.
-  typedef enum logic [1:0] {SUM, COMPARE, REPLAY, DONE} phase_t;
+  typedef enum logic [2:0] {SUM, COMPARE, REPLAY, LOAD, DONE} phase_t;
   phase_t phase;
-  logic check, retry;
+  logic check, retry, replay_sel, e_ready;
 
   // Save the transaction that produced the current partial product. A retry
   // must replay these exact operands while the architectural stages are held.
@@ -75,8 +76,10 @@ module ft_mul import cvw::*; #(
     else case (phase)
       SUM:     phase <= COMPARE;
       COMPARE: phase <= retry ? REPLAY : DONE;
-      REPLAY:  phase <= SUM;
+      REPLAY:  phase <= LOAD;
+      LOAD:    phase <= SUM;
       DONE:    phase <= DONE;
+      default: phase <= SUM;
     endcase
 
   // The original multiplier is registered; the completed products are captured
@@ -88,12 +91,22 @@ module ft_mul import cvw::*; #(
     end
   assign mismatch = mul_active_m & ~isolated & (primary_q != shadow_q);
   // After a mismatch, load the saved transaction into the internal PP registers
-  // even though the architectural pipeline is globally held.
-  assign replay_load = (phase == REPLAY);
+  // even though the architectural pipeline is globally held.  The multipliers
+  // take two cycles (mul.sv), so the saved operands are presented for two and
+  // the registers load in the second.
+  assign replay_sel  = (phase == REPLAY) | (phase == LOAD);
+  assign replay_load = (phase == LOAD);
   assign internal_stall_m = StallM & ~replay_load;
-  assign mul_a = replay_load ? saved_a : ForwardedSrcAE;
-  assign mul_b = replay_load ? saved_b : ForwardedSrcBE;
-  assign mul_funct3 = replay_load ? saved_funct3 : Funct3E;
+  assign mul_a = replay_sel ? saved_a : ForwardedSrcAE;
+  assign mul_b = replay_sel ? saved_b : ForwardedSrcBE;
+  assign mul_funct3 = replay_sel ? saved_funct3 : Funct3E;
+  // The same two cycles for a multiply arriving in Execute: e_ready says the
+  // multipliers were looking at this instruction's operands, clean and
+  // unchanged, for the whole of the last cycle -- that is, the pipeline did not
+  // move at the last edge and neither a replay nor an ECC stall was in the way.
+  always_ff @(posedge clk)
+    if (reset) e_ready <= 1'b0;
+    else       e_ready <= StallM & ~replay_sel & ~HoldE;
   // Permit the internal PP registers to load the saved retry transaction even
   // when the architectural hazard unit is asserting StallM.
   mul #(P.XLEN) primary(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
@@ -121,8 +134,9 @@ module ft_mul import cvw::*; #(
     .pe_primary, .pe_shadow);
   /* verilator lint_on PINCONNECTEMPTY */
 
-  // The pipeline waits for a multiply's evaluation to finish.
-  assign stall_req = mul_active_m & (phase != DONE);
+  // The pipeline waits for a multiply's evaluation in Memory to finish, and for
+  // the multipliers to have had their full cycle with a multiply in Execute.
+  assign stall_req = (mul_active_m & (phase != DONE)) | (MulActiveE & ~e_ready);
   // The product reads as zero until the evaluation is DONE, and stays zero if it
   // ended unresolved.  Both conditions, and the product itself, are registers.
   assign ProdM = ((phase != DONE) | unresolved) ? '0 : (use_shadow ? shadow_q : primary_q);

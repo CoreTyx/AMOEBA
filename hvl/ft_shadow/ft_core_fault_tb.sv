@@ -482,15 +482,16 @@ module ft_core_fault_tb;
         // An older trap, return or CSR write in Memory flushes Execute and with it
         // whatever the FT units there were doing, so the stall is not applied.
         if (dut.soc.core.FTStall && !dut.soc.core.TrapM && !dut.soc.core.RetM && !dut.soc.core.CSRWriteFenceM) begin
-          // Every instruction is held while the ALU wrapper evaluates it.  Only a
-          // hold caused by a fault counts here: the multiplier or divider stalling
-          // in Memory, or the ALU wrapper finding a mismatch (the COMPARE cycle
-          // that ends in a retry) or still retrying or diagnosing one.
-          if (dut.soc.core.FTStallM ||
-              (dut.soc.core.FTStallE &&
-               ((dut.soc.core.ieu.dp.ftalu.check && dut.soc.core.ieu.dp.ftalu.retry) ||
-                dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd2 ||
-                dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd2)))
+          // Every instruction is held while the FT wrappers evaluate it.  Only a hold
+          // caused by a fault counts here: a wrapper's check finding a mismatch (the
+          // cycle that ends in a retry), or a wrapper retrying or diagnosing one.
+          if ((dut.soc.core.ieu.dp.ftalu.check && dut.soc.core.ieu.dp.ftalu.retry) ||
+              dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd2 ||
+              dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd2 ||
+              (dut.soc.core.mdu.mdu.ftmul.check && dut.soc.core.mdu.mdu.ftmul.retry) ||
+              dut.soc.core.mdu.mdu.ftmul.ctrl.state == 3'd1 ||
+              (dut.soc.core.mdu.mdu.div.ftdiv.check && dut.soc.core.mdu.mdu.div.ftdiv.mismatch) ||
+              dut.soc.core.mdu.mdu.div.ftdiv.state == 2'd1)
             held_cycles++;
           check(
               dut.soc.core.StallF && dut.soc.core.StallD && dut.soc.core.StallE && dut.soc.core.StallM &&

@@ -648,6 +648,7 @@ ft_shadow_test:
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/flop/flop.sv \
 	    $(CURDIR)/../hdl/core/generic/flop/flopenrc.sv \
 	    $(CURDIR)/../hdl/core/generic/flop/flopen.sv \
 	    $(CURDIR)/../hdl/core/ieu/shifter.sv \

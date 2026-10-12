@@ -62,7 +62,21 @@ module mul #(parameter XLEN) (
 
   assign Aprime = {1'b0, ForwardedSrcAE[XLEN-2:0]};
   assign Bprime = {1'b0, ForwardedSrcBE[XLEN-2:0]};
-  assign PP1E = Aprime * Bprime;
+  // Aprime * Bprime takes two Execute cycles.  In the first, the four products of
+  // the operands' halves go into registers; from the second on, PP1E is their sum.
+  // One full-width multiply did not fit a 2.5 ns cycle after the forwarding muxes.
+  // The registers run freely, so the operands must have been presented, unchanged,
+  // for a full cycle before the partial-product registers below load PP1E.  ft_mul
+  // holds the pipeline until that is so.
+  localparam HALF = XLEN/2;
+  logic [XLEN-1:0]    LLE, LHE, HLE, HHE;                   // products of the halves
+  logic [XLEN-1:0]    LLQ, LHQ, HLQ, HHQ;                   // ... registered
+  assign LLE = Aprime[HALF-1:0]    * Bprime[HALF-1:0];
+  assign LHE = Aprime[HALF-1:0]    * Bprime[XLEN-1:HALF];
+  assign HLE = Aprime[XLEN-1:HALF] * Bprime[HALF-1:0];
+  assign HHE = Aprime[XLEN-1:HALF] * Bprime[XLEN-1:HALF];
+  flop #(4*XLEN) halvesreg(clk, {LLE, LHE, HLE, HHE}, {LLQ, LHQ, HLQ, HHQ});
+  assign PP1E = {HHQ, LLQ} + {{(HALF-1){1'b0}}, ({1'b0, LHQ} + {1'b0, HLQ}), {HALF{1'b0}}};
   assign PA = {(XLEN-1){ForwardedSrcAE[XLEN-1]}} & ForwardedSrcBE[XLEN-2:0];
   assign PB = {(XLEN-1){ForwardedSrcBE[XLEN-1]}} & ForwardedSrcAE[XLEN-2:0];
   assign PP = ForwardedSrcAE[XLEN-1] & ForwardedSrcBE[XLEN-1];

@@ -32,6 +32,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // Per-unit enables from the core; each injector selects bit and kind locally.
   input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
   input  logic              StallM, StallW,
+  input  logic              HoldE,                          // Execute's operands cannot be used this cycle (ECC stall)
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
   input  logic [2:0]        Funct3E, Funct3M,               // type of MDU operation
@@ -59,7 +60,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // DIV retries the held E-stage transaction by restarting both divider FSMs;
   // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
-  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
+  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM, .HoldE,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product replica bits before the M-stage checker.
     .fi_enable(fault_inject_mul),
