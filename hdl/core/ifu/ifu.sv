@@ -93,6 +93,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic                 ENVCFG_ADUE,                              // HPTW A/D Update enable
   input  logic                 sfencevmaM,                               // Virtual memory address fence, invalidate TLB entries
   output logic                 ITLBMissOrUpdateAF,                       // ITLB miss causes HPTW (hardware pagetable walker) walk or update access bit
+  input  logic                 HPTWInstrAccessFaultF,                    // The page walker ended this fetch's walk with an access fault
+  input  logic                 HPTWInstrPageFaultF,                      // ... or with a page fault
   input  var logic [7:0]       PMPCFG_ARRAY_REGW[P.PMP_ENTRIES-1:0],     // PMP configuration from privileged unit
   input  var logic [P.PA_BITS-3:0] PMPADDR_ARRAY_REGW[P.PMP_ENTRIES-1:0],// PMP address from privileged unit
   output logic                 InstrAccessFaultF,                        // Instruction access fault
@@ -134,6 +136,13 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic                        SelSpillNextF;                            // In a spill, stall pipeline and gate local stallF
   logic                        BusStall;                                 // Bus interface busy with multicycle operation
   logic                        IFUCacheBusStallF;                        // EIther I$ or bus busy with multicycle operation
+  logic                        ICacheBusyF;                              // I$ in the middle of an access (ICacheStallF without the cycle a request is first seen)
+  logic                        SpillStateHoldsF;                         // the spill FSM stays on the same half next cycle
+  logic                        FetchCheckedQ;                            // this fetch address has had a full cycle in the MMU
+  logic                        CacheableFQ;                              // CacheableF as of last cycle
+  logic                        UncachedFQ;                               // "fetch this address over the bus" as of last cycle
+  logic                        HPTWFaultF;                               // the page walker ended this fetch's walk with a fault
+  logic                        InstrAccessFaultRawF, InstrPageFaultRawF; // the MMU's fetch faults this cycle
   logic                        GatedStallD;                              // StallD gated by selected next spill
   // branch predictor signal
   logic                        BusCommittedF;                            // Bus memory operation in flight, delay interrupts
@@ -155,8 +164,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     logic [P.XLEN-1:0] PCSpillD, PCSpillE;
     logic [P.XLEN-1:0] PCIncrM;
     logic              SelSpillF, SelSpillD, SelSpillE, SelSpillM;
-    spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF,
-      .IFUCacheBusStallF, .ITLBMissOrUpdateAF, .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .PostSpillInstrRawF, .CompressedF);
+    spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
+      .IFUCacheBusStallF, .ITLBMissOrUpdateAF, .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
+      .PostSpillInstrRawF, .CompressedF);
     flopenr #(1) SpillDReg(clk, reset, ~StallD, SelSpillF, SelSpillD);
     flopenr #(1) SpillEReg(clk, reset, ~StallE, SelSpillD, SelSpillE);
     flopenr #(1) SpillMReg(clk, reset, ~StallM, SelSpillE, SelSpillM);
@@ -165,6 +175,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   end else begin : NoSpill
     assign PCSpillNextF = PCNextF;
+    assign SpillStateHoldsF = 1'b1;
     assign PCSpillF = PCF;
     assign PostSpillInstrRawF = InstrRawF;
     assign {SelSpillNextF, CompressedF} = '0;
@@ -200,8 +211,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
          .PhysicalAddress(PCPF),
          .TLBMiss(ITLBMissF),
          .Cacheable(CacheableF), .Idempotent(), .SelTIM(SelIROM),
-         .InstrAccessFaultF, .LoadAccessFaultM(), .StoreAmoAccessFaultM(),
-         .InstrPageFaultF, .LoadPageFaultM(), .StoreAmoPageFaultM(),
+         .InstrAccessFaultF(InstrAccessFaultRawF), .LoadAccessFaultM(), .StoreAmoAccessFaultM(),
+         .InstrPageFaultF(InstrPageFaultRawF), .LoadPageFaultM(), .StoreAmoPageFaultM(),
          .LoadMisalignedFaultM(), .StoreAmoMisalignedFaultM(),
          .UpdateDA(InstrUpdateAF), .CMOpM(4'b0),
          .AtomicAccessM(1'b0),.ExecuteAccessF(1'b1), .WriteAccessM(1'b0), .ReadAccessM(1'b0),
@@ -209,7 +220,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
      assign ITLBMissOrUpdateAF = ITLBMissF | (P.SVADU_SUPPORTED & InstrUpdateAF);
   end else begin
-    assign {ITLBMissF, InstrAccessFaultF, InstrPageFaultF, InstrUpdateAF} = '0;
+    assign {ITLBMissF, InstrAccessFaultRawF, InstrPageFaultRawF, InstrUpdateAF} = '0;
     assign PCPF = PCFExt[P.PA_BITS-1:0];
     assign CacheableF = 1'b1;
     assign SelIROM = '0;
@@ -249,16 +260,18 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       logic [P.PA_BITS-1:0] UnusedICacheEccDedDirtyFaultAdr;
       logic [1:0]           CacheBusRW, BusRW, CacheRWF;
 
-      assign BusRW = ~ITLBMissF & ~CacheableF & ~SelIROM & ~InvalidateICacheM ? IFURWF : '0;
+      // An uncached fetch waits for the fetch check cycle, and then uses what the MMU said last
+      // cycle about where the address lives (see the fetch check below).
+      assign BusRW = UncachedFQ & FetchCheckedQ & ~InvalidateICacheM ? IFURWF : '0;
       assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM & ~InvalidateICacheM ? IFURWF : '0;
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.ICACHE_LINELENINBITS),
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
               .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
       icache(.clk, .reset, .FlushStage(FlushD), .Stall(GatedStallD),
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
-             .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF),
+             .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF), .CacheBusy(ICacheBusyF),
              .CacheBusRW,
-             .ReadDataWord(ICacheInstrF), .AmoWord(), .CacheBusy(),
+             .ReadDataWord(ICacheInstrF), .AmoWord(),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
              .SecCount(ICacheSecCount),
@@ -284,7 +297,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
             .BusStall, .BusCommitted(BusCommittedF));
 
       mux3 #(32) UnCachedDataMux(.d0(ICacheInstrF), .d1(ShiftUncachedInstr), .d2(IROMInstrF),
-                                 .s({SelIROM, ~CacheableF}), .y(InstrRawF[31:0]));
+                                 .s({SelIROM, ~CacheableFQ}), .y(InstrRawF[31:0]));
     end else begin : passthrough
       assign IFUHADDR = PCPF;
       logic [1:0] BusRW;
@@ -301,6 +314,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       else assign InstrRawF = ShiftUncachedInstr;
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
+      assign ICacheBusyF = 1'b0;
       assign ICacheSecCount = '0;
     end
 
@@ -313,11 +327,39 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign {IFUHADDR, IFUHWRITE, IFUHSIZE, IFUHBURST, IFUHTRANS,
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
+    assign ICacheBusyF = 1'b0;
     assign ICacheSecCount = '0;
     assign InstrRawF = IROMInstrF;
   end
 
-  assign IFUCacheBusStallF = ICacheStallF | BusStall;
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Fetch check cycle
+  //
+  // What the MMU says about a fetch address -- whether it is cacheable, and whether fetching it
+  // faults -- comes out of the TLB, the PMP and the PMA checkers late in the cycle.  It used to
+  // decide, in that same cycle, whether the fetch stalled the pipeline, and to be captured
+  // into Decode straight from there.  Every fetch address now spends a first cycle here in
+  // which only the MMU's answer is taken (into registers); the stall for that cycle depends on
+  // registers alone.  A cached fetch was already held in that cycle; an uncached one is a cycle
+  // longer.  A new address is a new PC, the other half of an instruction that spills over a
+  // line or page, or the same PC once a page walk has filled the TLB or a flush or an I$
+  // invalidate has restarted the fetch.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  flopr #(1) fetchcheckedreg(clk, reset,
+    StallF & ~FlushD & SpillStateHoldsF & ~ITLBMissOrUpdateAF & ~InvalidateICacheM, FetchCheckedQ);
+  flop #(2) fetchwherereg(clk, {CacheableF, ~ITLBMissF & ~CacheableF & ~SelIROM}, {CacheableFQ, UncachedFQ});
+  // The faults are captured into Decode when the fetch completes, which is at least a cycle
+  // after its check cycle, so Decode is given last cycle's answer.
+  flopr #(2) fetchfaultreg(clk, reset, {InstrAccessFaultRawF, InstrPageFaultRawF}, {InstrAccessFaultF, InstrPageFaultF});
+
+  // "The fetch is not finished": in the middle of a cache or bus access, or still in its check
+  // cycle.  (ICacheStallF also covers the cycle a request is first seen, from the live request.)
+  // A walk that the page walker itself ends with a fault finishes the fetch as it stands: the
+  // TLB still misses, so there will never be a check cycle, and the pipeline has to advance for
+  // the fault to go into Decode (privpiperegs).  The walker presents the fault from its own
+  // registers for one cycle, with no cache or bus access under way.
+  assign HPTWFaultF = HPTWInstrAccessFaultF | HPTWInstrPageFaultF;
+  assign IFUCacheBusStallF = ICacheBusyF | BusStall | (~FetchCheckedQ & ~HPTWFaultF);
   assign IFUStallF = IFUCacheBusStallF | SelSpillNextF | InvalidateICacheM;
   assign GatedStallD = StallD & ~SelSpillNextF;
 

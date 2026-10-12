@@ -135,6 +135,16 @@
     assign mon_itf.mem_misaligned[0] = 1'b0;
 `endif
 
+    // ---- access/page-fault flag for the RVFI waiver -------------------------
+    // The trap cause is not part of the RVFI taps, so it is carried from Memory
+    // to Writeback here, next to the wrapper's TrapW.  Causes 1, 5, 7 are the
+    // instruction, load and store access faults; 12, 13, 15 the page faults.
+    logic [4:0] TrapCauseW;
+    always_ff @(posedge clk)
+        if (!`RT_TAP.StallW) TrapCauseW <= `RT_CORE.priv.priv.CauseM;
+    assign mon_itf.mmu_fault[0] = mon_itf.valid[0] && `RT_TAP.TrapW &&
+                                  (TrapCauseW inside {5'd1, 5'd5, 5'd7, 5'd12, 5'd13, 5'd15});
+
     // ---- UART transmit tap -------------------------------------------------
     // syscalls_amoeba.c reaches printf() -- and therefore configASSERT() -- by
     // storing bytes to the NS16550 transmit holding register at UART_BASE.

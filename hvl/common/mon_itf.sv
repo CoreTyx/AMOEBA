@@ -48,6 +48,11 @@ interface mon_itf #(
             // so monitor.sv waives their verdict for the Linux tier.
             logic               mem_misaligned [CHANNELS];
 
+            // Set when the retiring instruction trapped on an access fault or a
+            // page fault.  The generated riscv-formal models have neither an
+            // MMU nor a PMP, so monitor.sv waives their verdict on it.
+            logic               mmu_fault [CHANNELS];
+
             bit             halt  = 1'b0;
             bit             error = 1'b0;
 
