@@ -412,7 +412,12 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       // them is looked at in the first cycle of an access.
       logic UncachedQ, SelDTIMQ, NotCachedQ;
       flop #(3) wherereg(clk, {~CacheableM & ~SelDTIM, SelDTIM, ~CacheableOrFlushCacheM}, {UncachedQ, SelDTIMQ, NotCachedQ});
-      assign BusRW = (UncachedQ & (SelHPTW ? HPTWAccessChecked : MemCheckedQ)) ? LSURWM : '0;
+      // The request itself is a cycle old as well.  LSURWM is the instruction's (or the walker's)
+      // read/write after a failed store-conditional has been squashed, and that takes a compare of
+      // the translated address with the reservation; it does not change while the access is held.
+      logic [1:0] LSURWQ;
+      flop #(2) lsurwreg(clk, LSURWM, LSURWQ);
+      assign BusRW = (UncachedQ & (SelHPTW ? HPTWAccessChecked : MemCheckedQ)) ? LSURWQ : '0;
       assign CacheableOrFlushCacheM = CacheableM | FlushDCacheM;
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW

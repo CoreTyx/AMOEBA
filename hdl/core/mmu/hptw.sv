@@ -120,6 +120,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   logic                     PBMTOrDAUFaultM;
   logic                     HPTWFaultM;
   logic                     WalkerAccess;              // the walker is reading or writing a page-table entry
+  logic                     AccessCheckedQ;            // ... and was already doing so last cycle
   logic                     LSUAccessFaultQ;           // the MMU's verdict on the walker's address, as of last cycle
   logic                     WalkerAccessFaultM;        // access fault on the walker's own access
   logic                     AccessStallM;              // the walker's access is not finished
@@ -144,9 +145,10 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   // The address and the access type are the same in every cycle of one read or update state,
   // and two such states are never adjacent, so "an access last cycle" means "this access".
   assign WalkerAccess = |HPTWRW;
-  flopr #(2) accesscheckreg(clk, reset | FlushW, {WalkerAccess, LSUAccessFaultM}, {HPTWAccessChecked, LSUAccessFaultQ});
-  assign WalkerAccessFaultM = WalkerAccess & HPTWAccessChecked & LSUAccessFaultQ;
-  assign AccessStallM       = DCacheBusStallM | ~HPTWAccessChecked;
+  flopr #(2) accesscheckreg(clk, reset | FlushW, {WalkerAccess, LSUAccessFaultM}, {AccessCheckedQ, LSUAccessFaultQ});
+  assign HPTWAccessChecked  = WalkerAccess & AccessCheckedQ;
+  assign WalkerAccessFaultM = HPTWAccessChecked & LSUAccessFaultQ;
+  assign AccessStallM       = DCacheBusStallM | ~AccessCheckedQ;
 
   assign HPTWFaultM              = WalkerAccessFaultM | PBMTOrDAUFaultM;
   assign HPTWLoadAccessFault     = WalkerAccessFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
