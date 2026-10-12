@@ -92,7 +92,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              CSRReadM, CSRWriteM, PrivilegedM,// CSR read, CSR write, is privileged instruction
   output logic              CSRWriteFenceM,                  // CSR write or fence instruction needs to flush subsequent instructions
   // AMOEBA random instruction insertion
-  input  logic              InjectD,                         // Inject DummyInstrD into Decode this cycle
+  input  logic              InjectD,                         // Decode presents DummyInstrD this cycle (the core connects dummygen's request)
   input  logic [31:0]       DummyInstrD,                     // Dummy instruction to inject
   input  logic              DummySelD,                       // Which shadow physical register the dummy writes
   output logic              DummyW                           // Writeback stage holds a dummy instruction

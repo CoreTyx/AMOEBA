@@ -115,6 +115,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // AMOEBA random instruction insertion
   logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
   logic [31:0]                   DummyInstrD;                     // dummy instruction to inject
+  logic                          InjectReqD;                      // Decode presents the dummy this cycle
   logic                          InjectD;                         // inject a dummy this cycle
   logic                          DummySelD;                       // shadow register the dummy writes
   logic                          DummyW;                          // Writeback holds a dummy instruction
@@ -280,8 +281,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
      .StructuralStallD, .LoadStallD, .StoreStallD, .PCSrcE,
      .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM,
-     // random instruction insertion
-     .InjectD, .DummyInstrD, .DummySelD, .DummyW);
+     // random instruction insertion.  The IEU decodes the dummy on the request;
+     // the hazard unit, the IFU and the monitors act on the insertion itself.
+     .InjectD(InjectReqD), .DummyInstrD, .DummySelD, .DummyW);
 
   ///////////////////////////////////////////
   // AMOEBA: random instruction insertion
@@ -298,7 +300,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   dummygen dummygen(.clk, .reset,
     .FreqW(RAND_INSTR_INSERT_FREQ_REGW),
     .InstrD, .InstrValidD, .InsertOkD,
-    .InjectD, .DummyInstrD, .DummySelD);
+    .InjectReqD, .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
     .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
