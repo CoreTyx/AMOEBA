@@ -152,6 +152,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [LINELEN-1:0]          FetchBuffer;
   logic [31:0]                 ShiftUncachedInstr;
   logic                        ITLBMissF;
+  logic                        ITLBMissOrUpdateAFRaw;                    // ITLB miss or A-bit update needed, this cycle
   logic                        InstrUpdateAF;                            // ITLB hit needs to update dirty or access bits
 
   assign PCFExt = {2'b00, PCSpillF};
@@ -165,7 +166,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     logic [P.XLEN-1:0] PCIncrM;
     logic              SelSpillF, SelSpillD, SelSpillE, SelSpillM;
     spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
-      .IFUCacheBusStallF, .ITLBMissOrUpdateAF, .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
+      .IFUCacheBusStallF, .ITLBMissOrUpdateAF(ITLBMissOrUpdateAFRaw), .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
       .PostSpillInstrRawF, .CompressedF);
     flopenr #(1) SpillDReg(clk, reset, ~StallD, SelSpillF, SelSpillD);
     flopenr #(1) SpillEReg(clk, reset, ~StallE, SelSpillD, SelSpillE);
@@ -218,13 +219,13 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
          .AtomicAccessM(1'b0),.ExecuteAccessF(1'b1), .WriteAccessM(1'b0), .ReadAccessM(1'b0),
          .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW);
 
-     assign ITLBMissOrUpdateAF = ITLBMissF | (P.SVADU_SUPPORTED & InstrUpdateAF);
+     assign ITLBMissOrUpdateAFRaw = ITLBMissF | (P.SVADU_SUPPORTED & InstrUpdateAF);
   end else begin
     assign {ITLBMissF, InstrAccessFaultF, InstrPageFaultRawF, InstrUpdateAF} = '0;
     assign PCPF = PCFExt[P.PA_BITS-1:0];
     assign CacheableF = 1'b1;
     assign SelIROM = '0;
-    assign ITLBMissOrUpdateAF = '0;
+    assign ITLBMissOrUpdateAFRaw = '0;
   end
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -346,7 +347,13 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // invalidate has restarted the fetch.
   /////////////////////////////////////////////////////////////////////////////////////////////
   flopr #(1) fetchcheckedreg(clk, reset,
-    StallF & ~FlushD & SpillStateHoldsF & ~ITLBMissOrUpdateAF & ~InvalidateICacheM, FetchCheckedQ);
+    StallF & ~FlushD & SpillStateHoldsF & ~ITLBMissOrUpdateAFRaw & ~InvalidateICacheM, FetchCheckedQ);
+  // The page walker is asked to walk a cycle after the ITLB misses, from a register, so that
+  // its stall and flush do not hang off the TLB lookup.  The request stands only if the fetch
+  // address is still the one that missed: the pipeline was held (a fetch that misses is in its
+  // check cycle, which holds it), nothing was flushed, and the spill FSM stayed on the same half.
+  flopr #(1) itlbmissreg(clk, reset,
+    ITLBMissOrUpdateAFRaw & StallF & ~FlushD & SpillStateHoldsF, ITLBMissOrUpdateAF);
   flop #(2) fetchwherereg(clk, {CacheableF, ~ITLBMissF & ~CacheableF & ~SelIROM}, {CacheableFQ, UncachedFQ});
   // The faults are captured into Decode when the fetch completes, which is at least a cycle
   // after its check cycle, so Decode is given last cycle's answer.  The page fault is

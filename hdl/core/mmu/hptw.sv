@@ -66,6 +66,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   output logic              HPTWFlushW,
   output logic              SelHPTW,
   output logic              HPTWStall,
+  output logic              HPTWAccessChecked,         // the walker's memory access has had its check cycle (see below)
   input  logic              LSULoadAccessFaultM, LSUStoreAmoAccessFaultM,
   input  logic              LSULoadPageFaultM, LSUStoreAmoPageFaultM,
   // The same four faults for the instruction's own access, registered by the LSU (see lsu.sv).
@@ -118,14 +119,39 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   logic                     DAUFaultM;
   logic                     PBMTOrDAUFaultM;
   logic                     HPTWFaultM;
+  logic                     WalkerAccess;              // the walker is reading or writing a page-table entry
+  logic                     LSUAccessFaultQ;           // the MMU's verdict on the walker's address, as of last cycle
+  logic                     WalkerAccessFaultM;        // access fault on the walker's own access
+  logic                     AccessStallM;              // the walker's access is not finished
+  logic                     WalkerWasIdleQ;            // the walker was idle last cycle
 
   // map hptw access faults onto either the original LSU load/store fault or instruction access fault
   assign LSUAccessFaultM         = LSULoadAccessFaultM | LSUStoreAmoAccessFaultM;
   assign PBMTOrDAUFaultM         = PBMTFaultM | DAUFaultM;
-  assign HPTWFaultM              = LSUAccessFaultM | PBMTOrDAUFaultM;
-  assign HPTWLoadAccessFault     = LSUAccessFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
-  assign HPTWStoreAmoAccessFault = LSUAccessFaultM & DTLBWalk & (MemRWM[0] | (|CMOpM));
-  assign HPTWInstrAccessFault    = LSUAccessFaultM & ~DTLBWalk;
+
+  // Access check cycle for the walker's own reads and writes.
+  //
+  // Whether the walker may touch a page-table entry comes out of the PMP and PMA checkers late
+  // in the cycle.  It used to decide in that same cycle whether the bus request went out and
+  // whether the cache and the bus were flushed.  A walker access now spends its first cycle
+  // being checked: the verdict is registered, the walker waits in its read (or update) state,
+  // and from the second cycle on the fault, the flush and the next state use the register.
+  // Nothing irreversible happens in the first cycle -- the bus request waits for
+  // HPTWAccessChecked (lsu.sv), and the cache only reads until a hit writes two states later,
+  // by when a fault has flushed it.  A cached access was busy in that cycle anyway; an uncached
+  // one is a cycle longer.
+  //
+  // The address and the access type are the same in every cycle of one read or update state,
+  // and two such states are never adjacent, so "an access last cycle" means "this access".
+  assign WalkerAccess = |HPTWRW;
+  flopr #(2) accesscheckreg(clk, reset | FlushW, {WalkerAccess, LSUAccessFaultM}, {HPTWAccessChecked, LSUAccessFaultQ});
+  assign WalkerAccessFaultM = WalkerAccess & HPTWAccessChecked & LSUAccessFaultQ;
+  assign AccessStallM       = DCacheBusStallM | ~HPTWAccessChecked;
+
+  assign HPTWFaultM              = WalkerAccessFaultM | PBMTOrDAUFaultM;
+  assign HPTWLoadAccessFault     = WalkerAccessFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
+  assign HPTWStoreAmoAccessFault = WalkerAccessFaultM & DTLBWalk & (MemRWM[0] | (|CMOpM));
+  assign HPTWInstrAccessFault    = WalkerAccessFaultM & ~DTLBWalk;
   assign HPTWLoadPageFault       = PBMTOrDAUFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
   assign HPTWStoreAmoPageFault   = PBMTOrDAUFaultM & DTLBWalk & (MemRWM[0] | (|CMOpM));
   assign HPTWInstrPageFault      = PBMTOrDAUFaultM & ~DTLBWalk;
@@ -148,7 +174,13 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   // Extract bits from CSRs and inputs
   assign SvMode = SATP_REGW[P.XLEN-1:P.XLEN-P.SVMODE_BITS];
   assign BasePageTablePPN = SATP_REGW[P.PPN_BITS-1:0];
-  assign TLBMissOrUpdateDA = DTLBMissOrUpdateDAM | ITLBMissOrUpdateAF;
+  // A walk starts a cycle after the TLB misses.  Both requests are registered where they are
+  // made, and each says that the address that missed is still the one being presented:
+  // DTLBMissOrUpdateDAM is qualified in lsu.sv, which also knows that no walk was under way;
+  // ITLBMissOrUpdateAF is qualified in ifu.sv and has that added here, so that the miss seen in
+  // the cycle a walk fills the TLB does not start the walk again.
+  flopr #(1) wasidlereg(clk, reset, WalkerState == IDLE, WalkerWasIdleQ);
+  assign TLBMissOrUpdateDA = DTLBMissOrUpdateDAM | (ITLBMissOrUpdateAF & WalkerWasIdleQ);
 
   // Determine which address to translate
   mux2 #(P.XLEN) vadrmux(PCSpillF, IEUAdrExtM[P.XLEN-1:0], DTLBWalk, TranslationVAdr);
@@ -156,7 +188,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
 
   // State flops
   flopenr #(1) TLBMissMReg(clk, reset, StartWalk, DTLBMissOrUpdateDAM, DTLBWalk); // when walk begins, record whether it was for DTLB (or record 0 for ITLB)
-  assign PRegEn = HPTWRW[1] & ~DCacheBusStallM | UpdatePTE | (NextWalkerState == IDLE);
+  assign PRegEn = HPTWRW[1] & ~AccessStallM | UpdatePTE | (NextWalkerState == IDLE);
   assign NextPTE2 = (NextWalkerState == IDLE) ? '0 : NextPTE;
   flopenr #(P.XLEN) PTEReg(clk, reset, PRegEn, NextPTE2, PTE); // Capture page table entry from data cache
 
@@ -303,36 +335,36 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
                   else                                                NextWalkerState = IDLE;
       L4_ADR:                                                         NextWalkerState = L4_RD; // First access in SV57
       L4_RD:      if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = L4_RD;
+                  else if (AccessStallM)                              NextWalkerState = L4_RD;
                   else                                                NextWalkerState = L3_ADR;   // Transition to level 3
       L3_ADR:     if (HPTWFaultM)                                     NextWalkerState = FAULT;
                   else if (InitialWalkerState == L3_ADR | ValidNonLeafPTE) NextWalkerState = L3_RD; // First access in SV48
                   else                                                NextWalkerState = LEAF;
       L3_RD:      if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = L3_RD;
+                  else if (AccessStallM)                              NextWalkerState = L3_RD;
                   else                                                NextWalkerState = L2_ADR;
       L2_ADR:     if (HPTWFaultM)                                     NextWalkerState = FAULT;
                   else if (InitialWalkerState == L2_ADR | ValidNonLeafPTE) NextWalkerState = L2_RD; // First access in SV39
                   else                                                NextWalkerState = LEAF;
       L2_RD:      if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = L2_RD;
+                  else if (AccessStallM)                              NextWalkerState = L2_RD;
                   else                                                NextWalkerState = L1_ADR;
       L1_ADR:     if  (HPTWFaultM)                                     NextWalkerState = FAULT;
                   else if (InitialWalkerState == L1_ADR | ValidNonLeafPTE) NextWalkerState = L1_RD; // First access in SV32
                   else                                                NextWalkerState = LEAF;
       L1_RD:      if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = L1_RD;
+                  else if (AccessStallM)                              NextWalkerState = L1_RD;
                   else                                                NextWalkerState = L0_ADR;
       L0_ADR:     if (HPTWFaultM)                                     NextWalkerState = FAULT;
                   else if (ValidNonLeafPTE)                           NextWalkerState = L0_RD;
                   else                                                NextWalkerState = LEAF;
       L0_RD:      if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = L0_RD;
+                  else if (AccessStallM)                              NextWalkerState = L0_RD;
                   else                                                NextWalkerState = LEAF;
       LEAF:       if (P.SVADU_SUPPORTED & HPTWUpdateDA)               NextWalkerState = UPDATE_PTE;
                   else                                                NextWalkerState = IDLE;
       UPDATE_PTE: if (HPTWFaultM)                                     NextWalkerState = FAULT;
-                  else if (DCacheBusStallM)                           NextWalkerState = UPDATE_PTE;
+                  else if (AccessStallM)                              NextWalkerState = UPDATE_PTE;
                   else                                                NextWalkerState = LEAF;
       FAULT:                                                          NextWalkerState = IDLE;
       default:                                                        NextWalkerState = IDLE; // Should never be reached

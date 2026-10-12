@@ -149,6 +149,9 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   logic [(P.LLEN-1)/8:0] ByteMaskExtendedM;                      // Selects which bytes within a word to write
   logic [1:0]            MemRWSpillM;
   logic                  SpillStallM;
+  logic                  SpillStartM;                            // a misaligned access moves on to its second half next cycle
+  logic                  HPTWAccessChecked;                      // the page walker's own access has had its check cycle
+  logic                  DTLBMissOrUpdateDAQ;                    // the DTLB missed (or needs its A/D bits set) last cycle
 
   logic                  DTLBMissM;                              // DTLB miss causes HPTW walk
   logic                  DTLBWriteM;                             // Writes PTE and PageType to DTLB
@@ -182,7 +185,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
                      .MemRWM,
                      .DCacheReadDataWordM, .CacheBusHPWTStall, .SelHPTW,
                      .ByteMaskM, .ByteMaskExtendedM, .LSUWriteDataM, .ByteMaskSpillM, .LSUWriteDataSpillM,
-                     .IEUAdrSpillE, .IEUAdrSpillM, .IEUAdrxTvalM, .SelSpillE, .DCacheReadDataWordSpillM, .SpillStallM);
+                     .IEUAdrSpillE, .IEUAdrSpillM, .IEUAdrxTvalM, .SelSpillE, .DCacheReadDataWordSpillM, .SpillStallM, .SpillStartM);
     assign IEUAdrExtM = {2'b00, IEUAdrSpillM};
     assign IEUAdrExtE = {2'b00, IEUAdrSpillE};
   end else begin : no_ziccslm_align
@@ -193,7 +196,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign ByteMaskSpillM = ByteMaskM;
     assign LSUWriteDataSpillM = LSUWriteDataM;
     assign MemRWSpillM = MemRWM;
-    assign {SpillStallM} = 1'b0;
+    assign {SpillStallM, SpillStartM} = '0;
     assign IEUAdrxTvalM = IEUAdrM;
   end
 
@@ -232,7 +235,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       .ReadDataM(ReadDataM[P.XLEN-1:0]), // ReadDataM is LLEN, but HPTW only needs XLEN
       .WriteDataM(WriteDataZM), .Funct3M, .LSUFunct3M, .Funct7M, .LSUFunct7M,
       .IEUAdrExtM, .PTE, .IHWriteDataM, .PageType, .PreLSURWM, .LSUAtomicM,
-      .IHAdrM, .CMOpM, .LSUCMOpM, .HPTWStall, .SelHPTW,
+      .IHAdrM, .CMOpM, .LSUCMOpM, .HPTWStall, .HPTWAccessChecked, .SelHPTW,
       .HPTWFlushW, .LSULoadAccessFaultM, .LSUStoreAmoAccessFaultM,
       .OwnLoadAccessFaultM, .OwnStoreAmoAccessFaultM, .OwnLoadPageFaultM, .OwnStoreAmoPageFaultM,
       .LoadAccessFaultM, .StoreAmoAccessFaultM, .HPTWInstrAccessFaultF,
@@ -250,7 +253,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign StoreAmoAccessFaultM = OwnStoreAmoAccessFaultM;
     assign LoadPageFaultM = OwnLoadPageFaultM;
     assign StoreAmoPageFaultM = OwnStoreAmoPageFaultM;
-    assign {HPTWStall, SelHPTW, PTE, PageType, DTLBWriteM, ITLBWriteF, HPTWFlushW} = '0;
+    assign {HPTWStall, SelHPTW, PTE, PageType, DTLBWriteM, ITLBWriteF, HPTWFlushW, HPTWAccessChecked} = '0;
     assign {HPTWInstrAccessFaultF, HPTWInstrPageFaultF} = '0;
    end
 
@@ -261,7 +264,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   assign CommittedM = SelHPTW | DCacheCommittedM | BusCommittedM;
   assign GatedStallW = StallW & ~SelHPTW;
   assign DCacheBusStallM = DCacheStallM | LSUBusStallM;
-  assign CacheBusHPWTStall = DCacheBusStallM | HPTWStall;
+  // "The access is not finished", for the misaligned-access logic: the cache, the bus or the page
+  // walker is busy, or the access is still in its check cycle.  In that cycle none of the others
+  // need be busy yet -- on a TLB miss the walk only starts a cycle later.
+  assign CacheBusHPWTStall = DCacheBusStallM | HPTWStall | MemCheckStall;
   // The cycle a memory request first reaches the cache or the bus is covered by MemCheckStall
   // (the instruction's own access) or HPTWStall (a page walk's), so the pipeline's stall uses the
   // cache's busy state and not its full stall output: whether an address is cacheable comes
@@ -287,7 +293,10 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // first.  Faults found by the page walker are not affected; it presents them from its own
   // registers (hptw.sv).
   /////////////////////////////////////////////////////////////////////////////////////////////
-  flopr #(1) memcheckedreg(clk, reset, StallM & ~SelHPTW, MemCheckedQ);
+  //
+  // The second half of a misaligned access that crosses a line is an access to a new address
+  // and gets a check cycle of its own (SpillStartM).
+  flopr #(1) memcheckedreg(clk, reset, StallM & ~SelHPTW & ~SpillStartM, MemCheckedQ);
   assign MemCheckStall = ((|MemRWM) | (|CMOpM) | FlushDCacheM) & ~MemCheckedQ;
   flopr #(4) ownfaultreg(clk, reset,
     {LSULoadAccessFaultM, LSUStoreAmoAccessFaultM, LSULoadPageFaultM, LSUStoreAmoPageFaultM},
@@ -321,9 +330,15 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       .WriteAccessM, .ReadAccessM(PreLSURWM[1]),
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW);
 
-    assign DTLBMissOrUpdateDAM = DTLBMissM | (P.SVADU_SUPPORTED & DataUpdateDAM);
+    // The page walk for a DTLB miss starts from a register, a cycle after the miss, so that
+    // the walker's stall and flush do not hang off the TLB lookup.  The miss is found in the
+    // access check cycle, which holds the instruction in Memory whatever the TLB says, and
+    // MemCheckedQ says that it was held and that no walk was in progress: the registered miss
+    // is this instruction's, at the address it still presents.
+    flopr #(1) dtlbmissreg(clk, reset, DTLBMissM | (P.SVADU_SUPPORTED & DataUpdateDAM), DTLBMissOrUpdateDAQ);
+    assign DTLBMissOrUpdateDAM = DTLBMissOrUpdateDAQ & MemCheckedQ;
   end else begin  // No MMU, so no PMA/page faults and no address translation
-    assign DTLBMissOrUpdateDAM = '0;
+    assign {DTLBMissOrUpdateDAM, DTLBMissOrUpdateDAQ} = '0;
     assign {DTLBMissM, LSULoadAccessFaultM, LSUStoreAmoAccessFaultM, LoadMisalignedFaultM, StoreAmoMisalignedFaultM} = '0;
     assign {LSULoadPageFaultM, LSUStoreAmoPageFaultM} = '0;
     assign PAdrM = IHAdrM[P.PA_BITS-1:0];
@@ -390,13 +405,14 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         assign CacheCMOpM = '0;
         assign BusAtomic = 1'b0;
       end
-      // An uncached access of the instruction's own waits for the access check cycle.  By then
-      // (and by the read state of a page-walk step, whose address is presented a state earlier)
-      // where the address lives is known from last cycle, so the bus request uses a registered
-      // copy and does not wait for the MMU.
-      logic UncachedQ;
-      flop #(1) uncachedreg(clk, ~CacheableM & ~SelDTIM, UncachedQ);
-      assign BusRW = (UncachedQ & (MemCheckedQ | SelHPTW)) ? LSURWM : '0;
+      // An uncached access waits for its check cycle: the instruction's own for MemCheckedQ, a
+      // page walker's for HPTWAccessChecked (hptw.sv).  By then where the address lives is known
+      // from last cycle, so the bus request, the bus interface's address, size and data selects
+      // and the read-data muxes all use registered copies and do not wait for the MMU.  None of
+      // them is looked at in the first cycle of an access.
+      logic UncachedQ, SelDTIMQ, NotCachedQ;
+      flop #(3) wherereg(clk, {~CacheableM & ~SelDTIM, SelDTIM, ~CacheableOrFlushCacheM}, {UncachedQ, SelDTIMQ, NotCachedQ});
+      assign BusRW = (UncachedQ & (SelHPTW ? HPTWAccessChecked : MemCheckedQ)) ? LSURWM : '0;
       assign CacheableOrFlushCacheM = CacheableM | FlushDCacheM;
       assign CacheRWM = (CacheableM & ~SelDTIM) ? LSURWM : '0;
       assign FlushDCache = FlushDCacheM & ~SelHPTW;                          // exclusion-tag: lsu FlushDCacheSelHPTW
@@ -422,29 +438,25 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         .HRDATA, .HWDATA(LSUHWDATA), .HWSTRB(LSUHWSTRB),
         .HSIZE(LSUHSIZE), .HBURST(LSUHBURST), .HTRANS(LSUHTRANS), .HWRITE(LSUHWRITE), .HREADY(LSUHREADY),
         .BeatCount, .SelBusBeat, .CacheReadDataWordM(DCacheReadDataWordM[P.LLEN-1:0]), .WriteDataM(LSUWriteDataM),
-        .Funct3(LSUFunct3M), .HADDR(LSUHADDR), .CacheBusAdr(DCacheBusAdr), .CacheBusRW, .BusAtomic, .BusCMOZero, .CacheableOrFlushCacheM,
+        .Funct3(LSUFunct3M), .HADDR(LSUHADDR), .CacheBusAdr(DCacheBusAdr), .CacheBusRW, .BusAtomic, .BusCMOZero, .CacheableOrFlushCacheM(~NotCachedQ),
         .CacheBusAck(DCacheBusAck), .FetchBuffer, .PAdr(PAdrM),
-        .Cacheable(CacheableOrFlushCacheM), .BusRW, .Stall(GatedStallW),
+        .Cacheable(~NotCachedQ), .BusRW, .Stall(GatedStallW),
         .BusStall(LSUBusStallM), .BusCommitted(BusCommittedM));
 
       mux3 #(P.LLEN) UnCachedDataMux(.d0(DCacheReadDataWordSpillM), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
                                     .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
-                                    .s({SelDTIM, ~(CacheableOrFlushCacheM)}), .y(ReadDataWordMuxM));
+                                    .s({SelDTIMQ, NotCachedQ}), .y(ReadDataWordMuxM));
       // The same selection for the AMO ALU's operand, with the cache's registered AMO word in
       // place of its read data.  AMOs are aligned, so there is no spill to undo.
-      // Which memory the operand comes from is known from the instruction's first cycle in
-      // Memory, and an AMO's write is several cycles after that, so the select is registered:
-      // it comes out of the MMU's PMA check, late, and would otherwise sit in front of the AMO
-      // ALU on the way to the store data.
-      logic       AmoSelDTIMQ, AmoUncachedQ;
-      flop #(2) amoselreg(clk, {SelDTIM, ~(CacheableOrFlushCacheM)}, {AmoSelDTIMQ, AmoUncachedQ});
+      // Like the read data above it uses the registered select: the live one comes out of the
+      // MMU's PMA check, late, and would sit in front of the AMO ALU on the way to the store data.
       mux3 #(P.LLEN) AmoDataMux(.d0(DCacheAmoWordM[P.LLEN-1:0]), .d1({LLENPOVERAHBW{FetchBuffer[P.XLEN-1:0]}}),
                                 .d2({{P.LLEN-P.XLEN{1'b0}}, DTIMReadDataWordM[P.XLEN-1:0]}),
-                                .s({AmoSelDTIMQ, AmoUncachedQ}), .y(AmoReadWordMuxM));
+                                .s({SelDTIMQ, NotCachedQ}), .y(AmoReadWordMuxM));
     end else begin : passthrough // No Cache, use simple ahbinterface instead of ahbcacheinterface
       logic [1:0] BusRW;                    // Non-DTIM memory access, ignore cacheableM
       logic [P.XLEN-1:0] FetchBuffer;
-      assign BusRW = (~SelDTIM & (MemCheckedQ | SelHPTW)) ? LSURWM : 0;
+      assign BusRW = (~SelDTIM & (SelHPTW ? HPTWAccessChecked : MemCheckedQ)) ? LSURWM : 0;
 
       assign LSUHADDR = PAdrM;
       assign LSUHSIZE = LSUFunct3M;

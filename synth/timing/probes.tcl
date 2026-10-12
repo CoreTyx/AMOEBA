@@ -57,6 +57,10 @@ set TIMING_PROBES [subst -nocommands {
    fetch_pmp_match     {}                                     {}                                   {probe_d $core/ifu/immu.immu/pmp.pmpchecker/matchreg.matchreg/*}
    fetch_pmp_fault     {probe_ck $core/ifu/immu.immu/pmp.pmpchecker/matchreg.matchreg/*} {}        {}
    data_fault          {}                                     {}                                   {probe_d $core/lsu/ownfaultreg/*}
+   "Page walker and bus request"
+   walker_to_htrans    {probe_ck $core/lsu/hptw.hptw/WalkerStateReg/*} {get_nets $core/lsu/LSUHTRANS*}  {}
+   to_link_fifo        {}                                     {}                                   {probe_d chip/ofifo/storage_reg*}
+   walker_pte          {}                                     {}                                   {probe_d $core/lsu/hptw.hptw/PTEReg/*}
    "Stall network and privileged"
    stall_from_hazard   {}                                     {probe_pin $core/hzu/StallW}         {}
    through_InjectD     {}                                     {probe_pin $core/ieu/InjectD}        {}
