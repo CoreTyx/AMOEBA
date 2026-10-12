@@ -21,6 +21,16 @@
 //          When inject_en is tied to 0 (production), synthesis constant-
 //          propagation can eliminate the XOR flip path entirely.
 //
+//          REG_MASK: where codeword_i is itself a register output (the ECC
+//          pipeline registers), decoding the LFSR into a bit position takes
+//          far longer than the data takes to arrive, and that decode ends up
+//          at the head of every path out of the register.  With REG_MASK = 1
+//          the one-hot flip mask is computed a cycle ahead into a register, so
+//          the codeword passes one XOR.  The same bit is flipped in the same
+//          cycle; the one difference is that inject_en is sampled the cycle
+//          before the flip.  Leave it 0 where codeword_i arrives late anyway
+//          (the register file read), which saves the mask register.
+//
 // A component of the AMOEBA RISC-V project.
 //
 // Copyright (C) 2026 Saipranavvk
@@ -42,7 +52,8 @@
 module ecc_bit_flip #(
   parameter int CW_WIDTH      = 72,   // codeword width (DATA_WIDTH + R + 1)
   parameter int LFSR_POLY     = 16'hB400, // Galois LFSR: x^16+x^14+x^13+x^11+1
-  parameter int INJECT_PERIOD = 9     // inject every 2^INJECT_PERIOD cycles
+  parameter int INJECT_PERIOD = 9,    // inject every 2^INJECT_PERIOD cycles
+  parameter bit REG_MASK      = 1'b0  // 1 = flip mask from a register (see header)
 ) (
   input  logic                 clk,
   input  logic                 reset,
@@ -56,11 +67,13 @@ module ecc_bit_flip #(
   // ── Galois LFSR ──────────────────────────────────────────────────────────────
   // Feedback: shift right, XOR polynomial mask on LSB-out.
   // Initialised to all-ones (avoids the lock-up all-zeros state).
-  logic [15:0] lfsr;
+  logic [15:0] lfsr, lfsr_next;
+
+  assign lfsr_next = {1'b0, lfsr[15:1]} ^ (lfsr[0] ? 16'(LFSR_POLY) : 16'h0);
 
   always_ff @(posedge clk)
     if (reset) lfsr <= 16'hFFFF;
-    else       lfsr <= {1'b0, lfsr[15:1]} ^ (lfsr[0] ? 16'(LFSR_POLY) : 16'h0);
+    else       lfsr <= lfsr_next;
 
   // ── Period counter ───────────────────────────────────────────────────────────
   // Counts freely; injection fires on the single cycle where all bits are 1.
@@ -73,19 +86,38 @@ module ecc_bit_flip #(
   // ── Bit-index selection ──────────────────────────────────────────────────────
   // Use the lower LOG_CW bits of the LFSR as the candidate index.
   // Clamp indices >= CW_WIDTH to 0 (simple comparator, no divider hardware).
-  logic [LOG_CW-1:0] bit_sel;
+  function automatic logic [LOG_CW-1:0] bit_index(input logic [15:0] state);
+    return (state[LOG_CW-1:0] < LOG_CW'(CW_WIDTH)) ? state[LOG_CW-1:0] : '0;
+  endfunction
 
-  assign bit_sel = (lfsr[LOG_CW-1:0] < LOG_CW'(CW_WIDTH))
-                    ? lfsr[LOG_CW-1:0]
-                    : '0;
-
-  // ── Injection (combinational) ─────────────────────────────────────────────────
+  // ── Injection ────────────────────────────────────────────────────────────────
   // Flip exactly one bit when inject_en is asserted and the counter fires.
-  // When inject_en=0 this is a direct wire assignment (no XOR in critical path).
-  always_comb begin
-    codeword_o = codeword_i;
-    if (inject_en & (&cnt))
-      codeword_o[bit_sel] = ~codeword_i[bit_sel];
+  if (REG_MASK) begin : reg_mask
+    // Next cycle's flip, decided now: the counter fires next cycle when it is one
+    // short of all ones, and the bit comes from the LFSR's next state.
+    logic [CW_WIDTH-1:0] mask, mask_next;
+
+    always_comb begin
+      mask_next = '0;
+      if (inject_en & (cnt == {{(INJECT_PERIOD-1){1'b1}}, 1'b0}))
+        mask_next[bit_index(lfsr_next)] = 1'b1;
+    end
+
+    always_ff @(posedge clk)
+      if (reset) mask <= '0;
+      else       mask <= mask_next;
+
+    assign codeword_o = codeword_i ^ mask;
+  end else begin : comb_mask
+    // When inject_en=0 this is a direct wire assignment (no XOR in critical path).
+    logic [LOG_CW-1:0] bit_sel;
+    assign bit_sel = bit_index(lfsr);
+
+    always_comb begin
+      codeword_o = codeword_i;
+      if (inject_en & (&cnt))
+        codeword_o[bit_sel] = ~codeword_i[bit_sel];
+    end
   end
 
 endmodule

@@ -88,7 +88,9 @@ module flopenrc_ecc #(parameter int WIDTH = 64) (
 
   // ── Error injection (optional, gated by inject_en) ───────────────────────────
   logic [CW_WIDTH-1:0] cw_inj;
-  ecc_bit_flip #(.CW_WIDTH(CW_WIDTH)) flip (
+  // The flip mask is registered: cw_stored is a register output, and q_raw has
+  // nothing but this injector between it and the pipeline.
+  ecc_bit_flip #(.CW_WIDTH(CW_WIDTH), .REG_MASK(1'b1)) flip (
     .clk, .reset, .inject_en,
     .codeword_i(cw_stored),
     .codeword_o(cw_inj)
