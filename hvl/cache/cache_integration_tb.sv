@@ -512,7 +512,7 @@ module cache_integration_tb;
               check("dirty eviction: victim data way selected before first writeback beat",
                     dut.SelectedWayDataQ === (2'b01 << victimway));
               check("dirty eviction: first writeback line matches the dirty victim",
-                    dut.ReadDataLineCache === expectedvictimline);
+                    dut.CorrectedLine === expectedvictimline);
             end
           end
         end
@@ -548,7 +548,7 @@ module cache_integration_tb;
               check("flush: selected data way matches flush-way counter",
                     dut.SelectedWayDataQ === dut.FlushWay);
               check("flush: writeback line matches selected dirty cache line",
-                    dut.ReadDataLineCache === peekdata(flushway, flushset));
+                    dut.CorrectedLine === peekdata(flushway, flushset));
             end
             previouswrite = CacheBusRW[0];
           end

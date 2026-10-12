@@ -108,8 +108,11 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [SETLEN-1:0]             CacheSetTagDemand, CacheSetTag, CacheSetLRU;
   logic [LINELEN-1:0]            LineWriteData;
   logic                          ClearDirty, SetDirty, SetValid, ClearValid;
-  logic [LINELEN-1:0]            ReadDataLineWay [NUMWAYS-1:0];
-  logic [LINECHECKWIDTH-1:0]     DataCheckWay [NUMWAYS-1:0];
+  logic [LINELEN-1:0]            CorrectedLineWay [NUMWAYS-1:0];
+  logic [NUMWAYS-1:0]            DataSecErrWay, DataDedErrWay;
+  logic [NUMWAYS-1:0]            HitWayLive, DirtyWayLive;
+  logic                          HitLive, LineDirtyLive;
+  logic                          StoreRepairsData;
   logic [NUMWAYS-1:0]            HitWay, ValidWay, ValidMismatchWay;
   logic                          Hit;
   logic [NUMWAYS-1:0]            VictimWay, DirtyWay, HitDirtyWay, DirtyMismatchWay;
@@ -129,7 +132,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          FlushWayCntEn;
   logic                          SelWriteback;
   logic                          LRUWriteEn;
-  logic [LINELEN-1:0]            ReadDataLine, ReadDataLineCache;
+  logic [LINELEN-1:0]            ReadDataLine;
   logic                          SelFetchBuffer;
   logic                          CacheEn;
   logic                          SelVictim;
@@ -149,7 +152,6 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [LINELEN-1:0]            CorrectedLine;
   logic                          TagDecodeCaptureEnFsm, ScrubTagDecodeCaptureEn, TagDecodeCaptureEn;
   logic [NUMWAYS-1:0]            SelectedWayDataQ;
-  logic [LINECHECKWIDTH-1:0]     DataCheckBits;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Read Path
@@ -194,8 +196,8 @@ module cache import cvw::*; #(parameter cvw_t P,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
     .SelCorrectTag, .CorrectedTagIn, .SelCorrectData, .CorrectedLineIn(CorrectedLine),
     .TagDecodeCaptureEn, .SelectedWayDataQ,
-    .ReadDataLineWay, .DataCheckWay, .HitWay, .ValidWay, .ValidMismatch(ValidMismatchWay),
-    .DirtyWay, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
+    .CorrectedLineWay, .DataSecErrWay, .DataDedErrWay, .HitWay, .HitWayLive, .ValidWay, .ValidMismatch(ValidMismatchWay),
+    .DirtyWay, .DirtyWayLive, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
     .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
     .TagDedDirtyWay, .DropTagDedDirty,
     .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
@@ -212,6 +214,9 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign Hit = |HitWay;
   assign HitLineDirty = |HitDirtyWay;
   assign LineDirty = |DirtyWay;
+  // For the decisions taken in the cycle the tags are read (see cacheway.sv).
+  assign HitLive = |HitWayLive;
+  assign LineDirtyLive = |DirtyWayLive;
 
   // Whichever way is currently selected -- the demand hit way, or (mutually exclusive in time,
   // never both meaningful at once) the scrubber's target way -- determines whose tag SEC/DED
@@ -225,23 +230,15 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign ValidMismatch = |(ValidMismatchWay & TagSelWay);
   assign DirtyMismatch = |(DirtyMismatchWay & TagSelWay);
 
-  // ReadDataLineWay is a 2d array of cache line len by number of ways.
+  // CorrectedLineWay is a 2d array of cache line len by number of ways.
   // Need to OR together each way in a bitwise manner.
   // Final part of the AO Mux.  First is the AND in the cacheway.
-  or_rows #(NUMWAYS, LINELEN) ReadDataAOMux(.a(ReadDataLineWay), .y(ReadDataLineCache));
+  // Each way decodes its own line into a register (cacheway.sv), so what is selected here is
+  // already corrected and already registered.
+  or_rows #(NUMWAYS, LINELEN) ReadDataAOMux(.a(CorrectedLineWay), .y(CorrectedLine));
   or_rows #(NUMWAYS, TAGLEN) TagAOMux(.a(TagWay), .y(Tag));
-  or_rows #(NUMWAYS, LINECHECKWIDTH) DataCheckAOMux(.a(DataCheckWay), .y(DataCheckBits));
-
-  // Single shared data decoder: only the selected way's raw data+checkbits ever need decoding
-  // (unlike the tag, which is decoded per-way inside cacheway.sv because all ways must be compared
-  // in parallel to determine which one hits). Valid the cycle after SelectedWayDataQ reflects the
-  // right way -- see cacheway.sv header and cachefsm.sv's two-state tag-then-data sequencing.
-  cacheeccdec #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datadec (
-    .codeword_i ({ReadDataLineCache, DataCheckBits}),
-    .data_o     (CorrectedLine),
-    .sec_err_o  (DataSecErr),
-    .ded_err_o  (DataDedErr)
-  );
+  assign DataSecErr = |DataSecErrWay;
+  assign DataDedErr = |DataDedErrWay;
 
   cachescrubber #(.NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS), .SETLEN(SETLEN),
                   .READ_ONLY_CACHE(READ_ONLY_CACHE), .SCRUB_INTERVAL_CYCLES(SCRUB_INTERVAL_CYCLES)) scrubber (
@@ -316,7 +313,8 @@ module cache import cvw::*; #(parameter cvw_t P,
         .d1((SetDirty & ~SelFetchBuffer) ? CorrectedLine[8*index+7:8*index] : FetchBuffer[8*index+7:8*index]),
         .s(FetchBufferByteSel[index] & ~CMOpM[3]), .y(LineWriteData[8*index+7:8*index]));
     end
-    assign LineByteMask = SetDirty ? DemuxedByteMask : '1;
+    // A store that also repairs the line (see cachefsm.sv) writes every byte of it.
+    assign LineByteMask = (SetDirty & ~StoreRepairsData) ? DemuxedByteMask : '1;
   end else begin : WriteSelLogic
     // No need for this mux if the cache does not handle writes.
     assign LineWriteData = FetchBuffer;
@@ -380,6 +378,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .FlushAdrFlag, .FlushWayFlag, .FlushCache, .SelFetchBuffer,
     .InvalidateCache, .CMOpM, .CacheEn, .LRUWriteEn,
     .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr, .HitDirty(HitLineDirty),
+    .HitLive, .LineDirtyLive, .StoreRepairsData,
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
     .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .LatchHitWord, .SelHitWord,
@@ -395,7 +394,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   always_ff @(posedge clk)
     if (reset) SecCount <= '0;
-    else if (SelCorrectTag || SelCorrectData)
-      SecCount <= SecCount + {31'b0, SelCorrectTag} + {31'b0, SelCorrectData};
+    else if (SelCorrectTag || SelCorrectData || StoreRepairsData)
+      SecCount <= SecCount + {31'b0, SelCorrectTag} + {31'b0, SelCorrectData} + {31'b0, StoreRepairsData};
 
 endmodule
