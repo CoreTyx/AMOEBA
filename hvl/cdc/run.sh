@@ -12,7 +12,6 @@
 set -euo pipefail
 R="$(cd "$(dirname "$0")/../.." && pwd)"
 PROG="${1:-$R/testcode/isa_level_testing/tc_link_abort.c}"
-# Absolute, because the memory image is generated from inside $R/sim.
 case "$PROG" in /*) ;; *) PROG="$(cd "$(dirname "$PROG")" && pwd)/$(basename "$PROG")";; esac
 OUT="${OUT:-$(mktemp -d)}"
 mkdir -p "$OUT"
@@ -21,7 +20,9 @@ mkdir -p "$OUT"
 # run_verilator_top_tb_no_spike does.  Generated rather than picked up: sim/bin/
 # holds whatever the last regression left there, so reusing it would silently run
 # a different programme than the one named on the command line.
-( cd "$R/sim" && python3 "$R/bin/generate_memory_file.py" -8 "$PROG" >/dev/null )
+# program.mk needs GNU make 3.81 or later; the Synopsys make first on the EWS
+# PATH is 3.80, so use the make sim/Makefile was run with.
+"${MAKE:-make}" -s -f "$R/bin/program.mk" PROG="$PROG" IMAGE_DIR="$R/sim/bin" >/dev/null
 MEMLST="$R/sim/bin/memory_8.lst"
 [ -f "$MEMLST" ] || { echo "run.sh: no memory image at $MEMLST"; exit 1; }
 echo "=== programme: $PROG ==="

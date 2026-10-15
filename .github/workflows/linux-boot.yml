@@ -29,6 +29,9 @@ on:
     paths:
       - 'testcode/linux/**'
       - 'bin/linux_image_to_lst.py'
+      - 'bin/toolchain.py'
+      - 'bin/toolchain.mk'
+      - '.github/scripts/install_riscv_gcc.sh'
       - 'hdl/**'
       - 'hvl/**'
       - 'sim/Makefile'
@@ -45,7 +48,7 @@ permissions:
 jobs:
   boot:
     name: Boot to userspace
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -97,6 +100,10 @@ jobs:
 
       - name: Build Linux boot simulator
         run: make -C sim build_linux
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       # Cheap pre-flight: proves the UART tap, the .lst loader and the pass
       # matcher all work before committing hours to a boot.

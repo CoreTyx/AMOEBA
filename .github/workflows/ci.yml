@@ -10,7 +10,7 @@ jobs:
   # ── Build with Spike DPI ────────────────────────────────────────────────────
   ci-build-spike:
     name: Build (Spike DPI)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +63,7 @@ jobs:
   # ── Build without Spike DPI (ISA-level tests and FreeRTOS tests) ────────────
   ci-build-no-spike:
     name: Build (No Spike DPI — ISA & FreeRTOS)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,7 +110,7 @@ jobs:
   # ── FT 64-bit module tests (three thresholds) and core integration ──
   ci-ft-shadow:
     name: Fault-Tolerant Unit and Core Regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -149,7 +149,7 @@ jobs:
   # ── Discover all baremetal tests ────────────────────────────────────────────
   ci-discover-tests:
     name: Discover Baremetal Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tests: ${{ steps.discover.outputs.tests }}
     steps:
@@ -164,7 +164,7 @@ jobs:
   # ── Discover all ISA-level tests ─────────────────────────────────────────────
   ci-discover-isa-tests:
     name: Discover ISA-Level Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tests: ${{ steps.discover.outputs.tests }}
     steps:
@@ -183,7 +183,7 @@ jobs:
   # ── Discover all FreeRTOS tests ──────────────────────────────────────────────
   ci-discover-freertos-tests:
     name: Discover FreeRTOS Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tests: ${{ steps.discover.outputs.tests }}
     steps:
@@ -198,7 +198,7 @@ jobs:
   # ── Build Spike executable (shared for baremetal tests) ────────────────────
   ci-build-spike-exe:
     name: Build Spike
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -231,7 +231,7 @@ jobs:
   # ── ISA-level regression: run tests with no-spike simulator ─────────────────
   ci-isa-level:
     name: ISA-Level - ${{ matrix.test }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [ci-discover-isa-tests, ci-build-no-spike]
     strategy:
       matrix:
@@ -249,8 +249,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler
+            device-tree-compiler
           pip3 install --quiet pyyaml
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       - name: Restore no-spike build cache
         uses: actions/cache@v4
@@ -279,7 +283,7 @@ jobs:
   # sweep (make cdc_sweep) is deliberately NOT here; it belongs in a nightly.
   ci-forte:
     name: ASIC top (DUT=forte)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -294,8 +298,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler
+            device-tree-compiler
           pip3 install --quiet pyyaml
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       - name: Cache Verilator v5.026
         id: cache-verilator
@@ -338,7 +346,7 @@ jobs:
   # ── Baremetal regression: run tests with cached Spike DPI simulator ────────
   ci-baremetal:
     name: Baremetal - ${{ matrix.test }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [ci-discover-tests, ci-build-spike, ci-build-spike-exe]
     strategy:
       matrix:
@@ -356,8 +364,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler libboost-regex-dev libboost-system-dev
+            device-tree-compiler libboost-regex-dev libboost-system-dev
           pip3 install --quiet pyyaml
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       - name: Build spike.so
         run: g++ -shared -fPIC -O2 hvl/common/spike_dpi.cpp -o hvl/common/spike.so
@@ -388,7 +400,7 @@ jobs:
   # ── FreeRTOS regression: matrix over tc_*.c test programs ───────────────────
   ci-freertos:
     name: FreeRTOS - ${{ matrix.test }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [ci-discover-freertos-tests, ci-build-no-spike, ci-baremetal, ci-isa-level]
     strategy:
       matrix:
@@ -405,9 +417,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
-            autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf
+            autoconf flex bison libfl-dev help2man zlib1g-dev
           pip3 install --quiet pyyaml
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       - name: Fetch FreeRTOS-Kernel submodule
         run: git submodule update --init third_party/FreeRTOS-Kernel
@@ -431,7 +446,7 @@ jobs:
   # ── ECC unit tests (pure combinational enc/dec self-check) ──────────────────
   ci-ecc-unit:
     name: ECC Unit Tests (enc/dec standalone)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -472,7 +487,7 @@ jobs:
   # ── Build ECC inject simulator (ECE411_SIM_INJECT) ──────────────────────────
   ci-build-ecc-inject:
     name: Build (ECC Inject Sim)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -519,7 +534,7 @@ jobs:
   # ── Discover ECC baremetal tests ─────────────────────────────────────────────
   ci-discover-ecc-tests:
     name: Discover ECC Baremetal Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tests: ${{ steps.discover.outputs.tests }}
     steps:
@@ -534,7 +549,7 @@ jobs:
   # ── ECC baremetal regression: matrix over tc_ecc_*.c with inject_en=1 ───────
   ci-baremetal-ecc:
     name: ECC Baremetal - ${{ matrix.test }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [ci-discover-ecc-tests, ci-build-ecc-inject]
     strategy:
       matrix:
@@ -552,8 +567,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip gcc g++ make \
             autoconf flex bison libfl-dev help2man zlib1g-dev \
-            gcc-riscv64-unknown-elf device-tree-compiler
+            device-tree-compiler
           pip3 install --quiet pyyaml
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
 
       - name: Restore ECC inject build cache
         uses: actions/cache@v4
@@ -571,7 +590,7 @@ jobs:
   # ── Build Linux + ECC inject simulator ──────────────────────────────────────
   ci-build-linux-ecc-inject:
     name: Build (Linux + ECC Inject Sim)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -622,7 +641,7 @@ jobs:
   # continuous LFSR bit-flip injection.
   ci-linux-boot-ecc-inject:
     name: Linux Boot with ECC Inject
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
       contents: read

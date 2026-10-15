@@ -63,7 +63,9 @@ bin/                  Build helper scripts
   startup.s             Bare-metal CRT (initializes x1–x31, jumps to main)
   link.ld               Linker script (entry at 0x80000000, stack at 0x8ff00000)
   generate_rtl.sh       Refreshes hdl/cvw/ and creates hdl/core/ from CVW submodule
-  generate_memory_file.py  ELF → byte-addressed .lst memory image
+  program.mk            Builds one test program into sim/bin/ (ELF, disassembly, memory_8.lst image)
+  toolchain.py          Finds the RISC-V cross compiler all test code builds with (gcc 14.2.0)
+  toolchain.mk          Makefile side of toolchain.py, included by every Makefile that builds test code
   rvfi_reference.py     Generates hvl/common/rvfi_reference.svh from JSON config
   get_options.py        Reads options.json fields for Makefile use
 testcode/             C test programs
@@ -83,26 +85,25 @@ options.json          Project configuration (clock, ISA switches, synthesis sett
 
 ### 1. System Packages
 
-Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `riscv64-*-elf-gcc`, `python3`, and `gtkwave`.
+Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, `gtkwave`, and a riscv64 Linux cross gcc **14.2.0** — every tier builds with that one version; see [Compiling Test Programs](#compiling-test-programs). On EWS the compiler is already installed in `/class/ece411/riscv`.
 
 **Arch Linux**
 ```bash
 sudo pacman -S verilator gcc python python-pip gtkwave git base-devel
-sudo pacman -S riscv64-elf-gcc dtc boost   # cross-compiler + Spike build deps
+sudo pacman -S dtc boost                   # Spike build deps
 ```
 
 **Ubuntu / Debian**
 ```bash
 sudo apt update
 sudo apt install verilator g++ python3 gtkwave git make
-sudo apt install gcc-riscv64-unknown-elf         # cross-compiler
 sudo apt install device-tree-compiler libboost-all-dev build-essential  # Spike build deps
+.github/scripts/install_riscv_gcc.sh   # Ubuntu 24.04: gcc-14 cross compiler (14.2.0), as CI installs it
 ```
 
 **Fedora**
 ```bash
 sudo dnf install verilator gcc-c++ python3 gtkwave git make
-sudo dnf install gcc-riscv64-linux-gnu           # cross-compiler (or build from source)
 sudo dnf install dtc boost-devel                 # Spike build deps
 ```
 
@@ -191,21 +192,31 @@ gtkwave sim/verilator/dump.fst &
 
 ## Compiling Test Programs
 
-Pre-built ELFs are checked in under `testcode/baremetal/`. Recompile if you modify a test.
+Every piece of test code — baremetal, ISA-level, ECC, cache, CDC, FreeRTOS and the Linux boot image — is built with one riscv64 Linux cross compiler, **gcc 14.2.0**, already installed on the host. `bin/toolchain.py` picks it: the first of `riscv64-unknown-linux-gnu-gcc`, `riscv64-linux-gnu-gcc` and `riscv64-linux-gcc` on `PATH`, then `/class/ece411/riscv/bin/riscv64-unknown-linux-gnu-gcc`. It refuses any other version.
 
-The RISC-V bare-metal cross-compiler binary name varies by distribution:
-
-| Distribution | Binary name |
+| Where | Compiler |
 |---|---|
-| Arch Linux | `riscv64-elf-gcc` |
-| Ubuntu / Debian | `riscv64-unknown-elf-gcc` |
-| Fedora | `riscv64-linux-gnu-gcc` (or toolchain from source) |
+| EWS | `/class/ece411/riscv/bin/riscv64-unknown-linux-gnu-gcc` 14.2.0 (Binutils 2.43.1) |
+| CI, Ubuntu 24.04 | `gcc-14-riscv64-linux-gnu` 14.2.0, installed by `.github/scripts/install_riscv_gcc.sh` |
 
-**Bare-metal compile command:**
 ```bash
-riscv64-elf-gcc -march=rv64gc -mabi=lp64d -O2 -nostdlib \
-    -T bin/link.ld bin/startup.s testcode/baremetal/mytest.c \
-    -o testcode/baremetal/mytest.elf
+python3 bin/toolchain.py     # prints the tool prefix it picked
+```
+
+On EWS the compiler's `cc1` needs `libmpfr.so.4`, which RHEL 9 does not ship; the install keeps a copy in `/class/ece411/riscv/compat` but `ece411.sh` does not put it on `LD_LIBRARY_PATH`. The build adds it for you. To run the compiler by hand, `export LD_LIBRARY_PATH=/class/ece411/riscv/compat:$LD_LIBRARY_PATH` first.
+
+Tests must be freestanding (`-ffreestanding -nostdlib`): the compiler's C library is never linked, so no `printf` or `malloc`.
+
+To build with a different compiler (a rebuilt or patched gcc, say), set `CROSS_COMPILE` to its prefix. It applies to every tier; a version other than 14.2.0 is warned about, not refused:
+
+```bash
+CROSS_COMPILE=/opt/riscv/bin/riscv64-unknown-linux-gnu- make -C sim regression
+```
+
+The simulation targets compile `PROG` for you. To compile a test by hand into `sim/bin/`:
+
+```bash
+make -f bin/program.mk PROG=testcode/baremetal/mytest.c
 ```
 
 Test programs must terminate with the halt instruction `slti x0, x0, -256` (encoding `0xF0002013`). The testbench detects this and ends simulation cleanly. See `testcode/baremetal/basic_arith.c` for a minimal example.
@@ -662,8 +673,9 @@ Each FreeRTOS and ISA test appears as an independent check in the PR status pane
 | `verilator` | ≥ 5.000 | RTL simulation (primary local tool) |
 | `g++` | ≥ 11 | Compiles `spike.so` DPI bridge and Verilator C++ harness |
 | `spike` (source build) | main branch | ISA reference co-simulation (`--enable-commitlog` required) |
-| `riscv64-*-elf-gcc` | any recent | Bare-metal cross-compiler for test ELFs |
-| `python3` | ≥ 3.8 | Build helper scripts (`get_options.py`, `rvfi_reference.py`, `generate_memory_file.py`) |
+| riscv64 Linux `gcc` | 14.2.0 (exact) | Cross-compiler for all test code; found by `bin/toolchain.py` (EWS: `/class/ece411/riscv`, CI: Ubuntu `gcc-14-riscv64-linux-gnu`) |
+| `python3` | ≥ 3.8 | Build helper scripts (`toolchain.py`, `get_options.py`, `rvfi_reference.py`) |
+| `make` | GNU ≥ 3.82 | All build and simulation targets, including `bin/program.mk` |
 | `gtkwave` | any | FST waveform viewer (Verilator) |
 | `vcs` / `verdi` | — | EWS-only: commercial simulation + waveform viewer |
 | `dc_shell` | — | EWS-only: Synopsys Design Compiler (synthesis + power) |
