@@ -143,7 +143,6 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          SelFetchBuffer;
   logic                          CacheEn;
   logic                          SelVictim, SelVictimLive;
-  logic [LINELEN/8-1:0]          LineByteMask;
   logic [$clog2(LINELEN/8) - $clog2(MUXINTERVAL/8) - 1:0] WordOffsetAddr;
   genvar                         index;
 
@@ -193,7 +192,7 @@ module cache import cvw::*; #(parameter cvw_t P,
              .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
              .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
              .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
-    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteFinal, .LineCheckWriteFinal, .LineByteMask,
+    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteFinal, .LineCheckWriteFinal,
     .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
     .FlushWay, .FlushCache, .SelVictim, .SelVictimLive,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
@@ -328,12 +327,9 @@ module cache import cvw::*; #(parameter cvw_t P,
         .d1((SetDirty & ~SelFetchBuffer) ? CorrectedLine[8*index+7:8*index] : FetchBuffer[8*index+7:8*index]),
         .s(FetchBufferByteSel[index] & ~CMOpM[3]), .y(LineWriteData[8*index+7:8*index]));
     end
-    // A store that also repairs the line (see cachefsm.sv) writes every byte of it.
-    assign LineByteMask = (SetDirty & ~StoreRepairsData) ? DemuxedByteMask : '1;
   end else begin : WriteSelLogic
     // No need for this mux if the cache does not handle writes.
     assign LineWriteData = FetchBuffer;
-    assign LineByteMask = '1;
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////

@@ -26,6 +26,8 @@ SRAMS = {
     "rf_sp_64_44":  (6, 44,  "CEN", "WEN", None),
     "rf_sp_64_46":  (6, 46,  "CEN", "WEN", None),
     "rf_sp_64_128": (6, 128, "CEN", "WEN", None),
+    "rf_sp_64_53":  (6, 53,  "CEN", "WEN", None),   # cache tag + SECDED check bits
+    "rf_sp_64_137": (6, 137, "CEN", "WEN", None),   # cache line + SECDED check bits
     "TS1N28HPCPSVTB64X44M4SW": (6, 44, "CEB", "WEB", "BWEB"),
 }
 

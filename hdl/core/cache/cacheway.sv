@@ -95,7 +95,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        VictimWay,      // LRU selected this way as victim to evict
   input  logic                        FlushWay,       // This way is selected for flush and possible writeback if dirty
   input  logic                        InvalidateCache,// Clear all valid bits
-  input  logic [LINELEN/8-1:0]        LineByteMask,   // Final byte enables to cache (D$ only)
 
   // Scrubber interface: SelScrub overrides HitWay/FlushWay/VictimWay selection the same way they
   // override each other, picking an arbitrary way independent of any tag match.
@@ -150,7 +149,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   logic                               Dirty, DirtyRedundant;
   logic                               SelecteDirty;
   logic                               SelectedWriteWordEn;
-  logic [LINELEN/8-1:0]               FinalByteMask;
   logic                               SetValidEN, ClearValidEN, ScrubInvalidateWay;
   logic                               SetValidWay;
   logic                               ClearValidWay;
@@ -195,21 +193,24 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign SetValidEN = SetValidWay & ~FlushStage;                           // exclusion-tag: cache SetValidEN
   assign ClearValidEN = ClearValidWay & ~FlushStage;                       // exclusion-tag: cache ClearValidEN
 
-  // If writing the whole line set all write enables to 1, else only set the correct word.
-  assign FinalByteMask = SetValidWay ? '1 : LineByteMask; // OR
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Tag Array (optional SECDED: each word holds the whole codeword, {tag, check bits})
+  /////////////////////////////////////////////////////////////////////////////////////////////
 
-  /////////////////////////////////////////////////////////////////////////////////////////////
-  // Tag Array (optional SECDED: TAGLEN data bits + check-bit side array)
-  /////////////////////////////////////////////////////////////////////////////////////////////
+  // The check bits share the tag's word, so one macro per way holds both, and they are read and
+  // written in the same access by construction.
+  localparam int TAGSTOREWIDTH = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0);
 
   logic [TAGLEN-1:0]       TagWriteData;
   logic [TAGLEN-1:0]       CorrectedTag;
+  logic [TAGSTOREWIDTH-1:0] TagStoreWrite, TagStoreRead;
   logic TagWe;
   assign TagWe = SetValidEN | (TAG_ECC_SUPPORTED ? (SelCorrectTag & SelectedWay) : 1'b0);
 
-  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGLEN)) CacheTagMem(.clk, .ce(CacheEn),
-    .addr(CacheSetTag), .dout(ReadTag),
-    .din(TagWriteData), .we(TagWe));
+  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGSTOREWIDTH)) CacheTagMem(.clk, .ce(CacheEn),
+    .addr(CacheSetTag), .dout(TagStoreRead),
+    .din(TagStoreWrite), .we(TagWe));
+  assign ReadTag = TagStoreRead[TAGSTOREWIDTH-1 -: TAGLEN];
 
   if (TAG_ECC_SUPPORTED) begin : tag_ecc
     logic [TAGCHECKWIDTH-1:0] ReadTagCheck, TagEncodedCheck, TagCorrectionCheck, TagCheckWriteData;
@@ -227,9 +228,8 @@ module cacheway import cvw::*; #(parameter cvw_t P,
     mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
     mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
 
-    ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGCHECKWIDTH)) CacheTagCheckMem(.clk, .ce(CacheEn),
-      .addr(CacheSetTag), .dout(ReadTagCheck),
-      .din(TagCheckWriteData), .we(TagWe));
+    assign TagStoreWrite = {TagWriteData, TagCheckWriteData};
+    assign ReadTagCheck  = TagStoreRead[TAGCHECKWIDTH-1:0];
 
     cacheeccdec #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagdec (
       .codeword_i ({ReadTag, ReadTagCheck}),
@@ -239,6 +239,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
     );
   end else begin : tag_ecc_disabled
     assign TagWriteData = PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN];
+    assign TagStoreWrite = TagWriteData;
     assign CorrectedTag = ReadTag;
     assign TagSecErrLive = 1'b0;
     assign TagDedErrLive = 1'b0;
@@ -271,27 +272,20 @@ module cacheway import cvw::*; #(parameter cvw_t P,
     SelectedWayLive, SelectedWayDataQ);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
-  // Data Array (SECDED-protected: one codeword per full line; each way decodes its own line into
-  // a register -- see the data decode register below)
+  // Data Array (SECDED-protected: one codeword per full line, stored whole as {line, check bits};
+  // each way decodes its own line into a register -- see the data decode register below)
+  //
+  // Every write is a whole line, D$ included: a store is merged into the corrected resident line
+  // and the result is re-encoded (cache.sv WriteSelLogic), so the check bits always describe all
+  // of LineWriteFinal and there is no partial write to make.  With the check bits in the same
+  // word, one macro per way holds the line and its code.
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   logic DataWe;
   assign DataWe = SelectedWriteWordEn | (SelCorrectData & SelectedWay);
 
-  if (READ_ONLY_CACHE) begin : wordram // no byte-enable needed for i$.
-    ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINELEN)) CacheDataMem(.clk, .ce(CacheEn), .addr(CacheSetData),
-      .dout(ReadDataLine), .din(LineWriteFinal), .we(DataWe));
-    ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINECHECKWIDTH)) CacheDataCheckMem(.clk, .ce(CacheEn), .addr(CacheSetData),
-      .dout(ReadDataCheck), .din(LineCheckWriteFinal), .we(DataWe));
-  end else begin : wordram // D$ needs byte enables
-    ram1p1rwbe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINELEN)) CacheDataMem(.clk, .ce(CacheEn), .addr(CacheSetData),
-      .dout(ReadDataLine), .din(LineWriteFinal), .we(DataWe), .bwe(FinalByteMask));
-    // Check-bit array is always written in full -- per-line granularity means partial-line stores
-    // are merged with the corrected line and re-encoded whole (see cache.sv WriteSelLogic), so
-    // there is never a partial write to make here.
-    ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINECHECKWIDTH)) CacheDataCheckMem(.clk, .ce(CacheEn), .addr(CacheSetData),
-      .dout(ReadDataCheck), .din(LineCheckWriteFinal), .we(DataWe));
-  end
+  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINELEN+LINECHECKWIDTH)) CacheDataMem(.clk, .ce(CacheEn),
+    .addr(CacheSetData), .dout({ReadDataLine, ReadDataCheck}), .din({LineWriteFinal, LineCheckWriteFinal}), .we(DataWe));
 
   // Data decode register.  Each way decodes the line it reads and registers the result; the
   // corrected line and its flags are then selected across ways (AND here, OR in cache.sv) from

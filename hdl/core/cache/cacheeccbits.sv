@@ -18,8 +18,10 @@
 // data bit whose codeword position has bit k set.
 //
 // R has no default: it must be sized explicitly at every instantiation
-// (2^R >= DATA_WIDTH + R + 1), and elaboration fails via $error below if it
-// is not, rather than silently producing an aliased code.
+// (2^R >= DATA_WIDTH + R + 1). Simulation and lint fail elaboration via $error
+// below if it is not, rather than silently producing an aliased code. The check
+// is compiled out for synthesis (`SYNTHESIS, predefined by the synthesis tool),
+// as with the other elaboration checks in hdl/.
 //
 // A component of the AMOEBA RISC-V project.
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -34,10 +36,12 @@ module cacheeccbits #(
 
   localparam int CWBITS = DATA_WIDTH + R;
 
+`ifndef SYNTHESIS
   if (2**R < CWBITS + 1) begin : gen_validate_ecc_width
     $error("cacheeccbits: R=%0d is insufficient for DATA_WIDTH=%0d (need 2^R >= DATA_WIDTH+R+1=%0d)",
            R, DATA_WIDTH, CWBITS + 1);
   end
+`endif
 
   for (genvar bit_k = 0; bit_k < R; bit_k++) begin : gen_hamming
     logic [CWBITS-1:0] cov;

@@ -6,7 +6,9 @@
 //
 // Purpose: The storage half of flopenrc_ecc: a register with enable, synchronous
 //          reset and enabled clear that holds a SECDED codeword, with the error
-//          injector, the decoder and the self-repair behind it.
+//          injection XOR, the decoder and the self-repair behind it.  The flip
+//          mask comes from outside (ecc_flip_mask), so one generator can serve
+//          every register in a group.
 //
 //          flopenrc_ecc is an encoder in front of this module.  Use this one
 //          directly when the value to store is already a codeword -- a register
@@ -45,7 +47,7 @@ module flopenrc_cw #(
                     (WIDTH <= 120) ? 7 : 8
 ) (
   input  logic             clk, reset, clear, en,
-  input  logic             inject_en,
+  input  logic [WIDTH+R:0] flip_mask,  // one-hot on an injection cycle, else zero (ecc_flip_mask)
   input  logic [WIDTH+R:0] cw,         // codeword to store: {data, overall parity, R Hamming bits}
   output logic [WIDTH-1:0] q,          // corrected data
   output logic             sec_err_o,
@@ -66,15 +68,11 @@ module flopenrc_cw #(
       else              cw_stored <= cw;
     else if (sec_err_o) cw_stored <= cw_repair;
 
-  // ── Error injection (optional, gated by inject_en) ───────────────────────────
+  // ── Error injection ──────────────────────────────────────────────────────────
+  // The flip mask comes from a register (ecc_flip_mask): cw_stored is a register
+  // output, and q_raw has nothing but this XOR between it and the pipeline.
   logic [CW_WIDTH-1:0] cw_inj;
-  // The flip mask is registered: cw_stored is a register output, and q_raw has
-  // nothing but this injector between it and the pipeline.
-  ecc_bit_flip #(.CW_WIDTH(CW_WIDTH), .REG_MASK(1'b1)) flip (
-    .clk, .reset, .inject_en,
-    .codeword_i(cw_stored),
-    .codeword_o(cw_inj)
-  );
+  assign cw_inj = cw_stored ^ flip_mask;
 
   // Data bits sit above the R Hamming bits and the overall parity bit.
   assign q_raw = cw_inj[CW_WIDTH-1 : R+1];

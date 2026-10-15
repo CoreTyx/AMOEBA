@@ -244,24 +244,34 @@ module cache_edge_tb;
   endtask
 
   // ── Hierarchical peek/poke into the behavioral arrays (USE_SRAM=0) ──
+  // Each array word is a whole codeword: {line, check bits} and {tag, check bits}.
+  function automatic int tbrequiredr(input int dw);
+    return (dw <=    1) ?  2 : (dw <=    4) ?  3 : (dw <=   11) ?  4 : (dw <=   26) ?  5 :
+           (dw <=   57) ?  6 : (dw <=  120) ?  7 : (dw <=  247) ?  8 : (dw <=  502) ?  9 :
+           (dw <= 1013) ? 10 : 11;
+  endfunction
+  localparam int TB_LINECHECKR = tbrequiredr(LINELEN);
+  localparam int TB_LINECHECKWIDTH = TB_LINECHECKR + 1;
+  localparam int TB_TAGCHECKWIDTH = tbrequiredr(TAGLEN) + 1;
+
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
     endcase
   endfunction
 
   task automatic flipdatabit(input int w, input int s, input int b);
     case (w)
-      0: dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s][b] = ~dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s][b];
-      default: dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s][b] = ~dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s][b];
+      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
+      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
     endcase
   endtask
 
   task automatic fliptagbit(input int w, input int s, input int b);
     case (w)
-      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][b] = ~dut.CacheWays[0].CacheTagMem.ram.RAM[s][b];
-      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][b] = ~dut.CacheWays[1].CacheTagMem.ram.RAM[s][b];
+      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
+      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
     endcase
   endtask
 
@@ -288,8 +298,8 @@ module cache_edge_tb;
 
   function automatic logic [TAGLEN-1:0] peektag(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s];
-      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
+      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
     endcase
   endfunction
 
@@ -307,13 +317,6 @@ module cache_edge_tb;
   endfunction
 
   // ── Probe decoder: lets the random test ask "does this stored line already hold an error?" ──
-  function automatic int tbrequiredr(input int dw);
-    return (dw <=    1) ?  2 : (dw <=    4) ?  3 : (dw <=   11) ?  4 : (dw <=   26) ?  5 :
-           (dw <=   57) ?  6 : (dw <=  120) ?  7 : (dw <=  247) ?  8 : (dw <=  502) ?  9 :
-           (dw <= 1013) ? 10 : 11;
-  endfunction
-  localparam int TB_LINECHECKR = tbrequiredr(LINELEN);
-
   logic [LINELEN+TB_LINECHECKR:0] probecw;
   logic [LINELEN-1:0]             probedata;
   logic                           probesec, probeded;
@@ -322,8 +325,8 @@ module cache_edge_tb;
 
   function automatic logic [TB_LINECHECKR:0] peekdatacheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
     endcase
   endfunction
 

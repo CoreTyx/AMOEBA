@@ -172,15 +172,15 @@ module cache_integration_tb;
 
   function automatic logic [TB_LINECHECKWIDTH-1:0] peekdatacheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
     endcase
   endfunction
 
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
     endcase
   endfunction
 
@@ -190,15 +190,15 @@ module cache_integration_tb;
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
     case (w)
-      0: dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s] = v;
-      default: dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s] = v;
+      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
+      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
     endcase
   endtask
 
   function automatic logic [TB_TAGCHECKWIDTH-1:0] peektagcheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
     endcase
   endfunction
 
@@ -208,8 +208,8 @@ module cache_integration_tb;
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
     case (w)
-      0: dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
-      default: dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
+      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
+      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
     endcase
   endtask
 
@@ -232,8 +232,8 @@ module cache_integration_tb;
   function automatic int findway(input logic [PA_BITS-1:0] adr);
     int s;
     s = adr[SETLEN+OFFSETLEN-1:OFFSETLEN];
-    if (peekvalid(0, s) && dut.CacheWays[0].CacheTagMem.ram.RAM[s] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 0;
-    if (peekvalid(1, s) && dut.CacheWays[1].CacheTagMem.ram.RAM[s] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 1;
+    if (peekvalid(0, s) && dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 0;
+    if (peekvalid(1, s) && dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 1;
     return -1;
   endfunction
 
