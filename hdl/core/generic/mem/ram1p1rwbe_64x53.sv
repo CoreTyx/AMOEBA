@@ -35,8 +35,12 @@ module ram1p1rwbe_64x53(
   output logic [52:0]   Q
 );
 
+logic [55:0] Q_temp; 
+assign Q = Q_temp[52:0]; 
+
    // replace "generic64x128RAM" with "TS1N..64X128.." module from your memory vendor
    //generic64x128RAM sramIP (.CLK, .CEB, .WEB, .A, .D, .BWEB, .Q);
-   rf_sp_64_53 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D, .Q);
+   rf_sp_64_53 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D({3'd0, D}), .Q(Q_temp));
+
 
 endmodule
