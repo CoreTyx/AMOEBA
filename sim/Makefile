@@ -485,7 +485,7 @@ RVFIMON_ISA          ?= rv64imafdc_zb
 # Local fixes on top of the generated monitor, applied in order.  Applied by
 # generated-files and re-applied by check-generated, so regenerating cannot
 # silently drop them.
-RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch $(CURDIR)/../patches/rvfimon-w-low32.patch
 
 .PHONY: generate-rtl
 generate-rtl:
