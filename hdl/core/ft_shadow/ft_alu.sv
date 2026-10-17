@@ -94,11 +94,13 @@ module ft_alu import cvw::*; #(
   assign cmp_extended_a = {cmp_sgnd & cmp_a[P.XLEN-1], cmp_a};
   assign cmp_extended_b = {cmp_sgnd & cmp_b[P.XLEN-1], cmp_b};
 
+  // w64 is an argument rather than a read of the module's W64: VCS -xprop cannot
+  // instrument a block that calls a function reading a signal outside its arguments.
   function automatic logic [P.XLEN-1:0] shift_result(
-    input  logic [P.XLEN+1:0] wide, input logic diagnostic);
+    input  logic [P.XLEN+1:0] wide, input logic diagnostic, input logic w64);
     logic [P.XLEN-1:0] aligned;
     aligned = diagnostic ? wide[P.XLEN+1:2] : wide[P.XLEN-1:0];
-    if ((P.XLEN == 64) && W64)
+    if ((P.XLEN == 64) && w64)
       shift_result = {{(P.XLEN-32){aligned[31]}}, aligned[31:0]};
     else shift_result = aligned;
   endfunction
@@ -128,7 +130,7 @@ module ft_alu import cvw::*; #(
 
     // A shift-channel fault must reach the architectural output, including
     // word sign extension. The injection bit stays physical during diagnosis.
-    assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute) : result_raw[i];
+    assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute, W64) : result_raw[i];
     // No reset: nothing reads these before a COMPUTE cycle has written them.
     always_ff @(posedge clk)
       if (phase == COMPUTE) begin
@@ -147,9 +149,9 @@ module ft_alu import cvw::*; #(
                        (result_q[i] == {{(P.XLEN-1){1'b0}}, arith_q[i][P.XLEN]});
         end else alu_ok[i] &= (result_q[i] == ~normal_result[i]);
       end else if (shift_operation) begin
-        alu_ok[i] = (shift_result(normal_shift[i], 1'b0) == shift_result(shift_q[i], 1'b1)) &
-                    (normal_result[i] == shift_result(normal_shift[i], 1'b0)) &
-                    (result_q[i] == shift_result(shift_q[i], 1'b1)) &
+        alu_ok[i] = (shift_result(normal_shift[i], 1'b0, W64) == shift_result(shift_q[i], 1'b1, W64)) &
+                    (normal_result[i] == shift_result(normal_shift[i], 1'b0, W64)) &
+                    (result_q[i] == shift_result(shift_q[i], 1'b1, W64)) &
                     (arith_q[i] == normal_arith[i]) & (arith_q[0] == arith_q[1]);
       end
     end

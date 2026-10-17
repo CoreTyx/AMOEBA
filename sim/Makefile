@@ -13,20 +13,23 @@ CORE_SV   := $(CURDIR)/../hdl/core/cvw.sv
 # cvw.sv listed explicitly first in VER/VCS_SRCS (package must precede modules); exclude from CORE_SRCS.
 CORE_SRCS := $(filter-out $(CORE_SV), $(shell find $(CURDIR)/../hdl/core -name '*.sv' -o -name '*.v' 2>/dev/null))
 # Exclude hdl/cvw/ and hdl/core/ from generic hdl find; CORE_SV + CORE_SRCS handle hdl/core/.
-HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/% $(LINK_PKG), $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
+PRIM_HDR  := $(CURDIR)/../hdl/prim_assert.sv
+HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/% $(LINK_PKG) $(PRIM_HDR), $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
 COMM_HVL  := $(shell find $(CURDIR)/../hvl/common                -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VCS_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/vcs       -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VER_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/verilator -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so' -o -name '*.cpp')
 SRAM_SRCS := $(shell find $(CURDIR)/../sram/output -name '*.v')
 # Vendored OpenTitan primitives for the link's clock-domain crossing
-# (third_party/opentitan/README.md).  prim_assert.sv is a macro header, included
-# by prim_fifo_async rather than compiled, so it is an incdir and not a source.
-PRIM_SRCS := $(CURDIR)/../third_party/opentitan/prim_flop_2sync.sv $(CURDIR)/../third_party/opentitan/prim_fifo_async.sv
-PRIM_INC  := +incdir+$(CURDIR)/../third_party/opentitan
+# (third_party/opentitan/README.md).  The copies in hdl/ are the ones compiled:
+# prim_flop_2sync.sv and prim_fifo_async.sv come in through the hdl/ glob above,
+# so the third_party/ originals must not be listed as well or every module is
+# declared twice.  prim_assert.sv is a macro header, included by prim_fifo_async
+# rather than compiled, so it is filtered out of HDL_SRCS and is an incdir.
+PRIM_INC  := +incdir+$(CURDIR)/../hdl
 HDRS      := $(shell find $(CURDIR)/../hvl -name '*.svh') $(CURDIR)/../hvl/common/rvfi_reference.json
 DW_IP     := $(shell python3 $(CURDIR)/../bin/get_options.py dw_ip)
-VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
-VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
+VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
+VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
 
 # ── Waveform tracing for the baremetal / ISA / FreeRTOS tiers ─────────────────
 # Off by default.  Verilator's trace hooks cost roughly 50x in wall time -- the

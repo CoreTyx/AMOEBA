@@ -165,8 +165,11 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     logic [P.XLEN-1:0] PCSpillD, PCSpillE;
     logic [P.XLEN-1:0] PCIncrM;
     logic              SelSpillF, SelSpillD, SelSpillE, SelSpillM;
+    // InvalidateICacheM withholds the fetch request (CacheRWF/BusRW below), so neither the I$ nor the
+    // bus reports a stall and InstrRawF is not a real read.  The spill logic must wait it out too, or a
+    // PC at the end of a line right after FENCE.I latches that value as the instruction's first half.
     spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
-      .IFUCacheBusStallF, .ITLBMissOrUpdateAF(ITLBMissOrUpdateAFRaw), .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
+      .IFUCacheBusStallF(IFUCacheBusStallF | InvalidateICacheM), .ITLBMissOrUpdateAF(ITLBMissOrUpdateAFRaw), .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
       .PostSpillInstrRawF, .CompressedF);
     flopenr #(1) SpillDReg(clk, reset, ~StallD, SelSpillF, SelSpillD);
     flopenr #(1) SpillEReg(clk, reset, ~StallE, SelSpillD, SelSpillE);
