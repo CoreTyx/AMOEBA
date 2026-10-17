@@ -482,7 +482,7 @@ RVFIMON_ISA          ?= rv64imafdc_zb
 # Local fixes on top of the generated monitor, applied in order.  Applied by
 # generated-files and re-applied by check-generated, so regenerating cannot
 # silently drop them.
-RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch $(CURDIR)/../patches/rvfimon-w-low32.patch
 
 .PHONY: generate-rtl
 generate-rtl:
@@ -908,6 +908,56 @@ csr_harden_test:
 	    -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-GENUNNAMED \
 	    --timescale 1ps/1ps 2>&1 | tee verilator/csr_harden_tb/compile.log
 	verilator/csr_harden_tb/Vcsr_harden_tb
+
+# ── Random-program fuzzing (bin/fuzz.py) ────────────────────────────────────────
+# Generates FUZZ_N random self-terminating programs starting at seed FUZZ_SEED and
+# runs each against the chosen oracle.  Failing programs land in
+# fuzz/<target>/failures/<kind>/seed_<n>.s with their log, and replay through the
+# ordinary run_* targets with PROG=<that file>.
+#
+#     make fuzz_no_spike   FUZZ_N=500 FUZZ_JOBS=16     RVFI checker only
+#     make fuzz            FUZZ_N=500                  Spike co-simulation + RVFI
+#     make fuzz_ecc_inject FUZZ_N=500                  fault injection enabled
+#     make fuzz_no_spike   FUZZ_EXTRA="--rand-insert --trap-weight 2"
+#
+# The fuzz simulators are separate single-threaded builds.  A fuzz program runs a
+# few thousand cycles, where the --threads $(nproc) model the other tiers use
+# spends nearly all its time on thread hand-off (measured: 14 s against well under
+# a second for the same program) and cannot be run several at a time.
+FUZZ_N       ?= 100
+FUZZ_SEED    ?= 1
+FUZZ_LEN     ?= 200
+FUZZ_JOBS    ?= 8
+FUZZ_THREADS ?= 1
+FUZZ_EXTRA   ?=
+FUZZ_ARGS     = --count $(FUZZ_N) --seed $(FUZZ_SEED) --length $(FUZZ_LEN) --jobs $(FUZZ_JOBS) $(FUZZ_EXTRA)
+
+fuzz_flags = $(subst --threads $(shell nproc),--threads $(FUZZ_THREADS),$(subst -Mdir $(2),-Mdir $(2)_fuzz,$(1)))
+FUZZ_SIM            := verilator/$(BUILD_DIR)_fuzz/Vtop_tb
+FUZZ_NO_SPIKE_SIM   := verilator/$(NO_SPIKE_DIR)_fuzz/Vtop_tb
+FUZZ_ECC_INJECT_SIM := verilator/$(ECC_INJECT_DIR)_fuzz/Vtop_tb
+$(FUZZ_SIM):            FUZZ_VER_FLAGS = $(call fuzz_flags,$(VER_FLAGS),$(BUILD_DIR))
+$(FUZZ_NO_SPIKE_SIM):   FUZZ_VER_FLAGS = $(call fuzz_flags,$(NO_SPIKE_VER_FLAGS),$(NO_SPIKE_DIR))
+$(FUZZ_ECC_INJECT_SIM): FUZZ_VER_FLAGS = $(call fuzz_flags,$(ECC_INJECT_VER_FLAGS),$(ECC_INJECT_DIR))
+
+$(FUZZ_SIM) $(FUZZ_NO_SPIKE_SIM) $(FUZZ_ECC_INJECT_SIM): $(VER_SRCS) $(HDRS) ../hvl/common/spike.so $(CURDIR)/Makefile
+	mkdir -p $(@D)
+	python3 check_sus.py
+	python3 ../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
+	cd verilator ;\
+	PERL5LIB="$(CURDIR)/perl5:$${PERL5LIB}" verilator $(FUZZ_VER_FLAGS) $(VER_SRCS) --top-module top_tb |& tee $(notdir $(@D))/compile.log
+	cd $(@D) ;\
+	$(MAKE) --jobs=$(shell echo $(shell nproc)-2 | bc) -f Vtop_tb.mk |& tee -a compile.log
+
+.PHONY: fuzz fuzz_no_spike fuzz_ecc_inject
+fuzz: $(FUZZ_SIM)
+	python3 ../bin/fuzz.py --sim $< --out fuzz/spike $(FUZZ_ARGS)
+
+fuzz_no_spike: $(FUZZ_NO_SPIKE_SIM)
+	python3 ../bin/fuzz.py --sim $< --out fuzz/no_spike $(FUZZ_ARGS)
+
+fuzz_ecc_inject: $(FUZZ_ECC_INJECT_SIM)
+	python3 ../bin/fuzz.py --sim $< --out fuzz/ecc_inject $(FUZZ_ARGS)
 
 .PHONY: clean
 clean:

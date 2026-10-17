@@ -14906,7 +14906,7 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_divw (
   endfunction
   wire signed [31:0] divw_result_s = safe_s32_div(divw_rs1_s, rvfi_rs2_rdata[31:0]);
   wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? {32{1'b1}} :
-                       rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {1'b1, {31{1'b0}}} :
+                       rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? {1'b1, {31{1'b0}}} :
                        divw_result_s;
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 100 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
@@ -19455,7 +19455,9 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remuw (
       else safe_u32_rem = a % b;
     end
   endfunction
-  wire [31:0] result = rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdata :
+  // AMOEBA local fix -- see patches/rvfimon-w-low32.patch.  Divide by zero is
+  // decided by the low 32 bits of rs2, which is all a W-form instruction reads.
+  wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? rvfi_rs1_rdata :
                        safe_u32_rem(rvfi_rs1_rdata[31:0], rvfi_rs2_rdata[31:0]);
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 111 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
@@ -19521,8 +19523,10 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remw (
     end
   endfunction
   wire signed [31:0] remw_result_s = safe_s32_rem(remw_rs1_s, rvfi_rs2_rdata[31:0]);
-  wire [31:0] result = rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdata :
-                       rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {32{1'b0}} :
+  // AMOEBA local fix -- see patches/rvfimon-w-low32.patch.  Divide by zero and
+  // INT_MIN / -1 are decided by the low 32 bits, which is all a W-form instruction reads.
+  wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? rvfi_rs1_rdata :
+                       rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? {32{1'b0}} :
                        remw_result_s;
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 110 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
