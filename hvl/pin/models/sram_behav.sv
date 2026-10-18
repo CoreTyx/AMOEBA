@@ -16,8 +16,9 @@
 //
 // Behaviour follows the RTL's behavioural RAM: address registered on an enabled
 // edge, read combinational from it; active-low CEN/WEN.  The array is `logic`,
-// so it starts X in a 4-state simulator.  rf_sp_16_46 and rf_sp_32_45 are 48
-// bits wide at the port -- the wrappers pad D and drop the top bits of Q.
+// so it starts X in a 4-state simulator.  Some macros are wider at the port
+// than their name -- rf_sp_16_46 and rf_sp_32_45 are 48 bits, rf_sp_64_53 is 56
+// and rf_sp_64_137 is 140 -- because the wrappers pad D and drop the top of Q.
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 
@@ -49,3 +50,5 @@ endmodule
 `PIN_RF_SP(rf_sp_32_45,  32, 48)
 `PIN_RF_SP(rf_sp_16_128, 16, 128)
 `PIN_RF_SP(rf_sp_16_46,  16, 48)
+`PIN_RF_SP(rf_sp_64_53,  64, 56)
+`PIN_RF_SP(rf_sp_64_137, 64, 140)
