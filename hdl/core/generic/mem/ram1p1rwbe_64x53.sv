@@ -40,7 +40,10 @@ assign Q = Q_temp[52:0];
 
    // replace "generic64x128RAM" with "TS1N..64X128.." module from your memory vendor
    //generic64x128RAM sramIP (.CLK, .CEB, .WEB, .A, .D, .BWEB, .Q);
-   rf_sp_64_53 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D({3'd0, D}), .Q(Q_temp));
-
-
+   // RETN and EMA must be driven.  Left unconnected, synthesis tied them to 0:
+   // RETN=0 holds the macro in retention, and every read returns X (seen in
+   // the PDK model on the post-synthesis bench).  EMA=0 is a placeholder until
+   // the datasheet's recommended margin setting is known.
+   rf_sp_64_53 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D({3'd0, D}), .Q(Q_temp),
+     .RETN(1'b1), .EMA('0));
 endmodule

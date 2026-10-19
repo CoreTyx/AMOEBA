@@ -14,6 +14,10 @@
 // `rtl` vs `rtl_sva` trace comparison checks it: rtl_sva uses the byte-masked
 // behavioural RAM, so a cache that relied on the mask would diverge.
 //
+// RETN and EMA are ports, as on the PDK macros.  Anything but RETN=1 reads X,
+// as the PDK model does in retention, so a wrapper that stops driving RETN
+// fails here too.  EMA (margin) has no functional effect.
+//
 // Behaviour follows the RTL's behavioural RAM: address registered on an enabled
 // edge, read combinational from it; active-low CEN/WEN.  The array is `logic`,
 // so it starts X in a 4-state simulator.  Some macros are wider at the port
@@ -42,8 +46,11 @@ endmodule
 `ifndef PIN_RF_SP_GENERIC_ONLY
 `define PIN_RF_SP(NAME, DEP, WID) \
 module NAME (input logic CLK, CEN, WEN, input logic [$clog2(DEP)-1:0] A, \
-             input logic [WID-1:0] D, output logic [WID-1:0] Q); \
-  pin_rf_sp #(.DEPTH(DEP), .WIDTH(WID)) m (.*); \
+             input logic [WID-1:0] D, output logic [WID-1:0] Q, \
+             input logic RETN, input logic [2:0] EMA); \
+  logic [WID-1:0] q; \
+  pin_rf_sp #(.DEPTH(DEP), .WIDTH(WID)) m (.CLK, .CEN, .WEN, .A, .D, .Q(q)); \
+  assign Q = (RETN === 1'b1) ? q : {WID{1'bx}};  /* retention, as the PDK model */ \
 endmodule
 
 `PIN_RF_SP(rf_sp_64_128, 64, 128)

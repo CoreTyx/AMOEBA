@@ -24,7 +24,9 @@ PDK_FIRST=(); SRAM_MODELS=()
 if [ -n "${SRAM_MODELS_LIST:-}" ]; then read -r -a SRAM_MODELS <<<"$SRAM_MODELS_LIST"
 elif [ -f "$P/vm_paths.sh" ]; then source "$P/vm_paths.sh"; fi
 [ ${#SRAM_MODELS[@]} -gt 0 ] || { echo "SRAM_CMP_RESULT: SKIP (no SRAM_MODELS)"; exit 0; }
-TIES="${SRAM_TIES:-}"
+# Default: what hdl/core/generic/mem/ram1p1rwbe_*.sv tie, so the comparison
+# tests the macros as the design uses them.  SRAM_TIES overrides.
+TIES="${SRAM_TIES:-.RETN(1'b1), .EMA('0)}"
 [ -z "$TIES" ] || echo "SRAM_CMP: tying $TIES on every macro"
 rm -f "$OUT/simv"   # the generated top depends on SRAM_TIES; always rebuild it
 
