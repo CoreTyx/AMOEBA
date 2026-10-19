@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find where an X starts: the first signals in a VCD to go from known to X.
 
-    vcd_first_x.py <file.vcd> [--after NS] [--top N] [--scope PREFIX]
+    vcd_first_x.py <file.vcd> [--after NS] [--top N] [--scope PREFIX] [--match REGEX]
 
 Signals that are X from the start and never become known (uninitialised
 arrays, unused nets) are ignored; what is reported is each signal's first
@@ -9,7 +9,9 @@ transition from a fully known value to a value with X or Z bits, after time
 --after (ns, default 0: use a time after reset has been released).  Sorted
 by time, the first few lines are where the X entered; everything after them
 is it spreading.  --scope keeps only signals whose hierarchical name starts
-with PREFIX (e.g. pin_tb.dut.chip.soc).
+with PREFIX (e.g. pin_tb.dut.chip.soc).  --match keeps only names matching a
+regular expression -- e.g. control (pointers, valids, state) rather than data
+paths, which go X harmlessly whenever their valid is low.
 
 Made for hvl/pin/pin_tb.sv's +PIN_VCD dumps (build with WAVES=1).
 """
@@ -22,7 +24,8 @@ def main(argv):
     if not argv or argv[0].startswith("-"):
         print(__doc__)
         return 2
-    path, after, top, scope = argv[0], 0.0, 30, ""
+    import re
+    path, after, top, scope, match = argv[0], 0.0, 30, "", None
     i = 1
     while i < len(argv):
         if argv[i] == "--after":
@@ -31,6 +34,8 @@ def main(argv):
             top = int(argv[i + 1]); i += 2
         elif argv[i] == "--scope":
             scope = argv[i + 1]; i += 2
+        elif argv[i] == "--match":
+            match = re.compile(argv[i + 1]); i += 2
         else:
             print(f"unknown argument {argv[i]}"); return 2
 
@@ -71,7 +76,7 @@ def main(argv):
                     k += 1
                 vid, name = tokens[j + 3], tokens[j + 4]
                 full = ".".join(stack + [name])
-                if full.startswith(scope):
+                if full.startswith(scope) and (match is None or match.search(full)):
                     names.setdefault(vid, []).append(full)
                 j = k
             j += 1
