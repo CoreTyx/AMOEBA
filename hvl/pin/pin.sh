@@ -54,7 +54,9 @@ fi
 # Only directories that exist: a VM unpacked from vm_bundle.tgz has no
 # third_party/cvw, and nothing the bench compiles includes from it.
 INCS=()
-for d in pkg hdl/core hdl/core/ifu/bpred third_party/cvw/config/rv64gc third_party/opentitan; do
+# hdl itself: prim_fifo_async.sv (moved there from third_party/opentitan) does
+# `include "prim_assert.sv".
+for d in pkg hdl hdl/core hdl/core/ifu/bpred third_party/cvw/config/rv64gc; do
   [ -d "$R/$d" ] && INCS+=(+incdir+"$R/$d")
 done
 BENCH=("$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/pin_tb.sv")
@@ -89,7 +91,7 @@ rtl_sources() {
     SRCS=("${PDK[@]}")
   fi
   SRCS+=("$R/pkg/types.sv" "$LINK_PKG" "$R/hdl/core/cvw.sv" "${core[@]}" "${forte[@]}"
-         "$R/third_party/opentitan/prim_flop_2sync.sv" "$R/third_party/opentitan/prim_fifo_async.sv"
+         "$R/hdl/prim_flop_2sync.sv" "$R/hdl/prim_fifo_async.sv"
          "${BENCH[@]}")
 }
 

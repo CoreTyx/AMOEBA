@@ -46,7 +46,7 @@ hvl/pin/vm_pack.sh --list    # optional: the paths that go in it
 ```
 
 The bundle holds `hvl/pin/`, `bin/pin_trace_cmp.py`, `hdl/core/`,
-`hdl/forte_*.sv`, `pkg/`, the three `third_party/opentitan/prim_*.sv` files,
+`hdl/forte_*.sv`, `pkg/`, the three `hdl/prim_*.sv` files,
 this runbook, and `sim/pin/images/`.  It also carries `VM_BUNDLE`, which
 records when and from which commit it was packed, and `VM_FILES.sha256`, a
 checksum for every file.  Re-pack whenever anything on that list changes.
