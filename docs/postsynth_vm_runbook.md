@@ -75,6 +75,12 @@ SRAM_MODELS=(/path/to/sram_models/rf_sp_*.v)
 PAD_MODELS=(/path/to/io_cells.v)
 ```
 
+Compile order: `PDK_FIRST`, then `PAD_MODELS`, then `SRAM_MODELS`, as ordinary
+source files in the order listed, ahead of the design.  `STDCELL_MODELS` come
+last, as `-v` libraries.  If the pad or SRAM models build on separate PDK
+primitives or headers, list those files in `PDK_FIRST`.  Each
+`sim/pin/build/vcs_<dut>/build.log` begins with the exact VCS command.
+
 The RTL reference build uses `SRAM_MODELS` and `PAD_MODELS` as well.  If either
 is left empty, the RTL build falls back to the behavioural stand-ins in
 `hvl/pin/models/`.  That is fine for a smoke test but is **not** a sign-off

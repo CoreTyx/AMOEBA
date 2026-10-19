@@ -44,9 +44,10 @@ if [ "$SIM" = vcs ]; then
   # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
   [ -f "$P/vm_paths.sh" ] || die "no $P/vm_paths.sh: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
   # shellcheck source=vm_paths.example.sh
+  PDK_FIRST=()
   source "$P/vm_paths.sh"
 else
-  NETLIST=""; SDF=""; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=()
+  NETLIST=""; SDF=""; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=()
 fi
 
 # ---- source lists ------------------------------------------------------------
@@ -59,29 +60,45 @@ done
 BENCH=("$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/pin_tb.sv")
 LINK_PKG="$R/hdl/forte_link_pkg.sv"
 
+# Compile order.  PDK model files go FIRST, as ordinary sources, in the order
+# vm_paths.sh lists them: PDK_FIRST (primitives, headers and anything the pad
+# or SRAM models build on), then PAD_MODELS, then SRAM_MODELS.  A file given
+# with -v is only searched for modules the design leaves unresolved, so any
+# `define, `timescale or primitive the wrappers depend on would be missing
+# when they are elaborated.  Standard cells stay -v, at the end: a cell
+# library is thousands of modules, and only the ones the netlist uses are wanted.
+pdk_first() {
+  PDK=()
+  for f in ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${PAD_MODELS[@]}" "${SRAM_MODELS[@]}"; do PDK+=("$f"); done
+}
+
 rtl_sources() {
   local core forte
   mapfile -t core  < <(find "$R/hdl/core" \( -name '*.sv' -o -name '*.v' \) ! -name cvw.sv | sort)
   mapfile -t forte < <(find "$R/hdl" -maxdepth 1 -name 'forte_*.sv' ! -name forte_link_pkg.sv | sort)
-  SRCS=("$R/pkg/types.sv" "$LINK_PKG" "$R/hdl/core/cvw.sv" "${core[@]}" "${forte[@]}"
-        "$R/third_party/opentitan/prim_flop_2sync.sv" "$R/third_party/opentitan/prim_fifo_async.sv")
   DEFS=(+define+PIN_TB_RTL +define+ECE411_NO_FLOAT +define+ECE411_LINUX)
   LIBS=()
+  SRCS=()
   if [ "$DUT" = rtl ]; then
     DEFS+=(+define+SYNTHESIS)
-    if [ ${#SRAM_MODELS[@]} -gt 0 ]; then for f in "${SRAM_MODELS[@]}"; do LIBS+=(-v "$f"); done
-    else SRCS+=("$P/models/sram_behav.sv"); fi
-    if [ ${#PAD_MODELS[@]} -gt 0 ]; then for f in "${PAD_MODELS[@]}"; do LIBS+=(-v "$f"); done
-    else SRCS+=("$P/models/pad_behav.sv"); fi
+    # Real PDK models when vm_paths.sh names them, else the local stand-ins.
+    PDK=()
+    [ ${#PDK_FIRST[@]} -gt 0 ] && PDK+=(${PDK_FIRST[@]+"${PDK_FIRST[@]}"})
+    if [ ${#PAD_MODELS[@]} -gt 0 ];  then PDK+=("${PAD_MODELS[@]}");  else PDK+=("$P/models/pad_behav.sv");  fi
+    if [ ${#SRAM_MODELS[@]} -gt 0 ]; then PDK+=("${SRAM_MODELS[@]}"); else PDK+=("$P/models/sram_behav.sv"); fi
+    SRCS=("${PDK[@]}")
   fi
-  SRCS+=("${BENCH[@]}")
+  SRCS+=("$R/pkg/types.sv" "$LINK_PKG" "$R/hdl/core/cvw.sv" "${core[@]}" "${forte[@]}"
+         "$R/third_party/opentitan/prim_flop_2sync.sv" "$R/third_party/opentitan/prim_fifo_async.sv"
+         "${BENCH[@]}")
 }
 
 gate_sources() {
-  SRCS=("$LINK_PKG" "$NETLIST" "${BENCH[@]}")
+  pdk_first
+  SRCS=("${PDK[@]}" "$LINK_PKG" "$NETLIST" "${BENCH[@]}")
   DEFS=(+define+PIN_TB_GATE)
   LIBS=()
-  for f in "${STDCELL_MODELS[@]}" "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}"; do LIBS+=(-v "$f"); done
+  for f in "${STDCELL_MODELS[@]}"; do LIBS+=(-v "$f"); done
 }
 
 # ---- preflight -----------------------------------------------------------------
@@ -101,7 +118,7 @@ preflight() {
       [ ${#PAD_MODELS[@]}     -gt 0 ] || { echo "  PAD_MODELS is empty"; bad=1; }
       [ -z "$SDF" ] || isfile SDF "$SDF"
     fi
-    for f in "${STDCELL_MODELS[@]}" "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}"; do isfile model "$f"; done
+    for f in ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${STDCELL_MODELS[@]}" "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}"; do isfile model "$f"; done
   fi
   if [ "$DUT" = gate ] && [ -f "$NETLIST" ]; then
     # POSIX classes only: gawk reads \b as backspace and awk has no \s, so the
@@ -109,7 +126,7 @@ preflight() {
     local hdr; hdr="$(sed -nE '/^[[:space:]]*module[[:space:]]+forte_top([^[:alnum:]_]|$)/,/;/p' "$NETLIST")"
     [ -n "$hdr" ] || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
     # Every SRAM macro and pad cell the netlist instantiates must be defined by a model.
-    local defs; defs="$(cat "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^[[:space:]]*module[[:space:]]+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
+    local defs; defs="$(cat ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^[[:space:]]*module[[:space:]]+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
     for m in $(grep -oE '^[[:space:]]*(rf_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done
@@ -143,10 +160,16 @@ build() {
     # All of VCS's output into build.log (and the terminal), not -l: licence,
     # environment and command-line errors only ever reach the terminal.
     rm -f simv
+    # The exact command first, so the compile order is always on record.
+    { echo "# compile command (pin.sh, DUT=$DUT):"
+      printf '%q ' vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
+        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" -top pin_tb -o simv
+      echo; echo; } > build.cmd
+    cat build.cmd
     vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
       -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" \
       "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" \
-      -top pin_tb -o simv 2>&1 | tee build.log || true
+      -top pin_tb -o simv 2>&1 | cat build.cmd - | tee build.log || true
     [ -x simv ] || { tail -40 build.log | sed 's/^/  | /' >&2; die "vcs build failed, see $BUILD/build.log"; }
   fi
   echo "build: OK"

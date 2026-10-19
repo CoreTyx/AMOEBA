@@ -21,11 +21,14 @@ NETLIST="${NETLIST:-}"
 SDF="${SDF:-}"
 SDF_CORNER="${SDF_CORNER:-max}"          # min | typ | max
 
-# Verilog simulation models.  Each is compiled with -v (library: only the
-# modules the design references are elaborated).
-STDCELL_MODELS=()                        # standard-cell library .v
+# Verilog simulation models.  Compile order (pin.sh): PDK_FIRST, PAD_MODELS,
+# SRAM_MODELS -- as ordinary sources, in the order listed, BEFORE the design --
+# then the design and bench, then STDCELL_MODELS with -v (library: only the
+# cells the netlist uses are elaborated).  build.log starts with the command.
+PDK_FIRST=()                             # PDK primitives/headers the pad or SRAM models build on
+PAD_MODELS=()                            # io_in / io_out / io_tri (and what they instantiate)
 SRAM_MODELS=()                           # rf_sp_<D>_<W> macro models (PDK)
-PAD_MODELS=()                            # io_in / io_out / io_tri
+STDCELL_MODELS=()                        # standard-cell library .v
 
 # Used for the RTL reference too: forte_top under `SYNTHESIS instantiates the
 # SRAM macros and pad cells, so the RTL build needs SRAM_MODELS and PAD_MODELS.
