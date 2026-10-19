@@ -23,7 +23,7 @@ cd "$R"
 # What the VM runs: the bench and its scripts, the trace comparison, and every
 # RTL source pin.sh compiles for DUT=rtl/rtl_sva (all of hdl/core, the forte_*
 # top, the config package, the vendored CDC primitives), plus the images.
-PATHS=(hvl/pin bin/pin_trace_cmp.py docs/postsynth_vm_runbook.md
+PATHS=(hvl/pin bin/pin_trace_cmp.py bin/vcd_first_x.py docs/postsynth_vm_runbook.md
        hdl/core pkg third_party/opentitan/prim_assert.sv
        third_party/opentitan/prim_fifo_async.sv third_party/opentitan/prim_flop_2sync.sv)
 mapfile -t FORTE < <(ls hdl/forte_*.sv)
