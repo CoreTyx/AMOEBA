@@ -20,7 +20,7 @@ SIM="${SIM:-vcs}"
 OUT="$R/sim/pin/selftest/$SIM/sram_cmp"
 mkdir -p "$OUT"
 
-PDK_FIRST=(); SRAM_MODELS=()
+PDK_FIRST=(); SRAM_MODELS=(); VCS_FLAGS=()
 if [ -n "${SRAM_MODELS_LIST:-}" ]; then read -r -a SRAM_MODELS <<<"$SRAM_MODELS_LIST"
 elif [ -f "$P/vm_paths.sh" ]; then source "$P/vm_paths.sh"; fi
 [ ${#SRAM_MODELS[@]} -gt 0 ] || { echo "SRAM_CMP_RESULT: SKIP (no SRAM_MODELS)"; exit 0; }
@@ -79,7 +79,7 @@ if [ "$SIM" = verilator ]; then
   ./obj_dir/sram_cmp | tee run.log | grep -E '^SRAM_CMP'
 else
   [ -x simv ] || rm -rf simv.daidir csrc
-  vcs -full64 -sverilog -licqueue -timescale=1ns/1ps +nospecify +notimingcheck +define+PIN_RF_SP_GENERIC_ONLY \
+  vcs -full64 -sverilog -licqueue -timescale=1ns/1ps +nospecify +notimingcheck ${VCS_FLAGS[@]+"${VCS_FLAGS[@]}"} +define+PIN_RF_SP_GENERIC_ONLY \
     "${SRCS[@]}" -top sram_cmp_tb -o simv >build.log 2>&1
   rc=$?; grep -q "need not be recompiled" build.log && [ -x simv ] && rc=0
   [ $rc = 0 ] && [ -x simv ] || { tail -20 build.log; echo "SRAM_CMP_RESULT: FAIL build"; exit 1; }

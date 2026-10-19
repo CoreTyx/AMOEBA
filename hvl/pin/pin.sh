@@ -44,7 +44,7 @@ if [ "$SIM" = vcs ]; then
   # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
   [ -f "$P/vm_paths.sh" ] || die "no $P/vm_paths.sh: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
   # shellcheck source=vm_paths.example.sh
-  PDK_FIRST=()
+  PDK_FIRST=(); VCS_FLAGS=()
   source "$P/vm_paths.sh"
 else
   NETLIST=""; SDF=""; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=()
@@ -171,13 +171,13 @@ build() {
     # The exact command first, so the compile order is always on record.
     { echo "# compile command (pin.sh, DUT=$DUT):"
       printf '%q ' vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
-        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" -top pin_tb -o simv
+        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" ${VCS_FLAGS[@]+"${VCS_FLAGS[@]}"} "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" -top pin_tb -o simv
       echo; echo; } > build.cmd
     cat build.cmd
     # VCS's own exit status, captured inside the pipe (PIPESTATUS does not
     # survive the `|| true`).
     { vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
-        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" \
+        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" ${VCS_FLAGS[@]+"${VCS_FLAGS[@]}"} \
         "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" \
         -top pin_tb -o simv 2>&1; echo $? > build.rc; } | cat build.cmd - | tee build.log || true
     local rc; rc="$(cat build.rc 2>/dev/null || echo 1)"

@@ -48,7 +48,9 @@ else
   # simv.daidir without simv (an interrupted build, or an older run.sh that
   # deleted simv) makes VCS report "unchanged" and produce nothing: clear it.
   [ -x "$OUT/simv" ] || rm -rf "$OUT/simv.daidir" "$OUT/csrc"
-  ( cd "$OUT" && vcs -full64 -sverilog -licqueue -timescale=1ns/1ps "${SRCS[@]}" \
+  # Site flags (vm_paths.sh VCS_FLAGS) apply to every VCS build.
+  VCS_FLAGS=(); [ -f "$P/vm_paths.sh" ] && source "$P/vm_paths.sh"
+  ( cd "$OUT" && vcs -full64 -sverilog -licqueue -timescale=1ns/1ps ${VCS_FLAGS[@]+"${VCS_FLAGS[@]}"} "${SRCS[@]}" \
       -top pin_selftest_tb -o simv ) >"$OUT/build.log" 2>&1
   rc=$?
   grep -q "design hasn't changed and need not be recompiled" "$OUT/build.log" && [ -x "$OUT/simv" ] && rc=0

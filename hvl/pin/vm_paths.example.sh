@@ -37,3 +37,9 @@ STDCELL_MODELS=()                        # standard-cell library .v
 # SRAM macro control pins for selftest/sram_cmp.sh.  Empty = what the RTL
 # wrappers tie (.RETN(1'b1), .EMA('0)); set it to try other values.
 SRAM_TIES="${SRAM_TIES:-}"
+
+# Extra VCS flags for every VCS build (pin.sh, the self-test, sram_cmp), added
+# after the defaults so they win.  Put site flags here rather than editing the
+# scripts: bundle files are checksummed, and a new bundle replaces them.  e.g.
+#   VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
+VCS_FLAGS=()
