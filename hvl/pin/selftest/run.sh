@@ -6,8 +6,9 @@
 #   2. pin_selftest_tb, +VIOLATE=1..13          -> each violation detected
 #      (6, 11, 12 are X/Z checks: skipped, and reported as skipped, under Verilator)
 #   3. pin_tb on the RTL with the directed tests -> PASS
-#   4. pin_tb on the RTL with +FPGA_MUTATE=1..3  -> FAIL (a corrupted fetch, a
-#      wrong exit code, a dropped word: the bench must notice each)
+#   4. pin_tb with +FPGA_MUTATE=1..3, on a build whose plain smoke test passed
+#      -> FAIL (a corrupted fetch, a wrong exit code, a dropped word: the bench
+#      must notice each)
 #   5. rtl vs rtl_sva pin traces                 -> cycle-exact match
 #
 # Prints one line per check and a summary; exit status 0 only if all hold.
@@ -98,6 +99,7 @@ fi
 # ---- the bench on the RTL ------------------------------------------------------------
 # Directed tests need DUT builds; VCS on the VM uses the real SRAM/pad models
 # when vm_paths.sh names them.
+SMOKE_OK=()      # builds whose unmutated smoke test passed
 for dut in rtl rtl_sva; do
   echo "== build pin_tb ($SIM/$dut)"
   SIM=$SIM DUT=$dut "$P/pin.sh" build >"$OUT/build_$dut.log" 2>&1 || {
@@ -109,23 +111,34 @@ for dut in rtl rtl_sva; do
     else args=("$P/tests/$t.c"); fi
     [ -f "$P/tests/$t.cmd" ] && args+=("$P/tests/$t.cmd")
     if SIM=$SIM DUT=$dut TAG=st "$P/pin.sh" run "${args[@]}" +TIMEOUT=2000000 >"$OUT/${dut}_$t.log" 2>&1
-    then ok "$dut $t"; else bad "$dut $t ($OUT/${dut}_$t.log)"; fi
+    then ok "$dut $t"; [ "$t" = smoke ] && SMOKE_OK+=("$dut")
+    else
+      bad "$dut $t ($OUT/${dut}_$t.log) -- first errors:"
+      grep -m3 -hE 'ERROR|PIN_TB_RESULT|Fatal|Error-' "$R/sim/pin/runs/${SIM}_${dut}/${t}_st/sim.log" 2>/dev/null | cut -c1-200 | sed 's/^/        | /'
+    fi
   done
 done
 
 echo "== mutations (must FAIL)"
-for m in 1 2 3; do
-  smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
-  # Caught only if the bench RAN and returned a verdict of FAIL.  A run that
-  # never happened (bench not built, crash) fails too, and must not count.
-  SIM=$SIM DUT=rtl TAG="mut$m" "$P/pin.sh" run "$smoke" +FPGA_MUTATE=$m +TIMEOUT=100000 >"$OUT/mut$m.log" 2>&1
-  verdict="$(grep -m1 '^PIN_TB_RESULT:' "$R/sim/pin/runs/${SIM}_rtl/smoke_mut$m/sim.log" 2>/dev/null || true)"
-  case "$verdict" in
-    *PASS*)  bad "mutation $m went unnoticed ($OUT/mut$m.log)";;
-    *FAIL*)  ok "mutation $m caught: ${verdict#PIN_TB_RESULT: }";;
-    *)       bad "mutation $m: the bench never ran ($OUT/mut$m.log)";;
-  esac
-done
+# A mutation proves something only on a build where the same test passes
+# without it; on a build that fails anyway, "caught" is vacuous.
+if [ ${#SMOKE_OK[@]} -eq 0 ]; then
+  skp "mutations: no build passed the unmutated smoke test"
+else
+  mdut="${SMOKE_OK[0]}"
+  for m in 1 2 3; do
+    smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
+    # Caught only if the bench RAN and returned a verdict of FAIL.  A run that
+    # never happened (bench not built, crash) fails too, and must not count.
+    SIM=$SIM DUT=$mdut TAG="mut$m" "$P/pin.sh" run "$smoke" +FPGA_MUTATE=$m +TIMEOUT=100000 >"$OUT/mut$m.log" 2>&1
+    verdict="$(grep -m1 '^PIN_TB_RESULT:' "$R/sim/pin/runs/${SIM}_${mdut}/smoke_mut$m/sim.log" 2>/dev/null || true)"
+    case "$verdict" in
+      *PASS*)  bad "mutation $m ($mdut) went unnoticed ($OUT/mut$m.log)";;
+      *FAIL*)  ok "mutation $m ($mdut) caught: ${verdict#PIN_TB_RESULT: }";;
+      *)       bad "mutation $m ($mdut): the bench never ran ($OUT/mut$m.log)";;
+    esac
+  done
+fi
 
 echo "== rtl vs rtl_sva traces"
 for t in smoke uart_echo irq; do
