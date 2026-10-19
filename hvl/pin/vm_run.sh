@@ -23,8 +23,10 @@
 #               into X bytes, and the D$'s line-wide ECC then encodes X, which
 #               silicon (consistent garbage) never sees.  Read its failures as
 #               leads, not verdicts.
-# ONLY=<regex> restricts regress to matching image names; SKIP_RTL=1 reuses the
-# rtl runs of a previous invocation.
+# ONLY=<regex> restricts regress to matching image names.  SKIP_RTL=1 /
+# SKIP_GATE=1 reuse an image's earlier rtl / gate run (its verdict and trace)
+# when one exists, and run it otherwise -- so a skip can only save time, never
+# compare against a run that did not happen.
 #
 # Output: sim/pin/vm_results/SUMMARY (paste this back) and
 # sim/pin/vm_results.tgz (logs, traces, consoles -- send this if asked).
@@ -84,18 +86,27 @@ for st in "${STAGES[@]}"; do
       [[ -z "${ONLY:-}" || "$name" =~ ${ONLY} ]] || continue
       args=("$IMG/$name.lst"); [ -f "$IMG/$name.cmd" ] && args+=("$IMG/$name.cmd")
       t0=$(date +%s)
-      r_rtl="skip"; r_gate="skip"; r_cmp="-"
-      if [ -z "${SKIP_RTL:-}" ] && [[ " $duts " == *" rtl "* ]]; then
-        SIM=vcs DUT=rtl "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && r_rtl=PASS || r_rtl=FAIL
-      fi
+      r_rtl="-"; r_gate="-"; r_cmp="-"
+      # run_or_reuse <dut> <skip>: echoes PASS/FAIL (fresh) or PASS*/FAIL* (reused).
+      run_or_reuse() {
+        local d="$1" skip="$2" res="$R/sim/pin/runs/vcs_$1/$name/RESULT"
+        if [ -n "$skip" ] && [ -f "$res" ] && [ -f "$R/sim/pin/runs/vcs_$d/$name/pin_trace.log" ]; then
+          grep -q PASS "$res" && echo 'PASS*' || echo 'FAIL*'
+        else
+          SIM=vcs DUT=$d "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && echo PASS || echo FAIL
+        fi
+      }
+      [[ " $duts " == *" rtl "* ]]  && r_rtl="$(run_or_reuse rtl "${SKIP_RTL:-}")"
       if [[ " $duts " == *" gate "* ]]; then
-        SIM=vcs DUT=gate "$P/pin.sh" run "${args[@]}" +TIMEOUT=10000000 +UART_QUIET >/dev/null 2>&1 && r_gate=PASS || r_gate=FAIL
-        if python3 "$R/bin/pin_trace_cmp.py" "$R/sim/pin/runs/vcs_rtl/$name" "$R/sim/pin/runs/vcs_gate/$name" >"$OUT/cmp_$name.log" 2>&1
-        then r_cmp=MATCH; else r_cmp=DIFF; fi
+        r_gate="$(run_or_reuse gate "${SKIP_GATE:-}")"
+        a="$R/sim/pin/runs/vcs_rtl/$name"; b="$R/sim/pin/runs/vcs_gate/$name"
+        if [ ! -f "$a/pin_trace.log" ] || [ ! -f "$b/pin_trace.log" ]; then r_cmp=NONE
+        elif python3 "$R/bin/pin_trace_cmp.py" "$a" "$b" >"$OUT/cmp_$name.log" 2>&1; then r_cmp=MATCH
+        else r_cmp=DIFF; fi
       fi
-      verdict=PASS; [[ "$r_rtl" == FAIL || "$r_gate" == FAIL || "$r_cmp" == DIFF ]] && verdict=FAIL
+      verdict=PASS; [[ "$r_rtl" == FAIL* || "$r_gate" == FAIL* || "$r_cmp" == DIFF || "$r_cmp" == NONE ]] && verdict=FAIL
       [ $verdict = PASS ] && pass=$((pass+1)) || fail=$((fail+1))
-      line="$(printf '%-4s %-36s rtl=%-4s gate=%-4s trace=%-5s %5ss' $verdict "$name" $r_rtl $r_gate $r_cmp $(( $(date +%s) - t0 )))"
+      line="$(printf '%-4s %-36s rtl=%-5s gate=%-5s trace=%-5s %5ss' $verdict "$name" "$r_rtl" "$r_gate" "$r_cmp" $(( $(date +%s) - t0 )))"
       log "$line"
       if [ $verdict = FAIL ]; then
         for d in rtl gate; do
@@ -105,7 +116,7 @@ for st in "${STAGES[@]}"; do
         [ "$r_cmp" = DIFF ] && sed 's/^/       /' "$OUT/cmp_$name.log" | head -8 >>"$SUM"
       fi
     done < "$IMG/MANIFEST"
-    log "regress: $pass passed, $fail failed";;
+    log "regress: $pass passed, $fail failed  (* = reused an earlier run)";;
   xstress|xmem)
     pass=0; fail=0
     xa=("${XARGS[@]}"); [ "$st" = xmem ] && xa+=(+FPGA_MEM=x)
