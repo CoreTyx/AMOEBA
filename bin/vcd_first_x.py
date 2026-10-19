@@ -102,6 +102,10 @@ def main(argv):
                 pass                       # reals carry no X
 
     hits = sorted((tm, vid) for vid, tm in first_x.items())
+    import os
+    print(f"read {path}: {os.path.getsize(path)} bytes, {len(names)} signals"
+          f"{' in ' + scope if scope else ''}, last time {t:.3f} ns, "
+          f"{sum(1 for v in known if v in names)} ever known")
     if not hits:
         print(f"no signal went from known to X after {after} ns")
         return 0

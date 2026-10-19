@@ -132,8 +132,13 @@ module pin_tb;
     void'($value$plusargs("PIN_VCD_CYCLES=%d", n));
     $dumpfile("pin.vcd");
     $dumpvars(0, pin_tb);
-    if (n > 0) begin repeat (n) @(posedge core_clk); $dumpoff; end
+    if (n > 0) begin repeat (n) @(posedge core_clk); $dumpoff; $dumpflush; end
   end
+  // VCD output is buffered, and the run that needs a waveform usually ends in
+  // a $fatal (the bench's or the design's) right where the X appears: flush
+  // every 1000 cycles and at the end, or the interesting part is lost.
+  initial if ($test$plusargs("PIN_VCD")) forever begin repeat (1000) @(posedge core_clk); $dumpflush; end
+  final if ($test$plusargs("PIN_VCD")) $dumpflush;
 `endif
 
   // ---- status and output pin monitor -----------------------------------------
