@@ -98,6 +98,8 @@ Waveforms (VCS): `WAVES=1` on both the build and the run (it selects a separate
 build directory, `<sim>_<dut>_waves`), plus `+PIN_VCD` (and `+PIN_VCD_CYCLES=n`,
 default 400, 0 = whole run) on the run; `pin.vcd` lands in the run directory.
 `bin/vcd_first_x.py pin.vcd --after <ns>` lists the first signals to go X.
+For Verdi, `+PIN_FSDB` instead (VCS only) writes the whole run to `wave.fsdb`;
+open it with `verdi -ssf <run dir>/wave.fsdb`.
 
     WAVES=1 SIM=vcs DUT=rtl_sva hvl/pin/pin.sh build
     WAVES=1 SIM=vcs DUT=rtl_sva TAG=w hvl/pin/pin.sh run sim/pin/images/uart_echo.lst \

@@ -158,7 +158,7 @@ build() {
     local xp=()
     [ "$DUT" = gate ] || xp=(-xprop="$P/xprop.config" -xprop=flowctrl)
     # WAVES=1: waveform dumping (+PIN_VCD at run time), at some speed cost.
-    [ -n "${WAVES:-}" ] && xp+=(-debug_access+all +define+PIN_WAVES)
+    [ -n "${WAVES:-}" ] && xp+=(-debug_access+all -kdb +define+PIN_WAVES)
     local timing=(+nospecify +notimingcheck)
     if [ "$DUT" = gate ] && [ -n "$SDF" ]; then
       timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk)
@@ -209,10 +209,12 @@ run() {
   [ -x "$exe" ] || die "not built: $exe (run: ${WAVES:+WAVES=1 }SIM=$SIM DUT=$DUT $0 build)"
   # +PIN_VCD only works in a WAVES=1 build; without one it would be ignored.
   local a vcd=0
-  for a in "$@"; do [ "$a" = +PIN_VCD ] && vcd=1; done
-  if [ $vcd = 1 ] && [ "$SIM" = vcs ] && ! grep -q PIN_WAVES "$BUILD/build.cmd" 2>/dev/null; then
-    die "+PIN_VCD needs a waveform build: WAVES=1 SIM=$SIM DUT=$DUT $0 build, then run with WAVES=1 too"
+  local fsdb=0
+  for a in "$@"; do [ "$a" = +PIN_VCD ] && vcd=1; [ "$a" = +PIN_FSDB ] && fsdb=1; done
+  if [ $((vcd + fsdb)) -gt 0 ] && [ "$SIM" = vcs ] && ! grep -q PIN_WAVES "$BUILD/build.cmd" 2>/dev/null; then
+    die "+PIN_VCD/+PIN_FSDB need a waveform build: WAVES=1 SIM=$SIM DUT=$DUT $0 build, then run with WAVES=1 too"
   fi
+  [ $fsdb = 1 ] && [ "$SIM" != vcs ] && die "+PIN_FSDB is VCS only (use +PIN_VCD under Verilator)"
   rm -rf "$run"; mkdir -p "$run"
   case "$what" in
     *.lst) cp "$what" "$run/memory.lst";;
@@ -231,6 +233,7 @@ run() {
   ( cd "$run" && "$exe" "${args[@]}" +FPGA_TRACE="$run/pin_trace.log" +UART_LOG="$run/uart.log" "$@" ) \
     > "$run/sim.log" 2>&1 || true
   [ $vcd = 1 ] && { [ -s "$run/pin.vcd" ] && echo "waveform: $run/pin.vcd" || echo "pin.sh: WARNING +PIN_VCD given but no $run/pin.vcd was written" >&2; }
+  [ $fsdb = 1 ] && { [ -s "$run/wave.fsdb" ] && echo "waveform: $run/wave.fsdb  (verdi -ssf $run/wave.fsdb)" || echo "pin.sh: WARNING +PIN_FSDB given but no $run/wave.fsdb was written" >&2; }
   # No verdict line: a $fatal in the DESIGN (its own assertions) ends the run
   # before the bench can print one.  Name it rather than calling it a crash.
   local res; res="$(grep -m1 '^PIN_TB_RESULT:' "$run/sim.log" || true)"

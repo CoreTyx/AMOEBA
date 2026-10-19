@@ -123,7 +123,8 @@ module pin_tb;
   always @(posedge core_clk) cyc++;
 
 `ifdef PIN_WAVES
-  // Waveforms for chasing an X to its source (build with WAVES=1).  +PIN_VCD
+  // Waveforms for chasing an X to its source (build with WAVES=1).  +PIN_FSDB
+  // (VCS, below) writes wave.fsdb for Verdi; +PIN_VCD
   // dumps the DUT to pin.vcd from time 0 for +PIN_VCD_CYCLES core cycles
   // (default 400): a whole-chip VCD grows fast, and the first X is usually
   // early.  +PIN_VCD_CYCLES=0 dumps the whole run.
@@ -139,6 +140,15 @@ module pin_tb;
   // every 1000 cycles and at the end, or the interesting part is lost.
   initial if ($test$plusargs("PIN_VCD")) forever begin repeat (1000) @(posedge core_clk); $dumpflush; end
   final if ($test$plusargs("PIN_VCD")) $dumpflush;
+`ifdef VCS
+  // FSDB for Verdi: +PIN_FSDB dumps the whole bench, every cycle, to wave.fsdb
+  // in the run directory (compact enough to keep the full run).  Open with
+  // `verdi -ssf wave.fsdb`.  VCS links the dumper itself in a -kdb build.
+  initial if ($test$plusargs("PIN_FSDB")) begin
+    $fsdbDumpfile("wave.fsdb");
+    $fsdbDumpvars(0, pin_tb);
+  end
+`endif
 `endif
 
   // ---- status and output pin monitor -----------------------------------------
