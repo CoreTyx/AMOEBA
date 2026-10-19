@@ -30,7 +30,8 @@ module pin_selftest_tb;
   logic clk = 0;
   always #5 clk = ~clk;
 
-  logic rst_n = 0;
+  logic rst_n;                         // falls at 0.5 ns: see pin_tb.sv
+  initial begin rst_n = 1'bx; #0.5 rst_n = 1'b0; end
   wire  [LINK_W-1:0] io;
   logic dir = 1, req = 0, wr = 0;
   wire  ready, rvalid;

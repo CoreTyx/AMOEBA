@@ -69,7 +69,14 @@ module pin_tb;
   wire  [LINK_W-1:0] io;
   wire               dir, req, wr, clk_out, uart_tx, status;
   logic              ready, rvalid, uart_rx;
-  logic              rst_n = 1'b0;
+  // rst_n starts X and FALLS to 0 at 0.5 ns, before the first clock edge.  A
+  // declaration initialiser (`= 1'b0`) is applied before any process starts
+  // (IEEE 1800 6.8), so it produces no negedge: every asynchronous reset in the
+  // chip would stay X until the first clock edge, which silicon -- where rst_n
+  // is simply held low at power-up -- never does.  Under 2-state simulation
+  // the difference is invisible.
+  logic              rst_n;
+  initial begin rst_n = 1'bx; #0.5 rst_n = 1'b0; end
   logic [1:0]        irq = 2'b00;
   logic              test_mode = 1'b0, scan_en = 1'b0, fault_inject = 1'b0;
 
@@ -114,6 +121,20 @@ module pin_tb;
   end
 
   always @(posedge core_clk) cyc++;
+
+`ifdef PIN_WAVES
+  // Waveforms for chasing an X to its source (build with WAVES=1).  +PIN_VCD
+  // dumps the DUT to pin.vcd from time 0 for +PIN_VCD_CYCLES core cycles
+  // (default 400): a whole-chip VCD grows fast, and the first X is usually
+  // early.  +PIN_VCD_CYCLES=0 dumps the whole run.
+  initial if ($test$plusargs("PIN_VCD")) begin
+    int n = 400;
+    void'($value$plusargs("PIN_VCD_CYCLES=%d", n));
+    $dumpfile("pin.vcd");
+    $dumpvars(0, pin_tb);
+    if (n > 0) begin repeat (n) @(posedge core_clk); $dumpoff; end
+  end
+`endif
 
   // ---- status and output pin monitor -----------------------------------------
   // status cannot be checked for RATE here -- its slowest tap is 2^28 cycles --
