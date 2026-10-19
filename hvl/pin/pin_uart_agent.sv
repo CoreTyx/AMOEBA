@@ -40,7 +40,7 @@ module pin_uart_agent (
   bit     want_hit   = 0;
   string  fail_pat[$];           // patterns that fail the test on sight
   int     min_low    = 0;        // shortest low run seen, in core cycles
-  byte    txq[$];
+  int     txq[$];               // bits 7:0 the byte; bit 8 = send it with a bad (0) stop bit
   longint cyc        = 0;
   string  tail       = "";       // last chars, for pattern matching
 
@@ -71,8 +71,13 @@ module pin_uart_agent (
     end else if (c != 8'h0D) line = {line, $sformatf("%c", c)};
   endfunction
 
+  // One byte with a framing error: stop bit driven 0 for one bit time.
+  function automatic void send_ferr(input byte c);
+    txq.push_back((int'(c) & 'hFF) | 'h100);
+  endfunction
+
   function automatic void send(input string s);
-    for (int i = 0; i < s.len(); i++) txq.push_back(s.getc(i));
+    for (int i = 0; i < s.len(); i++) txq.push_back(int'(s.getc(i)) & 'hFF);
   endfunction
 
   initial begin
@@ -134,16 +139,21 @@ module pin_uart_agent (
   // ---- TX: agent -> chip ----------------------------------------------------
   initial begin : tx
     byte c;
+    int  e;
     forever begin
       @(posedge core_clk);
       if (rst_n !== 1'b1 || txq.size() == 0) continue;
-      c = txq.pop_front();
+      e = txq.pop_front();
+      c = e[7:0];
       n_tx++;
       for (int b = 0; b < 10; b++) begin
         #(tco_ns);
-        uart_rx = (b == 0) ? 1'b0 : (b == 9) ? 1'b1 : c[b - 1];
+        uart_rx = (b == 0) ? 1'b0 : (b == 9) ? ~e[8] : c[b - 1];
         repeat (bit_cyc()) @(posedge core_clk);
       end
+      // Back to idle-high: after a bad (0) stop bit the line would otherwise
+      // stay low, which the receiver rightly reads as a break.
+      if (e[8]) begin #(tco_ns); uart_rx = 1'b1; end
       repeat (tx_gap * bit_cyc()) @(posedge core_clk);
     end
   end

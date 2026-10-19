@@ -108,7 +108,7 @@ for dut in rtl rtl_sva; do
   SIM=$SIM DUT=$dut "$P/pin.sh" build >"$OUT/build_$dut.log" 2>&1 || {
     bad "build $dut ($OUT/build_$dut.log) -- last 25 lines:"; tail -25 "$OUT/build_$dut.log" | sed 's/^/        | /'; continue; }
   echo "== directed ($SIM/$dut)"
-  for t in smoke uart_echo irq; do
+  for t in smoke uart_echo irq uart_lsr; do
     # Prebuilt images (hvl/pin/images.sh) where there is no RISC-V toolchain.
     if [ -f "$IMG/$t.lst" ]; then args=("$IMG/$t.lst")
     else args=("$P/tests/$t.c"); fi
@@ -146,7 +146,7 @@ else
 fi
 
 echo "== rtl vs rtl_sva traces"
-for t in smoke uart_echo irq; do
+for t in smoke uart_echo irq uart_lsr; do
   a="$R/sim/pin/runs/${SIM}_rtl/${t}_st"; b="$R/sim/pin/runs/${SIM}_rtl_sva/${t}_st"
   if [ ! -f "$a/pin_trace.log" ] || [ ! -f "$b/pin_trace.log" ]; then bad "trace $t: no trace (a run above did not happen)"
   elif python3 "$R/bin/pin_trace_cmp.py" "$a" "$b" >"$OUT/cmp_$t.log" 2>&1; then ok "trace $t: $(cat "$OUT/cmp_$t.log")"

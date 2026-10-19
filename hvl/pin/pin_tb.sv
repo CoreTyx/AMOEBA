@@ -33,6 +33,7 @@
 //   expect_tohost <code>            exit code (tohost >> 1) must equal <code>
 //   uart_div   <n>                  16*(n<<UART_PRESCALE) core clocks per bit
 //   uart_send  <text...>            \n and \r are expanded
+//   uart_send_ferr <hex>            one byte with a framing error (stop bit 0)
 //   uart_gap   <bits>               idle bit times between sent bytes
 //   uart_fail  <text...>            fail the test if the console prints this
 //   irq        <0|1> <0|1>          drive irq[i]
@@ -291,6 +292,7 @@ module pin_tb;
       end
       "uart_div":  begin void'($sscanf(a1, "%d", v)); uart.div = int'(v); end
       "uart_send": uart.send(unescape(rest_after(ln, 1)));
+      "uart_send_ferr": begin void'($sscanf(a1, "%h", v)); uart.send_ferr(byte'(v)); end
       "uart_gap":  begin void'($sscanf(a1, "%d", v)); uart.tx_gap = int'(v); end
       "uart_fail": uart.fail_pat.push_back(unescape(rest_after(ln, 1)));
       "irq": begin

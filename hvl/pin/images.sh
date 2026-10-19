@@ -34,6 +34,7 @@ echo "== pin directed"
 add smoke     "$(gen "$R/hvl/pin/tests/smoke.c")"
 add uart_echo "$(gen "$R/hvl/pin/tests/uart_echo.c")" "$R/hvl/pin/tests/uart_echo.cmd"
 add irq       "$(gen "$R/hvl/pin/tests/irq.c")"       "$R/hvl/pin/tests/irq.cmd"
+add uart_lsr  "$(gen "$R/hvl/pin/tests/uart_lsr.c")"  "$R/hvl/pin/tests/uart_lsr.cmd"
 
 echo "== baremetal"
 for f in "$R"/testcode/baremetal/*.c; do add "bm_$(basename "${f%.c}")" "$(gen "$f")"; done
