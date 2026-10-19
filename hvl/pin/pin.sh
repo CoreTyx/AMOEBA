@@ -104,15 +104,18 @@ preflight() {
     for f in "${STDCELL_MODELS[@]}" "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}"; do isfile model "$f"; done
   fi
   if [ "$DUT" = gate ] && [ -f "$NETLIST" ]; then
-    grep -q '^\s*module\s\+forte_top\b' "$NETLIST" || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
+    # POSIX classes only: gawk reads \b as backspace and awk has no \s, so the
+    # GNU shorthands silently match nothing on some machines.
+    local hdr; hdr="$(sed -nE '/^[[:space:]]*module[[:space:]]+forte_top([^[:alnum:]_]|$)/,/;/p' "$NETLIST")"
+    [ -n "$hdr" ] || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
     # Every SRAM macro and pad cell the netlist instantiates must be defined by a model.
-    local defs; defs="$(cat "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^\s*module\s+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
-    for m in $(grep -oE '^\s*(rf_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)\s' "$NETLIST" | sort -u); do
+    local defs; defs="$(cat "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^[[:space:]]*module[[:space:]]+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
+    for m in $(grep -oE '^[[:space:]]*(rf_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done
     # The ports the bench connects.
     for p in core_clk rst_n io dir req clk_out wr ready rvalid irq uart_tx uart_rx test_mode scan_en fault_inject status; do
-      awk '/^\s*module\s+forte_top\b/,/;/' "$NETLIST" | grep -qw "$p" || { echo "  forte_top in NETLIST has no port $p"; bad=1; }
+      grep -qw "$p" <<<"$hdr" || { echo "  forte_top in NETLIST has no port $p"; bad=1; }
     done
   fi
   [ $bad = 0 ] && echo "preflight: OK" || die "preflight failed"
