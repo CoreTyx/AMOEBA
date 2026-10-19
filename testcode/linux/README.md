@@ -123,8 +123,8 @@ page walk on every TLB miss. These force Sv39 and its three-level walk.
 ## Toolchain
 
 Everything builds with the riscv64 Linux gcc 14.2.0 the rest of the repo uses,
-found by `bin/toolchain.py` (on EWS, `/class/ece411/riscv`'s
-`riscv64-unknown-linux-gnu-`; see the top-level README). `/init` is freestanding
+found by `bin/toolchain.py` (on EWS, the `riscv64-unknown-linux-gnu-` that
+`ece411.sh` puts on `PATH`; see the top-level README). `/init` is freestanding
 assembly against the Linux syscall ABI and links against nothing, so no musl,
 glibc or buildroot is needed to answer "did we reach userspace". A richer
 busybox userland would need the toolchain's C library and a root filesystem

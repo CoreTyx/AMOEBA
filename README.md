@@ -85,7 +85,7 @@ options.json          Project configuration (clock, ISA switches, synthesis sett
 
 ### 1. System Packages
 
-Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, `gtkwave`, and a riscv64 Linux cross gcc **14.2.0** — every tier builds with that one version; see [Compiling Test Programs](#compiling-test-programs). On EWS the compiler is already installed in `/class/ece411/riscv`.
+Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, `gtkwave`, and a riscv64 Linux cross gcc **14.2.0** — every tier builds with that one version; see [Compiling Test Programs](#compiling-test-programs). On EWS, `ece411.sh` already puts it on `PATH`.
 
 **Arch Linux**
 ```bash
@@ -192,18 +192,18 @@ gtkwave sim/verilator/dump.fst &
 
 ## Compiling Test Programs
 
-Every piece of test code — baremetal, ISA-level, ECC, cache, CDC, FreeRTOS and the Linux boot image — is built with one riscv64 Linux cross compiler, **gcc 14.2.0**, already installed on the host. `bin/toolchain.py` picks it: the first of `riscv64-unknown-linux-gnu-gcc`, `riscv64-linux-gnu-gcc` and `riscv64-linux-gcc` on `PATH`, then `/class/ece411/riscv/bin/riscv64-unknown-linux-gnu-gcc`. It refuses any other version.
+Every piece of test code — baremetal, ISA-level, ECC, cache, CDC, FreeRTOS and the Linux boot image — is built with one riscv64 Linux cross compiler, **gcc 14.2.0**, already installed on the host. `bin/toolchain.py` picks it: the first of `riscv64-unknown-linux-gnu-gcc`, `riscv64-linux-gnu-gcc` and `riscv64-linux-gcc` on `PATH`. It refuses any other version.
 
 | Where | Compiler |
 |---|---|
-| EWS | `/class/ece411/riscv/bin/riscv64-unknown-linux-gnu-gcc` 14.2.0 (Binutils 2.43.1) |
+| EWS | `riscv64-unknown-linux-gnu-gcc` 14.2.0 (Binutils 2.43.1), on `PATH` after `source ece411.sh` |
 | CI, Ubuntu 24.04 | `gcc-14-riscv64-linux-gnu` 14.2.0, installed by `.github/scripts/install_riscv_gcc.sh` |
 
 ```bash
 python3 bin/toolchain.py     # prints the tool prefix it picked
 ```
 
-On EWS the compiler's `cc1` needs `libmpfr.so.4`, which RHEL 9 does not ship; the install keeps a copy in `/class/ece411/riscv/compat` but `ece411.sh` does not put it on `LD_LIBRARY_PATH`. The build adds it for you. To run the compiler by hand, `export LD_LIBRARY_PATH=/class/ece411/riscv/compat:$LD_LIBRARY_PATH` first.
+On EWS the compiler's `cc1` needs `libmpfr.so.4`, which RHEL 9 does not ship; the install keeps a copy in a `compat/` directory next to its `bin/`, but `ece411.sh` does not put it on `LD_LIBRARY_PATH`. The build finds and adds it for you. To run the compiler by hand, put that directory on `LD_LIBRARY_PATH` first: `export LD_LIBRARY_PATH=$(python3 bin/toolchain.py --libdir):$LD_LIBRARY_PATH`.
 
 Tests must be freestanding (`-ffreestanding -nostdlib`): the compiler's C library is never linked, so no `printf` or `malloc`.
 
@@ -673,7 +673,7 @@ Each FreeRTOS and ISA test appears as an independent check in the PR status pane
 | `verilator` | ≥ 5.000 | RTL simulation (primary local tool) |
 | `g++` | ≥ 11 | Compiles `spike.so` DPI bridge and Verilator C++ harness |
 | `spike` (source build) | main branch | ISA reference co-simulation (`--enable-commitlog` required) |
-| riscv64 Linux `gcc` | 14.2.0 (exact) | Cross-compiler for all test code; found by `bin/toolchain.py` (EWS: `/class/ece411/riscv`, CI: Ubuntu `gcc-14-riscv64-linux-gnu`) |
+| riscv64 Linux `gcc` | 14.2.0 (exact) | Cross-compiler for all test code; found on `PATH` by `bin/toolchain.py` (EWS: from `ece411.sh`, CI: Ubuntu `gcc-14-riscv64-linux-gnu`) |
 | `python3` | ≥ 3.8 | Build helper scripts (`toolchain.py`, `get_options.py`, `rvfi_reference.py`) |
 | `make` | GNU ≥ 3.82 | All build and simulation targets, including `bin/program.mk` |
 | `gtkwave` | any | FST waveform viewer (Verilator) |

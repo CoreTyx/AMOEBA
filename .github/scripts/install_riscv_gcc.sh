@@ -2,8 +2,8 @@
 #=============================================================================
 # Install the RISC-V cross compiler every CI job that builds test code uses.
 #
-# bin/toolchain.py requires riscv64 Linux gcc 14.2.0.  On EWS that is
-# /class/ece411/riscv's riscv64-unknown-linux-gnu-gcc; here it is Ubuntu 24.04's
+# bin/toolchain.py requires riscv64 Linux gcc 14.2.0.  On EWS that is the
+# riscv64-unknown-linux-gnu-gcc ece411.sh puts on PATH; here it is Ubuntu 24.04's
 # gcc-14 cross package, the same GCC release.
 #
 # Ubuntu names the compiler riscv64-linux-gnu-gcc-14.  toolchain.py looks for

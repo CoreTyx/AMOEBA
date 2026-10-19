@@ -14,8 +14,8 @@
 #                                      LD_LIBRARY_PATH, or nothing
 #   python3 bin/toolchain.py --make    both, space-separated (bin/toolchain.mk)
 #
-# The compiler is the first of PREFIXES found on PATH, then FALLBACKS.  It must be
-# gcc REQUIRED_VERSION.  On EWS that is /class/ece411/riscv; CI installs Ubuntu's
+# The compiler is the first of PREFIXES found on PATH, and must be gcc
+# REQUIRED_VERSION.  On EWS, ece411.sh puts one on PATH; CI installs Ubuntu's
 # gcc-14 cross compiler (.github/scripts/install_riscv_gcc.sh).
 #
 # Set CROSS_COMPILE to build with something else -- a rebuilt or patched gcc, say.
@@ -28,8 +28,7 @@ import subprocess
 import sys
 
 REQUIRED_VERSION = "14.2.0"
-PREFIXES  = ["riscv64-unknown-linux-gnu-", "riscv64-linux-gnu-", "riscv64-linux-"]
-FALLBACKS = ["/class/ece411/riscv/bin/riscv64-unknown-linux-gnu-"]
+PREFIXES = ["riscv64-unknown-linux-gnu-", "riscv64-linux-gnu-", "riscv64-linux-"]
 
 def die(msg):
     sys.exit(f"[ERROR] toolchain.py: {msg}")
@@ -86,7 +85,7 @@ def find():
         if found != REQUIRED_VERSION:
             warn(f"CROSS_COMPILE={override} is gcc {found}, not {REQUIRED_VERSION}")
         return prefix, libdir
-    for candidate in PREFIXES + FALLBACKS:
+    for candidate in PREFIXES:
         prefix = resolve(candidate)
         if prefix is None:
             continue
@@ -97,8 +96,8 @@ def find():
                 f"{REQUIRED_VERSION}.  Set CROSS_COMPILE to use it anyway.")
         return prefix, libdir
     die(f"no riscv64 Linux gcc {REQUIRED_VERSION} found (looked for "
-        f"{', '.join(p + 'gcc' for p in PREFIXES)} on PATH, then "
-        f"{', '.join(p + 'gcc' for p in FALLBACKS)}).  Install one or set CROSS_COMPILE.")
+        f"{', '.join(p + 'gcc' for p in PREFIXES)} on PATH).  Put one's bin "
+        f"directory on PATH or set CROSS_COMPILE.")
 
 if __name__ == "__main__":
     prefix, libdir = find()
