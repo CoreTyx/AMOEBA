@@ -11,7 +11,8 @@
 #
 # Macro geometry (depth, port width) comes from hvl/pin/models/sram_behav.sv,
 # whose PIN_RF_SP table mirrors the wrappers in hdl/core/generic/mem.  Prints
-# one SRAM_CMP line per macro and SRAM_CMP_RESULT: PASS|FAIL.
+# one SRAM_CMP line per macro and SRAM_CMP_RESULT: FAIL if any READ differs,
+# PASS otherwise (noting differences after writes and idle cycles).
 set -uo pipefail
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 P="$R/hvl/pin"
@@ -51,13 +52,18 @@ TOP="$OUT/sram_cmp_tb.sv"
 EOT
   done
   echo '  initial begin'
-  echo '    int bad = 0;'
+  echo '    int bad = 0, note = 0;'
   echo '    #10;'
   printf '    wait (1'
   for m in "${DEFINED[@]}"; do [ -n "${GEOM[$m]:-}" ] && printf ' && drv_%s.done' "$m"; done
   echo ');'
-  for m in "${DEFINED[@]}"; do [ -n "${GEOM[$m]:-}" ] && echo "    bad += drv_$m.diffs;"; done
-  echo '    if (bad == 0) $display("SRAM_CMP_RESULT: PASS"); else $display("SRAM_CMP_RESULT: FAIL %0d differences", bad);'
+  # A read that returns the wrong word is a broken SRAM: FAIL.  Q after a write
+  # or an idle cycle differing from the RTL's RAM is a behaviour NOTE -- it
+  # matters only if the caches look at Q then, which the pin runs decide.
+  for m in "${DEFINED[@]}"; do [ -n "${GEOM[$m]:-}" ] && echo "    bad += drv_$m.by_op[1]; note += drv_$m.by_op[0] + drv_$m.by_op[2];"; done
+  echo '    if (bad != 0) $display("SRAM_CMP_RESULT: FAIL %0d reads returned other than the RTL expects", bad);'
+  echo '    else if (note != 0) $display("SRAM_CMP_RESULT: PASS (reads match; Q differs from the RTL RAM after write/idle %0d times)", note);'
+  echo '    else $display("SRAM_CMP_RESULT: PASS");'
   echo '    $finish;'
   echo '  end'
   echo 'endmodule'

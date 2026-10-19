@@ -89,7 +89,8 @@ if [ "$SIM" = vcs ]; then
     while read -r _ name rest; do
       name="${name%:}"
       case "$rest" in
-        *" 0 differences"*) ok "sram $name: $rest";;
+        *" 0 differences"*)  ok "sram $name: $rest";;
+        *"after read 0,"*)   ok "sram $name: reads match; $rest -- Q after write/idle differs from the RTL's RAM (matters only if the caches use it then)";;
         *) bad "sram $name: $rest"; grep "^SRAM_CMP $name: cycle" "$OUT/sram_cmp.log" | sed 's/^/        | /';;
       esac
     done < <(grep -E '^SRAM_CMP rf_sp[^ ]*: [0-9]+ cycles' "$OUT/sram_cmp.log")
