@@ -218,18 +218,24 @@ module forte_link_core import forte_link_pkg::*; #(
   end
 
 `ifndef SYNTHESIS
+  // Every guard below is `(...) === 1'b1`, never a bare `if (HRESETn & ...)`.
+  // HRESETn comes from forte_soc's two-flop synchroniser, which has no
+  // asynchronous reset, so it is X for the first two edges after power-up.  An
+  // X guard is simply false in 2-state simulation, but 4-state with xprop
+  // evaluates the body anyway, and the HADDR check fired at the first edge on
+  // the VM.  === is never X.  (forte_link_phy gates on `armed` instead.)
   logic was_idle;
   always_ff @(posedge HCLK) was_idle <= (st == LC_IDLE);
-  always @(posedge HCLK) if (HRESETn & st == LC_RDATA & was_idle & ibeat_valid)
+  always @(posedge HCLK) if ((HRESETn & st == LC_RDATA & was_idle & ibeat_valid) === 1'b1)
     $fatal(1, "link core: stale beat in the inbound FIFO at the start of a read -- the two halves disagree about the beat count");
 
   // The pending slot is single: a second accept while one is pending would mean
   // the pending one's data phase did not stall, which the uncore's HREADY mux
   // makes impossible.
-  always_ff @(posedge HCLK) if (HRESETn & accept & pending & st != LC_IDLE)
+  always_ff @(posedge HCLK) if ((HRESETn & accept & pending & st != LC_IDLE) === 1'b1)
     $fatal(1, "link core: second pipelined accept");
   // The address goes over whole, so 32 bits is the only constraint left.
-  always_ff @(posedge HCLK) if (HRESETn & accept) begin
+  always_ff @(posedge HCLK) if ((HRESETn & accept) === 1'b1) begin
     assert (HADDR[HADDR_W-1:32] == '0) else $fatal(1, "link core: HADDR above 4 GB: %h", HADDR);
     // The two sides' idea of the burst length, compared.  A line resize that
     // nobody propagated here lands on this line instead of hanging the DUT.
@@ -241,7 +247,7 @@ module forte_link_core import forte_link_pkg::*; #(
   end
   // Writes are never aborted (the D-cache's Flush is tied low); if that changes,
   // junk goes to memory and this is the first thing to fire.
-  always_ff @(posedge HCLK) if (HRESETn & wpush & ~beat_ok)
+  always_ff @(posedge HCLK) if ((HRESETn & wpush & ~beat_ok) === 1'b1)
     $fatal(1, "link core: write burst abandoned by the master at beat %0d", bcnt);
 
   // BEATS=1 would be a one-beat "burst", which on the wire is indistinguishable
