@@ -71,7 +71,8 @@ for v in $(seq 1 13); do st "violate_$v" +VIOLATE="$v"; done
 # when vm_paths.sh names them.
 for dut in rtl rtl_sva; do
   echo "== build pin_tb ($SIM/$dut)"
-  SIM=$SIM DUT=$dut "$P/pin.sh" build >"$OUT/build_$dut.log" 2>&1 || { bad "build $dut ($OUT/build_$dut.log)"; continue; }
+  SIM=$SIM DUT=$dut "$P/pin.sh" build >"$OUT/build_$dut.log" 2>&1 || {
+    bad "build $dut ($OUT/build_$dut.log) -- last 25 lines:"; tail -25 "$OUT/build_$dut.log" | sed 's/^/        | /'; continue; }
   echo "== directed ($SIM/$dut)"
   for t in smoke uart_echo irq; do
     # Prebuilt images (hvl/pin/images.sh) where there is no RISC-V toolchain.
@@ -86,15 +87,22 @@ done
 echo "== mutations (must FAIL)"
 for m in 1 2 3; do
   smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
-  if SIM=$SIM DUT=rtl TAG="mut$m" "$P/pin.sh" run "$smoke" +FPGA_MUTATE=$m +TIMEOUT=100000 >"$OUT/mut$m.log" 2>&1
-  then bad "mutation $m went unnoticed ($OUT/mut$m.log)"
-  else ok "mutation $m caught: $(grep -m1 -E 'ERROR|PIN_TB_RESULT' "$OUT/mut$m.log" | cut -c1-90)"; fi
+  # Caught only if the bench RAN and returned a verdict of FAIL.  A run that
+  # never happened (bench not built, crash) fails too, and must not count.
+  SIM=$SIM DUT=rtl TAG="mut$m" "$P/pin.sh" run "$smoke" +FPGA_MUTATE=$m +TIMEOUT=100000 >"$OUT/mut$m.log" 2>&1
+  verdict="$(grep -m1 '^PIN_TB_RESULT:' "$R/sim/pin/runs/${SIM}_rtl/smoke_mut$m/sim.log" 2>/dev/null || true)"
+  case "$verdict" in
+    *PASS*)  bad "mutation $m went unnoticed ($OUT/mut$m.log)";;
+    *FAIL*)  ok "mutation $m caught: ${verdict#PIN_TB_RESULT: }";;
+    *)       bad "mutation $m: the bench never ran ($OUT/mut$m.log)";;
+  esac
 done
 
 echo "== rtl vs rtl_sva traces"
 for t in smoke uart_echo irq; do
   a="$R/sim/pin/runs/${SIM}_rtl/${t}_st"; b="$R/sim/pin/runs/${SIM}_rtl_sva/${t}_st"
-  if python3 "$R/bin/pin_trace_cmp.py" "$a" "$b" >"$OUT/cmp_$t.log" 2>&1; then ok "trace $t: $(cat "$OUT/cmp_$t.log")"
+  if [ ! -f "$a/pin_trace.log" ] || [ ! -f "$b/pin_trace.log" ]; then bad "trace $t: no trace (a run above did not happen)"
+  elif python3 "$R/bin/pin_trace_cmp.py" "$a" "$b" >"$OUT/cmp_$t.log" 2>&1; then ok "trace $t: $(cat "$OUT/cmp_$t.log")"
   else bad "trace $t: $(head -1 "$OUT/cmp_$t.log")"; fi
 done
 

@@ -92,7 +92,10 @@ module pin_uart_agent (
     longint t_fall, low_run;
     logic   s, prev;
     byte    c;
-    int     k;
+    int     k, b;
+    // No initialised declarations in here: this is a static block, so an
+    // initialiser runs once at time 0, not per iteration (IEEE 1800 6.21).
+    // VCS honours that and Verilator does not, which hid exactly that bug.
     prev = 1'b1;
     forever begin
       @(negedge core_clk);
@@ -113,7 +116,7 @@ module pin_uart_agent (
             low_run = 0;
           end
           if (k % bit_cyc() == bit_cyc() / 2) begin
-            int b = k / bit_cyc();
+            b = k / bit_cyc();
             if ($isunknown(s)) err($sformatf("uart_tx is %b in bit %0d", s, b));
             if (b == 0 && s != 1'b0) begin err("start bit glitch"); break; end
             if (b >= 1 && b <= 8) c[b - 1] = s;
