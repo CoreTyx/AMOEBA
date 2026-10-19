@@ -231,7 +231,14 @@ run() {
   ( cd "$run" && "$exe" "${args[@]}" +FPGA_TRACE="$run/pin_trace.log" +UART_LOG="$run/uart.log" "$@" ) \
     > "$run/sim.log" 2>&1 || true
   [ $vcd = 1 ] && { [ -s "$run/pin.vcd" ] && echo "waveform: $run/pin.vcd" || echo "pin.sh: WARNING +PIN_VCD given but no $run/pin.vcd was written" >&2; }
-  local res; res="$(grep -m1 '^PIN_TB_RESULT:' "$run/sim.log" || echo 'PIN_TB_RESULT: FAIL no verdict (crash or killed)')"
+  # No verdict line: a $fatal in the DESIGN (its own assertions) ends the run
+  # before the bench can print one.  Name it rather than calling it a crash.
+  local res; res="$(grep -m1 '^PIN_TB_RESULT:' "$run/sim.log" || true)"
+  if [ -z "$res" ]; then
+    local fat; fat="$(grep -m1 -A1 -E '^Fatal:|%Fatal|Error:.*Assertion' "$run/sim.log" | tr '\n' ' ' | cut -c1-220)"
+    if [ -n "$fat" ]; then res="PIN_TB_RESULT: FAIL design \$fatal: $fat"
+    else res="PIN_TB_RESULT: FAIL no verdict (crash or killed; see $run/sim.log)"; fi
+  fi
   echo "$res" | tee "$run/RESULT"
   grep -E '^\[PIN_TB\] cycles=|ERROR' "$run/sim.log" | head -20 || true
   [[ "$res" == *PASS* ]]
