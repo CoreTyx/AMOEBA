@@ -33,3 +33,7 @@ STDCELL_MODELS=()                        # standard-cell library .v
 # Used for the RTL reference too: forte_top under `SYNTHESIS instantiates the
 # SRAM macros and pad cells, so the RTL build needs SRAM_MODELS and PAD_MODELS.
 # Leave both empty to fall back to hvl/pin/models/*_behav.sv (NOT sign-off).
+
+# Extra SRAM macro pins for selftest/sram_cmp.sh, e.g. ".RETN(1'b1), .EMA(3'b010)".
+# The RTL wrappers connect only CLK/CEN/WEN/A/D/Q; values come from the IP datasheet.
+SRAM_TIES="${SRAM_TIES:-}"

@@ -4,6 +4,10 @@
 #
 #   SIM=vcs hvl/pin/selftest/sram_cmp.sh            uses vm_paths.sh
 #   SIM=vcs SRAM_MODELS_LIST="a.v b.v" ...          or name the files directly
+#   SRAM_TIES=".RETN(1'b1), .EMA(3'b010)" ...       extra macro pins to tie, e.g.
+#       retention and margin pins the RTL wrappers leave unconnected (also
+#       settable in vm_paths.sh).  Unconnected, they float to Z, and a model
+#       in retention returns X on every read.
 #
 # Macro geometry (depth, port width) comes from hvl/pin/models/sram_behav.sv,
 # whose PIN_RF_SP table mirrors the wrappers in hdl/core/generic/mem.  Prints
@@ -19,6 +23,9 @@ PDK_FIRST=(); SRAM_MODELS=()
 if [ -n "${SRAM_MODELS_LIST:-}" ]; then read -r -a SRAM_MODELS <<<"$SRAM_MODELS_LIST"
 elif [ -f "$P/vm_paths.sh" ]; then source "$P/vm_paths.sh"; fi
 [ ${#SRAM_MODELS[@]} -gt 0 ] || { echo "SRAM_CMP_RESULT: SKIP (no SRAM_MODELS)"; exit 0; }
+TIES="${SRAM_TIES:-}"
+[ -z "$TIES" ] || echo "SRAM_CMP: tying $TIES on every macro"
+rm -f "$OUT/simv"   # the generated top depends on SRAM_TIES; always rebuild it
 
 # Macros the models define, with their geometry from the stand-in table.
 declare -A GEOM
@@ -39,7 +46,7 @@ TOP="$OUT/sram_cmp_tb.sv"
     cat <<EOT
   wire c_$m, w_$m; wire [$((aw-1)):0] a_$m; wire [$((wid-1)):0] d_$m, qm_$m, qr_$m;
   sram_cmp_drv #(.DEPTH($dep), .WIDTH($wid), .NAME("$m")) drv_$m (.clk, .cen(c_$m), .wen(w_$m), .a(a_$m), .d(d_$m), .q_model(qm_$m), .q_ref(qr_$m));
-  $m model_$m (.CLK(clk), .CEN(c_$m), .WEN(w_$m), .A(a_$m), .D(d_$m), .Q(qm_$m));
+  $m model_$m (.CLK(clk), .CEN(c_$m), .WEN(w_$m), .A(a_$m), .D(d_$m), .Q(qm_$m)${TIES:+, $TIES});
   pin_rf_sp #(.DEPTH($dep), .WIDTH($wid)) ref_$m (.CLK(clk), .CEN(c_$m), .WEN(w_$m), .A(a_$m), .D(d_$m), .Q(qr_$m));
 EOT
   done

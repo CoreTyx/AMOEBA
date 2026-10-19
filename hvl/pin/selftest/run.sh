@@ -114,7 +114,9 @@ for dut in rtl rtl_sva; do
     then ok "$dut $t"; [ "$t" = smoke ] && SMOKE_OK+=("$dut")
     else
       bad "$dut $t ($OUT/${dut}_$t.log) -- first errors:"
-      grep -m3 -hE 'ERROR|PIN_TB_RESULT|Fatal|Error-' "$R/sim/pin/runs/${SIM}_${dut}/${t}_st/sim.log" 2>/dev/null | cut -c1-200 | sed 's/^/        | /'
+      # -A1: VCS puts a $fatal's message on the line after "Fatal: <file>, <line>".
+      grep -m3 -A1 -hE 'ERROR|PIN_TB_RESULT|Fatal|Error-' "$R/sim/pin/runs/${SIM}_${dut}/${t}_st/sim.log" 2>/dev/null \
+        | grep -v '^--$' | head -6 | cut -c1-200 | sed 's/^/        | /'
     fi
   done
 done
