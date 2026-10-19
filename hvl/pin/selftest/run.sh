@@ -76,6 +76,25 @@ echo "== harness self-test"
 st legal
 for v in $(seq 1 13); do st "violate_$v" +VIOLATE="$v"; done
 
+# ---- PDK SRAM models vs the RTL's assumption ------------------------------------------
+# Only with real models (VCS on the VM).  A difference here is behaviour the
+# caches were never verified against, and it reaches the netlist too.
+if [ "$SIM" = vcs ]; then
+  echo "== SRAM models vs the RTL's behavioural RAM"
+  SIM=vcs "$P/selftest/sram_cmp.sh" >"$OUT/sram_cmp.log" 2>&1
+  if grep -q '^SRAM_CMP_RESULT: SKIP' "$OUT/sram_cmp.log"; then skp "sram: no SRAM_MODELS in vm_paths.sh"
+  elif ! grep -q '^SRAM_CMP rf_sp' "$OUT/sram_cmp.log"; then bad "sram: did not run ($OUT/sram_cmp.log)"; tail -15 "$OUT/sram_cmp.log" | sed 's/^/        | /'
+  else
+    while read -r _ name rest; do
+      name="${name%:}"
+      case "$rest" in
+        *" 0 differences"*) ok "sram $name: $rest";;
+        *) bad "sram $name: $rest"; grep "^SRAM_CMP $name: cycle" "$OUT/sram_cmp.log" | sed 's/^/        | /';;
+      esac
+    done < <(grep -E '^SRAM_CMP rf_sp[^ ]*: [0-9]+ cycles' "$OUT/sram_cmp.log")
+  fi
+fi
+
 # ---- the bench on the RTL ------------------------------------------------------------
 # Directed tests need DUT builds; VCS on the VM uses the real SRAM/pad models
 # when vm_paths.sh names them.

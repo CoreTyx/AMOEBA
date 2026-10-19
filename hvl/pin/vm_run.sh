@@ -69,7 +69,7 @@ for st in "${STAGES[@]}"; do
     log "preflight: OK ($(wc -l < "$IMG/MANIFEST") images)";;
   selftest)
     SIM=vcs "$P/selftest/run.sh" >"$OUT/selftest.log" 2>&1
-    rc=$?; grep -E '^\s+(PASS|FAIL|SKIP)|summary' "$OUT/selftest.log" >>"$SUM"
+    rc=$?; grep -E '^\s+(PASS|FAIL|SKIP|\|)|summary' "$OUT/selftest.log" >>"$SUM"
     [ $rc = 0 ] || stop "selftest (see selftest.log)"
     log "selftest: OK";;
   build)

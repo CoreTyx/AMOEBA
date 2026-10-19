@@ -37,6 +37,9 @@ module pin_rf_sp #(parameter int DEPTH = 64, parameter int WIDTH = 128) (
   assign Q = mem[ad];
 endmodule
 
+// PIN_RF_SP_GENERIC_ONLY: just pin_rf_sp, for hvl/pin/selftest/sram_cmp_tb.sv,
+// which compares it with the PDK models of the same names.
+`ifndef PIN_RF_SP_GENERIC_ONLY
 `define PIN_RF_SP(NAME, DEP, WID) \
 module NAME (input logic CLK, CEN, WEN, input logic [$clog2(DEP)-1:0] A, \
              input logic [WID-1:0] D, output logic [WID-1:0] Q); \
@@ -52,3 +55,4 @@ endmodule
 `PIN_RF_SP(rf_sp_16_46,  16, 48)
 `PIN_RF_SP(rf_sp_64_53,  64, 56)
 `PIN_RF_SP(rf_sp_64_137, 64, 140)
+`endif

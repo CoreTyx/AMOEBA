@@ -153,6 +153,8 @@ build() {
   else
     local xp=()
     [ "$DUT" = gate ] || xp=(-xprop="$P/xprop.config" -xprop=flowctrl)
+    # WAVES=1: waveform dumping (+PIN_VCD at run time), at some speed cost.
+    [ -n "${WAVES:-}" ] && xp+=(-debug_access+all +define+PIN_WAVES)
     local timing=(+nospecify +notimingcheck)
     if [ "$DUT" = gate ] && [ -n "$SDF" ]; then
       timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk)
