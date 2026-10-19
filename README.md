@@ -50,12 +50,12 @@ sim/                  Simulation Makefile + build artifacts
   verilator/            Verilator build directory (Vtop_tb binary, dump.fst)
   vcs/                  VCS build directory (top_tb binary, dump.fsdb)
   spike/                Spike co-sim output logs
-synth/                Synthesis (Synopsys Design Compiler, EWS-only)
+synth/                Synthesis (Synopsys Design Compiler, UIUC EWS only)
   Makefile              synth, power_verilator, power_vcs, dv targets
   synthesis.tcl / power.tcl / dv.tcl
   reports/              Synthesis, power, area reports
   outputs/              synth.ddc gate-level netlist
-lint/                 Lint (Synopsys Spyglass, EWS-only)
+lint/                 Lint (Synopsys Spyglass, UIUC EWS only)
   Makefile              lint target
   lint.tcl
   reports/              lint.rpt
@@ -85,7 +85,7 @@ options.json          Project configuration (clock, ISA switches, synthesis sett
 
 ### 1. System Packages
 
-Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, `gtkwave`, and a riscv64 Linux cross gcc **14.2.0** — every tier builds with that one version; see [Compiling Test Programs](#compiling-test-programs). On EWS, `ece411.sh` already puts it on `PATH`.
+Install the required tools for your distribution. The only mandatory tools for local Verilator simulation are: `verilator`, `g++`, `python3`, `gtkwave`, GNU `make`, and a riscv64 Linux cross gcc **14.2.0** — every tier builds with that one version. [Getting the RISC-V compiler](#getting-the-risc-v-compiler) covers installing it on each platform.
 
 **Arch Linux**
 ```bash
@@ -98,7 +98,7 @@ sudo pacman -S dtc boost                   # Spike build deps
 sudo apt update
 sudo apt install verilator g++ python3 gtkwave git make
 sudo apt install device-tree-compiler libboost-all-dev build-essential  # Spike build deps
-.github/scripts/install_riscv_gcc.sh   # Ubuntu 24.04: gcc-14 cross compiler (14.2.0), as CI installs it
+.github/scripts/install_riscv_gcc.sh   # Ubuntu 24.04: RISC-V gcc 14.2.0, as CI installs it
 ```
 
 **Fedora**
@@ -107,7 +107,11 @@ sudo dnf install verilator gcc-c++ python3 gtkwave git make
 sudo dnf install dtc boost-devel                 # Spike build deps
 ```
 
-> **EWS-only tools** (VCS, Verdi, Design Compiler `dc_shell`, Spyglass `sg_shell`) are license-gated and only available on ECE EWS machines. Verilator covers all local development.
+Arch and Fedora package riscv64 Linux cross compilers too, which may not be version 14.2.0; see [Getting the RISC-V compiler](#getting-the-risc-v-compiler).
+
+**UIUC EWS**: Verilator and the RISC-V compiler are already installed; `source ece411.sh` (the ECE 411 environment script) puts them on `PATH`. `gtkwave` is not installed. Use GNU make 4.3 at `/usr/bin/make`: the Synopsys make 3.80 that comes first on `PATH` cannot read `sim/Makefile`.
+
+> **UIUC EWS only tools** (VCS, Verdi, Design Compiler `dc_shell`, Spyglass `sg_shell`) are license-gated and only available on UIUC ECE EWS machines. Verilator covers all local development.
 
 ---
 
@@ -192,18 +196,36 @@ gtkwave sim/verilator/dump.fst &
 
 ## Compiling Test Programs
 
-Every piece of test code — baremetal, ISA-level, ECC, cache, CDC, FreeRTOS and the Linux boot image — is built with one riscv64 Linux cross compiler, **gcc 14.2.0**, already installed on the host. `bin/toolchain.py` picks it: the first of `riscv64-unknown-linux-gnu-gcc`, `riscv64-linux-gnu-gcc` and `riscv64-linux-gcc` on `PATH`. It refuses any other version.
-
-| Where | Compiler |
-|---|---|
-| EWS | `riscv64-unknown-linux-gnu-gcc` 14.2.0 (Binutils 2.43.1), on `PATH` after `source ece411.sh` |
-| CI, Ubuntu 24.04 | `gcc-14-riscv64-linux-gnu` 14.2.0, installed by `.github/scripts/install_riscv_gcc.sh` |
+Every piece of test code — baremetal, ISA-level, ECC, cache, CDC, FreeRTOS and the Linux boot image — is built with one riscv64 Linux cross compiler, **gcc 14.2.0**. `bin/toolchain.py` picks it: the first of `riscv64-unknown-linux-gnu-gcc`, `riscv64-linux-gnu-gcc` and `riscv64-linux-gcc` on `PATH`. It refuses any other version unless you name the compiler yourself with `CROSS_COMPILE` (below).
 
 ```bash
-python3 bin/toolchain.py     # prints the tool prefix it picked
+python3 bin/toolchain.py     # prints the tool prefix it picked, or why it found none
 ```
 
-On EWS the compiler's `cc1` needs `libmpfr.so.4`, which RHEL 9 does not ship; the install keeps a copy in a `compat/` directory next to its `bin/`, but `ece411.sh` does not put it on `LD_LIBRARY_PATH`. The build finds and adds it for you. To run the compiler by hand, put that directory on `LD_LIBRARY_PATH` first: `export LD_LIBRARY_PATH=$(python3 bin/toolchain.py --libdir):$LD_LIBRARY_PATH`.
+### Getting the RISC-V compiler
+
+**Ubuntu 24.04** (what CI runs): install Ubuntu's gcc-14 cross compiler, which is 14.2.0. Ubuntu names it `riscv64-linux-gnu-gcc-14`; the script links each tool under its plain name and prints the `PATH` line to add to your shell profile.
+
+```bash
+.github/scripts/install_riscv_gcc.sh
+```
+
+**Any other Linux**: build gcc 14.2.0 with [riscv-gnu-toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain) (install its listed prerequisites first; the build takes a while):
+
+```bash
+curl -L https://ftp.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz | tar -xJ
+git clone https://github.com/riscv-collab/riscv-gnu-toolchain
+cd riscv-gnu-toolchain
+./configure --prefix=$HOME/riscv --with-gcc-src=$PWD/../gcc-14.2.0
+make linux -j$(nproc)
+export PATH=$HOME/riscv/bin:$PATH    # add to your shell profile
+```
+
+**UIUC EWS**: already installed. `source ece411.sh` puts `riscv64-unknown-linux-gnu-gcc` 14.2.0 (Binutils 2.43.1) on `PATH`. Its `cc1` needs `libmpfr.so.4`, which RHEL 9 does not ship; the install keeps a copy in a `compat/` directory next to its `bin/`, but `ece411.sh` does not put it on `LD_LIBRARY_PATH`. The build finds and adds it for you. To run the compiler by hand, put that directory on `LD_LIBRARY_PATH` first: `export LD_LIBRARY_PATH=$(python3 bin/toolchain.py --libdir):$LD_LIBRARY_PATH`.
+
+**A compiler you already have**: a riscv64 Linux gcc of another version (such as Arch's `riscv64-linux-gnu-gcc` or Fedora's `gcc-riscv64-linux-gnu`) works through `CROSS_COMPILE`, with a warning; your test binaries will then differ from CI's. A bare-metal `riscv64-unknown-elf-gcc` can build the bare-metal tests that way, but not the Linux boot image: the kernel's VDSO needs a Linux-targeting compiler.
+
+### Building tests
 
 Tests must be freestanding (`-ffreestanding -nostdlib`): the compiler's C library is never linked, so no `printf` or `malloc`.
 
@@ -251,7 +273,7 @@ Outputs per run:
 
 ---
 
-### VCS + Verdi (EWS / License-Gated)
+### VCS + Verdi (UIUC EWS / License-Gated)
 
 ```bash
 cd sim
@@ -406,8 +428,8 @@ Outputs: `sim/verilator/freertos_wally/simulation.log`, `sim/verilator/dump.fst`
 | `isa_regression` | All `testcode/isa_level_testing/*.c` without co-sim |
 | `freertos_regression` | All `testcode/freertos/tc_*.c` without co-sim |
 | `regression` | Runs all three tiers in order |
-| `vcs_baremetal_regression` | Baremetal tier under VCS (EWS only) |
-| `vcs_isa_regression` | ISA-level tier under VCS (EWS only) |
+| `vcs_baremetal_regression` | Baremetal tier under VCS (UIUC EWS only) |
+| `vcs_isa_regression` | ISA-level tier under VCS (UIUC EWS only) |
 | `vcs_regression` | Both VCS tiers in order |
 
 **Utility targets**
@@ -427,7 +449,7 @@ Outputs: `sim/verilator/freertos_wally/simulation.log`, `sim/verilator/dump.fst`
 
 ---
 
-### `synth/` Targets (EWS / License-Gated)
+### `synth/` Targets (UIUC EWS / License-Gated)
 
 Run from the `synth/` directory. Requires Synopsys Design Compiler (`dc_shell`) and `FREEPDK45` standard cell library.
 
@@ -443,7 +465,7 @@ Power analysis extracts switching activity from the ROI window (`slti x0, x0, 1`
 
 ---
 
-### `lint/` Targets (EWS / License-Gated)
+### `lint/` Targets (UIUC EWS / License-Gated)
 
 Run from the `lint/` directory. Requires Synopsys Spyglass (`sg_shell`).
 
@@ -673,11 +695,11 @@ Each FreeRTOS and ISA test appears as an independent check in the PR status pane
 | `verilator` | ≥ 5.000 | RTL simulation (primary local tool) |
 | `g++` | ≥ 11 | Compiles `spike.so` DPI bridge and Verilator C++ harness |
 | `spike` (source build) | main branch | ISA reference co-simulation (`--enable-commitlog` required) |
-| riscv64 Linux `gcc` | 14.2.0 (exact) | Cross-compiler for all test code; found on `PATH` by `bin/toolchain.py` (EWS: from `ece411.sh`, CI: Ubuntu `gcc-14-riscv64-linux-gnu`) |
+| riscv64 Linux `gcc` | 14.2.0 (exact) | Cross-compiler for all test code; found on `PATH` by `bin/toolchain.py`; see [Getting the RISC-V compiler](#getting-the-risc-v-compiler) |
 | `python3` | ≥ 3.8 | Build helper scripts (`toolchain.py`, `get_options.py`, `rvfi_reference.py`) |
 | `make` | GNU ≥ 3.82 | All build and simulation targets, including `bin/program.mk` |
 | `gtkwave` | any | FST waveform viewer (Verilator) |
-| `vcs` / `verdi` | — | EWS-only: commercial simulation + waveform viewer |
-| `dc_shell` | — | EWS-only: Synopsys Design Compiler (synthesis + power) |
-| `sg_shell` | — | EWS-only: Synopsys Spyglass (lint) |
-| `fsdb2saif` / `vcd2saif` | — | EWS-only: FSDB/VCD → SAIF conversion for power analysis |
+| `vcs` / `verdi` | — | UIUC EWS only: commercial simulation + waveform viewer |
+| `dc_shell` | — | UIUC EWS only: Synopsys Design Compiler (synthesis + power) |
+| `sg_shell` | — | UIUC EWS only: Synopsys Spyglass (lint) |
+| `fsdb2saif` / `vcd2saif` | — | UIUC EWS only: FSDB/VCD → SAIF conversion for power analysis |

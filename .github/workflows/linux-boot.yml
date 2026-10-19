@@ -101,6 +101,14 @@ jobs:
       - name: Build Linux boot simulator
         run: make -C sim build_linux
 
+      # The compiler's packages, so only the first job after the script changes
+      # downloads them.
+      - name: Cache RISC-V gcc packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/riscv-gcc-debs
+          key: riscv-gcc-debs-ubuntu-24.04-${{ hashFiles('.github/scripts/install_riscv_gcc.sh') }}
+
       # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
       - name: Install RISC-V gcc
         run: .github/scripts/install_riscv_gcc.sh

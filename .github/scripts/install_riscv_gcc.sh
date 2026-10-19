@@ -18,8 +18,21 @@ set -euo pipefail
 
 GCC_VERSION=14.2.0
 
-sudo apt-get install -y --no-install-recommends \
+# In CI the downloaded packages are kept in DEBS, which the workflows cache
+# (actions/cache, keyed on this script), so jobs install from the cache instead
+# of downloading the compiler again.
+APT_CACHE=()
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  DEBS="$HOME/.cache/riscv-gcc-debs"
+  mkdir -p "$DEBS/partial"
+  sudo chown _apt "$DEBS/partial"
+  APT_CACHE=(-o Dir::Cache::Archives="$DEBS" -o APT::Keep-Downloaded-Packages=true)
+fi
+sudo apt-get install -y --no-install-recommends "${APT_CACHE[@]}" \
   gcc-14-riscv64-linux-gnu binutils-riscv64-linux-gnu
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+fi
 
 BIN="${RUNNER_TEMP:-$HOME/.local}/riscv-gcc/bin"
 mkdir -p "$BIN"
