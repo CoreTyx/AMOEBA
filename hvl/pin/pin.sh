@@ -31,7 +31,9 @@ R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 P="$R/hvl/pin"
 SIM="${SIM:-verilator}"
 DUT="${DUT:-rtl}"
-BUILD="$R/sim/pin/build/${SIM}_${DUT}"
+# WAVES=1 builds (waveform dumping) live in their own directory, so a normal
+# rebuild -- the self-test, vm_run.sh -- cannot replace them unnoticed.
+BUILD="$R/sim/pin/build/${SIM}_${DUT}${WAVES:+_waves}"
 RUNS="$R/sim/pin/runs/${SIM}_${DUT}"
 
 die() { echo "pin.sh: $*" >&2; exit 1; }
@@ -204,7 +206,13 @@ run() {
   local name; name="$(basename "${what%.*}")${TAG:+_$TAG}"
   local run="$RUNS/$name"
   local exe; [ "$SIM" = verilator ] && exe="$BUILD/obj_dir/pin_tb" || exe="$BUILD/simv"
-  [ -x "$exe" ] || die "not built: $exe (run: SIM=$SIM DUT=$DUT $0 build)"
+  [ -x "$exe" ] || die "not built: $exe (run: ${WAVES:+WAVES=1 }SIM=$SIM DUT=$DUT $0 build)"
+  # +PIN_VCD only works in a WAVES=1 build; without one it would be ignored.
+  local a vcd=0
+  for a in "$@"; do [ "$a" = +PIN_VCD ] && vcd=1; done
+  if [ $vcd = 1 ] && [ "$SIM" = vcs ] && ! grep -q PIN_WAVES "$BUILD/build.cmd" 2>/dev/null; then
+    die "+PIN_VCD needs a waveform build: WAVES=1 SIM=$SIM DUT=$DUT $0 build, then run with WAVES=1 too"
+  fi
   rm -rf "$run"; mkdir -p "$run"
   case "$what" in
     *.lst) cp "$what" "$run/memory.lst";;
@@ -222,6 +230,7 @@ run() {
   echo "run: $name${script:+ ($(basename "$script"))} -> $run"
   ( cd "$run" && "$exe" "${args[@]}" +FPGA_TRACE="$run/pin_trace.log" +UART_LOG="$run/uart.log" "$@" ) \
     > "$run/sim.log" 2>&1 || true
+  [ $vcd = 1 ] && { [ -s "$run/pin.vcd" ] && echo "waveform: $run/pin.vcd" || echo "pin.sh: WARNING +PIN_VCD given but no $run/pin.vcd was written" >&2; }
   local res; res="$(grep -m1 '^PIN_TB_RESULT:' "$run/sim.log" || echo 'PIN_TB_RESULT: FAIL no verdict (crash or killed)')"
   echo "$res" | tee "$run/RESULT"
   grep -E '^\[PIN_TB\] cycles=|ERROR' "$run/sim.log" | head -20 || true

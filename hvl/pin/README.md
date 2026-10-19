@@ -94,9 +94,14 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 `+UART_PRESCALE` `+UART_TX_GAP` `+UART_QUIET` `+MAX_ERRORS` `+TIMEOUT` `+CLK_PS`.
 `+FPGA_MUTATE=1..3` breaks the bench on purpose (self-test only).
 
-Waveforms (VCS): build with `WAVES=1 SIM=vcs DUT=rtl hvl/pin/pin.sh build`, run with
-`+PIN_VCD` (and `+PIN_VCD_CYCLES=n`, default 400, 0 = whole run) to get `pin.vcd`
-in the run directory.
+Waveforms (VCS): `WAVES=1` on both the build and the run (it selects a separate
+build directory, `<sim>_<dut>_waves`), plus `+PIN_VCD` (and `+PIN_VCD_CYCLES=n`,
+default 400, 0 = whole run) on the run; `pin.vcd` lands in the run directory.
+`bin/vcd_first_x.py pin.vcd --after <ns>` lists the first signals to go X.
+
+    WAVES=1 SIM=vcs DUT=rtl_sva hvl/pin/pin.sh build
+    WAVES=1 SIM=vcs DUT=rtl_sva TAG=w hvl/pin/pin.sh run sim/pin/images/uart_echo.lst \
+        sim/pin/images/uart_echo.cmd +PIN_VCD +PIN_VCD_CYCLES=5600
 
 `selftest/sram_cmp.sh` compares each PDK `rf_sp_*` model in `SRAM_MODELS` with
 the RTL's behavioural RAM under random traffic (part of the VCS self-test).  A
