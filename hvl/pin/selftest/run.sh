@@ -31,11 +31,19 @@ if [ "$SIM" = verilator ]; then
       "${SRCS[@]}" --top-module pin_selftest_tb -o selftest >build.log 2>&1 )
   EXE="$OUT/obj_dir/selftest"
 else
+  # Everything VCS says goes to build.log.  Not -l: VCS writes licence,
+  # environment and command-line errors to the terminal only, so a -l log of a
+  # failed run can end at the banner with no reason given.
+  rm -f "$OUT/simv"
   ( cd "$OUT" && vcs -full64 -sverilog -licqueue -timescale=1ns/1ps "${SRCS[@]}" \
-      -top pin_selftest_tb -o simv -l build.log >/dev/null 2>&1 )
+      -top pin_selftest_tb -o simv ) >"$OUT/build.log" 2>&1
   EXE="$OUT/simv"
 fi
-[ -x "$EXE" ] || { echo "build failed: $OUT/build.log"; exit 1; }
+if [ ! -x "$EXE" ]; then
+  echo "build failed: $OUT/build.log -- last 40 lines:"
+  tail -40 "$OUT/build.log" | sed 's/^/  | /'
+  exit 1
+fi
 
 st() {  # $1 = label, rest = plusargs
   local label="$1"; shift

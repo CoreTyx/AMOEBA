@@ -131,11 +131,14 @@ build() {
     if [ "$DUT" = gate ] && [ -n "$SDF" ]; then
       timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk)
     fi
+    # All of VCS's output into build.log (and the terminal), not -l: licence,
+    # environment and command-line errors only ever reach the terminal.
+    rm -f simv
     vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
       -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" \
       "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" \
-      -top pin_tb -o simv -l build.log
-    [ -x simv ] || die "vcs build failed, see $BUILD/build.log"
+      -top pin_tb -o simv 2>&1 | tee build.log || true
+    [ -x simv ] || { tail -40 build.log | sed 's/^/  | /' >&2; die "vcs build failed, see $BUILD/build.log"; }
   fi
   echo "build: OK"
 }
