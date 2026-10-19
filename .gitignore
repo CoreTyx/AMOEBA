@@ -5,3 +5,4 @@ formal/freertos/dump.fst
 hvl/ft_shadow/build/
 hdl/cvw/addins/
 sim/pin/
+hvl/pin/vm_paths.sh

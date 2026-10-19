@@ -1,4 +1,8 @@
-# hvl/pin/vm_paths.sh -- site paths for VCS runs.  FILL THESE IN ON THE VM.
+# hvl/pin/vm_paths.example.sh -- template for hvl/pin/vm_paths.sh, the VM's
+# own netlist and library paths.  On the VM:
+#     cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh     # then fill it in
+# vm_paths.sh is not tracked and never in vm_bundle.tgz, so unpacking a new
+# bundle cannot overwrite it.
 #
 # VCS itself must already be on PATH (e.g. 'module load vcs' or the site's
 # Synopsys setup script) in the shell that runs vm_run.sh; check 'which vcs'.

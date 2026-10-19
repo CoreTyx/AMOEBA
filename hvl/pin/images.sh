@@ -6,7 +6,8 @@
 # line in run order; vm_run.sh runs exactly what MANIFEST names, on those DUTs.
 #
 #   hvl/pin/images.sh            build all tiers
-#   hvl/pin/images.sh pack       ... and tar them to sim/pin/images.tgz for the VM
+#   hvl/pin/images.sh pack       ... and tar them to sim/pin/images.tgz (for the VM,
+#                                use hvl/pin/vm_pack.sh, which includes these)
 #
 # Tiers: pin directed tests, baremetal, isa_level_testing (incl. forte-only
 # tcf_*), FreeRTOS.  Linux is built by testcode/linux and added when present.

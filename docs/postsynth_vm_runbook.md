@@ -31,36 +31,43 @@ matches its RTL at the pins.
 | VCS on `PATH` | Load it in the same shell first (e.g. `module load vcs`, or the site's Synopsys setup script) and check with `which vcs`.  A new shell needs this again.  One licence is enough; everything runs sequentially. |
 | `python3`, `bash`, `tar` | Standard. |
 | The synthesized netlist | `make -C synth synth DESIGN_TOP=forte_top` writes `synth/outputs/forte_top.gate.v`. |
-| Verilog simulation models | Standard cells; the SRAM macros `rf_sp_64_128` and `rf_sp_64_46` (others are harmless extras); the pad cells `io_in`, `io_out`, `io_tri`. |
-| `images.tgz` | Prebuilt program images (about 8 MB).  The VM has no RISC-V toolchain, so programs are compiled elsewhere; see below. |
-| Branch `postsynth_verif` | Contains the bench and the test fixes it depends on. |
+| Verilog simulation models | Standard cells; the SRAM macros `rf_sp_64_128`, `rf_sp_64_46`, `rf_sp_64_53` and `rf_sp_64_137` (preflight lists any the netlist needs and the models lack); the pad cells `io_in`, `io_out`, `io_tri`. |
+| `vm_bundle.tgz` | Everything else, about 8 MB: the bench, the RTL it compiles, and prebuilt program images.  The VM has neither git nor a RISC-V toolchain, so it is packed elsewhere; see below. |
 
-### Getting `images.tgz`
+### Making `vm_bundle.tgz`
 
-Build it on any machine that has `riscv64-unknown-elf-gcc` (the same setup as
-the main regression):
+On any machine with the repository and `riscv64-unknown-elf-gcc` (the same
+setup as the main regression), on branch `postsynth_verif`:
 
 ```bash
-git checkout postsynth_verif
-make -C testcode/linux           # soft-float Linux image; skip if build/boot.lst is current
-hvl/pin/images.sh pack           # writes sim/pin/images.tgz
+make -C testcode/linux       # soft-float Linux image; skip if build/boot.lst is current
+hvl/pin/vm_pack.sh           # rebuilds the program images, writes sim/pin/vm_bundle.tgz
+hvl/pin/vm_pack.sh --list    # optional: the paths that go in it
 ```
 
-The archive is not in git.  Rebuild it whenever a test program, `bin/startup.s`
-or the Linux image changes.  The VM runs exactly the images in the archive.
+The bundle holds `hvl/pin/`, `bin/pin_trace_cmp.py`, `hdl/core/`,
+`hdl/forte_*.sv`, `pkg/`, the three `third_party/opentitan/prim_*.sv` files,
+this runbook, and `sim/pin/images/`.  It also carries `VM_BUNDLE`, which
+records when and from which commit it was packed, and `VM_FILES.sha256`, a
+checksum for every file.  Re-pack whenever anything on that list changes.
+Copy the one file; do not copy individual files to the VM.
 
-## Setup (once per checkout)
+## Setup
 
 ```bash
-git fetch origin
-git checkout postsynth_verif
-mkdir -p sim/pin
-tar -C sim/pin -xzf /path/to/images.tgz        # creates sim/pin/images/ with a MANIFEST
+scp vm_bundle.tgz <vm>:/path/to/postsynth_tb/
+# on the VM:
+cd /path/to/postsynth_tb
+tar -xzf vm_bundle.tgz                         # overwrites the bench and RTL with the bundle's
 ```
 
-Edit `hvl/pin/vm_paths.sh`.  These are bash arrays, so globs work:
+Once per VM directory, create `hvl/pin/vm_paths.sh` from the template.
+Bundles never contain this file, so unpacking a new one leaves it alone.
+These are bash arrays, so globs work:
 
 ```bash
+cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh
+# then set:
 NETLIST=/path/to/synth/outputs/forte_top.gate.v
 SDF=                                   # leave empty: post-synthesis is zero-delay
 STDCELL_MODELS=(/path/to/stdcells/*.v)
@@ -73,6 +80,9 @@ is left empty, the RTL build falls back to the behavioural stand-ins in
 `hvl/pin/models/`.  That is fine for a smoke test but is **not** a sign-off
 comparison.
 
+In every new shell, load VCS before running anything (`module load vcs`, or
+the site's Synopsys setup script) and check it with `which vcs`.
+
 ## Run, step 1: the quick stages (minutes)
 
 ```bash
@@ -81,7 +91,7 @@ hvl/pin/vm_run.sh preflight selftest build
 
 | Stage | Checks | If it fails |
 |---|---|---|
-| `preflight` | Every path in `vm_paths.sh` exists.  The netlist defines `forte_top` with all 16 bench-facing ports.  Every SRAM macro and pad cell the netlist instantiates is defined by a model. | The failing path or module is named in `SUMMARY`.  Fix `vm_paths.sh`. |
+| `preflight` | Every file matches the bundle's checksums, so a partial or mixed copy is refused.  Every path in `vm_paths.sh` exists.  The netlist defines `forte_top` with all 16 bench-facing ports.  Every SRAM macro and pad cell the netlist instantiates is defined by a model. | The failing path or module is named in `SUMMARY`.  Fix `vm_paths.sh`. |
 | `selftest` | The harness's own tests under VCS, against independent models: legal traffic, 13 deliberate protocol violations each detected with the right message, and 3 deliberate bench faults that must fail.  It includes the 3 X/Z checks Verilator could not run. | Send `sim/pin/vm_results/selftest.log` and the per-check logs in `sim/pin/selftest/vcs/`. |
 | `build` | Compiles the bench against the RTL and the netlist. | Send the last ~50 lines of `sim/pin/build/vcs_<rtl|gate>/build.log`. |
 
@@ -123,7 +133,8 @@ overwritten, so one file covers several sessions.
 ## What to send back
 
 1. **Always:** `sim/pin/vm_results/SUMMARY`.  It holds one line per run and the
-   first errors of anything that failed.
+   first errors of anything that failed.  Its `bundle` lines identify exactly
+   which files were run.
 2. **If asked:** `sim/pin/vm_results.tgz`, which every `vm_run.sh` invocation
    rewrites.  It holds every run's `sim.log`, `pin_trace.log` (link
    transactions) and `uart.log` (console).

@@ -1,8 +1,9 @@
 #!/bin/bash
 # hvl/pin/vm_run.sh -- the whole post-synthesis check, one command, on the VM.
 #
-#   1. fill in hvl/pin/vm_paths.sh
-#   2. copy sim/pin/images.tgz (from hvl/pin/images.sh pack) into sim/pin/, untar
+#   1. on a machine with the repo: hvl/pin/vm_pack.sh  ->  sim/pin/vm_bundle.tgz
+#   2. on the VM: tar -xzf vm_bundle.tgz -C <dir>; once, cp hvl/pin/vm_paths.example.sh
+#      hvl/pin/vm_paths.sh and fill it in; load VCS (which vcs)
 #   3. hvl/pin/vm_run.sh [stage ...]          default: all stages, in order
 #
 # Stages (each stops the run if it fails, except `regress`, which records
@@ -43,12 +44,25 @@ stop() { log "STOPPED: $*"; pack; exit 1; }
 pack() { tar -C "$R/sim/pin" -czf "$R/sim/pin/vm_results.tgz" vm_results runs 2>/dev/null; echo "results: $SUM, $R/sim/pin/vm_results.tgz"; }
 
 log "==== vm_run $(date '+%F %T')  host=$(hostname)  stages=${STAGES[*]}"
-log "git: $(git -C "$R" rev-parse --short HEAD 2>/dev/null) $(git -C "$R" status --porcelain 2>/dev/null | grep -qv '^??' && echo '(modified)')"
+# No git on the VM: the bundle says what it is (hvl/pin/vm_pack.sh).
+if [ -f "$R/VM_BUNDLE" ]; then sed 's/^/bundle /' "$R/VM_BUNDLE" | while read -r l; do log "$l"; done
+else log "bundle: none (no VM_BUNDLE: files were not unpacked from vm_bundle.tgz)"; fi
 
 for st in "${STAGES[@]}"; do
   case "$st" in
   preflight)
-    [ -f "$IMG/MANIFEST" ] || stop "no $IMG/MANIFEST: copy images.tgz from a machine with the toolchain"
+    # Every file must be exactly what was packed: a partial or mixed copy is
+    # the commonest way for a VM run to test something nobody meant to test.
+    if [ -f "$R/VM_FILES.sha256" ]; then
+      command -v sha256sum >/dev/null || stop "sha256sum not found: cannot verify the bundle"
+      ( cd "$R" && sha256sum -c --quiet VM_FILES.sha256 ) >"$OUT/bundle_check.log" 2>&1 \
+        || { grep -v '^sha256sum: WARNING' "$OUT/bundle_check.log" | head -20 | sed 's/^/       /' >>"$SUM"
+             stop "files differ from the bundle (above); unpack vm_bundle.tgz again"; }
+      log "bundle: all $(wc -l < "$R/VM_FILES.sha256") files match"
+    else
+      log "bundle: WARNING no VM_FILES.sha256, files not verified"
+    fi
+    [ -f "$IMG/MANIFEST" ] || stop "no $IMG/MANIFEST: unpack vm_bundle.tgz from hvl/pin/vm_pack.sh"
     for d in rtl gate; do
       SIM=vcs DUT=$d "$P/pin.sh" preflight >"$OUT/preflight_$d.log" 2>&1 || { cat "$OUT/preflight_$d.log" >>"$SUM"; stop "preflight $d"; }
     done

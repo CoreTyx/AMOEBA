@@ -41,15 +41,21 @@ case "$DUT" in rtl|rtl_sva|gate) ;; *) die "DUT must be rtl, rtl_sva or gate, no
 [ "$SIM/$DUT" = "verilator/gate" ] && die "gate-level needs a 4-state simulator: use SIM=vcs"
 
 if [ "$SIM" = vcs ]; then
-  # shellcheck source=vm_paths.sh
+  # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
+  [ -f "$P/vm_paths.sh" ] || die "no $P/vm_paths.sh: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
+  # shellcheck source=vm_paths.example.sh
   source "$P/vm_paths.sh"
 else
   NETLIST=""; SDF=""; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=()
 fi
 
 # ---- source lists ------------------------------------------------------------
-INCS=(+incdir+"$R/pkg" +incdir+"$R/hdl/core" +incdir+"$R/hdl/core/ifu/bpred"
-      +incdir+"$R/third_party/cvw/config/rv64gc" +incdir+"$R/third_party/opentitan")
+# Only directories that exist: a VM unpacked from vm_bundle.tgz has no
+# third_party/cvw, and nothing the bench compiles includes from it.
+INCS=()
+for d in pkg hdl/core hdl/core/ifu/bpred third_party/cvw/config/rv64gc third_party/opentitan; do
+  [ -d "$R/$d" ] && INCS+=(+incdir+"$R/$d")
+done
 BENCH=("$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/pin_tb.sv")
 LINK_PKG="$R/hdl/forte_link_pkg.sv"
 

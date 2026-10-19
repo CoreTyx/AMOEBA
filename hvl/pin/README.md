@@ -49,9 +49,10 @@ SIM=verilator DUT=rtl hvl/pin/pin.sh build
 SIM=verilator DUT=rtl hvl/pin/pin.sh run testcode/baremetal/sorting_algo.c
 SIM=verilator DUT=rtl hvl/pin/pin.sh run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd
 hvl/pin/selftest/run.sh                     # the harness's own tests
-hvl/pin/images.sh pack                      # program images for the VM
+hvl/pin/vm_pack.sh                          # one file for the VM: sim/pin/vm_bundle.tgz
 
-# VM (VCS): fill in vm_paths.sh, untar images.tgz into sim/pin/, then
+# VM (VCS, no git): see docs/postsynth_vm_runbook.md
+tar -xzf vm_bundle.tgz; cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh   # fill in, once
 hvl/pin/vm_run.sh                           # paste back sim/pin/vm_results/SUMMARY
 ```
 
