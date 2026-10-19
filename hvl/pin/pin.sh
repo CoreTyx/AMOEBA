@@ -159,18 +159,32 @@ build() {
     fi
     # All of VCS's output into build.log (and the terminal), not -l: licence,
     # environment and command-line errors only ever reach the terminal.
-    rm -f simv
+    # simv is kept between builds: VCS compiles incrementally and, when nothing
+    # changed, leaves it as it is ("The design hasn't changed and need not be
+    # recompiled").  The verdict is VCS's exit status, not simv existing, so an
+    # old simv cannot stand in for a failed compile.
+    # simv.daidir without simv (an interrupted build, or an older pin.sh that
+    # deleted simv) makes VCS report "unchanged" and produce nothing: clear it.
+    [ -x simv ] || rm -rf simv.daidir csrc
     # The exact command first, so the compile order is always on record.
     { echo "# compile command (pin.sh, DUT=$DUT):"
       printf '%q ' vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
         -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" -top pin_tb -o simv
       echo; echo; } > build.cmd
     cat build.cmd
-    vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
-      -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" \
-      "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" \
-      -top pin_tb -o simv 2>&1 | cat build.cmd - | tee build.log || true
-    [ -x simv ] || { tail -40 build.log | sed 's/^/  | /' >&2; die "vcs build failed, see $BUILD/build.log"; }
+    # VCS's own exit status, captured inside the pipe (PIPESTATUS does not
+    # survive the `|| true`).
+    { vcs -full64 -sverilog -licqueue -lca -suppress=LCA_FEATURES_ENABLED -timescale=1ns/1ps \
+        -assert svaext +lint=TFIPC-L "${xp[@]}" "${timing[@]}" \
+        "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" "${LIBS[@]}" \
+        -top pin_tb -o simv 2>&1; echo $? > build.rc; } | cat build.cmd - | tee build.log || true
+    local rc; rc="$(cat build.rc 2>/dev/null || echo 1)"
+    # "Unchanged, not recompiled" is a success whatever status VCS gives it.
+    grep -q "design hasn't changed and need not be recompiled" build.log && [ -x simv ] && rc=0
+    if [ "$rc" != 0 ] || [ ! -x simv ]; then
+      tail -40 build.log | sed 's/^/  | /' >&2
+      die "vcs build failed (exit $rc), see $BUILD/build.log"
+    fi
   fi
   echo "build: OK"
 }

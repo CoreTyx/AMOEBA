@@ -39,12 +39,22 @@ else
   # Everything VCS says goes to build.log.  Not -l: VCS writes licence,
   # environment and command-line errors to the terminal only, so a -l log of a
   # failed run can end at the banner with no reason given.
-  rm -f "$OUT/simv"
+  # simv is kept between runs: VCS compiles incrementally and, when nothing
+  # changed, leaves the existing simv alone ("The design hasn't changed and
+  # need not be recompiled").  Deleting simv alone made that look like a
+  # failed build.  VCS's exit status is the verdict, so an old simv cannot
+  # stand in for a failed compile.
+  # simv.daidir without simv (an interrupted build, or an older run.sh that
+  # deleted simv) makes VCS report "unchanged" and produce nothing: clear it.
+  [ -x "$OUT/simv" ] || rm -rf "$OUT/simv.daidir" "$OUT/csrc"
   ( cd "$OUT" && vcs -full64 -sverilog -licqueue -timescale=1ns/1ps "${SRCS[@]}" \
       -top pin_selftest_tb -o simv ) >"$OUT/build.log" 2>&1
+  rc=$?
+  grep -q "design hasn't changed and need not be recompiled" "$OUT/build.log" && [ -x "$OUT/simv" ] && rc=0
   EXE="$OUT/simv"
+  [ $rc = 0 ] || EXE=""
 fi
-if [ ! -x "$EXE" ]; then
+if [ -z "$EXE" ] || [ ! -x "$EXE" ]; then
   echo "build failed: $OUT/build.log -- last 40 lines:"
   tail -40 "$OUT/build.log" | sed 's/^/  | /'
   exit 1
