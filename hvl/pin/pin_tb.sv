@@ -148,7 +148,7 @@ module pin_tb;
   logic   status_q;
   longint since_rst = 0;
   always @(negedge core_clk) begin
-    if (!rst_n) since_rst = 0;
+    if (rst_n !== 1'b1) since_rst = 0;   // X (power-up) counts as in reset
     else begin
       since_rst++;
       if (since_rst > 4) begin

@@ -257,7 +257,7 @@ module pin_link_agent import forte_link_pkg::*; #(
 
       n_rvalid = 1'b0; n_en = 1'b0;
 
-      if (!rst_n) begin
+      if (rst_n !== 1'b1) begin   // X (power-up) counts as in reset
         // +FPGA_X_IN_RESET: reset must dominate whatever the board does to
         // the inputs before it releases rst_n -- a 4-state-only question.
         st = A_IDLE; cyc = 0; first_xact = 1; notready_cnt = 0;

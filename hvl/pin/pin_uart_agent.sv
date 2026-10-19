@@ -100,7 +100,7 @@ module pin_uart_agent (
     forever begin
       @(negedge core_clk);
       s = uart_tx;
-      if (!rst_n) begin prev = 1'b1; continue; end
+      if (rst_n !== 1'b1) begin prev = 1'b1; continue; end   // X (power-up) counts as in reset
       cyc++;
       if ($isunknown(s)) begin err($sformatf("uart_tx is %b", s)); prev = 1'b1; continue; end
       if (prev == 1'b1 && s == 1'b0) begin
@@ -136,7 +136,7 @@ module pin_uart_agent (
     byte c;
     forever begin
       @(posedge core_clk);
-      if (!rst_n || txq.size() == 0) continue;
+      if (rst_n !== 1'b1 || txq.size() == 0) continue;
       c = txq.pop_front();
       n_tx++;
       for (int b = 0; b < 10; b++) begin
