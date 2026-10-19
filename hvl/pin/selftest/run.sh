@@ -24,6 +24,11 @@ bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
 skp()  { echo "  SKIP  $*"; skip=$((skip+1)); }
 
 # ---- build the self-test bench ----------------------------------------------
+if ! command -v "$SIM" >/dev/null; then
+  echo "$SIM: not found on PATH.  Load the simulator first (e.g. 'module load vcs', or your"
+  echo "site's Synopsys setup script), check with 'which $SIM', then rerun."
+  exit 1
+fi
 echo "== build pin_selftest_tb ($SIM)"
 SRCS=("$R/hdl/forte_link_pkg.sv" "$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/selftest/pin_selftest_tb.sv")
 if [ "$SIM" = verilator ]; then

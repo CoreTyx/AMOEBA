@@ -1,5 +1,8 @@
 # hvl/pin/vm_paths.sh -- site paths for VCS runs.  FILL THESE IN ON THE VM.
 #
+# VCS itself must already be on PATH (e.g. 'module load vcs' or the site's
+# Synopsys setup script) in the shell that runs vm_run.sh; check 'which vcs'.
+#
 # Sourced by hvl/pin/pin.sh for --sim vcs.  Every path is checked before
 # anything is compiled (pin.sh preflight), so a wrong one fails in seconds with
 # its name, not after an hour of elaboration.  Bash arrays, so globs work:

@@ -28,7 +28,7 @@ matches its RTL at the pins.
 
 | Need | Notes |
 |---|---|
-| VCS on `PATH` | One licence is enough.  Everything runs sequentially. |
+| VCS on `PATH` | Load it in the same shell first (e.g. `module load vcs`, or the site's Synopsys setup script) and check with `which vcs`.  A new shell needs this again.  One licence is enough; everything runs sequentially. |
 | `python3`, `bash`, `tar` | Standard. |
 | The synthesized netlist | `make -C synth synth DESIGN_TOP=forte_top` writes `synth/outputs/forte_top.gate.v`. |
 | Verilog simulation models | Standard cells; the SRAM macros `rf_sp_64_128` and `rf_sp_64_46` (others are harmless extras); the pad cells `io_in`, `io_out`, `io_tri`. |
