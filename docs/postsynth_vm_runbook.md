@@ -136,6 +136,20 @@ XLIST='^smoke$' hvl/pin/vm_run.sh xstress                        # narrow xstres
 Stages can be run in any order after `build`.  `SUMMARY` is appended to, not
 overwritten, so one file covers several sessions.
 
+## Fuzz programs (F3 of docs/postsynth_fuzz_plan.md)
+
+The bundle carries 100 Cascade-generated programs (`fz_200_*`), each already
+passing on the RTL under Verilator. They are ordinary images: each runs on
+`rtl` then `gate` with a cycle-exact trace comparison.
+
+```bash
+nohup env ONLY='^fz_' hvl/pin/vm_run.sh regress > fuzz.out 2>&1 &
+```
+
+They total about 1.4M cycles, roughly half an hour of netlist simulation plus
+per-run startup. A Cascade program detects a bug by never finishing, so a
+failure shows up as `timeout: no tohost write`.
+
 ## What to send back
 
 1. **Always:** `sim/pin/vm_results/SUMMARY`.  It holds one line per run and the

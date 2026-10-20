@@ -1,6 +1,6 @@
 # Fuzzing plan: Cascade on the pin bench
 
-**Status: approved; F0 and F1 done, F2 in progress.  Deviations from the plan are logged at the end.**
+**Status: approved; F0–F2 done, F3 packed for the VM.  Deviations from the plan are logged at the end.**
 
 ## Goal
 
@@ -204,3 +204,13 @@ there is no planted-bug script (deferred until it's needed again).
      access-fault exceptions to S mode is not fuzzed. OpenSBI doesn't
      delegate those either. Building Cascade's own pinned Spike would bring
      them back.
+
+**F2 rerun with the fix: 5,000/5,000 pass** (seeds 100–109; about 13 s
+generation and 130 s simulation per 500, Verilator, rtl). All 146 earlier
+failures had the `medeleg` cause. No core bugs found at this depth.
+
+**F3 (VM): packed.** 100 programs (seed 200; 3k–38k cycles, 1.4M in total)
+pass locally and are in `vm_bundle.tgz` as `fz_200_*`. `images.sh` takes
+whatever `bin/pin_fuzz.py gen` wrote to `sim/pin/fuzz/vm` (`FUZZ_DIR`). Run
+with `ONLY='^fz_' hvl/pin/vm_run.sh regress`. *As planned:* random seeds and
+no selection step.

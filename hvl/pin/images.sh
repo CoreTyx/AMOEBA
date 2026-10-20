@@ -61,6 +61,14 @@ if [ -f "$R/testcode/linux/build/boot.lst" ]; then
   add linux_m3 "$R/testcode/linux/build/boot.lst" "$R/hvl/pin/tests/linux_m3.cmd" "rtl"
 fi
 
+# Fuzz programs for the VM (docs/postsynth_fuzz_plan.md, F3): whatever
+# bin/pin_fuzz.py gen wrote to FUZZ_DIR, already checked on the RTL locally.
+FUZZ_DIR="${FUZZ_DIR:-$R/sim/pin/fuzz/vm}"
+if compgen -G "$FUZZ_DIR/fz_*.lst" >/dev/null; then
+  echo "== fuzz ($FUZZ_DIR)"
+  for f in "$FUZZ_DIR"/fz_*.lst; do add "$(basename "${f%.lst}")" "$f" "${f%.lst}.cmd"; done
+fi
+
 echo "$(wc -l < "$OUT/MANIFEST") images in $OUT"
 if [ "${1:-}" = pack ]; then
   tar -C "$R/sim/pin" -czf "$R/sim/pin/images.tgz" images
