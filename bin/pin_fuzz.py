@@ -2,12 +2,14 @@
 """Cascade fuzzing on the pin bench (docs/postsynth_fuzz_plan.md).
 
     pin_fuzz.py gen N [--seed S] [--out DIR] [--jobs J]
-    pin_fuzz.py run [DIR] [--sim verilator|vcs] [--dut rtl|rtl_sva|gate] [-- +plusargs...]
+    pin_fuzz.py run [DIR] [--sim verilator|vcs] [--dut rtl|rtl_sva|gate] [--prune] [-- +plusargs...]
 
 gen  writes fz_<seed>_<i>.lst / .cmd / .txt (descriptor) into DIR (default
      sim/pin/fuzz).  Run hvl/pin/fuzz/get_cascade.sh once first.
 run  runs every image in DIR through hvl/pin/pin.sh, one at a time, and
-     prints one PASS/FAIL line each plus a total.  Images are independent
+     prints one PASS/FAIL line each plus a total.  --prune deletes a passing
+     program's image and run directory (about 3 MB), keeping its descriptor
+     (.txt): `gen` with the same --seed regenerates it exactly.  Images are independent
      files, so several `run`s on different directories can go in parallel.
 
 Cascade is used as published, with four replacements made from here (no fork):
@@ -152,7 +154,7 @@ def to_lst(elf, lst):
     os.remove(bin_path)
 
 
-def run(d, sim, dut, extra):
+def run(d, sim, dut, extra, prune=False):
     images = sorted(f[:-4] for f in os.listdir(d) if f.startswith("fz_") and f.endswith(".lst"))
     passed = 0
     for nm in images:
@@ -163,6 +165,12 @@ def run(d, sim, dut, extra):
         ok = "PASS" in verdict
         passed += ok
         print(f"{'PASS' if ok else 'FAIL'} {nm}  {'' if ok else verdict}", flush=True)
+        if ok and prune:
+            import shutil
+            for ext in (".lst", ".elf", ".cmd"):
+                if os.path.exists(os.path.join(d, nm + ext)):
+                    os.remove(os.path.join(d, nm + ext))
+            shutil.rmtree(os.path.join(R, "sim", "pin", "runs", f"{sim}_{dut}", nm), ignore_errors=True)
     print(f"fuzz: {passed}/{len(images)} passed ({sim}/{dut})")
     return 0 if passed == len(images) else 1
 
@@ -183,7 +191,9 @@ def main(argv):
         return 0
     if argv[:1] == ["run"]:
         sim, dut = opt("--sim", "verilator"), opt("--dut", "rtl")
-        return run(argv[1] if len(argv) > 1 else os.path.join(R, "sim", "pin", "fuzz"), sim, dut, extra)
+        prune = "--prune" in argv
+        argv = [a for a in argv if a != "--prune"]
+        return run(argv[1] if len(argv) > 1 else os.path.join(R, "sim", "pin", "fuzz"), sim, dut, extra, prune)
     print(__doc__)
     return 2
 
