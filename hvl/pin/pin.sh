@@ -143,6 +143,18 @@ preflight() {
 }
 
 # ---- build ---------------------------------------------------------------------------
+# One hash over every file the build compiles (sources, models, netlist).
+# Recorded at build, compared at run: a bundle unpacked since the build keeps
+# the PACKING machine's timestamps, so comparing mtimes would miss it.
+src_hash() {
+  if [ "$DUT" = gate ]; then gate_sources; else rtl_sources; fi
+  local f files=()
+  for f in "${SRCS[@]}" "${LIBS[@]}"; do [ -f "$f" ] && files+=("$f"); done
+  # Included headers are not in SRCS: take every header the include paths hold.
+  while IFS= read -r f; do files+=("$f"); done < <(find "$R/pkg" "$R/hdl" -maxdepth 1 \( -name '*.vh' -o -name '*.svh' -o -name 'prim_assert.sv' \) 2>/dev/null)
+  sha256sum "${files[@]}" 2>/dev/null | awk '{print $1}' | sha256sum | awk '{print $1}'
+}
+
 build() {
   preflight
   if [ "$DUT" = gate ]; then gate_sources; else rtl_sources; fi
@@ -192,6 +204,7 @@ build() {
       die "vcs build failed (exit $rc), see $BUILD/build.log"
     fi
   fi
+  src_hash > "$BUILD/srchash"
   echo "build: OK"
 }
 
@@ -207,6 +220,12 @@ run() {
   local run="$RUNS/$name"
   local exe; [ "$SIM" = verilator ] && exe="$BUILD/obj_dir/pin_tb" || exe="$BUILD/simv"
   [ -x "$exe" ] || die "not built: $exe (run: ${WAVES:+WAVES=1 }SIM=$SIM DUT=$DUT $0 build)"
+  # The bench and RTL are compiled into the executable: if any source differs
+  # from what it was built from (a new bundle unpacked, an edit), the run would
+  # test the OLD code.
+  if [ "$(cat "$BUILD/srchash" 2>/dev/null)" != "$(src_hash)" ]; then
+    die "sources differ from what $exe was built from -- rebuild: ${WAVES:+WAVES=1 }SIM=$SIM DUT=$DUT $0 build"
+  fi
   # +PIN_VCD only works in a WAVES=1 build; without one it would be ignored.
   local a vcd=0
   local fsdb=0

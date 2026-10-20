@@ -45,6 +45,16 @@ log() { echo "$*" | tee -a "$SUM"; }
 stop() { log "STOPPED: $*"; pack; exit 1; }
 pack() { tar -C "$R/sim/pin" -czf "$R/sim/pin/vm_results.tgz" vm_results runs 2>/dev/null; echo "results: $SUM, $R/sim/pin/vm_results.tgz"; }
 
+# The benches are compiled: unpacking a new bundle does not change what simv
+# runs.  Stages that run them rebuild first; VCS is incremental, so an
+# unchanged bench costs seconds.
+ensure_built() {
+  local d
+  for d in "$@"; do
+    SIM=vcs DUT=$d "$P/pin.sh" build >"$OUT/build_$d.log" 2>&1 || { tail -30 "$OUT/build_$d.log" >>"$SUM"; return 1; }
+  done
+}
+
 log "==== vm_run $(date '+%F %T')  host=$(hostname)  stages=${STAGES[*]}"
 # No git on the VM: the bundle says what it is (hvl/pin/vm_pack.sh).
 if [ -f "$R/VM_BUNDLE" ]; then sed 's/^/bundle /' "$R/VM_BUNDLE" | while read -r l; do log "$l"; done
@@ -80,6 +90,7 @@ for st in "${STAGES[@]}"; do
       log "build $d: OK ($(grep -ciE 'warning' "$R/sim/pin/build/vcs_$d/build.log") warnings)"
     done;;
   regress)
+    ensure_built rtl gate || stop "build"
     pass=0; fail=0
     while read -r name duts; do
       [ -n "$name" ] || continue
@@ -118,6 +129,7 @@ for st in "${STAGES[@]}"; do
     done < "$IMG/MANIFEST"
     log "regress: $pass passed, $fail failed  (* = reused an earlier run)";;
   xstress|xmem)
+    ensure_built rtl gate || stop "build"
     pass=0; fail=0
     xa=("${XARGS[@]}"); [ "$st" = xmem ] && xa+=(+FPGA_MEM=x)
     while read -r name _; do
