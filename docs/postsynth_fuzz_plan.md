@@ -1,6 +1,6 @@
 # Fuzzing plan: Cascade on the pin bench
 
-**Status: approved; F0 and F1 done.  Deviations from the plan are logged at the end.**
+**Status: approved; F0 and F1 done, F2 in progress.  Deviations from the plan are logged at the end.**
 
 ## Goal
 
@@ -178,3 +178,29 @@ once the RTL is restored. So a rare single-instruction data bug surfaces in
 about 5% of programs: enough for a campaign of thousands to catch bugs of
 that rarity, too few for a handful. The bug was planted by hand and reverted;
 there is no planted-bug script (deferred until it's needed again).
+
+**F2 (local campaign): first run, then a fix.** The first 5,000 programs
+(seeds 100–109) gave 146 failures (2.9%), all timeouts.
+
+8. **The triage tool changed.** The existing Spike co-simulation (`sim/`,
+   `DUT=forte`) flags a false mismatch at the first trap: Spike doesn't log a
+   trapping `ecall`, the core's RVFI does, and Cascade programs trap
+   constantly. Triage used instead: the `RETIRE_TRACE=1` build's PC trace and
+   the FST waveform's committed register writes, compared with Spike's commit
+   log. *Planned:* the co-sim names the first wrong instruction.
+9. **The 146 failures were a generator/reference mismatch, not a core bug.**
+   On the first failure, the first differing register write is a
+   `csrrw t1, medeleg` read-back: the core keeps `medeleg` bits 5 and 7
+   (load/store access-fault delegation), and Spike drops them. The program was
+   built on Spike, so its later computed values diverge. Hundreds of
+   instructions on, a store address comes out misaligned, the core traps where
+   Spike doesn't, and the program never terminates.
+   - **Spike 1.1.0 keeps `medeleg` = `0xB309`.** Cascade's code assumes
+     `0xB3FF` (`SPIKE_MEDELEG_MASK`), and the core keeps `0xB3FE`.
+   - **Fix:** the driver now *measures* Spike's mask at generation time and
+     gives Cascade the intersection (`0xB308`). With it, seed 100 passes
+     500/500, where it had 22 failures.
+   - **Coverage cost:** delegating illegal-instruction, misaligned and
+     access-fault exceptions to S mode is not fuzzed. OpenSBI doesn't
+     delegate those either. Building Cascade's own pinned Spike would bring
+     them back.

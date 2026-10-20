@@ -18,9 +18,10 @@ Cascade is used as published, with four replacements made from here (no fork):
     both off-chip and 64-bit-storable, and EXT_MEM stores sit in the D$.  Ours
     writes tohost = 1 and runs fence.i, like every other test's exit.
   - design profiling: Cascade runs a program on the design's own simulator to
-    learn which medeleg bits stick.  The RTL fixes the answer
-    (csrm.sv: MEDELEG_MASK, 0xB3FE with C); a wrong value could only make
-    programs fail, never hide a bug.
+    learn which medeleg bits stick.  The RTL fixes the core's answer
+    (csrm.sv: MEDELEG_MASK, 0xB3FE with C), intersected with the bits the
+    installed Spike keeps (measured: Cascade assumes 0xB3FF; Spike 1.1.0 keeps
+    0xB309).  A wrong value could only make programs fail, never hide a bug.
   - counters: this core has no Zicntr/Zihpm; the initial block's mcycle and
     minstret resets become mscratch writes, and random CSR ops skip them.
   - generation seed: Cascade's gen_many_elfs always seeds 0; ours takes --seed.
@@ -37,6 +38,28 @@ CASCADE = os.path.join(R, "third_party", "cascade", "fuzzer")
 DESIGN = "forte"
 TOHOST = 0x8080_0000
 MEDELEG_MASK = 0xB3FE   # hdl/core/privileged/csrm.sv, ZCA_SUPPORTED
+
+
+def spike_medeleg_mask(tmp):
+    """The medeleg bits the installed Spike keeps (write all ones, read back).
+    Cascade pre-simulates on Spike, so a bit the core keeps and Spike drops
+    makes the program disagree with the core -- seen as 146/5000 false
+    failures with Spike 1.1.0 (mask 0xB309) against Cascade's assumed 0xB3FF."""
+    os.makedirs(tmp, exist_ok=True)
+    src, elf, cmd = (os.path.join(tmp, f) for f in ("medeleg.S", "medeleg.elf", "medeleg.cmd"))
+    with open(src, "w") as f:
+        f.write(".globl _start\n_start:\n li t0, -1\n csrw medeleg, t0\n csrr t1, medeleg\n1: j 1b\n")
+    subprocess.run(["riscv64-unknown-elf-gcc", "-march=rv64imac_zicsr", "-mabi=lp64", "-nostdlib",
+                    "-Wl,-N", "-Ttext=0x80000000", "-o", elf, src], check=True, capture_output=True)
+    with open(cmd, "w") as f:
+        f.write("until pc 0 0x8000000a\nreg 0 t1\nq\n")    # li is compressed: csrr ends at +0xa
+    out = subprocess.run(["spike", "-d", f"--debug-cmd={cmd}", "--isa=rv64imac_zicsr_zifencei",
+                          "--pc=0x80000000", "-m0x80000000:0x10000000", elf],
+                         capture_output=True, text=True, timeout=60)
+    vals = [l.strip() for l in (out.stdout + out.stderr).splitlines() if l.strip().startswith("0x")]
+    if not vals:
+        sys.exit(f"pin_fuzz.py: could not read Spike's medeleg mask:\n{out.stdout}{out.stderr}")
+    return int(vals[-1], 16)
 
 
 def cascade_env(tmp):
@@ -76,7 +99,9 @@ def cascade_env(tmp):
         ]
 
     bb.finalblock = finalblock
-    prof.PROFILED_MEDELEG_MASK = MEDELEG_MASK
+    spike_mask = spike_medeleg_mask(tmp)
+    prof.PROFILED_MEDELEG_MASK = MEDELEG_MASK & spike_mask
+    print(f"medeleg: core {MEDELEG_MASK:#06x} & spike {spike_mask:#06x} = {prof.PROFILED_MEDELEG_MASK:#06x}")
 
     # No Zicntr/Zihpm on this core (pkg/config.vh): mcycle, minstret, mhpm*
     # are illegal here but real in Spike, so a program touching them diverges
