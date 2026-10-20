@@ -1,53 +1,189 @@
 #!/usr/bin/env python3
-"""Fuzzing front end for the pin bench -- STUB until a generator is chosen.
+"""Cascade fuzzing on the pin bench (docs/postsynth_fuzz_plan.md).
 
-The bench side is done: hvl/pin/fuzz/fuzz.cmd runs one case and dumps its
-signature.  What a generator must provide, whichever one is plugged in
-(Cascade, riscv-dv, AAPG, ...):
+    pin_fuzz.py gen N [--seed S] [--out DIR] [--jobs J]
+    pin_fuzz.py run [DIR] [--sim verilator|vcs] [--dut rtl|rtl_sva|gate] [-- +plusargs...]
 
-  gen   --seed N --out DIR   DIR/case.elf: RV64IMAC + Zicsr/Zifencei, M/S/U,
-                             Sv39 allowed; no F/D, no Zicbo*.  Entry at
-                             0x8000_0000, memory 0x8000_0000-0x8FFF_FFFF.  On
-                             completion it stores its signature (registers and
-                             any checked memory) at SIG_BASE, writes tohost =
-                             (code << 1) | 1, then executes fence.i -- the D$ is
-                             write-back and only fence.i makes the stores
-                             visible on the link.
-  ref   DIR                  DIR/reference.hex in the bench's dump_mem format
-                             ("<addr> <64-bit word>" per line), from Spike.
-  check DIR RUN              compare RUN/signature.hex with DIR/reference.hex.
+gen  writes fz_<seed>_<i>.lst / .cmd / .txt (descriptor) into DIR (default
+     sim/pin/fuzz).  Run hvl/pin/fuzz/get_cascade.sh once first.
+run  runs every image in DIR through hvl/pin/pin.sh, one at a time, and
+     prints one PASS/FAIL line each plus a total.  Images are independent
+     files, so several `run`s on different directories can go in parallel.
 
-Each case then runs twice through hvl/pin/pin.sh: on the RTL (DUT=rtl) and on
-the netlist (DUT=gate), and bin/pin_trace_cmp.py requires their pin traces to
-match.  A case therefore fails on any of: a timeout, a nonzero exit code, a
-signature that disagrees with Spike, or a netlist that differs from its RTL
-at the pins.
+Cascade is used as published, with four replacements made from here (no fork):
+  - the final block: Cascade's stops with a store to a "stop address" below
+    0x8000_0000 and dumps registers; on this chip nothing below 0x8000_0000 is
+    both off-chip and 64-bit-storable, and EXT_MEM stores sit in the D$.  Ours
+    writes tohost = 1 and runs fence.i, like every other test's exit.
+  - design profiling: Cascade runs a program on the design's own simulator to
+    learn which medeleg bits stick.  The RTL fixes the answer
+    (csrm.sv: MEDELEG_MASK, 0xB3FE with C); a wrong value could only make
+    programs fail, never hide a bug.
+  - counters: this core has no Zicntr/Zihpm; the initial block's mcycle and
+    minstret resets become mscratch writes, and random CSR ops skip them.
+  - generation seed: Cascade's gen_many_elfs always seeds 0; ours takes --seed.
+A Cascade program detects a bug by not terminating, so the bench's
+run_until_tohost timeout is the check.
 """
+import os
+import random
+import subprocess
 import sys
 
-SIG_BASE = 0x80F0_0000
-SIG_BYTES = 4096
+R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CASCADE = os.path.join(R, "third_party", "cascade", "fuzzer")
+DESIGN = "forte"
+TOHOST = 0x8080_0000
+MEDELEG_MASK = 0xB3FE   # hdl/core/privileged/csrm.sv, ZCA_SUPPORTED
 
 
-def check(ref_path, run_dir):
-    """The one part that does not depend on the generator."""
-    def load(p):
-        with open(p) as f:
-            return {int(a, 16): int(w, 16) for a, w in (ln.split() for ln in f if ln.strip())}
-    ref, got = load(ref_path), load(f"{run_dir}/signature.hex")
-    bad = [a for a in sorted(ref) if got.get(a) != ref[a]]
-    for a in bad[:8]:
-        print(f"signature {a:#x}: got {got.get(a, 0):#018x}, expected {ref[a]:#018x}")
-    print(f"{'MATCH' if not bad else 'MISMATCH'}: {len(ref) - len(bad)}/{len(ref)} words")
-    return 1 if bad else 0
+def cascade_env(tmp):
+    """Point Cascade at our design entry and a scratch directory, then import it."""
+    if not os.path.isdir(CASCADE):
+        sys.exit("pin_fuzz.py: no Cascade checkout -- run hvl/pin/fuzz/get_cascade.sh")
+    os.environ.update({
+        "CASCADE_ENV_SOURCED": "yes",
+        "CASCADE_DESIGN_PROCESSING_ROOT": os.path.join(R, "hvl", "pin", "fuzz", "cascade"),
+        "CASCADE_DATADIR": tmp,
+        "CASCADE_PATH_TO_FIGURES": os.path.join(tmp, "figures"),
+        "CASCADE_META_ROOT": os.path.dirname(CASCADE),
+    })
+    sys.path.insert(0, CASCADE)
+
+    import cascade.basicblock as bb
+    import common.profiledesign as prof
+    from params.fuzzparams import RDEP_MASK_REGISTER_ID
+    from rv.asmutil import li_into_reg
+    from cascade.cfinstructionclasses import (ImmRdInstruction, RegImmInstruction,
+                                              IntStoreInstruction, SpecialInstruction, JALInstruction)
+
+    def finalblock(fuzzerstate, design_name):
+        # x30 (RDEP) holds tohost's address, x1 the exit value 1.  lui sign-
+        # extends bit 31, so clear the upper half with slli/srli.
+        a = RDEP_MASK_REGISTER_ID
+        lui, addi = li_into_reg(TOHOST, do_check_bounds=False)   # its bound guards the sign extension, which slli/srli clear
+        return [
+            ImmRdInstruction("lui", a, lui, True),
+            RegImmInstruction("addi", a, a, addi, True),
+            RegImmInstruction("slli", a, a, 32, True),
+            RegImmInstruction("srli", a, a, 32, True),
+            RegImmInstruction("addi", 1, 0, 1, True),
+            IntStoreInstruction("sd", a, 1, 0, -1, True),
+            SpecialInstruction("fence.i"),       # write the D$ back: tohost reaches the link
+            JALInstruction("jal", 0, 0),
+        ]
+
+    bb.finalblock = finalblock
+    prof.PROFILED_MEDELEG_MASK = MEDELEG_MASK
+
+    # No Zicntr/Zihpm on this core (pkg/config.vh): mcycle, minstret, mhpm*
+    # are illegal here but real in Spike, so a program touching them diverges
+    # from its own pre-simulation and looks like a hang.  The initial block's
+    # counter resets become mscratch writes (same size, same place), and the
+    # random M-mode CSR ops never pick a counter.
+    import random as _random
+    import cascade.initialblock as ib
+    import cascade.randomize.pickrandomcsrop as pr
+    from rv.csrids import CSR_IDS
+    _csrreg = ib.CSRRegInstruction
+    def csrreg(instr, rd, rs1, csr, *a, **k):
+        return _csrreg(instr, rd, rs1, CSR_IDS.MSCRATCH if csr in (CSR_IDS.MCYCLE, CSR_IDS.MINSTRET) else csr, *a, **k)
+    ib.CSRRegInstruction = csrreg
+
+    class NoCounters:
+        absent = {"MINSTRET", "MHPMCOUNTER3", "MHPMEVENT31"}
+        def __getattr__(self, name):
+            return getattr(_random, name)
+        def choice(self, seq):
+            return _random.choice([x for x in seq if getattr(x, "name", None) not in self.absent] or seq)
+    pr.random = NoCounters()
+    from cascade.fuzzfromdescriptor import gen_new_test_instance, gen_fuzzerstate_elf_expectedvals
+    from common.spike import calibrate_spikespeed
+    return gen_new_test_instance, gen_fuzzerstate_elf_expectedvals, calibrate_spikespeed
+
+
+def _worker(args):
+    desc, elf_out = args
+    _, gen_elf = _worker.fns
+    fuzzerstate, elfpath, *_ = gen_elf(*desc[:2], desc[2], desc[3], desc[4], False)
+    os.replace(elfpath, elf_out)
+    return sum(len(b) for b in fuzzerstate.instr_objs_seq) + len(fuzzerstate.final_bb)
+
+
+def gen(n, seed, out, jobs):
+    import multiprocessing as mp
+    os.makedirs(out, exist_ok=True)
+    tmp = os.path.join(out, "tmp")
+    new_instance, gen_elf, calibrate = cascade_env(tmp)
+    calibrate()
+    random.seed(seed)
+    descs = [new_instance(DESIGN, seed * 100003 + i, True) for i in range(n)]
+    # (memsize, design_name, randseed, nmax_bbs, authorize_privileges)
+    names = [f"fz_{seed}_{i}" for i in range(n)]
+    _worker.fns = (new_instance, gen_elf)
+    with mp.Pool(jobs) as pool:
+        ninstrs = pool.map(_worker, [(d, os.path.join(out, nm + ".elf")) for d, nm in zip(descs, names)])
+
+    for nm, d, ni in zip(names, descs, ninstrs):
+        to_lst(os.path.join(out, nm + ".elf"), os.path.join(out, nm + ".lst"))
+        timeout = max(200_000, 400 * ni)     # cycles; a miss costs ~50, most instructions far less
+        with open(os.path.join(out, nm + ".cmd"), "w") as f:
+            f.write(f"# Cascade program {nm}: {ni} instructions; descriptor in {nm}.txt\n"
+                    "mem_policy zero\nload_lst $MEM\nreset 16\n"
+                    f"run_until_tohost {timeout}\nexpect_tohost 0\nfinish\n")
+        with open(os.path.join(out, nm + ".txt"), "w") as f:
+            f.write(repr(d) + "\n")
+        print(f"{nm}: {ni} instructions")
+
+
+def to_lst(elf, lst):
+    """Cascade's ELF is one segment at the boot address: objcopy it to binary
+    and write the bench's .lst (an @word-index line, then 64-bit words).
+    Not bin/generate_memory_file.py: it rejects section sizes that are not a
+    multiple of 8, and it writes a shared sim/bin/memory_8.lst."""
+    bin_path = elf[:-4] + ".bin"
+    subprocess.run(["riscv64-unknown-elf-objcopy", "-O", "binary", elf, bin_path], check=True)
+    data = open(bin_path, "rb").read()
+    data += bytes(-len(data) % 8)
+    with open(lst, "w") as f:
+        f.write(f"@{0x8000_0000 // 8:08x}\n")
+        for i in range(0, len(data), 8):
+            f.write(f"{int.from_bytes(data[i:i + 8], 'little'):016x}\n")
+    os.remove(bin_path)
+
+
+def run(d, sim, dut, extra):
+    images = sorted(f[:-4] for f in os.listdir(d) if f.startswith("fz_") and f.endswith(".lst"))
+    passed = 0
+    for nm in images:
+        r = subprocess.run([os.path.join(R, "hvl", "pin", "pin.sh"), "run",
+                            os.path.join(d, nm + ".lst"), os.path.join(d, nm + ".cmd"), "+UART_QUIET", *extra],
+                           env={**os.environ, "SIM": sim, "DUT": dut}, capture_output=True, text=True)
+        verdict = next((l for l in r.stdout.splitlines() if l.startswith("PIN_TB_RESULT:")), "PIN_TB_RESULT: FAIL no verdict")
+        ok = "PASS" in verdict
+        passed += ok
+        print(f"{'PASS' if ok else 'FAIL'} {nm}  {'' if ok else verdict}", flush=True)
+    print(f"fuzz: {passed}/{len(images)} passed ({sim}/{dut})")
+    return 0 if passed == len(images) else 1
 
 
 def main(argv):
-    if len(argv) == 3 and argv[0] == "check":
-        return check(f"{argv[1]}/reference.hex", argv[2])
-    if argv and argv[0] in ("gen", "ref"):
-        print(f"pin_fuzz.py {argv[0]}: no generator selected yet -- see the docstring")
-        return 2
+    def opt(name, default):
+        if name in argv:
+            i = argv.index(name); v = argv[i + 1]; del argv[i:i + 2]; return v
+        return default
+    extra = argv[argv.index("--") + 1:] if "--" in argv else []
+    argv = argv[:argv.index("--")] if "--" in argv else argv
+    if argv[:1] == ["gen"] and len(argv) >= 2:
+        venv = os.path.join(R, "third_party", "cascade", ".venv", "bin", "python")
+        if os.path.exists(venv) and os.path.realpath(sys.prefix) != os.path.realpath(os.path.dirname(os.path.dirname(venv))):
+            os.execv(venv, [venv, os.path.abspath(__file__), *sys.argv[1:]])   # Cascade's dependencies
+        seed, out, jobs = int(opt("--seed", 1)), opt("--out", os.path.join(R, "sim", "pin", "fuzz")), int(opt("--jobs", 4))
+        gen(int(argv[1]), seed, out, jobs)
+        return 0
+    if argv[:1] == ["run"]:
+        sim, dut = opt("--sim", "verilator"), opt("--dut", "rtl")
+        return run(argv[1] if len(argv) > 1 else os.path.join(R, "sim", "pin", "fuzz"), sim, dut, extra)
     print(__doc__)
     return 2
 

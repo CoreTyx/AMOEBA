@@ -6,3 +6,4 @@ hvl/ft_shadow/build/
 hdl/cvw/addins/
 sim/pin/
 hvl/pin/vm_paths.sh
+third_party/cascade/
