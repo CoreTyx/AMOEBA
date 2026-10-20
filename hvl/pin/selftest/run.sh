@@ -124,6 +124,20 @@ for dut in rtl rtl_sva; do
   done
 done
 
+# The 4-state stress modes of vm_run.sh's xstress stage, on a build whose
+# smoke test passes: the bus driven X while the chip has released it, every
+# input X while rst_n is low.  Only meaningful in a 4-state simulator.
+if [ "$SIM" = vcs ] && [ ${#SMOKE_OK[@]} -gt 0 ]; then
+  echo "== 4-state stress (smoke, ${SMOKE_OK[0]})"
+  smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
+  if SIM=$SIM DUT=${SMOKE_OK[0]} TAG=xs "$P/pin.sh" run "$smoke" +FPGA_IO_IDLE=x +FPGA_X_IN_RESET +TIMEOUT=2000000 >"$OUT/xstress_smoke.log" 2>&1
+  then ok "xstress smoke (${SMOKE_OK[0]})"
+  else
+    bad "xstress smoke (${SMOKE_OK[0]}) -- first errors:"
+    grep -m3 -A1 -hE 'ERROR|PIN_TB_RESULT|Fatal' "$R/sim/pin/runs/${SIM}_${SMOKE_OK[0]}/smoke_xs/sim.log" 2>/dev/null | grep -v '^--$' | head -6 | sed 's/^/        | /'
+  fi
+fi
+
 echo "== mutations (must FAIL)"
 # A mutation proves something only on a build where the same test passes
 # without it; on a build that fails anyway, "caught" is vacuous.

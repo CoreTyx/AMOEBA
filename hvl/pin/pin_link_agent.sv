@@ -181,7 +181,11 @@ module pin_link_agent import forte_link_pkg::*; #(
   logic [LINK_W-1:0] io_val;
   logic              io_en;
   logic              idle_x = 1'b0;        // idle_drive == "x", as a plain bit for the assign
-  assign io = io_en ? io_val : (idle_x ? {LINK_W{1'bx}} : {LINK_W{1'bz}});
+  // FPGA_IO_IDLE=x drives X only while the chip has RELEASED the bus (dir=0)
+  // and no read word is being returned -- garbage on a floating bus.  While
+  // dir=1 the chip owns io and the FPGA must not drive it at all; driving X
+  // there would be contention, not a model of anything on the board.
+  assign io = io_en ? io_val : ((idle_x && dir === 1'b0) ? {LINK_W{1'bx}} : {LINK_W{1'bz}});
 
   initial begin
     int v;
