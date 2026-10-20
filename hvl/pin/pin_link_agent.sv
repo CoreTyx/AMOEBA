@@ -227,6 +227,14 @@ module pin_link_agent import forte_link_pkg::*; #(
 
   function automatic bit unk(input logic [LINK_W-1:0] v); return $isunknown(v); endfunction
 
+  // Who owns io right now, for an X on the bus: the chip's dir and when it
+  // last changed, and the agent's own drive.  Works without a waveform.
+  realtime dir_t = 0;
+  always @(dir) dir_t = $realtime;
+  function automatic string bus_state();
+    return $sformatf("dir=%b since %0t, agent io_en=%b idle_x=%b, io now=%h", dir, dir_t, io_en, idle_x, io);
+  endfunction
+
   task automatic finish_xact();
     string s = "";
     for (int b = 0; b < BEATS; b++) s = {s, $sformatf(" %016h", line_w[b])};
@@ -290,14 +298,14 @@ module pin_link_agent import forte_link_pkg::*; #(
           A_IDLE: begin
             if (s_req === 1'b1) begin
               if (notready_cnt > GUARD) err($sformatf("req %0d cycles after ready fell (guard band %0d)", notready_cnt, GUARD));
-              if (unk(s_io)) err($sformatf("X/Z on io in header word 0: %h", s_io));
+              if (unk(s_io)) err($sformatf("X/Z on io in header word 0: %h  [%s]", s_io, bus_state()));
               hdr_hi = s_io; twr = s_wr; xact_start = cyc; st = A_HDR;
             end
           end
           A_HDR: begin
             if (s_req !== 1'b1) err("req dropped after one header word");
             if (s_wr !== twr) err("wr changed inside the header");
-            if (unk(s_io)) err($sformatf("X/Z on io in header word 1: %h", s_io));
+            if (unk(s_io)) err($sformatf("X/Z on io in header word 1: %h  [%s]", s_io, bus_state()));
             addr = {hdr_hi, s_io};
             if (addr < MEM_BASE || addr > MEM_LIMIT) err($sformatf("address %08h outside EXT_MEM", addr));
             if (addr % LINE_B != 0) err($sformatf("address %08h not line-aligned", addr));
