@@ -1,6 +1,6 @@
 # Fuzzing plan: Cascade on the pin bench
 
-**Status: approved; F0–F2 done, F3 packed for the VM.  Deviations from the plan are logged at the end.**
+**Status: F0–F4 done.  Report and deviations at the end.**
 
 ## Goal
 
@@ -214,3 +214,34 @@ pass locally and are in `vm_bundle.tgz` as `fz_200_*`. `images.sh` takes
 whatever `bin/pin_fuzz.py gen` wrote to `sim/pin/fuzz/vm` (`FUZZ_DIR`). Run
 with `ONLY='^fz_' hvl/pin/vm_run.sh regress`. *As planned:* random seeds and
 no selection step.
+
+**F3 (VM): done.** 100/100 `fz_200_*`: `rtl=PASS gate=PASS trace=MATCH`
+on the synthesized netlist (VCS), 15–20 s each.
+
+## F4 report
+
+| Level | Programs | Result |
+|---|---|---|
+| RTL, 2-state (Verilator, local) | 5,000 + 100 | all pass (after the `medeleg` fix) |
+| RTL, 4-state (VCS, xprop) | 100 | all pass |
+| Netlist (VCS, zero-delay) | 100 | all pass, traces match the RTL cycle for cycle |
+
+- **Core bugs found by fuzzing: none.** The one failure class (146/5,000) was a
+  reference mismatch: the installed Spike drops `medeleg` bits the core keeps.
+  It's fixed in the generator by using the bits both agree on.
+- **Sensitivity:** a planted rare ALU bug (1 operand pattern in 256)
+  surfaced in about 5% of programs. Over 5,000 programs, a bug of that rarity
+  that reaches the control flow would very likely have been seen.
+- **What the fuzzer does not reach:**
+  - **Sv39:** Cascade makes no page tables. Covered by the Linux tier.
+  - **Delegation of illegal-instruction, misaligned and access-fault
+    exceptions to S mode:** masked out (see 9).
+  - **Asynchronous interrupts:** covered by the `irq` test and FreeRTOS.
+  - **Performance counters:** absent on this core.
+  - **Corruptions that never reach a branch or jump target:** inherent to
+    Cascade.
+  - **Fault injection:** `fault_inject=0` throughout.
+- **Next, if wanted:**
+  - larger VM sessions: at 15–20 s per program, about 300 fit in two hours;
+  - the same images on the post-PnR netlist with an SDF;
+  - Cascade's own pinned Spike, to bring back the masked delegation bits.
