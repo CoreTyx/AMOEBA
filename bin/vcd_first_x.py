@@ -2,6 +2,7 @@
 """Find where an X starts: the first signals in a VCD to go from known to X.
 
     vcd_first_x.py <file.vcd> [--after NS] [--top N] [--scope PREFIX] [--match REGEX]
+    vcd_first_x.py <file.vcd> --show REGEX [--until NS]
 
 Signals that are X from the start and never become known (uninitialised
 arrays, unused nets) are ignored; what is reported is each signal's first
@@ -12,6 +13,10 @@ is it spreading.  --scope keeps only signals whose hierarchical name starts
 with PREFIX (e.g. pin_tb.dut.chip.soc).  --match keeps only names matching a
 regular expression -- e.g. control (pointers, valids, state) rather than data
 paths, which go X harmlessly whenever their valid is low.
+
+--show prints every value change of the signals matching REGEX (time, value,
+name) up to --until (ns, default 1000) instead -- e.g. what dir/req/io do
+through reset, for a signal that was never known and so never shows above.
 
 Made for hvl/pin/pin_tb.sv's +PIN_VCD dumps (build with WAVES=1).
 """
@@ -26,6 +31,7 @@ def main(argv):
         return 2
     import re
     path, after, top, scope, match = argv[0], 0.0, 30, "", None
+    show, until = None, 1000.0
     i = 1
     while i < len(argv):
         if argv[i] == "--after":
@@ -34,6 +40,10 @@ def main(argv):
             top = int(argv[i + 1]); i += 2
         elif argv[i] == "--scope":
             scope = argv[i + 1]; i += 2
+        elif argv[i] == "--show":
+            show = re.compile(argv[i + 1]); match = show; i += 2
+        elif argv[i] == "--until":
+            until = float(argv[i + 1]); i += 2
         elif argv[i] == "--match":
             match = re.compile(argv[i + 1]); i += 2
         else:
@@ -85,6 +95,10 @@ def main(argv):
             j += 1
 
         def change(vid, val):
+            if show is not None:
+                if vid in names and t <= until:
+                    print(f"  {t:12.3f} ns  {val:>18}  {names[vid][0]}")
+                return
             if vid not in names or vid in first_x:
                 return
             bad = any(c in "xXzZ" for c in val)
@@ -101,6 +115,8 @@ def main(argv):
             c = line[0]
             if c == "#":
                 t = int(line[1:]) * ns_per_tick
+                if show is not None and t > until:
+                    break
             elif c in "01xXzZ":
                 change(line[1:], c)
             elif c in "bB":
@@ -109,6 +125,8 @@ def main(argv):
             elif c in "rR":
                 pass                       # reals carry no X
 
+    if show is not None:
+        return 0
     hits = sorted((tm, vid) for vid, tm in first_x.items())
     import os
     print(f"read {path}: {os.path.getsize(path)} bytes, {len(names)} signals"
