@@ -48,10 +48,13 @@ def main(argv):
 
     with open(path, "r", errors="replace") as f:
         # header
+        # Check each LINE for the end of the header, not the growing token
+        # list: a netlist dump declares ~10^5-10^6 signals, and re-scanning the
+        # list per line was quadratic.
         tokens = []
         for line in f:
             tokens += line.split()
-            if "$enddefinitions" in tokens:
+            if "$enddefinitions" in line:
                 break
         j = 0
         while j < len(tokens):
