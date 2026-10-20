@@ -1,6 +1,6 @@
 # Fuzzing plan: Cascade on the pin bench
 
-**Status: approved; F0 done.  Deviations from the plan are logged at the end.**
+**Status: approved; F0 and F1 done.  Deviations from the plan are logged at the end.**
 
 ## Goal
 
@@ -169,3 +169,12 @@ changed times out, as it should.
    is never used went undetected; changing a `jalr`'s address register was
    caught. This is inherent to the method. F1's planted-bug gate measures
    how often a real logic bug surfaces.
+
+**F1 (integration, planted-bug gate): done.** `gen` and `run` landed with F0.
+Gate: 20 programs (seed 2) pass 20/20 on the clean RTL. With a planted ALU
+bug -- `xor` bit 0 flipped when operand A's low byte is `0x5A`, about 1 in
+256 xors -- 1 of the same 20 never terminates (`fz_2_6`), and it passes again
+once the RTL is restored. So a rare single-instruction data bug surfaces in
+about 5% of programs: enough for a campaign of thousands to catch bugs of
+that rarity, too few for a handful. The bug was planted by hand and reverted;
+there is no planted-bug script (deferred until it's needed again).
