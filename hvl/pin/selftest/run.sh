@@ -1,0 +1,171 @@
+#!/bin/bash
+# hvl/pin/selftest/run.sh -- everything that must hold before the pin bench's
+# verdict on a netlist is believed.  SIM=verilator (default) or SIM=vcs.
+#
+#   1. pin_selftest_tb, legal traffic           -> PASS
+#   2. pin_selftest_tb, +VIOLATE=1..13          -> each violation detected
+#      (6, 11, 12 are X/Z checks: skipped, and reported as skipped, under Verilator)
+#   3. pin_tb on the RTL with the directed tests -> PASS
+#   4. pin_tb with +FPGA_MUTATE=1..3, on a build whose plain smoke test passed
+#      -> FAIL (a corrupted fetch, a wrong exit code, a dropped word: the bench
+#      must notice each)
+#   5. rtl vs rtl_sva pin traces                 -> cycle-exact match
+#
+# Prints one line per check and a summary; exit status 0 only if all hold.
+set -uo pipefail
+R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+P="$R/hvl/pin"
+SIM="${SIM:-verilator}"
+OUT="$R/sim/pin/selftest/$SIM"
+IMG="$R/sim/pin/images"
+mkdir -p "$OUT"
+pass=0; fail=0; skip=0
+ok()   { echo "  PASS  $*"; pass=$((pass+1)); }
+bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
+skp()  { echo "  SKIP  $*"; skip=$((skip+1)); }
+
+# ---- build the self-test bench ----------------------------------------------
+if ! command -v "$SIM" >/dev/null; then
+  echo "$SIM: not found on PATH.  Load the simulator first (e.g. 'module load vcs', or your"
+  echo "site's Synopsys setup script), check with 'which $SIM', then rerun."
+  exit 1
+fi
+echo "== build pin_selftest_tb ($SIM)"
+SRCS=("$R/hdl/forte_link_pkg.sv" "$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/selftest/pin_selftest_tb.sv")
+if [ "$SIM" = verilator ]; then
+  ( cd "$OUT" && verilator --binary --timing --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style \
+      "${SRCS[@]}" --top-module pin_selftest_tb -o selftest >build.log 2>&1 )
+  EXE="$OUT/obj_dir/selftest"
+else
+  # Everything VCS says goes to build.log.  Not -l: VCS writes licence,
+  # environment and command-line errors to the terminal only, so a -l log of a
+  # failed run can end at the banner with no reason given.
+  # simv is kept between runs: VCS compiles incrementally and, when nothing
+  # changed, leaves the existing simv alone ("The design hasn't changed and
+  # need not be recompiled").  Deleting simv alone made that look like a
+  # failed build.  VCS's exit status is the verdict, so an old simv cannot
+  # stand in for a failed compile.
+  # simv.daidir without simv (an interrupted build, or an older run.sh that
+  # deleted simv) makes VCS report "unchanged" and produce nothing: clear it.
+  [ -x "$OUT/simv" ] || rm -rf "$OUT/simv.daidir" "$OUT/csrc"
+  # Site flags (vm_paths.sh VCS_FLAGS) apply to every VCS build.
+  VCS_FLAGS=(); [ -f "$P/vm_paths.sh" ] && source "$P/vm_paths.sh"
+  ( cd "$OUT" && vcs -full64 -sverilog -licqueue -timescale=1ns/1ps ${VCS_FLAGS[@]+"${VCS_FLAGS[@]}"} "${SRCS[@]}" \
+      -top pin_selftest_tb -o simv ) >"$OUT/build.log" 2>&1
+  rc=$?
+  grep -q "design hasn't changed and need not be recompiled" "$OUT/build.log" && [ -x "$OUT/simv" ] && rc=0
+  EXE="$OUT/simv"
+  [ $rc = 0 ] || EXE=""
+fi
+if [ -z "$EXE" ] || [ ! -x "$EXE" ]; then
+  echo "build failed: $OUT/build.log -- last 40 lines:"
+  tail -40 "$OUT/build.log" | sed 's/^/  | /'
+  exit 1
+fi
+
+st() {  # $1 = label, rest = plusargs
+  local label="$1"; shift
+  local log="$OUT/$label.log"
+  ( cd "$OUT" && "$EXE" "$@" ) >"$log" 2>&1
+  local res; res="$(grep -m1 '^SELFTEST_RESULT:' "$log" || echo 'SELFTEST_RESULT: FAIL no verdict')"
+  case "$res" in
+    *"PASS (violation"*skipped*) skp "$label: needs 4-state";;
+    *PASS*) ok "$label";;
+    *)      bad "$label: ${res#SELFTEST_RESULT: } ($log)";;
+  esac
+}
+
+echo "== harness self-test"
+st legal
+for v in $(seq 1 13); do st "violate_$v" +VIOLATE="$v"; done
+
+# ---- PDK SRAM models vs the RTL's assumption ------------------------------------------
+# Only with real models (VCS on the VM).  A difference here is behaviour the
+# caches were never verified against, and it reaches the netlist too.
+if [ "$SIM" = vcs ]; then
+  echo "== SRAM models vs the RTL's behavioural RAM"
+  SIM=vcs "$P/selftest/sram_cmp.sh" >"$OUT/sram_cmp.log" 2>&1
+  if grep -q '^SRAM_CMP_RESULT: SKIP' "$OUT/sram_cmp.log"; then skp "sram: no SRAM_MODELS in vm_paths.sh"
+  elif ! grep -q '^SRAM_CMP rf_sp' "$OUT/sram_cmp.log"; then bad "sram: did not run ($OUT/sram_cmp.log)"; tail -15 "$OUT/sram_cmp.log" | sed 's/^/        | /'
+  else
+    while read -r _ name rest; do
+      name="${name%:}"
+      case "$rest" in
+        *" 0 differences"*)  ok "sram $name: $rest";;
+        *"after read 0,"*)   ok "sram $name: reads match; $rest -- Q after write/idle differs from the RTL's RAM (matters only if the caches use it then)";;
+        *) bad "sram $name: $rest"; grep "^SRAM_CMP $name: cycle" "$OUT/sram_cmp.log" | sed 's/^/        | /';;
+      esac
+    done < <(grep -E '^SRAM_CMP rf_sp[^ ]*: [0-9]+ cycles' "$OUT/sram_cmp.log")
+  fi
+fi
+
+# ---- the bench on the RTL ------------------------------------------------------------
+# Directed tests need DUT builds; VCS on the VM uses the real SRAM/pad models
+# when vm_paths.sh names them.
+SMOKE_OK=()      # builds whose unmutated smoke test passed
+for dut in rtl rtl_sva; do
+  echo "== build pin_tb ($SIM/$dut)"
+  SIM=$SIM DUT=$dut "$P/pin.sh" build >"$OUT/build_$dut.log" 2>&1 || {
+    bad "build $dut ($OUT/build_$dut.log) -- last 25 lines:"; tail -25 "$OUT/build_$dut.log" | sed 's/^/        | /'; continue; }
+  echo "== directed ($SIM/$dut)"
+  for t in smoke uart_echo irq uart_lsr; do
+    # Prebuilt images (hvl/pin/images.sh) where there is no RISC-V toolchain.
+    if [ -f "$IMG/$t.lst" ]; then args=("$IMG/$t.lst")
+    else args=("$P/tests/$t.c"); fi
+    [ -f "$P/tests/$t.cmd" ] && args+=("$P/tests/$t.cmd")
+    if SIM=$SIM DUT=$dut TAG=st "$P/pin.sh" run "${args[@]}" +TIMEOUT=2000000 >"$OUT/${dut}_$t.log" 2>&1
+    then ok "$dut $t"; [ "$t" = smoke ] && SMOKE_OK+=("$dut")
+    else
+      bad "$dut $t ($OUT/${dut}_$t.log) -- first errors:"
+      # -A1: VCS puts a $fatal's message on the line after "Fatal: <file>, <line>".
+      grep -m3 -A1 -hE 'ERROR|PIN_TB_RESULT|Fatal|Error-' "$R/sim/pin/runs/${SIM}_${dut}/${t}_st/sim.log" 2>/dev/null \
+        | grep -v '^--$' | head -6 | cut -c1-200 | sed 's/^/        | /'
+    fi
+  done
+done
+
+# The 4-state stress modes of vm_run.sh's xstress stage, on a build whose
+# smoke test passes: the bus driven X while the chip has released it, every
+# input X while rst_n is low.  Only meaningful in a 4-state simulator.
+if [ "$SIM" = vcs ] && [ ${#SMOKE_OK[@]} -gt 0 ]; then
+  echo "== 4-state stress (smoke, ${SMOKE_OK[0]})"
+  smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
+  if SIM=$SIM DUT=${SMOKE_OK[0]} TAG=xs "$P/pin.sh" run "$smoke" +FPGA_IO_IDLE=x +FPGA_X_IN_RESET +TIMEOUT=2000000 >"$OUT/xstress_smoke.log" 2>&1
+  then ok "xstress smoke (${SMOKE_OK[0]})"
+  else
+    bad "xstress smoke (${SMOKE_OK[0]}) -- first errors:"
+    grep -m3 -A1 -hE 'ERROR|PIN_TB_RESULT|Fatal' "$R/sim/pin/runs/${SIM}_${SMOKE_OK[0]}/smoke_xs/sim.log" 2>/dev/null | grep -v '^--$' | head -6 | sed 's/^/        | /'
+  fi
+fi
+
+echo "== mutations (must FAIL)"
+# A mutation proves something only on a build where the same test passes
+# without it; on a build that fails anyway, "caught" is vacuous.
+if [ ${#SMOKE_OK[@]} -eq 0 ]; then
+  skp "mutations: no build passed the unmutated smoke test"
+else
+  mdut="${SMOKE_OK[0]}"
+  for m in 1 2 3; do
+    smoke="$P/tests/smoke.c"; [ -f "$IMG/smoke.lst" ] && smoke="$IMG/smoke.lst"
+    # Caught only if the bench RAN and returned a verdict of FAIL.  A run that
+    # never happened (bench not built, crash) fails too, and must not count.
+    SIM=$SIM DUT=$mdut TAG="mut$m" "$P/pin.sh" run "$smoke" +FPGA_MUTATE=$m +TIMEOUT=100000 >"$OUT/mut$m.log" 2>&1
+    verdict="$(grep -m1 '^PIN_TB_RESULT:' "$R/sim/pin/runs/${SIM}_${mdut}/smoke_mut$m/sim.log" 2>/dev/null || true)"
+    case "$verdict" in
+      *PASS*)  bad "mutation $m ($mdut) went unnoticed ($OUT/mut$m.log)";;
+      *FAIL*)  ok "mutation $m ($mdut) caught: ${verdict#PIN_TB_RESULT: }";;
+      *)       bad "mutation $m ($mdut): the bench never ran ($OUT/mut$m.log)";;
+    esac
+  done
+fi
+
+echo "== rtl vs rtl_sva traces"
+for t in smoke uart_echo irq uart_lsr; do
+  a="$R/sim/pin/runs/${SIM}_rtl/${t}_st"; b="$R/sim/pin/runs/${SIM}_rtl_sva/${t}_st"
+  if [ ! -f "$a/pin_trace.log" ] || [ ! -f "$b/pin_trace.log" ]; then bad "trace $t: no trace (a run above did not happen)"
+  elif python3 "$R/bin/pin_trace_cmp.py" "$a" "$b" >"$OUT/cmp_$t.log" 2>&1; then ok "trace $t: $(cat "$OUT/cmp_$t.log")"
+  else bad "trace $t: $(head -1 "$OUT/cmp_$t.log")"; fi
+done
+
+echo "== summary: $pass passed, $fail failed, $skip skipped"
+[ $fail -eq 0 ]

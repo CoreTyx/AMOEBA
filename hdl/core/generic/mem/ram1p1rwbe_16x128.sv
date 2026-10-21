@@ -37,6 +37,10 @@ module ram1p1rwbe_16x128(
 
    // replace "generic64x44RAM" with "TS1N..64X44.." module from your memory vendor
    // generic64x44RAM sramIP (.CLK, .CEB, .WEB, .A, .D, .BWEB, .Q);
-   rf_sp_16_128 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D, .Q);
-
+   // RETN and EMA must be driven.  Left unconnected, synthesis tied them to 0:
+   // RETN=0 holds the macro in retention, and every read returns X (seen in
+   // the PDK model on the post-synthesis bench).  EMA=0 is a placeholder until
+   // the datasheet's recommended margin setting is known.
+   rf_sp_16_128 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D, .Q,
+     .RETN(1'b1), .EMA('0));
 endmodule

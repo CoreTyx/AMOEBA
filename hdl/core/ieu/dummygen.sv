@@ -29,6 +29,7 @@ module dummygen (
   input  logic [31:0] InstrD,       // real decode-stage instruction, after decompression
   input  logic        InstrValidD,  // decode stage holds a valid instruction
   input  logic        InsertOkD,    // pipeline state permits an insertion this cycle
+  output logic        InjectReqD,   // decode presents DummyInstrD this cycle, whether or not it issues
   output logic        InjectD,      // insert DummyInstrD into decode this cycle
   output logic [31:0] DummyInstrD,  // instruction to inject
   output logic        DummySelD     // which shadow physical register the dummy writes
@@ -75,7 +76,14 @@ module dummygen (
   // Inject the previously captured instruction, never the one captured this cycle:
   // that keeps the injection path clear of the decode-stage instruction mux and
   // enforces the "each captured opcode is replayed at most once" property.
-  assign InjectD = StrobeD & LFSR[0] & DummyValid & InsertOkD;
+  //
+  // The request depends on this module's registers only.  It is what selects the
+  // dummy in Decode, so that select does not wait for InsertOkD -- which is the
+  // end of the stall network -- before the register file can be read.  When the
+  // pipeline refuses the insertion, Execute is stalled or flushed and whatever
+  // Decode presented that cycle is not captured.
+  assign InjectReqD = StrobeD & LFSR[0] & DummyValid;
+  assign InjectD    = InjectReqD & InsertOkD;
 
   always_ff @(posedge clk)
     if (reset) begin

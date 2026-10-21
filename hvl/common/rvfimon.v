@@ -14708,7 +14708,16 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_div (
   // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
   // to 1 for INT_MIN / -1, whose result comes from the special case below.
   wire signed [64-1:0] div_rs2_s = rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? 64'sd1 : rvfi_rs2_rdata;
-  wire signed [64-1:0] div_result_s = div_rs1_s / div_rs2_s;
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.  Guard and divide in one
+  // function so the host divide never sees a stale, X-carrying, zero or INT_MIN/-1 operand.
+  function automatic signed [63:0] safe_s64_div;
+    input signed [63:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 64'sd0 || (a == {1'b1, {63{1'b0}}} && b == -64'sd1)) safe_s64_div = 64'sd0;
+      else safe_s64_div = a / b;
+    end
+  endfunction
+  wire signed [64-1:0] div_result_s = safe_s64_div(div_rs1_s, rvfi_rs2_rdata);
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? {64{1'b1}} :
                                          rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? {1'b1, {64-1{1'b0}}} :
                                          div_result_s;
@@ -14762,8 +14771,16 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_divu (
   wire misa_ok = 1;
 
   // DIVU instruction
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.
+  function automatic [63:0] safe_u64_div;
+    input [63:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 64'd0) safe_u64_div = 64'd0;
+      else safe_u64_div = a / b;
+    end
+  endfunction
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? {64{1'b1}} :
-                                         rvfi_rs1_rdata / rvfi_rs2_rdata;
+                                         safe_u64_div(rvfi_rs1_rdata, rvfi_rs2_rdata);
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 101 && insn_opcode == 7'b 0110011;
   assign spec_rs1_addr = insn_rs1;
   assign spec_rs2_addr = insn_rs2;
@@ -14814,8 +14831,16 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_divuw (
   wire misa_ok = 1;
 
   // DIVUW instruction
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.
+  function automatic [31:0] safe_u32_div;
+    input [31:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 32'd0) safe_u32_div = 32'd0;
+      else safe_u32_div = a / b;
+    end
+  endfunction
   wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? {32{1'b1}} :
-                       rvfi_rs1_rdata[31:0] / rvfi_rs2_rdata[31:0];
+                       safe_u32_div(rvfi_rs1_rdata[31:0], rvfi_rs2_rdata[31:0]);
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 101 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
   assign spec_rs2_addr = insn_rs2;
@@ -14870,9 +14895,18 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_divw (
   // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
   // to 1 for INT_MIN / -1, whose result comes from the special case below.
   wire signed [31:0] divw_rs2_s = rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? 32'sd1 : rvfi_rs2_rdata[31:0];
-  wire signed [31:0] divw_result_s = divw_rs1_s / divw_rs2_s;
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.  Guard and divide in one
+  // function so the host divide never sees a stale, X-carrying, zero or INT_MIN/-1 operand.
+  function automatic signed [31:0] safe_s32_div;
+    input signed [31:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 32'sd0 || (a == {1'b1, {31{1'b0}}} && b == -32'sd1)) safe_s32_div = 32'sd0;
+      else safe_s32_div = a / b;
+    end
+  endfunction
+  wire signed [31:0] divw_result_s = safe_s32_div(divw_rs1_s, rvfi_rs2_rdata[31:0]);
   wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? {32{1'b1}} :
-                       rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {1'b1, {31{1'b0}}} :
+                       rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? {1'b1, {31{1'b0}}} :
                        divw_result_s;
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 100 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
@@ -19290,7 +19324,16 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_rem (
   // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
   // to 1 for INT_MIN / -1, whose result comes from the special case below.
   wire signed [64-1:0] rem_rs2_s = rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? 64'sd1 : rvfi_rs2_rdata;
-  wire signed [64-1:0] rem_result_s = rem_rs1_s % rem_rs2_s;
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.  Guard and divide in one
+  // function so the host divide never sees a stale, X-carrying, zero or INT_MIN/-1 operand.
+  function automatic signed [63:0] safe_s64_rem;
+    input signed [63:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 64'sd0 || (a == {1'b1, {63{1'b0}}} && b == -64'sd1)) safe_s64_rem = 64'sd0;
+      else safe_s64_rem = a % b;
+    end
+  endfunction
+  wire signed [64-1:0] rem_result_s = safe_s64_rem(rem_rs1_s, rvfi_rs2_rdata);
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? rvfi_rs1_rdata :
                                          rvfi_rs1_rdata == {1'b1, {64-1{1'b0}}} && rvfi_rs2_rdata == {64{1'b1}} ? {64{1'b0}} :
                                          rem_result_s;
@@ -19344,8 +19387,16 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remu (
   wire misa_ok = 1;
 
   // REMU instruction
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.
+  function automatic [63:0] safe_u64_rem;
+    input [63:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 64'd0) safe_u64_rem = 64'd0;
+      else safe_u64_rem = a % b;
+    end
+  endfunction
   wire [64-1:0] result = rvfi_rs2_rdata == 64'b0 ? rvfi_rs1_rdata :
-                                         rvfi_rs1_rdata % rvfi_rs2_rdata;
+                                         safe_u64_rem(rvfi_rs1_rdata, rvfi_rs2_rdata);
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 111 && insn_opcode == 7'b 0110011;
   assign spec_rs1_addr = insn_rs1;
   assign spec_rs2_addr = insn_rs2;
@@ -19396,8 +19447,18 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remuw (
   wire misa_ok = 1;
 
   // REMUW instruction
-  wire [31:0] result = rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdata :
-                       rvfi_rs1_rdata[31:0] % rvfi_rs2_rdata[31:0];
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.
+  function automatic [31:0] safe_u32_rem;
+    input [31:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 32'd0) safe_u32_rem = 32'd0;
+      else safe_u32_rem = a % b;
+    end
+  endfunction
+  // AMOEBA local fix -- see patches/rvfimon-w-low32.patch.  Divide by zero is
+  // decided by the low 32 bits of rs2, which is all a W-form instruction reads.
+  wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? rvfi_rs1_rdata :
+                       safe_u32_rem(rvfi_rs1_rdata[31:0], rvfi_rs2_rdata[31:0]);
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 111 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;
   assign spec_rs2_addr = insn_rs2;
@@ -19452,9 +19513,20 @@ module riscv_formal_monitor_rv64imafdc_zb_insn_remw (
   // AMOEBA local fix -- see patches/rvfimon-div-overflow.patch.  Divisor forced
   // to 1 for INT_MIN / -1, whose result comes from the special case below.
   wire signed [31:0] remw_rs2_s = rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? 32'sd1 : rvfi_rs2_rdata[31:0];
-  wire signed [31:0] remw_result_s = remw_rs1_s % remw_rs2_s;
-  wire [31:0] result = rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdata :
-                       rvfi_rs1_rdata == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata == {32{1'b1}} ? {32{1'b0}} :
+  // AMOEBA local fix -- see patches/rvfimon-div-zero.patch.  Guard and divide in one
+  // function so the host divide never sees a stale, X-carrying, zero or INT_MIN/-1 operand.
+  function automatic signed [31:0] safe_s32_rem;
+    input signed [31:0] a, b;
+    begin
+      if ($isunknown({a, b}) || b == 32'sd0 || (a == {1'b1, {31{1'b0}}} && b == -32'sd1)) safe_s32_rem = 32'sd0;
+      else safe_s32_rem = a % b;
+    end
+  endfunction
+  wire signed [31:0] remw_result_s = safe_s32_rem(remw_rs1_s, rvfi_rs2_rdata[31:0]);
+  // AMOEBA local fix -- see patches/rvfimon-w-low32.patch.  Divide by zero and
+  // INT_MIN / -1 are decided by the low 32 bits, which is all a W-form instruction reads.
+  wire [31:0] result = rvfi_rs2_rdata[31:0] == 32'b0 ? rvfi_rs1_rdata :
+                       rvfi_rs1_rdata[31:0] == {1'b1, {31{1'b0}}} && rvfi_rs2_rdata[31:0] == {32{1'b1}} ? {32{1'b0}} :
                        remw_result_s;
   assign spec_valid = rvfi_valid && !insn_padding && insn_funct7 == 7'b 0000001 && insn_funct3 == 3'b 110 && insn_opcode == 7'b 0111011;
   assign spec_rs1_addr = insn_rs1;

@@ -15,12 +15,13 @@ module ft_core_fault_tb;
   logic [31:0] rom[256];
   logic [63:0] regs[32];
   logic mul_fi_enable = 0;
-  logic [1:0] mul_fi_target = 1, mul_fi_kind = 0;
+  logic [1:0] mul_fi_kind = 0;
   logic [6:0] mul_fi_bit = 0;
-  logic div_fi_enable = 0, div_fi_channel = 0;
-  logic [1:0] div_fi_target = 1, div_fi_kind = 0;
+  logic div_fi_enable = 0;
+  logic [1:0] div_fi_kind = 0;
   logic [5:0] div_fi_bit = 0;
   logic fault_inject = 0, directed = 1;
+  logic [7:0] fi_units_expected = 0;  // mask & pin as the core's enable register will have sampled them
   logic fi_enable = 0;
   logic [1:0] fi_target = 1, fi_kind = 0, fi_channel = 0;
   logic [6:0] fi_bit = 0;
@@ -148,28 +149,12 @@ module ft_core_fault_tb;
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd3);
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit = $clog2(64 + 1)'(fi_bit);
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind = fi_kind;
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now = mul_fi_enable & mul_fi_target[0];
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit = mul_fi_bit;
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind = mul_fi_kind;
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now = mul_fi_enable & mul_fi_target[1];
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit = mul_fi_bit;
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind = mul_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now = div_fi_enable & div_fi_target[0] &
-          (div_fi_channel == 1'b0);
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now = div_fi_enable & div_fi_target[0] &
-          (div_fi_channel == 1'b1);
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now = div_fi_enable & div_fi_target[1] &
-          (div_fi_channel == 1'b0);
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now = div_fi_enable & div_fi_target[1] &
-          (div_fi_channel == 1'b1);
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind = div_fi_kind;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.inject_now = mul_fi_enable;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.fi_bit = mul_fi_bit;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.fi_kind = mul_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.inject_now = div_fi_enable;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_kind = div_fi_kind;
     end else begin
       release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.inject_now;
       release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_bit;
@@ -195,24 +180,12 @@ module ft_core_fault_tb;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.inject_now;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_kind;
     end
   end
   always_comb begin
@@ -246,7 +219,7 @@ module ft_core_fault_tb;
     checks++;
     if (condition !== 1'b1) $fatal(1, "scenario=%0d %s at %0t", scenario, label_text, $time);
   endtask
-  task automatic check_unit_enables(input logic [5:0] expected);
+  task automatic check_unit_enables(input logic [7:0] expected);
     check(dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].arith_fi.fi_enable");
@@ -255,21 +228,16 @@ module ft_core_fault_tb;
     check(dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].shift_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[0].cmp_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[1].cmp_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.primary_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.shadow_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.ftmul.result_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.result_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.regf.inj1.inject_en == expected[4], "unit gate: ieu.dp.regf.inj1.inject_en");
     check(dut.soc.core.ieu.dp.regf.inj2.inject_en == expected[4], "unit gate: ieu.dp.regf.inj2.inject_en");
-    check(dut.soc.core.ieu.dp.RD1EReg.inject_en == expected[5], "unit gate: ieu.dp.RD1EReg.inject_en");
-    check(dut.soc.core.ieu.dp.RD2EReg.inject_en == expected[5], "unit gate: ieu.dp.RD2EReg.inject_en");
-    check(dut.soc.core.ieu.dp.ImmExtEReg.inject_en == expected[5], "unit gate: ieu.dp.ImmExtEReg.inject_en");
-    check(dut.soc.core.ieu.dp.SrcAMReg.inject_en == expected[5], "unit gate: ieu.dp.SrcAMReg.inject_en");
-    check(dut.soc.core.ieu.dp.IEUResultMReg.inject_en == expected[5], "unit gate: ieu.dp.IEUResultMReg.inject_en");
-    check(dut.soc.core.ieu.dp.WriteDataMReg.inject_en == expected[5], "unit gate: ieu.dp.WriteDataMReg.inject_en");
-    check(dut.soc.core.ieu.dp.IFResultWReg.inject_en == expected[5], "unit gate: ieu.dp.IFResultWReg.inject_en");
+    // One flip-mask generator serves all seven ECC pipeline registers (datapath.sv).
+    check(dut.soc.core.ieu.dp.pipeflipmask.inject_en == expected[5], "unit gate: ieu.dp.pipeflipmask.inject_en");
+    check(dut.soc.core.ifu.bus.icache.icache.faultinject.FaultInjectSec == expected[6], "unit gate: icache.faultinject.FaultInjectSec");
+    check(dut.soc.core.ifu.bus.icache.icache.faultinject.FaultInjectDed == expected[7], "unit gate: icache.faultinject.FaultInjectDed");
+    check(dut.soc.core.lsu.bus.dcache.dcache.faultinject.FaultInjectSec == expected[6], "unit gate: dcache.faultinject.FaultInjectSec");
+    check(dut.soc.core.lsu.bus.dcache.dcache.faultinject.FaultInjectDed == expected[7], "unit gate: dcache.faultinject.FaultInjectDed");
   endtask
 
   task automatic load_program(input logic bge);
@@ -303,8 +271,8 @@ module ft_core_fault_tb;
     end else if (monitor_valid) begin
       if (monitor_rd_addr != 0 && !monitor_trap) regs[monitor_rd_addr] = monitor_rd_wdata;
       if (scenario == SC_FAULT_CONTROL && monitor_rd_addr == 10 && !monitor_trap) begin
-        check(monitor_rd_wdata == ((control_reads == 0 || control_reads == 8) ? 63 :
-              ((control_reads == 1) ? 0 : (1 << (control_reads - 2)))), "software byte readback of unit mask");
+        check(monitor_rd_wdata == ((control_reads == 0 || control_reads == 1) ? 0 :
+              ((control_reads == 10) ? 63 : (1 << (control_reads - 2)))), "software byte readback of unit mask");
         control_reads++;
       end
       if (monitor_trap) begin
@@ -313,7 +281,7 @@ module ft_core_fault_tb;
               "fault trap retains original instruction PC");
       end
       if (!mdu_case(scenario) && monitor_pc_rdata == BRANCH_PC && !monitor_trap) retired_branches++;
-      if (monitor_pc_rdata == ((scenario == SC_FAULT_CONTROL) ? BASE + 108 : (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40))) ||
+      if (monitor_pc_rdata == ((scenario == SC_FAULT_CONTROL) ? BASE + 132 : (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40))) ||
               monitor_pc_rdata == BASE + 268)
         finished = 1;
     end
@@ -337,6 +305,7 @@ module ft_core_fault_tb;
       rst = 1;
       directed = (scenario != SC_SHARED_INJECTION && scenario != SC_FAULT_CONTROL);
       fault_inject = (scenario == SC_SHARED_INJECTION);
+      fi_units_expected = 0;
       fi_enable = 0;
       mul_fi_enable = 0;
       div_fi_enable = 0;
@@ -371,25 +340,41 @@ module ft_core_fault_tb;
         rom[0] = 32'h100702b7; // lui t0,0x10070
         rom[1] = addi(5, 5, 11);
         rom[2] = 32'h0002c503; // lbu a0,0(t0): reset mask
-        for (int unit_index = 0; unit_index < 8; unit_index++) begin
-          rom[3 + 3*unit_index] = addi(6, 0, (unit_index == 0) ? 0 : ((unit_index == 7) ? 63 : (1 << (unit_index-1))));
+        // 0, then each unit bit alone, then the reset mask back
+        for (int unit_index = 0; unit_index < 10; unit_index++) begin
+          rom[3 + 3*unit_index] = addi(6, 0, (unit_index == 0) ? 0 : ((unit_index == 9) ? 63 : (1 << (unit_index-1))));
           rom[4 + 3*unit_index] = 32'h00628023; // sb t1,0(t0)
           rom[5 + 3*unit_index] = 32'h0002c503; // lbu a0,0(t0)
         end
-        rom[27] = 32'h0000006f;
+        rom[33] = 32'h0000006f;
       end
       held_cycles = 0;
       injected = 0;
       held_last = 0;
+      // The unit mask resets to 0; for shared injection, boot software has armed the six core units.
+      if (scenario == SC_SHARED_INJECTION) force dut.soc.uncoregen.uncore.faultcontrol.FaultInjectMask = 8'h3f;
       repeat (6) @(negedge clk);
       rst = 0;
+      if (scenario == SC_SHARED_INJECTION) begin
+        wait (dut.soc.uncoregen.uncore.faultcontrol.PRESETn);
+        @(posedge clk) #1 release dut.soc.uncoregen.uncore.faultcontrol.FaultInjectMask;
+      end
       // Hang guard, not a performance check. The slowest scenario (SC_SHARED_INJECTION) needs ~3.1k
       // cycles on main and ~12.4k with swe-cache-ec's multi-cycle cache hits; 50k leaves headroom.
       for (int cycle = 0; cycle < 50000 && !finished; cycle++) begin
         @(negedge clk);
+        // The ALU wrapper only sees a fault that is present in the cycle it captures
+        // the replicas (one cycle in each instruction's stay in Execute), and this
+        // loop runs at a fixed number of cycles per instruction that divides the
+        // injectors' 512-cycle period.  Left alone, every injector event lands on
+        // the same cycle of that rhythm.  A one-cycle stall now and then slides the
+        // program across the injectors' phase so that the events are actually seen.
+        if (scenario == SC_SHARED_INJECTION) force dut.soc.core.ExternalStall = (cycle % 37 == 0);
         if (!injected && scenario != SC_HEALTHY && scenario < SC_SHARED_INJECTION && !mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE == BRANCH_PC && dut.soc.core.ForwardedSrcAE == 8) begin
-          // This loop has trained the predictor before diagnosis begins.
-          check(!dut.soc.core.BPWrongE && dut.soc.core.PCSrcE, "faulted branch is predicted taken");
+          // This is the branch's first cycle in Execute: its evaluation has only
+          // begun, so the outcome is still withheld and the pipeline is waiting.
+          check(!dut.soc.core.PCSrcE && dut.soc.core.FTStallE,
+                "branch outcome is withheld until its evaluation completes");
           check(dut.soc.core.ieu.dp.SrcAE == BRANCH_PC && dut.soc.core.ieu.dp.SrcBE == 64'hfffffffffffffff8,
                 "branch target and comparison have independent operands");
           fi_target = (scenario == SC_CMP_ISOLATION) ? 2 : 1;
@@ -407,15 +392,12 @@ module ft_core_fault_tb;
         if (!injected && scenario < SC_LATE_DIV_INJECTION && mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE == BASE + 20) begin
           if (scenario == SC_MUL_TRAP || scenario == SC_MUL_TRANSIENT || scenario == SC_MUL_BACKPRESSURE) begin
             mul_fi_enable = 1;
-            mul_fi_target = (scenario == SC_MUL_TRANSIENT) ? 2 : 1;
             mul_fi_kind = (scenario == SC_MUL_TRANSIENT) ? 0 : 2;
             mul_fi_bit = (scenario == SC_MUL_TRANSIENT) ? 0 : 4;
           end else begin
             div_fi_enable = 1;
-            div_fi_target = (scenario == SC_DIV_TRANSIENT) ? 2 : 1;
             div_fi_kind = (scenario == SC_DIV_TRANSIENT) ? 0 : 2;
             div_fi_bit = (scenario == SC_DIV_REM_TRAP || scenario == SC_DIV_TRANSIENT) ? 0 : 4;
-            div_fi_channel = (scenario == SC_DIV_REM_TRAP);
           end
           injected = 1;
         end
@@ -425,10 +407,8 @@ module ft_core_fault_tb;
         if (!injected && scenario >= SC_LATE_DIV_INJECTION && scenario <= SC_LATE_REM_BACKPRESSURE && dut.soc.core.InstrValidM &&
             dut.soc.core.PCM == BASE + 20) begin
           div_fi_enable = 1;
-          div_fi_target = 1;
           div_fi_kind = 2;
           div_fi_bit = 4;
-          div_fi_channel = (scenario == SC_LATE_REM_INJECTION || scenario == SC_LATE_REM_BACKPRESSURE);
           injected = 1;
           if (scenario >= SC_LATE_DIV_BACKPRESSURE) begin
             force dut.soc.core.ExternalStall = 1'b1;
@@ -458,14 +438,30 @@ module ft_core_fault_tb;
           if (backpressure_cycles == 0) force dut.soc.core.ExternalStall = 1'b0;
         end
         if (scenario == SC_FAULT_CONTROL) begin
+          // The core registers the unit enables, so what the injectors see now is
+          // the mask and pin as they stood at the last rising edge -- the values
+          // this loop left in place half a cycle before it.
+          check_unit_enables(fi_units_expected);
           fault_inject = cycle[0]; // verify the pin gates every programmed mask
           #1;
-          check_unit_enables(dut.soc.FaultInjectMask & {6{fault_inject}});
+          fi_units_expected = dut.soc.FaultInjectMask & {8{fault_inject}};
         end
         #1;
         if (held_last) check(dut.soc.core.PCE == held_pc, "execute PC holds across FT stall edge");
-        if (dut.soc.core.FTStall && !dut.soc.core.TrapM) begin
-          held_cycles++;
+        // An older trap, return or CSR write in Memory flushes Execute and with it
+        // whatever the FT units there were doing, so the stall is not applied.
+        if (dut.soc.core.FTStall && !dut.soc.core.TrapM && !dut.soc.core.RetM && !dut.soc.core.CSRWriteFenceM) begin
+          // Every instruction is held while the FT wrappers evaluate it.  Only a hold
+          // caused by a fault counts here: a wrapper's check finding a mismatch (the
+          // cycle that ends in a retry), or a wrapper retrying or diagnosing one.
+          if ((dut.soc.core.ieu.dp.ftalu.check && dut.soc.core.ieu.dp.ftalu.retry) ||
+              dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.alu_ctrl.state == 3'd2 ||
+              dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd1 || dut.soc.core.ieu.dp.ftalu.cmp_ctrl.state == 3'd2 ||
+              (dut.soc.core.mdu.mdu.ftmul.check && dut.soc.core.mdu.mdu.ftmul.retry) ||
+              dut.soc.core.mdu.mdu.ftmul.ctrl.state == 3'd1 ||
+              (dut.soc.core.mdu.mdu.div.ftdiv.check && dut.soc.core.mdu.mdu.div.ftdiv.mismatch) ||
+              dut.soc.core.mdu.mdu.div.ftdiv.state == 2'd1)
+            held_cycles++;
           check(
               dut.soc.core.StallF && dut.soc.core.StallD && dut.soc.core.StallE && dut.soc.core.StallM &&
                   dut.soc.core.StallW,
@@ -491,13 +487,28 @@ module ft_core_fault_tb;
         check(injected && held_cycles > 0, "runtime fault actually exercised");
       if (scenario >= SC_CMP_BACKPRESSURE && scenario <= SC_DIV_BACKPRESSURE)
         check(backpressure_started, "terminal backpressure exercised");
+      // The fault counters saw what the scenario did: detections (ALU, CMP, MUL, DIV mismatch
+      // counters 8, 10, 12, 14) and unresolved faults (9, 11, 13, 15).
+      begin
+        int detected, unresolved, total;
+        detected = 0; unresolved = 0; total = 0;
+        for (int i = 0; i < 18; i++) total += int'(dut.soc.uncoregen.uncore.faultcount.Count[i]);
+        for (int i = 8; i < 16; i += 2) begin
+          detected   += int'(dut.soc.uncoregen.uncore.faultcount.Count[i]);
+          unresolved += int'(dut.soc.uncoregen.uncore.faultcount.Count[i+1]);
+        end
+        if (scenario == SC_HEALTHY) check(total == 0, "fault counters stay zero without faults");
+        else if (trap_case(scenario)) check(detected > 0 && unresolved == 1, "fault counters: detections and one unresolved fault");
+        else if (scenario < SC_SHARED_INJECTION) check(detected > 0 && unresolved == 0, "fault counters: recovered detections only");
+        else if (scenario == SC_SHARED_INJECTION) check(total > 0, "fault counters see shared injection");
+      end
       if (trap_case(scenario)) begin
         check(trap_count == 1 && regs[12] == 16 && regs[13] == (mdu_case(scenario) ? BASE + 20 : BRANCH_PC),
               "precise machine cause-16 trap");
         check(regs[14][6] && regs[10] == 0, "unresolved sticky status and no younger retirement");
       end else if (scenario == SC_FAULT_CONTROL) begin
-        check(trap_count == 0 && control_reads == 9 && regs[10] == 63,
-              "byte stores/loads control all six units without traps");
+        check(trap_count == 0 && control_reads == 11 && regs[10] == 63,
+              "byte stores/loads control all eight units without traps");
       end else if (scenario >= SC_LATE_DIV_INJECTION) begin
         check(
             injected && trap_count == 0 && regs[11] == 0 &&

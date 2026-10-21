@@ -291,14 +291,16 @@ localparam DTLB_ENTRIES = 32'd8;
 localparam DCACHE_NUMWAYS = 32'd4;
 localparam DCACHE_WAYSIZEINBYTES = 32'd1024;
 localparam DCACHE_LINELENINBITS = 32'd128;
-localparam ICACHE_NUMWAYS = 32'd4;
+localparam ICACHE_NUMWAYS = 32'd2; 
 localparam ICACHE_WAYSIZEINBYTES = 32'd1024;
 localparam ICACHE_LINELENINBITS = 32'd128;
 localparam CACHE_SRAMLEN = 32'd128;
 
 // Integer Divider Configuration
 // IDIV_BITSPERCYCLE must be 1, 2, or 4
-localparam IDIV_BITSPERCYCLE = 32'd4;
+// 2, not 4: each bit is one subtract-and-select in series, and four of them do
+// not fit a 2.5 ns cycle.  A 64-bit divide takes 32 iterations instead of 16.
+localparam IDIV_BITSPERCYCLE = 32'd2;
 localparam logic IDIV_ON_FPU = 0;   // must be 0: there is no FPU to share
 
 // Legal number of PMP entries are 0, 16, or 64

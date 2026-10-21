@@ -11,5 +11,6 @@ int main(void) {
     for (i = 0; i < 16; i++) arr[i] = i * i;
     int sum = 0;
     for (i = 0; i < 16; i++) sum += arr[i];
-    return sum;
+    /* The return value is the exit code (bin/startup.s), so check, not report. */
+    return (c == 49 && d == 294 && e == 6 && f == 0 && g == 294000 && sum == 1240) ? 0 : 1;
 }

@@ -46,7 +46,9 @@ module cache_integration_tb;
   logic CacheCommitted, CacheStall;
   logic [WORDLEN-1:0] ReadDataWord;
   logic CacheMiss, CacheAccess;
-  logic [31:0] SecCount;
+  logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
+  logic [2:0]  SecErr;
+  logic        DedErr;
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -63,11 +65,15 @@ module cache_integration_tb;
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
           .SCRUBBER_ENABLED(1'b1), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
+    .FaultInjectSec(1'b0), .FaultInjectDed(1'b0), .FaultLfsr('0), .FaultCount('0),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
-    .CacheCommitted, .CacheStall, .ReadDataWord, .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
+    .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );
+  always @(posedge clk)
+    if (reset) SecCount <= '0;
+    else       SecCount <= SecCount + 32'(SecErr[0]) + 32'(SecErr[1]) + 32'(SecErr[2]);
 
   // ── Clock ──────────────────────────────────────────────────────────────────────────────────
   always #5 clk = ~clk;
@@ -172,15 +178,15 @@ module cache_integration_tb;
 
   function automatic logic [TB_LINECHECKWIDTH-1:0] peekdatacheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
     endcase
   endfunction
 
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
     endcase
   endfunction
 
@@ -190,15 +196,15 @@ module cache_integration_tb;
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
     case (w)
-      0: dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s] = v;
-      default: dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s] = v;
+      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
+      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
     endcase
   endtask
 
   function automatic logic [TB_TAGCHECKWIDTH-1:0] peektagcheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
     endcase
   endfunction
 
@@ -208,8 +214,8 @@ module cache_integration_tb;
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
     case (w)
-      0: dut.CacheWays[0].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
-      default: dut.CacheWays[1].tag_ecc.CacheTagCheckMem.ram.RAM[s] = v;
+      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
+      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
     endcase
   endtask
 
@@ -232,8 +238,8 @@ module cache_integration_tb;
   function automatic int findway(input logic [PA_BITS-1:0] adr);
     int s;
     s = adr[SETLEN+OFFSETLEN-1:OFFSETLEN];
-    if (peekvalid(0, s) && dut.CacheWays[0].CacheTagMem.ram.RAM[s] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 0;
-    if (peekvalid(1, s) && dut.CacheWays[1].CacheTagMem.ram.RAM[s] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 1;
+    if (peekvalid(0, s) && dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 0;
+    if (peekvalid(1, s) && dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 1;
     return -1;
   endfunction
 
@@ -512,7 +518,7 @@ module cache_integration_tb;
               check("dirty eviction: victim data way selected before first writeback beat",
                     dut.SelectedWayDataQ === (2'b01 << victimway));
               check("dirty eviction: first writeback line matches the dirty victim",
-                    dut.ReadDataLineCache === expectedvictimline);
+                    dut.CorrectedLine === expectedvictimline);
             end
           end
         end
@@ -548,7 +554,7 @@ module cache_integration_tb;
               check("flush: selected data way matches flush-way counter",
                     dut.SelectedWayDataQ === dut.FlushWay);
               check("flush: writeback line matches selected dirty cache line",
-                    dut.ReadDataLineCache === peekdata(flushway, flushset));
+                    dut.CorrectedLine === peekdata(flushway, flushset));
             end
             previouswrite = CacheBusRW[0];
           end

@@ -92,7 +92,6 @@ module uartPC16550D #(parameter UART_PRESCALE) (
   logic [9:0]                   rxshiftreg;
   logic [10:0]                  rxfifo[15:0];
   logic [7:0]                   txfifo[15:0];
-  logic [4:0]                   rxfifotailunwrapped;
   logic [3:0]                   rxfifohead, rxfifotail, txfifohead, txfifotail, rxfifotriggerlevel;
   logic [3:0]                   rxfifoentries;
   logic [3:0]                   rxbitsexpected, txbitsexpected;
@@ -109,7 +108,6 @@ module uartPC16550D #(parameter UART_PRESCALE) (
   logic [8:0]                   rxdata9;
   logic [7:0]                   rxdata;
   logic [15:0]                  RXerrbit, rxfullbit;
-  logic [31:0]                  rxfullbitunwrapped;
 
   // transmit data
   logic [7:0]                   TXHR, nexttxdata;
@@ -182,7 +180,11 @@ module uartPC16550D #(parameter UART_PRESCALE) (
         LSR[4]   <= (LSR[4] | rxbreak)  & ~squashRXerrIP; // break indicator
         LSR[5]   <= THRE; // THRE
         LSR[6]   <= ~txsrfull & THRE; //  TEMT
-        if (rxfifohaserr) LSR[7] <= 1'b1; // any bits in FIFO have error
+        // LSR[7]: set while an errored character is in the RX FIFO; an LSR read
+        // clears it unless one still is (PC16550D 8.6.3).  It used to stay set
+        // until reset.
+        if (rxfifohaserr)                  LSR[7] <= 1'b1;
+        else if (~MEMRb & (A == UART_LSR)) LSR[7] <= 1'b0;
       end
 
       // Modem Status Register (8.6.8)
@@ -344,21 +346,16 @@ module uartPC16550D #(parameter UART_PRESCALE) (
   //assign rxfifotimeout = 0; // disabled pending fix
 
   // detect any errors in rx fifo
-  // although rxfullbit looks like a combinational loop, in one bit rxfifotail == i and breaks the loop
-  // tail is normally higher than head, but might wrap around.  unwrapped variable adds 16 to eliminate wrapping
-  assign rxfifotailunwrapped = rxfifotail < rxfifohead ? {1'b1, rxfifotail} : {1'b0, rxfifotail};
+  // rxfullbit[i]: slot i holds a received character, i.e. it lies in
+  // [rxfifotail, rxfifohead) -- the head is the WRITE pointer.  This used an
+  // unwrapped prefix chain written for the opposite convention ("tail is
+  // normally higher than head"), which marked the EMPTY slots instead: a real
+  // error in an occupied slot never reached LSR[7], and stale or never-written
+  // slots did (X in 4-state simulation, garbage in silicon).
   genvar i;
-  for (i=0; i<32; i++) begin : rxfull
-    if (i == 0) assign rxfullbitunwrapped[i] = (rxfifohead==0) & (rxfifotail != 0);
-    else        assign rxfullbitunwrapped[i] = ({1'b0,rxfifohead}==i | rxfullbitunwrapped[i-1]) & (rxfifotailunwrapped != i);
-  end
   for (i=0; i<16; i++) begin : rx
     assign RXerrbit[i]  = |rxfifo[i][10:8]; // are any of the error conditions set?
-    assign rxfullbit[i] = rxfullbitunwrapped[i] | rxfullbitunwrapped[i+16];
-  /*      if (i > 0)
-      assign rxfullbit[i] = ((rxfifohead==i) | rxfullbit[i-1]) & (rxfifotail != i);
-      else
-      assign rxfullbit[0] = ((rxfifohead==i) | rxfullbit[15]) & (rxfifotail != i);*/
+    assign rxfullbit[i] = ((4'(i) - rxfifotail) < rxfifoentries);   // 4-bit: wraps mod 16
   end
   assign rxfifohaserr   = |(RXerrbit & rxfullbit);
 

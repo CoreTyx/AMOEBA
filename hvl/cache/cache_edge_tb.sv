@@ -55,7 +55,9 @@ module cache_edge_tb;
   logic CacheCommitted, CacheStall;
   logic [WORDLEN-1:0] ReadDataWord;
   logic CacheMiss, CacheAccess;
-  logic [31:0] SecCount;
+  logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
+  logic [2:0]  SecErr;
+  logic        DedErr;
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -63,6 +65,10 @@ module cache_edge_tb;
   logic [1:0] CacheBusRW;
   logic [PA_BITS-1:0] CacheBusAdr;
   logic EccDedDirtyFault;
+  // Runtime fault injection (cachefi): the dut's phase is 0, so holding the count at 1 keeps it quiet
+  logic fi_sec = 0, fi_ded = 0;
+  logic [15:0] fi_lfsr = 0;
+  logic [FI_COUNT_BITS-1:0] fi_count = 1;
   logic [PA_BITS-1:0] EccDedDirtyFaultAdr;
 
   int errors;
@@ -73,11 +79,15 @@ module cache_edge_tb;
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
           .SCRUBBER_ENABLED(1'b0), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
+    .FaultInjectSec(fi_sec), .FaultInjectDed(fi_ded), .FaultLfsr(fi_lfsr), .FaultCount(fi_count),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
-    .CacheCommitted, .CacheStall, .ReadDataWord, .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
+    .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );
+  always @(posedge clk)
+    if (reset) SecCount <= '0;
+    else       SecCount <= SecCount + 32'(SecErr[0]) + 32'(SecErr[1]) + 32'(SecErr[2]);
 
   // ── Clock ──────────────────────────────────────────────────────────────────────────────────
   always #5 clk = ~clk;
@@ -211,6 +221,14 @@ module cache_edge_tb;
     refset(adr, l);
   endtask
 
+  // Arm one injection event: it lands in the next line and tag the cache writes.
+  task automatic fi_arm(input logic ded, input logic [1:0] sel);
+    @(negedge clk);
+    fi_sec = ~ded; fi_ded = ded; fi_lfsr = {14'b0, sel}; fi_count = 0;
+    @(negedge clk);
+    fi_sec = 0; fi_ded = 0; fi_count = 1;
+  endtask
+
   task automatic doflush;
     FlushCache = 1;
     @(negedge clk);
@@ -244,24 +262,34 @@ module cache_edge_tb;
   endtask
 
   // ── Hierarchical peek/poke into the behavioral arrays (USE_SRAM=0) ──
+  // Each array word is a whole codeword: {line, check bits} and {tag, check bits}.
+  function automatic int tbrequiredr(input int dw);
+    return (dw <=    1) ?  2 : (dw <=    4) ?  3 : (dw <=   11) ?  4 : (dw <=   26) ?  5 :
+           (dw <=   57) ?  6 : (dw <=  120) ?  7 : (dw <=  247) ?  8 : (dw <=  502) ?  9 :
+           (dw <= 1013) ? 10 : 11;
+  endfunction
+  localparam int TB_LINECHECKR = tbrequiredr(LINELEN);
+  localparam int TB_LINECHECKWIDTH = TB_LINECHECKR + 1;
+  localparam int TB_TAGCHECKWIDTH = tbrequiredr(TAGLEN) + 1;
+
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
     endcase
   endfunction
 
   task automatic flipdatabit(input int w, input int s, input int b);
     case (w)
-      0: dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s][b] = ~dut.CacheWays[0].wordram.CacheDataMem.ram.RAM[s][b];
-      default: dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s][b] = ~dut.CacheWays[1].wordram.CacheDataMem.ram.RAM[s][b];
+      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
+      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
     endcase
   endtask
 
   task automatic fliptagbit(input int w, input int s, input int b);
     case (w)
-      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][b] = ~dut.CacheWays[0].CacheTagMem.ram.RAM[s][b];
-      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][b] = ~dut.CacheWays[1].CacheTagMem.ram.RAM[s][b];
+      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
+      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
     endcase
   endtask
 
@@ -288,8 +316,8 @@ module cache_edge_tb;
 
   function automatic logic [TAGLEN-1:0] peektag(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s];
-      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
+      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
     endcase
   endfunction
 
@@ -307,13 +335,6 @@ module cache_edge_tb;
   endfunction
 
   // ── Probe decoder: lets the random test ask "does this stored line already hold an error?" ──
-  function automatic int tbrequiredr(input int dw);
-    return (dw <=    1) ?  2 : (dw <=    4) ?  3 : (dw <=   11) ?  4 : (dw <=   26) ?  5 :
-           (dw <=   57) ?  6 : (dw <=  120) ?  7 : (dw <=  247) ?  8 : (dw <=  502) ?  9 :
-           (dw <= 1013) ? 10 : 11;
-  endfunction
-  localparam int TB_LINECHECKR = tbrequiredr(LINELEN);
-
   logic [LINELEN+TB_LINECHECKR:0] probecw;
   logic [LINELEN-1:0]             probedata;
   logic                           probesec, probeded;
@@ -322,8 +343,8 @@ module cache_edge_tb;
 
   function automatic logic [TB_LINECHECKR:0] peekdatacheck(input int w, input int s);
     case (w)
-      0: return dut.CacheWays[0].wordram.CacheDataCheckMem.ram.RAM[s];
-      default: return dut.CacheWays[1].wordram.CacheDataCheckMem.ram.RAM[s];
+      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
+      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
     endcase
   endfunction
 
@@ -668,6 +689,48 @@ module cache_edge_tb;
     // ── 11. Same, with single-bit data errors planted in resident lines. All are correctable,
     //        so loads AND final memory contents must still match the reference. ──
     randomphase("inject", 1500, 1);
+
+    // ── 12. Runtime fault injection through the write path (cachefi). An armed event lands in
+    //        the next line and tag written: a correctable flip is repaired on the next hit, an
+    //        uncorrectable pair on a clean line makes it refetch. ──
+    doreset();
+    begin
+      logic [31:0] seccountbefore;
+      logic [PA_BITS-1:0] b;
+      int wv;
+      a = 16'h1100;
+      setline(a, 128'h9999999999999999_8888888888888888);
+      fi_arm(0, 2'd1);
+      doload(a, result);                                    // the fill takes the flips
+      s = setof(a); wv = peekvalid(0, s) ? 0 : 1;
+      check("FI SEC: miss returns the fetched word", result === 64'h8888888888888888);
+      check("FI SEC: one data bit flipped in the stored line", $onehot(peekdata(wv, s) ^ refget(a)));
+      check("FI SEC: one tag bit flipped", $onehot(peektag(wv, s) ^ a[PA_BITS-1:SETLEN+OFFSETLEN]));
+      seccountbefore = SecCount;
+      doload(a, result);
+      check("FI SEC: hit returns the corrected word", result === 64'h8888888888888888);
+      check("FI SEC: tag and data corrections counted", SecCount == seccountbefore + 2);
+      check("FI SEC: corrected line and tag written back",
+            peekdata(wv, s) === refget(a) && peektag(wv, s) == a[PA_BITS-1:SETLEN+OFFSETLEN]);
+      b = a + PA_BITS'(1 << OFFSETLEN);                     // next set
+      setline(b, 128'h7777777777777777_6666666666666666);
+      doload(b, result);
+      check("FI SEC: the event is spent; the next fill is clean", peekdata(findway(b), setof(b)) === refget(b));
+    end
+    doreset();
+    begin
+      int wv;
+      a = 16'h1200;
+      setline(a, 128'h5555555555555555_4444444444444444);
+      fi_arm(1, 2'd3);
+      doload(a, result);
+      s = setof(a); wv = peekvalid(0, s) ? 0 : 1;
+      check("FI DED: two data bits flipped in the stored line", $countones(peekdata(wv, s) ^ refget(a)) == 2);
+      doload(a + 8, result);
+      check("FI DED clean: correct word after the line is refetched", result === 64'h5555555555555555);
+      check("FI DED clean: the refetched line is clean", peekdata(findway(a), s) === refget(a));
+    end
+    doreset();
 
     $display("cache_edge_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");

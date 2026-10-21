@@ -32,9 +32,14 @@
 module cache import cvw::*; #(parameter cvw_t P,
                               parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE,
                               parameter SCRUBBER_ENABLED = 1'b0,
-                              parameter SCRUB_INTERVAL_CYCLES = 0) (
+                              parameter SCRUB_INTERVAL_CYCLES = 0,
+                              parameter logic [FI_COUNT_BITS-1:0] FI_PHASE = '0) (  // this cache's event phase on the shared generator
   input  logic                   clk,
   input  logic                   reset,
+  // Runtime fault injection (cachefi.sv): unit enables and the core's shared generator
+  input  logic                   FaultInjectSec, FaultInjectDed,
+  input  logic [15:0]            FaultLfsr,
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic                   Stall,             // Stall the cache, preventing new accesses. In-flight access finished but does not return to READY
   input  logic                   FlushStage,        // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                   InvalidateFlushStage, // Pipeline flush of second stage (prevent writes and bus operations)
@@ -49,11 +54,15 @@ module cache import cvw::*; #(parameter cvw_t P,
   input  logic [WORDLEN-1:0]     WriteData,    // Data to write to cache (D$ only)
   output logic                   CacheCommitted,    // Cache has started bus operation that shouldn't be interrupted
   output logic                   CacheStall,        // Cache stalls pipeline during multicycle operation
+  output logic                   CacheBusy,         // CacheStall without the cycle a request is first seen (see cachefsm.sv)
   output logic [WORDLEN-1:0]     ReadDataWord,      // Word read from cache (goes to CPU and bus)
+  output logic [WORDLEN-1:0]     AmoWord,           // The word an AMO operates on, from a register: the hit word, or the fetched one on a miss
+  input  logic [$clog2(LINELEN/8)-1:0] AmoOffset,   // Where in the line that word is: PAdr's offset bits, from the instruction's own address register
   // to performance counters to cpu
   output logic                   CacheMiss,         // Cache miss
   output logic                   CacheAccess,       // Cache access
-  output logic [31:0]            SecCount,          // Number of SEC codewords corrected
+  output logic [2:0]             SecErr,            // Pulses: tag, line, and store-repaired line corrected this cycle
+  output logic                   DedErr,            // Pulse: an uncorrectable line or tag was dropped or reported
   // lsu control
   input  logic                   SelHPTW,           // Use PAdr from Hardware Page Table Walker rather than NextSet
   // Bus fsm interface
@@ -84,9 +93,22 @@ module cache import cvw::*; #(parameter cvw_t P,
   localparam                     TAG_ECC_SUPPORTED = 1'b1;
 `endif
 
-  // ECC sizing for the shared data decoder/encoder (must match cacheway.sv's own derivation exactly
+  // ECC sizing for the shared tag and data encoders (must match cacheway.sv's own derivation exactly
   // -- see the comment there on why this small ladder is duplicated rather than shared via a
   // function call across module boundaries).
+  localparam int TAGCHECKR      = (TAGLEN <=    1) ?  2 :
+                                   (TAGLEN <=    4) ?  3 :
+                                   (TAGLEN <=   11) ?  4 :
+                                   (TAGLEN <=   26) ?  5 :
+                                   (TAGLEN <=   57) ?  6 :
+                                   (TAGLEN <=  120) ?  7 :
+                                   (TAGLEN <=  247) ?  8 :
+                                   (TAGLEN <=  502) ?  9 :
+                                   (TAGLEN <= 1013) ? 10 :
+                                   (TAGLEN <= 2036) ? 11 :
+                                   (TAGLEN <= 4083) ? 12 : 13;
+  localparam int TAGCHECKWIDTH  = TAGCHECKR + 1;
+  localparam int TAGSTOREWIDTH  = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0);
   localparam int LINECHECKR     = (LINELEN <=    1) ?  2 :
                                    (LINELEN <=    4) ?  3 :
                                    (LINELEN <=   11) ?  4 :
@@ -103,13 +125,19 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          SelAdrData;
   logic                          SelAdrTag;
   logic [1:0]                    AdrSelMuxSelData;
-  logic [1:0]                    AdrSelMuxSelTag, AdrSelMuxSelLRU;
+  logic [1:0]                    AdrSelMuxSelTag;
   logic [SETLEN-1:0]             CacheSetDataDemand, CacheSetData;
-  logic [SETLEN-1:0]             CacheSetTagDemand, CacheSetTag, CacheSetLRU;
+  logic [SETLEN-1:0]             CacheSetTagDemand, CacheSetTag;
   logic [LINELEN-1:0]            LineWriteData;
   logic                          ClearDirty, SetDirty, SetValid, ClearValid;
-  logic [LINELEN-1:0]            ReadDataLineWay [NUMWAYS-1:0];
-  logic [LINECHECKWIDTH-1:0]     DataCheckWay [NUMWAYS-1:0];
+  logic [LINELEN-1:0]            CorrectedLineWay [NUMWAYS-1:0];
+  logic [NUMWAYS-1:0]            DataSecErrWay, DataDedErrWay;
+  logic [NUMWAYS-1:0]            HitWayLive, DirtyWayLive;
+  logic                          HitLive, LineDirtyLive;
+  logic                          StoreRepairsData;
+  logic                          CacheBusyFsm;
+  logic [LINELEN-1:0]            LineEncodedData, LineCorrectionData, LineWriteMux, LineWriteFinal;
+  logic [LINECHECKWIDTH-1:0]     LineEncodedCheck, LineCorrectionCheck, LineCheckWriteFinal;
   logic [NUMWAYS-1:0]            HitWay, ValidWay, ValidMismatchWay;
   logic                          Hit;
   logic [NUMWAYS-1:0]            VictimWay, DirtyWay, HitDirtyWay, DirtyMismatchWay;
@@ -120,20 +148,21 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            TagDedDirtyWay;     // valid+dirty ways whose tag is uncorrectable
   logic                          TagDedDirty, DropTagDedDirty;
   logic                          EccDedLostLine;     // cachefsm: dirty line dropped on eviction/flush (uncorrectable data)
+  logic                          EccDedCleanDrop;    // cachefsm: clean line dropped for an uncorrectable error
   logic                          LatchHitWord, SelHitWord;
   logic [WORDLEN-1:0]            ReadDataWordLine, HitWordQ;
   logic [SETLEN-1:0]             FlushAdr;
+  logic [SETLEN-1:0]             FlushAdrCurr;      // the set being flushed (FlushAdr looks one ahead for the next read)
   logic                          FlushAdrCntEn, FlushCntRst;
   logic                          FlushAdrFlag, FlushWayFlag;
   logic [NUMWAYS-1:0]            FlushWay, NextFlushWay;
   logic                          FlushWayCntEn;
   logic                          SelWriteback;
   logic                          LRUWriteEn;
-  logic [LINELEN-1:0]            ReadDataLine, ReadDataLineCache;
+  logic [LINELEN-1:0]            ReadDataLine;
   logic                          SelFetchBuffer;
   logic                          CacheEn;
-  logic                          SelVictim;
-  logic [LINELEN/8-1:0]          LineByteMask;
+  logic                          SelVictim, SelVictimLive;
   logic [$clog2(LINELEN/8) - $clog2(MUXINTERVAL/8) - 1:0] WordOffsetAddr;
   genvar                         index;
 
@@ -146,10 +175,10 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          TagSecErr, TagDedErr, DataSecErr, DataDedErr;
   logic                          SelCorrectTag, SelCorrectData;
   logic [TAGLEN-1:0]             CorrectedTagIn;
+  logic [TAGSTOREWIDTH-1:0]      TagStoreWrite;
   logic [LINELEN-1:0]            CorrectedLine;
   logic                          TagDecodeCaptureEnFsm, ScrubTagDecodeCaptureEn, TagDecodeCaptureEn;
   logic [NUMWAYS-1:0]            SelectedWayDataQ;
-  logic [LINECHECKWIDTH-1:0]     DataCheckBits;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Read Path
@@ -166,10 +195,6 @@ module cache import cvw::*; #(parameter cvw_t P,
   mux3 #(SETLEN) AdrSelMuxTag(NextSet[SETTOP-1:OFFSETLEN], PAdr[SETTOP-1:OFFSETLEN], FlushAdr,
     AdrSelMuxSelTag, CacheSetTagDemand);
 
-  assign AdrSelMuxSelLRU = {FlushCache, ((SelAdrTag | SelHPTW | Stall) & ~((READ_ONLY_CACHE == 1) & FlushStage))};
-  mux3 #(SETLEN) AdrSelMuxLRU(NextSet[SETTOP-1:OFFSETLEN], PAdr[SETTOP-1:OFFSETLEN], FlushAdr,
-    AdrSelMuxSelLRU, CacheSetLRU);
-
   // Scrubber takes the address bus on grant and retains it through decode, verification, and
   // commit; ScrubGrant never overlaps a real demand/flush/CMO/HPTW access.
   mux2 #(SETLEN) ScrubAdrMuxData(CacheSetDataDemand, ScrubSet, ScrubOwnsWaySelect, CacheSetData);
@@ -178,32 +203,33 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign ScrubGrant = SCRUBBER_ENABLED & ScrubReq & ~(|CacheRW) & ~FlushCache & ~InvalidateCache & ~(|CMOpM) & ~SelHPTW & ~CacheStall;
   assign ScrubOwnsWaySelect = ScrubGrant | ScrubBusy;
 
-  // Array of cache ways, along with victim, hit, dirty, and read merging logic
-  cacheway #(.P(P), .PA_BITS(PA_BITS), .NUMSETS(NUMSETS), .LINELEN(LINELEN),
-             .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
-             .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
-             .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
-    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteData, .LineByteMask,
-    .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
-    .FlushWay, .FlushCache, .SelVictim,
-    .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
-    .SelCorrectTag, .CorrectedTagIn, .SelCorrectData, .CorrectedLineIn(CorrectedLine),
-    .TagDecodeCaptureEn, .SelectedWayDataQ,
-    .ReadDataLineWay, .DataCheckWay, .HitWay, .ValidWay, .ValidMismatch(ValidMismatchWay),
-    .DirtyWay, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
-    .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
-    .TagDedDirtyWay, .DropTagDedDirty,
-    .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
-
   // The scrubber needs the array enabled throughout its operation, including cycles when cachefsm's
   // own CacheEn would be deasserted. LRU state, though, should only ever move for demand evictions.
   logic CacheEnArray;
   assign CacheEnArray = CacheEn | ScrubOwnsWaySelect;
 
+  // Array of cache ways, along with victim, hit, dirty, and read merging logic
+  cacheway #(.P(P), .PA_BITS(PA_BITS), .NUMSETS(NUMSETS), .LINELEN(LINELEN),
+             .TAGLEN(TAGLEN), .OFFSETLEN(OFFSETLEN), .INDEXLEN(SETLEN),
+             .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED),
+             .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
+    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag, .PAdr, .LineWriteFinal, .LineCheckWriteFinal,
+    .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
+    .FlushWay, .FlushCache, .SelVictim, .SelVictimLive,
+    .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
+    .SelCorrectTag, .TagStoreWrite, .SelCorrectData,
+    .TagDecodeCaptureEn, .SelectedWayDataQ,
+    .CorrectedLineWay, .DataSecErrWay, .DataDedErrWay, .HitWay, .HitWayLive, .ValidWay, .ValidMismatch(ValidMismatchWay),
+    .DirtyWay, .DirtyWayLive, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
+    .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
+    .TagDedDirtyWay, .DropTagDedDirty,
+    .TagWay, .FlushStage, .InvalidateCache, .InvalidateFlushStage);
+
+
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict
     cacheLRU #(NUMWAYS, SETLEN, NUMSETS) cacheLRU(
-      .clk, .reset, .CacheEn, .HitWay, .ValidWay, .VictimWay, .CacheSetLRU, .LRUWriteEn,
+      .clk, .reset, .CacheEn, .HitWay, .ValidWay, .VictimWay, .LRUWriteEn,
       .SetValid, .PAdr(PAdr[SETTOP-1:OFFSETLEN]), .InvalidateCache, .InvalidateFlushStage);
   end else
     assign VictimWay = 1'b1; // one hot.
@@ -211,6 +237,9 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign Hit = |HitWay;
   assign HitLineDirty = |HitDirtyWay;
   assign LineDirty = |DirtyWay;
+  // For the decisions taken in the cycle the tags are read (see cacheway.sv).
+  assign HitLive = |HitWayLive;
+  assign LineDirtyLive = |DirtyWayLive;
 
   // Whichever way is currently selected -- the demand hit way, or (mutually exclusive in time,
   // never both meaningful at once) the scrubber's target way -- determines whose tag SEC/DED
@@ -224,23 +253,15 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign ValidMismatch = |(ValidMismatchWay & TagSelWay);
   assign DirtyMismatch = |(DirtyMismatchWay & TagSelWay);
 
-  // ReadDataLineWay is a 2d array of cache line len by number of ways.
+  // CorrectedLineWay is a 2d array of cache line len by number of ways.
   // Need to OR together each way in a bitwise manner.
   // Final part of the AO Mux.  First is the AND in the cacheway.
-  or_rows #(NUMWAYS, LINELEN) ReadDataAOMux(.a(ReadDataLineWay), .y(ReadDataLineCache));
+  // Each way decodes its own line into a register (cacheway.sv), so what is selected here is
+  // already corrected and already registered.
+  or_rows #(NUMWAYS, LINELEN) ReadDataAOMux(.a(CorrectedLineWay), .y(CorrectedLine));
   or_rows #(NUMWAYS, TAGLEN) TagAOMux(.a(TagWay), .y(Tag));
-  or_rows #(NUMWAYS, LINECHECKWIDTH) DataCheckAOMux(.a(DataCheckWay), .y(DataCheckBits));
-
-  // Single shared data decoder: only the selected way's raw data+checkbits ever need decoding
-  // (unlike the tag, which is decoded per-way inside cacheway.sv because all ways must be compared
-  // in parallel to determine which one hits). Valid the cycle after SelectedWayDataQ reflects the
-  // right way -- see cacheway.sv header and cachefsm.sv's two-state tag-then-data sequencing.
-  cacheeccdec #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datadec (
-    .codeword_i ({ReadDataLineCache, DataCheckBits}),
-    .data_o     (CorrectedLine),
-    .sec_err_o  (DataSecErr),
-    .ded_err_o  (DataDedErr)
-  );
+  assign DataSecErr = |DataSecErrWay;
+  assign DataDedErr = |DataDedErrWay;
 
   cachescrubber #(.NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS), .SETLEN(SETLEN),
                   .READ_ONLY_CACHE(READ_ONLY_CACHE), .SCRUB_INTERVAL_CYCLES(SCRUB_INTERVAL_CYCLES)) scrubber (
@@ -287,10 +308,22 @@ module cache import cvw::*; #(parameter cvw_t P,
   flopen #(WORDLEN) HitWordReg(clk, LatchHitWord, ReadDataWordLine, HitWordQ);
   mux2 #(WORDLEN) HitWordMux(ReadDataWordLine, HitWordQ, SelHitWord, ReadDataWord);
 
+  // The AMO's operand.  An AMO hit writes in STATE_AMO_WRITE, when HitWordQ holds the word it
+  // read; an AMO miss writes with the refill (STATE_WRITE_LINE), from the fetch buffer.  Either
+  // way the operand starts at a register and does not come through ReadDataWord, so the AMO
+  // ALU is not on a path from the arrays or from the bus-beat word select.
+  // The word of the fetch buffer is picked with AmoOffset and not with PAdr: for an AMO they are
+  // the same bits (the offset within a line is inside the page offset), but PAdr arrives through
+  // the page walker's address mux and AmoOffset comes straight from a register.
+  logic [WORDLEN-1:0] FetchBufferWord;
+  subcachelineread #(LINELEN, WORDLEN, MUXINTERVAL) fetchbufferwordread(
+    .PAdr(AmoOffset[$clog2(LINELEN/8) - 1 : $clog2(MUXINTERVAL/8)]), .ReadDataLine(FetchBuffer), .ReadDataWord(FetchBufferWord));
+  mux2 #(WORDLEN) AmoWordMux(HitWordQ, FetchBufferWord, SelFetchBuffer, AmoWord);
+
   // Bus address for fetch, writeback, or flush writeback
   mux3 #(PA_BITS) CacheBusAdrMux(.d0({PAdr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
     .d1({Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}}),
-    .d2({Tag, FlushAdr, {OFFSETLEN{1'b0}}}),
+    .d2({Tag, FlushAdrCurr, {OFFSETLEN{1'b0}}}),
     .s({FlushCache, SelWriteback}), .y(CacheBusAdr));
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -315,11 +348,66 @@ module cache import cvw::*; #(parameter cvw_t P,
         .d1((SetDirty & ~SelFetchBuffer) ? CorrectedLine[8*index+7:8*index] : FetchBuffer[8*index+7:8*index]),
         .s(FetchBufferByteSel[index] & ~CMOpM[3]), .y(LineWriteData[8*index+7:8*index]));
     end
-    assign LineByteMask = SetDirty ? DemuxedByteMask : '1;
   end else begin : WriteSelLogic
     // No need for this mux if the cache does not handle writes.
     assign LineWriteData = FetchBuffer;
-    assign LineByteMask = '1;
+  end
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Line encode
+  //
+  // What is written to the data array is either new data (LineWriteData) or the corrected copy
+  // of the line that was read (a correction writeback).  Both are the same for every way -- the
+  // way is chosen by the write enable -- so they are encoded once here.  Each way used to carry
+  // its own copy of both encoders.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) dataenc (
+    .data_i     (LineWriteData),
+    .codeword_o ({LineEncodedData, LineEncodedCheck})
+  );
+  cacheeccenc #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datacorrectionenc (
+    .data_i     (CorrectedLine),
+    .codeword_o ({LineCorrectionData, LineCorrectionCheck})
+  );
+  mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteMux);
+  mux2 #(LINECHECKWIDTH) linecheckdinmux(LineEncodedCheck, LineCorrectionCheck, SelCorrectData, LineCheckWriteFinal);
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Fault injection: flips armed by cachefi land in the next tag and line written, after encode
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  logic [TAGLEN-1:0]             TagFlip;
+  logic [LINELEN-1:0]            LineFlip;
+  cachefi #(.TAGLEN(TAGLEN), .TAGR(TAGCHECKR), .LINELEN(LINELEN), .LINER(LINECHECKR), .PHASE(FI_PHASE)) faultinject(
+    .clk, .reset, .FaultInjectSec, .FaultInjectDed, .FaultLfsr, .FaultCount,
+    .TagWrite((SetValid & ~FlushStage) | SelCorrectTag),
+    .LineWrite(((SetValid | SetDirty) & ~FlushStage) | SelCorrectData),
+    .TagFlip, .LineFlip);
+  assign LineWriteFinal = LineWriteMux ^ LineFlip;
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Tag encode
+  //
+  // The same holds for the tag array: what is written is either the new line's tag (from PAdr)
+  // or the corrected copy of the tag that was read (CorrectedTagIn), the same for every way, so
+  // the word is built once here.  Each way used to carry its own copy of both encoders.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  if (TAG_ECC_SUPPORTED) begin : tagwrite
+    logic [TAGLEN-1:0]        TagEncodedData, TagCorrectionData, TagWriteData;
+    logic [TAGCHECKWIDTH-1:0] TagEncodedCheck, TagCorrectionCheck, TagCheckWriteData;
+
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagenc (
+      .data_i     (PAdr[PA_BITS-1:SETTOP]),
+      .codeword_o ({TagEncodedData, TagEncodedCheck})
+    );
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagcorrectionenc (
+      .data_i     (CorrectedTagIn),
+      .codeword_o ({TagCorrectionData, TagCorrectionCheck})
+    );
+    mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
+    mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
+    assign TagStoreWrite = {TagWriteData ^ TagFlip, TagCheckWriteData};
+  end else begin : tagwrite                      // no tag ECC: nothing to inject into
+    assign TagStoreWrite = PAdr[PA_BITS-1:SETTOP];
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -336,6 +424,10 @@ module cache import cvw::*; #(parameter cvw_t P,
     mux2    #(SETLEN) FlushAdrMux(NextFlushAdr, FlushAdrP1, FlushAdrCntEn, FlushAdr);
     assign FlushAdrP1 = NextFlushAdr + 1'b1;
     assign FlushAdrFlag = (NextFlushAdr == FLUSHADRTHRESHOLD[SETLEN-1:0]);
+    // The line being written back is in the set the counter holds.  FlushAdr moves to the
+    // next set in the cycle the counter is told to advance, so that the arrays read it early;
+    // that decision comes from the tags as they are read, and has no business on the bus address.
+    assign FlushAdrCurr = NextFlushAdr;
 
     // Flush way
     flopenl #(NUMWAYS) FlushWayReg(clk, FlushWayCntEn, ResetOrFlushCntRst, {{NUMWAYS-1{1'b0}}, 1'b1}, NextFlushWay, FlushWay);
@@ -348,6 +440,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     assign FlushWayFlag = 1'b0;
     assign FlushAdrFlag = 1'b0;
     assign FlushAdr = '0;
+    assign FlushAdrCurr = '0;
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -372,29 +465,33 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .CacheBusRW, .CacheBusAck,
     .FlushStage, .InvalidateFlushStage, .CacheRW, .Stall,
-    .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheCommitted,
-    .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim,
+    .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheBusy(CacheBusyFsm), .CacheCommitted,
+    .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim, .SelVictimLive,
     .ClearDirty, .SetDirty, .SetValid, .ClearValid, .SelWriteback,
     .FlushAdrCntEn, .FlushWayCntEn, .FlushCntRst,
     .FlushAdrFlag, .FlushWayFlag, .FlushCache, .SelFetchBuffer,
     .InvalidateCache, .CMOpM, .CacheEn, .LRUWriteEn,
     .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr, .HitDirty(HitLineDirty),
+    .HitLive, .LineDirtyLive, .StoreRepairsData,
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
-    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .LatchHitWord, .SelHitWord,
+    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .EccDedCleanDrop, .LatchHitWord, .SelHitWord,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
+  // While the scrubber has the arrays a demand request waits in ACCESS, so the cache is busy
+  // then too.  (ScrubBusy is scrubber state; its grant cycle needs no cover, because a grant
+  // requires that there be no request.)
+  assign CacheBusy = CacheBusyFsm | ScrubBusy;
   assign ScrubFaultAdr = {Tag, ScrubSet, {OFFSETLEN{1'b0}}};
   // For a line dropped on eviction/flush, report that line's own address (the selected way's tag is
   // the victim's or flush way's), not the access that caused the eviction.
   logic [PA_BITS-1:0]            LostLineAdr;
-  assign LostLineAdr = FlushCache ? {Tag, FlushAdr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
+  assign LostLineAdr = FlushCache ? {Tag, FlushAdrCurr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
   assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : EccDedLostLine ? LostLineAdr : PAdr;
 
-  always_ff @(posedge clk)
-    if (reset) SecCount <= '0;
-    else if (SelCorrectTag || SelCorrectData)
-      SecCount <= SecCount + {31'b0, SelCorrectTag} + {31'b0, SelCorrectData};
+  // Fault flags for the counters (faultcount_apb), demand and scrubber alike
+  assign SecErr = {StoreRepairsData, SelCorrectData, SelCorrectTag};
+  assign DedErr = EccDedCleanDrop | EccDedDirtyFault | ScrubInvalidate;
 
 endmodule
