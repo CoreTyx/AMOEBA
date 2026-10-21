@@ -87,9 +87,22 @@ module cache import cvw::*; #(parameter cvw_t P,
   localparam                     TAG_ECC_SUPPORTED = 1'b1;
 `endif
 
-  // ECC sizing for the shared data decoder/encoder (must match cacheway.sv's own derivation exactly
+  // ECC sizing for the shared tag and data encoders (must match cacheway.sv's own derivation exactly
   // -- see the comment there on why this small ladder is duplicated rather than shared via a
   // function call across module boundaries).
+  localparam int TAGCHECKR      = (TAGLEN <=    1) ?  2 :
+                                   (TAGLEN <=    4) ?  3 :
+                                   (TAGLEN <=   11) ?  4 :
+                                   (TAGLEN <=   26) ?  5 :
+                                   (TAGLEN <=   57) ?  6 :
+                                   (TAGLEN <=  120) ?  7 :
+                                   (TAGLEN <=  247) ?  8 :
+                                   (TAGLEN <=  502) ?  9 :
+                                   (TAGLEN <= 1013) ? 10 :
+                                   (TAGLEN <= 2036) ? 11 :
+                                   (TAGLEN <= 4083) ? 12 : 13;
+  localparam int TAGCHECKWIDTH  = TAGCHECKR + 1;
+  localparam int TAGSTOREWIDTH  = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0);
   localparam int LINECHECKR     = (LINELEN <=    1) ?  2 :
                                    (LINELEN <=    4) ?  3 :
                                    (LINELEN <=   11) ?  4 :
@@ -155,6 +168,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          TagSecErr, TagDedErr, DataSecErr, DataDedErr;
   logic                          SelCorrectTag, SelCorrectData;
   logic [TAGLEN-1:0]             CorrectedTagIn;
+  logic [TAGSTOREWIDTH-1:0]      TagStoreWrite;
   logic [LINELEN-1:0]            CorrectedLine;
   logic                          TagDecodeCaptureEnFsm, ScrubTagDecodeCaptureEn, TagDecodeCaptureEn;
   logic [NUMWAYS-1:0]            SelectedWayDataQ;
@@ -196,7 +210,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
     .FlushWay, .FlushCache, .SelVictim, .SelVictimLive,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
-    .SelCorrectTag, .CorrectedTagIn, .SelCorrectData,
+    .SelCorrectTag, .TagStoreWrite, .SelCorrectData,
     .TagDecodeCaptureEn, .SelectedWayDataQ,
     .CorrectedLineWay, .DataSecErrWay, .DataDedErrWay, .HitWay, .HitWayLive, .ValidWay, .ValidMismatch(ValidMismatchWay),
     .DirtyWay, .DirtyWayLive, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
@@ -350,6 +364,32 @@ module cache import cvw::*; #(parameter cvw_t P,
   );
   mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteFinal);
   mux2 #(LINECHECKWIDTH) linecheckdinmux(LineEncodedCheck, LineCorrectionCheck, SelCorrectData, LineCheckWriteFinal);
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Tag encode
+  //
+  // The same holds for the tag array: what is written is either the new line's tag (from PAdr)
+  // or the corrected copy of the tag that was read (CorrectedTagIn), the same for every way, so
+  // the word is built once here.  Each way used to carry its own copy of both encoders.
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  if (TAG_ECC_SUPPORTED) begin : tagwrite
+    logic [TAGLEN-1:0]        TagEncodedData, TagCorrectionData, TagWriteData;
+    logic [TAGCHECKWIDTH-1:0] TagEncodedCheck, TagCorrectionCheck, TagCheckWriteData;
+
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagenc (
+      .data_i     (PAdr[PA_BITS-1:SETTOP]),
+      .codeword_o ({TagEncodedData, TagEncodedCheck})
+    );
+    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagcorrectionenc (
+      .data_i     (CorrectedTagIn),
+      .codeword_o ({TagCorrectionData, TagCorrectionCheck})
+    );
+    mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
+    mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
+    assign TagStoreWrite = {TagWriteData, TagCheckWriteData};
+  end else begin : tagwrite
+    assign TagStoreWrite = PAdr[PA_BITS-1:SETTOP];
+  end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Flush logic

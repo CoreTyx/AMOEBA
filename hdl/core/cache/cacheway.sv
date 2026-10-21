@@ -62,6 +62,7 @@ module cacheway import cvw::*; #(parameter cvw_t P,
                                                    (TAGLEN <= 2036) ? 11 :
                                                    (TAGLEN <= 4083) ? 12 : 13,
                   localparam int TAGCHECKWIDTH  = TAGCHECKR + 1,
+                  localparam int TAGSTOREWIDTH  = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0),
                   localparam int LINECHECKR     = (LINELEN <=    1) ?  2 :
                                                    (LINELEN <=    4) ?  3 :
                                                    (LINELEN <=   11) ?  4 :
@@ -102,10 +103,10 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        ScrubWay,       // This way is the scrubber's current target (one-hot across ways)
 
   // Correction writeback: commit a corrected line (tag or data) into the currently selected way.
-  // Tag correction is re-encoded per way; a corrected data line arrives already encoded, on
-  // LineWriteFinal, from the one pair of line encoders in cache.sv.
-  input  logic                        SelCorrectTag,  // Commit CorrectedTagIn (re-encoded) into the tag array
-  input  logic [TAGLEN-1:0]           CorrectedTagIn,         // Re-encoded tag input for a tag-codeword correction writeback
+  // Both arrive already encoded from cache.sv: the tag word on TagStoreWrite, the line on
+  // LineWriteFinal.
+  input  logic                        SelCorrectTag,  // Commit a corrected tag (what TagStoreWrite carries then) into the tag array
+  input  logic [TAGSTOREWIDTH-1:0]    TagStoreWrite,  // Tag word to write: {tag, check bits}.  Encoded once in cache.sv: every way is given the same word
   input  logic                        SelCorrectData, // Commit a corrected line into the data array (it is what LineWriteFinal carries then)
 
   // A second, held-one-cycle-later copy of "which way is selected," used only to gate the data
@@ -198,12 +199,11 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   // The check bits share the tag's word, so one macro per way holds both, and they are read and
-  // written in the same access by construction.
-  localparam int TAGSTOREWIDTH = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0);
+  // written in the same access by construction.  The word written (TagStoreWrite) is built in
+  // cache.sv; only the decode of what this way reads is done here.
 
-  logic [TAGLEN-1:0]       TagWriteData;
   logic [TAGLEN-1:0]       CorrectedTag;
-  logic [TAGSTOREWIDTH-1:0] TagStoreWrite, TagStoreRead;
+  logic [TAGSTOREWIDTH-1:0] TagStoreRead;
   logic TagWe;
   assign TagWe = SetValidEN | (TAG_ECC_SUPPORTED ? (SelCorrectTag & SelectedWay) : 1'b0);
 
@@ -213,22 +213,8 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign ReadTag = TagStoreRead[TAGSTOREWIDTH-1 -: TAGLEN];
 
   if (TAG_ECC_SUPPORTED) begin : tag_ecc
-    logic [TAGCHECKWIDTH-1:0] ReadTagCheck, TagEncodedCheck, TagCorrectionCheck, TagCheckWriteData;
-    logic [TAGLEN-1:0] TagEncodedData, TagCorrectionData;
+    logic [TAGCHECKWIDTH-1:0] ReadTagCheck;
 
-    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagenc (
-      .data_i     (PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]),
-      .codeword_o ({TagEncodedData, TagEncodedCheck})
-    );
-    cacheeccenc #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagcorrectionenc (
-      .data_i     (CorrectedTagIn),
-      .codeword_o ({TagCorrectionData, TagCorrectionCheck})
-    );
-
-    mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
-    mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
-
-    assign TagStoreWrite = {TagWriteData, TagCheckWriteData};
     assign ReadTagCheck  = TagStoreRead[TAGCHECKWIDTH-1:0];
 
     cacheeccdec #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagdec (
@@ -238,8 +224,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
       .ded_err_o  (TagDedErrLive)
     );
   end else begin : tag_ecc_disabled
-    assign TagWriteData = PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN];
-    assign TagStoreWrite = TagWriteData;
     assign CorrectedTag = ReadTag;
     assign TagSecErrLive = 1'b0;
     assign TagDedErrLive = 1'b0;

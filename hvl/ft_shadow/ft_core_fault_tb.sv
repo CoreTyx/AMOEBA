@@ -15,10 +15,10 @@ module ft_core_fault_tb;
   logic [31:0] rom[256];
   logic [63:0] regs[32];
   logic mul_fi_enable = 0;
-  logic [1:0] mul_fi_target = 1, mul_fi_kind = 0;
+  logic [1:0] mul_fi_kind = 0;
   logic [6:0] mul_fi_bit = 0;
-  logic div_fi_enable = 0, div_fi_channel = 0;
-  logic [1:0] div_fi_target = 1, div_fi_kind = 0;
+  logic div_fi_enable = 0;
+  logic [1:0] div_fi_kind = 0;
   logic [5:0] div_fi_bit = 0;
   logic fault_inject = 0, directed = 1;
   logic [5:0] fi_units_expected = 0;  // mask & pin as the core's enable register will have sampled them
@@ -149,28 +149,12 @@ module ft_core_fault_tb;
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now = fi_enable & fi_target[1] & (fi_channel == 2'd3);
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit = $clog2(64 + 1)'(fi_bit);
       force dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind = fi_kind;
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now = mul_fi_enable & mul_fi_target[0];
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit = mul_fi_bit;
-      force dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind = mul_fi_kind;
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now = mul_fi_enable & mul_fi_target[1];
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit = mul_fi_bit;
-      force dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind = mul_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now = div_fi_enable & div_fi_target[0] &
-          (div_fi_channel == 1'b0);
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now = div_fi_enable & div_fi_target[0] &
-          (div_fi_channel == 1'b1);
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now = div_fi_enable & div_fi_target[1] &
-          (div_fi_channel == 1'b0);
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind = div_fi_kind;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now = div_fi_enable & div_fi_target[1] &
-          (div_fi_channel == 1'b1);
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit = div_fi_bit;
-      force dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind = div_fi_kind;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.inject_now = mul_fi_enable;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.fi_bit = mul_fi_bit;
+      force dut.soc.core.mdu.mdu.ftmul.result_fi.fi_kind = mul_fi_kind;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.inject_now = div_fi_enable;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_bit = div_fi_bit;
+      force dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_kind = div_fi_kind;
     end else begin
       release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.inject_now;
       release dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_bit;
@@ -196,24 +180,12 @@ module ft_core_fault_tb;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.inject_now;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_bit;
       release dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.inject_now;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.inject_now;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_kind;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.inject_now;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_bit;
-      release dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.inject_now;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.ftmul.result_fi.fi_kind;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.inject_now;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_bit;
+      release dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_kind;
     end
   end
   always_comb begin
@@ -256,21 +228,12 @@ module ft_core_fault_tb;
     check(dut.soc.core.ieu.dp.ftalu.replica[1].shift_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].shift_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[0].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[0].cmp_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[1].cmp_fi.fi_enable == expected[1], "unit gate: ieu.dp.ftalu.replica[1].cmp_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.ftmul.primary_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.primary_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.ftmul.shadow_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.shadow_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_quot_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_quot_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.primary_rem_fi.fi_enable");
-    check(dut.soc.core.mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.shadow_rem_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.ftmul.result_fi.fi_enable == expected[2], "unit gate: mdu.mdu.ftmul.result_fi.fi_enable");
+    check(dut.soc.core.mdu.mdu.div.ftdiv.result_fi.fi_enable == expected[3], "unit gate: mdu.mdu.div.ftdiv.result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.regf.inj1.inject_en == expected[4], "unit gate: ieu.dp.regf.inj1.inject_en");
     check(dut.soc.core.ieu.dp.regf.inj2.inject_en == expected[4], "unit gate: ieu.dp.regf.inj2.inject_en");
-    check(dut.soc.core.ieu.dp.RD1EReg.inject_en == expected[5], "unit gate: ieu.dp.RD1EReg.inject_en");
-    check(dut.soc.core.ieu.dp.RD2EReg.inject_en == expected[5], "unit gate: ieu.dp.RD2EReg.inject_en");
-    check(dut.soc.core.ieu.dp.ImmExtEReg.inject_en == expected[5], "unit gate: ieu.dp.ImmExtEReg.inject_en");
-    check(dut.soc.core.ieu.dp.SrcAMReg.inject_en == expected[5], "unit gate: ieu.dp.SrcAMReg.inject_en");
-    check(dut.soc.core.ieu.dp.IEUResultMReg.inject_en == expected[5], "unit gate: ieu.dp.IEUResultMReg.inject_en");
-    check(dut.soc.core.ieu.dp.WriteDataMReg.inject_en == expected[5], "unit gate: ieu.dp.WriteDataMReg.inject_en");
-    check(dut.soc.core.ieu.dp.IFResultWReg.inject_en == expected[5], "unit gate: ieu.dp.IFResultWReg.inject_en");
+    // One flip-mask generator serves all seven ECC pipeline registers (datapath.sv).
+    check(dut.soc.core.ieu.dp.pipeflipmask.inject_en == expected[5], "unit gate: ieu.dp.pipeflipmask.inject_en");
   endtask
 
   task automatic load_program(input logic bge);
@@ -418,15 +381,12 @@ module ft_core_fault_tb;
         if (!injected && scenario < SC_LATE_DIV_INJECTION && mdu_case(scenario) && dut.soc.core.InstrValidE && dut.soc.core.PCE == BASE + 20) begin
           if (scenario == SC_MUL_TRAP || scenario == SC_MUL_TRANSIENT || scenario == SC_MUL_BACKPRESSURE) begin
             mul_fi_enable = 1;
-            mul_fi_target = (scenario == SC_MUL_TRANSIENT) ? 2 : 1;
             mul_fi_kind = (scenario == SC_MUL_TRANSIENT) ? 0 : 2;
             mul_fi_bit = (scenario == SC_MUL_TRANSIENT) ? 0 : 4;
           end else begin
             div_fi_enable = 1;
-            div_fi_target = (scenario == SC_DIV_TRANSIENT) ? 2 : 1;
             div_fi_kind = (scenario == SC_DIV_TRANSIENT) ? 0 : 2;
             div_fi_bit = (scenario == SC_DIV_REM_TRAP || scenario == SC_DIV_TRANSIENT) ? 0 : 4;
-            div_fi_channel = (scenario == SC_DIV_REM_TRAP);
           end
           injected = 1;
         end
@@ -436,10 +396,8 @@ module ft_core_fault_tb;
         if (!injected && scenario >= SC_LATE_DIV_INJECTION && scenario <= SC_LATE_REM_BACKPRESSURE && dut.soc.core.InstrValidM &&
             dut.soc.core.PCM == BASE + 20) begin
           div_fi_enable = 1;
-          div_fi_target = 1;
           div_fi_kind = 2;
           div_fi_bit = 4;
-          div_fi_channel = (scenario == SC_LATE_REM_INJECTION || scenario == SC_LATE_REM_BACKPRESSURE);
           injected = 1;
           if (scenario >= SC_LATE_DIV_BACKPRESSURE) begin
             force dut.soc.core.ExternalStall = 1'b1;
