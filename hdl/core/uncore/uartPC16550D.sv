@@ -180,7 +180,11 @@ module uartPC16550D #(parameter UART_PRESCALE) (
         LSR[4]   <= (LSR[4] | rxbreak)  & ~squashRXerrIP; // break indicator
         LSR[5]   <= THRE; // THRE
         LSR[6]   <= ~txsrfull & THRE; //  TEMT
-        if (rxfifohaserr) LSR[7] <= 1'b1; // any bits in FIFO have error
+        // LSR[7]: set while an errored character is in the RX FIFO; an LSR read
+        // clears it unless one still is (PC16550D 8.6.3).  It used to stay set
+        // until reset.
+        if (rxfifohaserr)                  LSR[7] <= 1'b1;
+        else if (~MEMRb & (A == UART_LSR)) LSR[7] <= 1'b0;
       end
 
       // Modem Status Register (8.6.8)
