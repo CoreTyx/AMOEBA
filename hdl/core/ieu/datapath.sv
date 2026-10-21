@@ -37,6 +37,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Per-unit injection enables after the core applies the software mask and master pin.
   input  logic              fault_inject_alu, fault_inject_cmp,
   input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
+  input  logic [15:0]       FaultLfsr,               // shared fault-injection generator (ft_fault_gen)
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   // Decode stage signals
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
@@ -92,7 +94,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   output logic              RegEccSecErrW,           // any correctable ECC error (regfile or pipeline reg)
   output logic              RegEccDedErrW,           // any uncorrectable ECC error → fault signal
   output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (IFResultM→IFResultW)
-  output logic [31:0]       RegfileSecCount
+  // Fault flags for the counters (faultcount_apb): ECC corrections and uncorrectable errors per
+  // register, and the FT ALU's {CMP, ALU} mismatches and unresolved lanes
+  output logic [1:0]        RegfileSec, RegfileDed,  // RD1E, RD2E
+  output logic [4:0]        PipeSec, PipeDed,        // ImmExtE, SrcAM, IEUResultM, WriteDataM, IFResultW
+  output logic [1:0]        FTDetect, FTUnresolved
   // Hazard Unit signals
 );
 
@@ -139,7 +145,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .wd3(ResultW),
     .DummyW, .DummySelW,
     .rd1(R1DRaw), .rd2(R2DRaw),
-    .inject_en(fault_inject_regfile)
+    .inject_en(fault_inject_regfile), .FaultLfsr, .FaultCount
   );
 
   // AMOEBA: obfuscate the operands of inserted dummy instructions.  The mask is
@@ -173,7 +179,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // same cycle either way.
   logic [ECC_CW-1:0] PipeFlipMask;
   ecc_flip_mask #(.CW_WIDTH(ECC_CW)) pipeflipmask(.clk, .reset,
-    .inject_en(fault_inject_pipeline), .mask(PipeFlipMask));
+    .inject_en(fault_inject_pipeline), .lfsr(FaultLfsr), .count(FaultCount), .mask(PipeFlipMask));
 
   flopenrc_cw #(P.XLEN) RD1EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
     .cw(R1D), .q(), .q_raw(R1E), .sec_err_o(sec_rd1e), .ded_err_o(ded_rd1e));
@@ -194,10 +200,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
     .BSelect(BSelectE), .ZBBSelect(ZBBSelectE), .Funct3(Funct3E), .Funct7(Funct7E),
     .Rs2E, .BALUControl(BALUControlE), .BMUActive(BMUActiveE), .CZero(CZeroE),
-    .fi_enable(fault_inject_alu), .cmp_fi_enable(fault_inject_cmp),
+    .fi_enable(fault_inject_alu), .cmp_fi_enable(fault_inject_cmp), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
     .ALUResult(ALUResultE), .Sum(IEUAdrE), .stall_req(FTStallE),
     .unresolved(FTUnresolvedE), .pe_primary(ALU_PE_p), .pe_shadow(ALU_PE_r),
-    .cmp_pe_primary(CMP_PE_p), .cmp_pe_shadow(CMP_PE_r));
+    .cmp_pe_primary(CMP_PE_p), .cmp_pe_shadow(CMP_PE_r), .fault_detect(FTDetect), .fault_unresolved(FTUnresolved));
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
   // Memory stage pipeline registers (ECC-protected)
@@ -250,12 +256,12 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   assign RegEccDedErrW = ded_rd1e | ded_rd2e | ded_imme
                        | ded_srcam | ded_ieumm | ded_wdm | ded_ifrw;
 
-  // Single-bit errors corrected on the two register operands: errors read out of
-  // the register file, and errors in the operand registers themselves.  Each one
-  // is flagged for exactly one cycle, the cycle the operand register repairs it.
-  always_ff @(posedge clk)
-    if (reset) RegfileSecCount <= '0;
-    else       RegfileSecCount <= RegfileSecCount + {31'b0, sec_rd1e} + {31'b0, sec_rd2e};
+  // Per-register flags for the fault counters.  The two operand registers report errors read out
+  // of the register file as well as their own.  Each is flagged for exactly one cycle.
+  assign RegfileSec = {sec_rd2e, sec_rd1e};
+  assign RegfileDed = {ded_rd2e, ded_rd1e};
+  assign PipeSec    = {sec_ifrw, sec_wdm, sec_ieumm, sec_srcam, sec_imme};
+  assign PipeDed    = {ded_ifrw, ded_wdm, ded_ieumm, ded_srcam, ded_imme};
   // Separate W-stage pipeline reg DED: instruction in W when this fires, so MEPC should use PCW
   assign RegEccDedErrPipeW = ded_ifrw;
 

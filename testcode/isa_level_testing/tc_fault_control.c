@@ -3,7 +3,8 @@
 #include "test_utils.h"
 
 #define FI_CONTROL (*(volatile uint8_t *)0x1007000bUL)
-#define FI_UNIT_MASK 0x3fu
+#define FI_UNIT_MASK  0xffu   // ALU, CMP, MUL, DIV, regfile ECC, pipeline ECC, cache SEC, cache DED
+#define FI_RESET_MASK 0x00u   // every unit resets off: software opts in
 
 static void write_mask(uint8_t value) {
     FI_CONTROL = value;
@@ -12,11 +13,11 @@ static void write_mask(uint8_t value) {
 
 int main(void) {
     test_begin("FI_CONTROL");
-    check("reset enables all six units", FI_CONTROL, FI_UNIT_MASK);
+    check("reset leaves every unit off", FI_CONTROL, FI_RESET_MASK);
 
     write_mask(0);
     check("disable all units", FI_CONTROL, 0);
-    for (unsigned bit = 0; bit < 6; ++bit) {
+    for (unsigned bit = 0; bit < 8; ++bit) {
         unsigned mask = 1u << bit;
         write_mask(mask);
         check("enable one unit", FI_CONTROL, mask);
@@ -24,7 +25,7 @@ int main(void) {
         check("disable one unit", FI_CONTROL, FI_UNIT_MASK ^ mask);
     }
 
-    // Sweep every input byte, including reserved bits 7:6. Repeated reads
+    // Sweep every input byte; every bit is a unit. Repeated reads
     // must preserve the mask even though the external master pin is low.
     int patterns_ok = 1;
     for (unsigned value = 0; value < 256; ++value) {
@@ -42,8 +43,8 @@ int main(void) {
 
     write_mask(0);
     check("disable after rewriting", FI_CONTROL, 0);
-    write_mask(FI_UNIT_MASK);
-    check("restore reset mask", FI_CONTROL, FI_UNIT_MASK);
+    write_mask(FI_RESET_MASK);
+    check("restore reset mask", FI_CONTROL, FI_RESET_MASK);
     print_summary();
     test_finish();
 }

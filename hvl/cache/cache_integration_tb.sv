@@ -46,7 +46,9 @@ module cache_integration_tb;
   logic CacheCommitted, CacheStall;
   logic [WORDLEN-1:0] ReadDataWord;
   logic CacheMiss, CacheAccess;
-  logic [31:0] SecCount;
+  logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
+  logic [2:0]  SecErr;
+  logic        DedErr;
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -63,11 +65,15 @@ module cache_integration_tb;
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
           .SCRUBBER_ENABLED(1'b1), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
+    .FaultInjectSec(1'b0), .FaultInjectDed(1'b0), .FaultLfsr('0), .FaultCount('0),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );
+  always @(posedge clk)
+    if (reset) SecCount <= '0;
+    else       SecCount <= SecCount + 32'(SecErr[0]) + 32'(SecErr[1]) + 32'(SecErr[2]);
 
   // ── Clock ──────────────────────────────────────────────────────────────────────────────────
   always #5 clk = ~clk;

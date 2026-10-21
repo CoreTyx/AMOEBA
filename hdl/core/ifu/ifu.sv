@@ -28,6 +28,10 @@
 
 module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic                 clk, reset,
+  // Cache fault injection: unit enables and the core's shared generator (ft_fault_gen)
+  input  logic                 FaultInjectCacheSec, FaultInjectCacheDed,
+  input  logic [15:0]          FaultLfsr,
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic                 StallF, StallD, StallE, StallM, StallW,
   input  logic                 FlushD, FlushE, FlushM, FlushW,
   output logic                 IFUStallF,                                // IFU stalsl pipeline during a multicycle operation
@@ -100,7 +104,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   output logic                 InstrAccessFaultF,                        // Instruction access fault
   output logic                 ICacheAccess,                             // Report I$ read to performance counters
   output logic                 ICacheMiss,                               // Report I$ miss to performance counters
-  output logic [31:0]          ICacheSecCount
+  output logic [2:0]           ICacheSec,                                // fault flags for the counters (cache.sv)
+  output logic                 ICacheDed
 );
 
   localparam [31:0]            nop = 32'h00000013;                       // instruction for NOP
@@ -270,15 +275,17 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM & ~InvalidateICacheM ? IFURWF : '0;
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.ICACHE_LINELENINBITS),
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
-              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
+              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1),
+              .FI_PHASE(9'h13E))
       icache(.clk, .reset, .FlushStage(FlushD), .Stall(GatedStallD),
+             .FaultInjectSec(FaultInjectCacheSec), .FaultInjectDed(FaultInjectCacheDed), .FaultLfsr, .FaultCount,
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
              .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF), .CacheBusy(ICacheBusyF),
              .CacheBusRW,
              .ReadDataWord(ICacheInstrF), .AmoWord(), .AmoOffset('0),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
-             .SecCount(ICacheSecCount),
+             .SecErr(ICacheSec), .DedErr(ICacheDed),
              .ByteMask('0), .BeatCount('0), .SelBusBeat('0),
              .WriteData('0),
              .CacheRW(CacheRWF),
@@ -319,7 +326,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
       assign ICacheBusyF = 1'b0;
-      assign ICacheSecCount = '0;
+      assign {ICacheSec, ICacheDed} = '0;
     end
 
     // mux between the alignments of uncached reads.
@@ -332,7 +339,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
     assign ICacheBusyF = 1'b0;
-    assign ICacheSecCount = '0;
+    assign {ICacheSec, ICacheDed} = '0;
     assign InstrRawF = IROMInstrF;
   end
 

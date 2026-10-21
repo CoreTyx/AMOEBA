@@ -5,9 +5,9 @@
 // Modified:
 //
 // Purpose: Parameterizable single-bit error injector for ECC testing.
-//          Uses a 16-bit Galois LFSR to select a pseudo-random codeword bit
-//          index; a period counter triggers an injection every 2^INJECT_PERIOD
-//          clock cycles.  Injection is gated by inject_en so the module is a
+//          On the cycle the core's shared fault counter (ft_fault_gen) reaches
+//          PHASE, the shared LFSR selects a pseudo-random codeword bit index and
+//          that bit is flipped.  Injection is gated by inject_en so the module is a
 //          pure combinational pass-through (codeword_o = codeword_i) when
 //          inject_en = 0.  This keeps the normal-operation critical path clean
 //          and makes the design DFT-friendly: a test controller can assert
@@ -16,10 +16,6 @@
 //          Only a single bit is ever flipped per injection event, guaranteeing
 //          that the SECDED decoder can always correct the error.  DED (double
 //          error) injection is not supported here by design.
-//
-//          Synthesis path: LFSR + period counter are ordinary flip-flops.
-//          When inject_en is tied to 0 (production), synthesis constant-
-//          propagation can eliminate the XOR flip path entirely.
 //
 // A component of the AMOEBA RISC-V project.
 //
@@ -39,38 +35,19 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module ecc_bit_flip #(
-  parameter int CW_WIDTH      = 72,   // codeword width (DATA_WIDTH + R + 1)
-  parameter int LFSR_POLY     = 16'hB400, // Galois LFSR: x^16+x^14+x^13+x^11+1
-  parameter int INJECT_PERIOD = 9     // inject every 2^INJECT_PERIOD cycles
+module ecc_bit_flip import cvw::*; #(
+  parameter int CW_WIDTH = 72,                      // codeword width (DATA_WIDTH + R + 1)
+  parameter logic [FI_COUNT_BITS-1:0] PHASE = '1    // shared-counter value at which this site flips
 ) (
-  input  logic                 clk,
-  input  logic                 reset,
-  input  logic                 inject_en,          // 1 = inject; 0 = pass-through
-  input  logic [CW_WIDTH-1:0]  codeword_i,
-  output logic [CW_WIDTH-1:0]  codeword_o
+  input  logic                     inject_en,       // 1 = inject; 0 = pass-through
+  input  logic [15:0]              lfsr,            // shared generator
+  input  logic [FI_COUNT_BITS-1:0] count,
+  input  logic [CW_WIDTH-1:0]      codeword_i,
+  output logic [CW_WIDTH-1:0]      codeword_o
 );
 
   localparam int LOG_CW = $clog2(CW_WIDTH);
 
-  // ── Galois LFSR ──────────────────────────────────────────────────────────────
-  // Feedback: shift right, XOR polynomial mask on LSB-out.
-  // Initialised to all-ones (avoids the lock-up all-zeros state).
-  logic [15:0] lfsr;
-
-  always_ff @(posedge clk)
-    if (reset) lfsr <= 16'hFFFF;
-    else       lfsr <= {1'b0, lfsr[15:1]} ^ (lfsr[0] ? 16'(LFSR_POLY) : 16'h0);
-
-  // ── Period counter ───────────────────────────────────────────────────────────
-  // Counts freely; injection fires on the single cycle where all bits are 1.
-  logic [INJECT_PERIOD-1:0] cnt;
-
-  always_ff @(posedge clk)
-    if (reset) cnt <= '0;
-    else       cnt <= cnt + 1'b1;
-
-  // ── Bit-index selection ──────────────────────────────────────────────────────
   // Use the lower LOG_CW bits of the LFSR as the candidate index.
   // Clamp indices >= CW_WIDTH to 0 (simple comparator, no divider hardware).
   logic [LOG_CW-1:0] bit_sel;
@@ -79,12 +56,9 @@ module ecc_bit_flip #(
                     ? lfsr[LOG_CW-1:0]
                     : '0;
 
-  // ── Injection (combinational) ─────────────────────────────────────────────────
-  // Flip exactly one bit when inject_en is asserted and the counter fires.
-  // When inject_en=0 this is a direct wire assignment (no XOR in critical path).
   always_comb begin
     codeword_o = codeword_i;
-    if (inject_en & (&cnt))
+    if (inject_en & (count == PHASE))
       codeword_o[bit_sel] = ~codeword_i[bit_sel];
   end
 

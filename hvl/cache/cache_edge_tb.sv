@@ -55,7 +55,9 @@ module cache_edge_tb;
   logic CacheCommitted, CacheStall;
   logic [WORDLEN-1:0] ReadDataWord;
   logic CacheMiss, CacheAccess;
-  logic [31:0] SecCount;
+  logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
+  logic [2:0]  SecErr;
+  logic        DedErr;
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -63,6 +65,10 @@ module cache_edge_tb;
   logic [1:0] CacheBusRW;
   logic [PA_BITS-1:0] CacheBusAdr;
   logic EccDedDirtyFault;
+  // Runtime fault injection (cachefi): the dut's phase is 0, so holding the count at 1 keeps it quiet
+  logic fi_sec = 0, fi_ded = 0;
+  logic [15:0] fi_lfsr = 0;
+  logic [FI_COUNT_BITS-1:0] fi_count = 1;
   logic [PA_BITS-1:0] EccDedDirtyFaultAdr;
 
   int errors;
@@ -73,11 +79,15 @@ module cache_edge_tb;
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
           .SCRUBBER_ENABLED(1'b0), .SCRUB_INTERVAL_CYCLES(0)) dut (
     .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
+    .FaultInjectSec(fi_sec), .FaultInjectDed(fi_ded), .FaultLfsr(fi_lfsr), .FaultCount(fi_count),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecCount,
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
     .EccDedDirtyFault, .EccDedDirtyFaultAdr
   );
+  always @(posedge clk)
+    if (reset) SecCount <= '0;
+    else       SecCount <= SecCount + 32'(SecErr[0]) + 32'(SecErr[1]) + 32'(SecErr[2]);
 
   // ── Clock ──────────────────────────────────────────────────────────────────────────────────
   always #5 clk = ~clk;
@@ -209,6 +219,14 @@ module cache_edge_tb;
     l = refget(adr);
     l[int'(adr[OFFSETLEN-1:3])*64 +: 64] = data;
     refset(adr, l);
+  endtask
+
+  // Arm one injection event: it lands in the next line and tag the cache writes.
+  task automatic fi_arm(input logic ded, input logic [1:0] sel);
+    @(negedge clk);
+    fi_sec = ~ded; fi_ded = ded; fi_lfsr = {14'b0, sel}; fi_count = 0;
+    @(negedge clk);
+    fi_sec = 0; fi_ded = 0; fi_count = 1;
   endtask
 
   task automatic doflush;
@@ -671,6 +689,48 @@ module cache_edge_tb;
     // ── 11. Same, with single-bit data errors planted in resident lines. All are correctable,
     //        so loads AND final memory contents must still match the reference. ──
     randomphase("inject", 1500, 1);
+
+    // ── 12. Runtime fault injection through the write path (cachefi). An armed event lands in
+    //        the next line and tag written: a correctable flip is repaired on the next hit, an
+    //        uncorrectable pair on a clean line makes it refetch. ──
+    doreset();
+    begin
+      logic [31:0] seccountbefore;
+      logic [PA_BITS-1:0] b;
+      int wv;
+      a = 16'h1100;
+      setline(a, 128'h9999999999999999_8888888888888888);
+      fi_arm(0, 2'd1);
+      doload(a, result);                                    // the fill takes the flips
+      s = setof(a); wv = peekvalid(0, s) ? 0 : 1;
+      check("FI SEC: miss returns the fetched word", result === 64'h8888888888888888);
+      check("FI SEC: one data bit flipped in the stored line", $onehot(peekdata(wv, s) ^ refget(a)));
+      check("FI SEC: one tag bit flipped", $onehot(peektag(wv, s) ^ a[PA_BITS-1:SETLEN+OFFSETLEN]));
+      seccountbefore = SecCount;
+      doload(a, result);
+      check("FI SEC: hit returns the corrected word", result === 64'h8888888888888888);
+      check("FI SEC: tag and data corrections counted", SecCount == seccountbefore + 2);
+      check("FI SEC: corrected line and tag written back",
+            peekdata(wv, s) === refget(a) && peektag(wv, s) == a[PA_BITS-1:SETLEN+OFFSETLEN]);
+      b = a + PA_BITS'(1 << OFFSETLEN);                     // next set
+      setline(b, 128'h7777777777777777_6666666666666666);
+      doload(b, result);
+      check("FI SEC: the event is spent; the next fill is clean", peekdata(findway(b), setof(b)) === refget(b));
+    end
+    doreset();
+    begin
+      int wv;
+      a = 16'h1200;
+      setline(a, 128'h5555555555555555_4444444444444444);
+      fi_arm(1, 2'd3);
+      doload(a, result);
+      s = setof(a); wv = peekvalid(0, s) ? 0 : 1;
+      check("FI DED: two data bits flipped in the stored line", $countones(peekdata(wv, s) ^ refget(a)) == 2);
+      doload(a + 8, result);
+      check("FI DED clean: correct word after the line is refetched", result === 64'h5555555555555555);
+      check("FI DED clean: the refetched line is clean", peekdata(findway(a), s) === refget(a));
+    end
+    doreset();
 
     $display("cache_edge_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");

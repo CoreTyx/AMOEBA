@@ -52,10 +52,13 @@ module ft_alu import cvw::*; #(
   input  logic [1:0]        CZero,
   // Shared runtime enable; each replica/channel selects faults locally.
   input  logic              fi_enable, cmp_fi_enable, // ALU and comparison injection are independently enabled
+  input  logic [15:0]       fi_lfsr,                  // shared fault-injection generator (ft_fault_gen)
+  input  logic [FI_COUNT_BITS-1:0] fi_count,
   output logic [P.XLEN-1:0] ALUResult, Sum,
   output logic [1:0]        flags,  // unchanged comparator schema: {eq, lt}
   output logic              stall_req, unresolved, pe_primary, pe_shadow,
-  output logic              cmp_pe_primary, cmp_pe_shadow
+  output logic              cmp_pe_primary, cmp_pe_shadow,
+  output logic [1:0]        fault_detect, fault_unresolved  // {CMP, ALU}: mismatch found by a check; lane unresolved
 );
   logic [P.XLEN-1:0] result_raw[2], result_pre_fi[2], result_live[2];
   logic [P.XLEN:0] arith_raw[2], arith_live[2], cmp_raw[2], cmp_live[2];
@@ -118,15 +121,16 @@ module ft_alu import cvw::*; #(
       .a(cmp_extended_a), .b(cmp_extended_b), .sub(1'b1),
       .recompute(cmp_recompute), .result(cmp_raw[i]));
 
-    // Each physical result channel has its own LFSR and event phase.
-    ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA001 + 16'(i*64))) result_fi(
-      .clk, .reset, .fi_enable, .data_i(result_pre_fi[i]), .data_o(result_live[i]));
-    ft_fault_inject #(.WIDTH(P.XLEN+1), .SEED(16'hA011 + 16'(i*64))) arith_fi(
-      .clk, .reset, .fi_enable, .data_i(arith_raw[i]), .data_o(arith_live[i]));
-    ft_fault_inject #(.WIDTH(P.XLEN+2), .SEED(16'hA021 + 16'(i*64))) shift_fi(
-      .clk, .reset, .fi_enable, .data_i(shift_raw[i]), .data_o(shift_live[i]));
-    ft_fault_inject #(.WIDTH(P.XLEN+1), .SEED(16'hA031 + 16'(i*64))) cmp_fi(
-      .clk, .reset, .fi_enable(cmp_fi_enable), .data_i(cmp_raw[i]), .data_o(cmp_live[i]));
+    // Each physical result channel has its own event phase on the shared generator,
+    // 16 cycles apart, so no two channels (and no replica and its shadow) fault together.
+    ft_fault_inject #(.WIDTH(P.XLEN), .PHASE(9'h1FE - 9'(i*64))) result_fi(
+      .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(result_pre_fi[i]), .data_o(result_live[i]));
+    ft_fault_inject #(.WIDTH(P.XLEN+1), .PHASE(9'h1EE - 9'(i*64))) arith_fi(
+      .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(arith_raw[i]), .data_o(arith_live[i]));
+    ft_fault_inject #(.WIDTH(P.XLEN+2), .PHASE(9'h1DE - 9'(i*64))) shift_fi(
+      .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(shift_raw[i]), .data_o(shift_live[i]));
+    ft_fault_inject #(.WIDTH(P.XLEN+1), .PHASE(9'h1CE - 9'(i*64))) cmp_fi(
+      .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable(cmp_fi_enable), .data_i(cmp_raw[i]), .data_o(cmp_live[i]));
 
     // A shift-channel fault must reach the architectural output, including
     // word sign extension. The injection bit stays physical during diagnosis.
@@ -208,6 +212,8 @@ module ft_alu import cvw::*; #(
   // The pipeline waits for a valid instruction's evaluation to finish.
   assign stall_req = valid & (phase != DONE);
   assign unresolved = alu_unresolved | cmp_unresolved;
+  assign fault_detect     = {2{check}} & {cmp_mismatch, alu_mismatch};
+  assign fault_unresolved = {cmp_unresolved, alu_unresolved};
   // Outputs read as zero until the evaluation is DONE, and stay zero if it ended
   // unresolved; otherwise they are the registered channels of the selected
   // replica.  Both conditions are register outputs.

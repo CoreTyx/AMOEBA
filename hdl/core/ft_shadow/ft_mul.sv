@@ -29,10 +29,13 @@ module ft_mul import cvw::*; #(
   input  logic [P.XLEN-1:0]   ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0]          Funct3E,
   input  logic                MulActiveE,
-  // Shared runtime enable; bit and kind are selected inside the injector.
+  // Shared runtime enable and generator; bit and kind are selected inside the injector.
   input  logic                fi_enable,
+  input  logic [15:0]         fi_lfsr,
+  input  logic [FI_COUNT_BITS-1:0] fi_count,
   output logic [P.XLEN-1:0]   ProdM,                  // low half for mul, high half for mulh/mulhsu/mulhu
-  output logic                stall_req, unresolved
+  output logic                stall_req, unresolved,
+  output logic                fault_detect            // a check found the product wrong
 );
   // saved_* is the architectural transaction; mul_* selects current E inputs
   // or that saved transaction during an M-stage replay.
@@ -115,8 +118,8 @@ module ft_mul import cvw::*; #(
     .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(prod_raw));
   // Fault-injection endpoint: corrupt the completed product before the check
   // and the architectural product output.
-  ft_fault_inject #(.WIDTH(P.XLEN*2), .SEED(16'hA081)) result_fi(
-    .clk, .reset, .fi_enable, .data_i(prod_raw), .data_o(prod));
+  ft_fault_inject #(.WIDTH(P.XLEN*2), .PHASE(9'h17E)) result_fi(
+    .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(prod_raw), .data_o(prod));
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Residue check (mod 15)
@@ -148,6 +151,7 @@ module ft_mul import cvw::*; #(
   residue15 #(P.XLEN*2) prodres(prod_q, res_prod);
   residue15 #(5) expres(5'(res_ab_q) + {4'b0, signed_a & prod_q[P.XLEN*2-1]}, res_expected);
   assign mismatch = mul_active_m & (res_prod != res_expected);
+  assign fault_detect = check & mismatch;
 
   // MUL uses retry only in this implementation; with one multiplier there is no
   // replica to isolate.  A persistent failure is unresolved.

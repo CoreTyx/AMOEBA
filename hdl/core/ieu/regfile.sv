@@ -43,7 +43,7 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module regfile #(
+module regfile import cvw::*; #(
   parameter XLEN, E_SUPPORTED,
   // SECDED check-bit count and total codeword width
   parameter int R  = (XLEN <=   1) ? 2 :
@@ -61,7 +61,9 @@ module regfile #(
   input  logic             DummyW,
   input  logic             DummySelW,
   output logic [CW-1:0]    rd1, rd2,           // codewords as stored: not checked or corrected here
-  input  logic             inject_en
+  input  logic             inject_en,
+  input  logic [15:0]      FaultLfsr,          // shared fault-injection generator
+  input  logic [FI_COUNT_BITS-1:0] FaultCount
 );
 
   localparam ARCHREGS = E_SUPPORTED ? 16 : 32;
@@ -110,13 +112,13 @@ module regfile #(
   assign cw_rd2_raw = (a2 != '0) ? rf[a2] : '0;
 
   ecc_bit_flip  #(.CW_WIDTH(CW)) inj1 (
-    .clk, .reset, .inject_en,
+    .inject_en, .lfsr(FaultLfsr), .count(FaultCount),
     .codeword_i(cw_rd1_raw),
     .codeword_o(cw_rd1_inj)
   );
 
   ecc_bit_flip  #(.CW_WIDTH(CW)) inj2 (
-    .clk, .reset, .inject_en,
+    .inject_en, .lfsr(FaultLfsr), .count(FaultCount),
     .codeword_i(cw_rd2_raw),
     .codeword_o(cw_rd2_inj)
   );

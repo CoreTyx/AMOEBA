@@ -32,11 +32,15 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Per-unit injection enables after the core applies the software mask and master pin.
   input  logic              fault_inject_alu, fault_inject_cmp,
   input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
+  input  logic [15:0]       FaultLfsr,               // shared fault-injection generator (ft_fault_gen)
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
   output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (for precise EPC)
-  output logic [31:0]       RegfileSecCount,
+  output logic [1:0]        RegfileSec, RegfileDed,  // fault flags for the counters (datapath.sv)
+  output logic [4:0]        PipeSec, PipeDed,
+  output logic [1:0]        FTDetect, FTUnresolved,
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
@@ -147,7 +151,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline,
+    .clk, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline, .FaultLfsr, .FaultCount,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .InjectD, .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
@@ -156,5 +160,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
     .InstrValidE, .FTStallE, .FTUnresolvedE, .EccStallE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
-    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
+    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+    .RegfileSec, .RegfileDed, .PipeSec, .PipeDed, .FTDetect, .FTUnresolved);
 endmodule

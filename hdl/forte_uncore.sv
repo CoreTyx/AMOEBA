@@ -42,7 +42,8 @@ module forte_uncore import cvw::*; #(
   // back to the core
   output logic [P.AHBW-1:0]    HRDATA,
   output logic                 HREADY, HRESP,
-  output logic [5:0]           FaultInjectMask, // software unit enables, also present with off-chip peripherals
+  output logic [FI_UNITS-1:0]  FaultInjectMask, // software unit enables, also present with off-chip peripherals
+  input  fault_events_t        FaultEvents,     // registered fault flags from the core, counted here
   // 1 = DFT permitted; see hdl/forte_dft_lock.sv.  Goes to forte_chip, which is
   // where the pads are and therefore where the gating has to happen.
   output logic                 dft_unlocked,
@@ -57,16 +58,15 @@ module forte_uncore import cvw::*; #(
   input  logic                 MExtIntIn, SExtIntIn
 );
 
-  localparam PERIPHS = 5;   // CLINT, PLIC, UART, DFT lock, fault injection
+  localparam PERIPHS = 6;   // CLINT, PLIC, UART, DFT lock, fault injection, fault counters
 
   // The DFT lock occupies one otherwise-unused CLINT doubleword. The fault
   // control byte has its own region in adrdecs/PMA at FI_CONTROL_ADDR.
   // Taking the DFT address away from CLINT gives each access one responder.
   localparam logic [15:0] DFTLOCK_OFF  = 16'hF000;
 
-  // Width follows adrdecs. [12] is the ECC-counter region (ECC_COUNTER_BASE, served by uncore.sv on
-  // the legacy SoC); nothing here serves it, so an access there takes the no-region path below.
-  // [13] is FI_CONTROL, routed to the fault-injection APB slot.
+  // Width follows adrdecs. [12] is the fault-counter region (ECC_COUNTER_BASE) and [13] is
+  // FI_CONTROL, each routed to its APB slot.
   logic [13:0]                 HSELRegions;
   logic                        HSELDTIM, HSELIROM, HSELRam, HSELCLINT, HSELPLIC, HSELGPIO, HSELUART, HSELSDC, HSELSPI;
   logic                        HSELBootRom, HSELEXTRaw;
@@ -96,10 +96,10 @@ module forte_uncore import cvw::*; #(
   assign HSELCLINTQ  = HSELCLINT & ~HSELDFTLOCK;
 
   // AHB -> APB for the on-die peripherals.
-  // PSEL[0]=CLINT, [1]=PLIC, [2]=UART, [3]=DFT lock, [4]=fault injection.
+  // PSEL[0]=CLINT, [1]=PLIC, [2]=UART, [3]=DFT lock, [4]=fault injection, [5]=fault counters.
   logic [PERIPHS-1:0] HSELAPB;
-  assign HSELAPB = PERIPH_ONCHIP ? {HSELRegions[13], HSELDFTLOCK, HSELUART, HSELPLIC, HSELCLINTQ}
-                                 : {HSELRegions[13], HSELDFTLOCK, 2'b00,            HSELCLINTQ};
+  assign HSELAPB = PERIPH_ONCHIP ? {HSELRegions[12], HSELRegions[13], HSELDFTLOCK, HSELUART, HSELPLIC, HSELCLINTQ}
+                                 : {HSELRegions[12], HSELRegions[13], HSELDFTLOCK, 2'b00,            HSELCLINTQ};
 
   ahbapbbridge #(P, PERIPHS) ahbapbbridge (
     .HCLK, .HRESETn, .HSEL(HSELAPB), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
@@ -117,6 +117,9 @@ module forte_uncore import cvw::*; #(
 
   fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSEL[4]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[4]), .PREADY(PREADY[4]), .FaultInjectMask);
+
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .PADDR(PADDR[6:2]),
+    .PRDATA(PRDATA[5]), .PREADY(PREADY[5]), .FaultEvents);
 
   if (PERIPH_ONCHIP) begin : onchip
     plic_apb #(P) plic(.PCLK, .PRESETn, .PSEL(PSEL[1]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,

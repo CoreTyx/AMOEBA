@@ -29,11 +29,14 @@ module ft_div import cvw::*; #(
   input  logic              StallM, FlushE, FlushM,
   input  logic              IntDivE, DivSignedE, RemE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
-  // Shared runtime enable; bit and kind are selected inside the injector.
+  // Shared runtime enable and generator; bit and kind are selected inside the injector.
   input  logic              fi_enable,
+  input  logic [15:0]       fi_lfsr,
+  input  logic [FI_COUNT_BITS-1:0] fi_count,
   output logic              DivBusyE,
   output logic [P.XLEN-1:0] DivResultM,
-  output logic              stall_req, unresolved
+  output logic              stall_req, unresolved,
+  output logic              fault_detect              // a check found the result wrong
 );
 
   localparam int COUNT_W = (TE_THRESHOLD == 1) ? 1 : $clog2(TE_THRESHOLD);
@@ -119,8 +122,8 @@ module ft_div import cvw::*; #(
 
   // The fault is placed on the result ahead of its capture, where the check
   // sees it; operands, controls and progress state are out of scope.
-  ft_fault_inject #(.WIDTH(P.XLEN), .SEED(16'hA0A1)) result_fi(
-    .clk, .reset, .fi_enable, .data_i(result_raw), .data_o(result));
+  ft_fault_inject #(.WIDTH(P.XLEN), .PHASE(9'h15E)) result_fi(
+    .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(result_raw), .data_o(result));
 
   // Check only after the divider FSM has completed this held instruction;
   // IDLE is also not busy, but does not contain a valid result.
@@ -185,6 +188,7 @@ module ft_div import cvw::*; #(
     else if (div_neg & ~mag_zero_q) res_expected = res_mag_neg;
     else                            res_expected = res_mag;
   assign mismatch = (res_a != res_expected) | (~div0 & (~in_range_q | (res_id != res_x_q)));
+  assign fault_detect = check & mismatch;
 
   // A completed divide holds the full pipeline until its check is DONE, and a
   // retry holds it while the divider runs again.  A final failed

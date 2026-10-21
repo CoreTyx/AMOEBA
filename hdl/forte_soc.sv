@@ -49,7 +49,8 @@ module forte_soc import cvw::*; #(
   logic [63:0]                MTIME_CLINT;
   logic                       MExtInt, SExtInt;
 
-  logic [5:0] FaultInjectMask; // software unit enables from the on-die APB register
+  logic [FI_UNITS-1:0] FaultInjectMask; // software unit enables from the on-die APB register
+  fault_events_t       FaultEvents;     // registered fault flags from the core, counted by the uncore
 
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
   synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
@@ -62,17 +63,14 @@ module forte_soc import cvw::*; #(
     // open as rv64_core_wrapper does: nothing in the ASIC consumes it yet, and
     // routing it to a pad is a decision for the DFT discussion.
     .PrivModeUncorrectableFaultW (),
-    // SEC (corrected-error) counters for the register file and both caches, added on
-    // swe-cache-ec. wallypipelinedsoc serves them as read-only registers at ECC_COUNTER_BASE via
-    // uncore.sv; forte_uncore has no such slave yet, so they are left open here for the same
-    // reason as above. Exposing them on the ASIC is a separate decision (see forte_uncore.sv).
-    .RegfileSecCount (), .ICacheSecCount (), .DCacheSecCount ());
+    // Fault flags for the read-only counters forte_uncore serves at ECC_COUNTER_BASE.
+    .FaultEvents);
 
   forte_uncore #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) uncore(
     .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HTRANS,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT,
     .HRDATA, .HREADY, .HRESP,
-    .dft_unlocked, .FaultInjectMask,
+    .dft_unlocked, .FaultInjectMask, .FaultEvents,
     .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .MTIME_CLINT,
     .UARTSin, .UARTSout, .ExtIrq, .MExtIntIn, .SExtIntIn);
 

@@ -32,6 +32,10 @@
 
 module lsu import cvw::*;  #(parameter cvw_t P) (
   input  logic                    clk, reset,
+  // Cache fault injection: unit enables and the core's shared generator (ft_fault_gen)
+  input  logic                    FaultInjectCacheSec, FaultInjectCacheDed,
+  input  logic [15:0]             FaultLfsr,
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic                    StallM, FlushM, StallW, FlushW,
   output logic                    LSUStallM,                            // LSU stalls pipeline during a multicycle operation
   // connected to cpu (controls)
@@ -47,7 +51,8 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   output logic                    SquashSCW,                            // Store conditional failed disable write to GPR
   output logic                    DCacheMiss,                           // D cache miss for performance counters
   output logic                    DCacheAccess,                         // D cache memory access for performance counters
-  output logic [31:0]             DCacheSecCount,
+  output logic [2:0]              DCacheSec,                            // fault flags for the counters (cache.sv)
+  output logic                    DCacheDed,
   // address and write data
   input  logic [P.XLEN-1:0]       IEUAdrE,                              // Execution stage memory address
   output logic [P.XLEN-1:0]       IEUAdrM,                              // Memory stage memory address
@@ -435,14 +440,15 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
 
             cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.DCACHE_LINELENINBITS), .NUMSETS(P.DCACHE_WAYSIZEINBYTES*8/LINELEN),
               .NUMWAYS(P.DCACHE_NUMWAYS), .LOGBWPL(LLENLOGBWPL), .WORDLEN(CACHEWORDLEN), .MUXINTERVAL(P.LLEN),
-              .READ_ONLY_CACHE(0)) dcache(
+              .READ_ONLY_CACHE(0), .FI_PHASE(9'h11E)) dcache(
         .clk, .reset, .Stall(GatedStallW & ~SelSpillE), .SelBusBeat, .FlushStage(LSUFlushW),
+        .FaultInjectSec(FaultInjectCacheSec), .FaultInjectDed(FaultInjectCacheDed), .FaultLfsr, .FaultCount,
         .CacheRW(CacheRWM),
         .FlushCache(FlushDCache), .NextSet(IEUAdrExtE[11:0]), .PAdr(PAdrM),
         .ByteMask(ByteMaskSpillM), .BeatCount(BeatCount[AHBWLOGBWPL-1:AHBWLOGBWPL-LLENLOGBWPL]),
         .WriteData(LSUWriteDataSpillM), .SelHPTW,
         .CacheStall(DCacheStallM), .CacheBusy(DCacheBusyM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
-        .SecCount(DCacheSecCount),
+        .SecErr(DCacheSec), .DedErr(DCacheDed),
         .CacheCommitted(DCacheCommittedM),
         .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM), .AmoOffset(IEUAdrM[$clog2(LINELEN/8)-1:0]),
         .FetchBuffer, .CacheBusRW(CacheBusRW),
@@ -490,7 +496,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       assign DCacheBusyM = 1'b0;
       assign DCacheAmoWordM = '0;
       assign AmoReadWordMuxM = ReadDataWordMuxM; // no cache: the read data already comes from a register
-      assign DCacheSecCount = '0;
+      assign {DCacheSec, DCacheDed} = '0;
     end
   end else begin : nobus // block: bus, only DTIM
     assign {LSUHWDATA, LSUHADDR, LSUHWRITE, LSUHSIZE, LSUHBURST, LSUHTRANS, LSUHWSTRB} = '0;
@@ -500,7 +506,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign AmoReadWordMuxM = ReadDataWordMuxM;
     assign {LSUBusStallM, BusCommittedM} = '0;
     assign {DCacheMiss, DCacheAccess} = '0;
-    assign DCacheSecCount = '0;
+    assign {DCacheSec, DCacheDed} = '0;
     assign {DCacheStallM, DCacheCommittedM} = '0;
     assign DCacheBusyM = 1'b0;
   end

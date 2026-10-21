@@ -64,29 +64,36 @@ module ft_recompute_fault_tb #(
   always #5 clk = ~clk;
   /* verilator lint_on BLKSEQ */
 
+  // The core's shared injection generator, driving every injector here.
+  logic [15:0] fault_lfsr;
+  logic [FI_COUNT_BITS-1:0] fault_count;
+  ft_fault_gen gen(.clk, .reset, .lfsr(fault_lfsr), .count(fault_count));
+
   // These injectors run without forces to check the production stimulus source.
   logic random_enable = 0;
   logic [N+1:0] random_input = '1, random_out0, random_out1;
-    ft_fault_inject #(.WIDTH(N+2), .SEED(16'hA001)) random_fi0(
-    .clk, .reset, .fi_enable(random_enable), .data_i(random_input), .data_o(random_out0));
-    ft_fault_inject #(.WIDTH(N+2), .SEED(16'hA041)) random_fi1(
-    .clk, .reset, .fi_enable(random_enable), .data_i(random_input), .data_o(random_out1));
+    ft_fault_inject #(.WIDTH(N+2), .PHASE(9'h1FE)) random_fi0(
+    .reset, .lfsr(fault_lfsr), .count(fault_count), .fi_enable(random_enable), .data_i(random_input), .data_o(random_out0));
+    ft_fault_inject #(.WIDTH(N+2), .PHASE(9'h1BE)) random_fi1(
+    .reset, .lfsr(fault_lfsr), .count(fault_count), .fi_enable(random_enable), .data_i(random_input), .data_o(random_out1));
 
     ft_alu #(.P(TP), .TE_THRESHOLD(THRESHOLD)) dut(
     .clk, .reset, .flush, .valid,
     .advance, .load, .hold(1'b0), .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
     .W64(w64), .UW64(uw64), .SubArith(sub), .ALUSelect(select_op), .BSelect(bselect),
     .ZBBSelect(zbbselect), .Funct3(funct3), .BALUControl(balu), .Funct7(7'b0), .Rs2E(5'b0),
-    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .ALUResult(result), .Sum(sum), .flags,
+    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
+    .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
     .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .HoldE(1'b0), .ForwardedSrcAE(mul_a),
     .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .MulActiveE(mul_active),
-    .fi_enable(mul_fi_enable),
+    .fi_enable(mul_fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
     .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved));
     ft_div #(.P(TP), .TE_THRESHOLD(THRESHOLD)) div_dut(
     .clk, .reset, .StallM(div_stall), .FlushE(flush), .FlushM(flush), .IntDivE(div_active), .DivSignedE(div_signed),
     .RemE(div_channel), .W64E(div_w64), .ForwardedSrcAE(div_a), .ForwardedSrcBE(div_b), .fi_enable(div_fi_enable),
+    .fi_lfsr(fault_lfsr), .fi_count(fault_count),
     .DivBusyE(div_busy), .DivResultM(div_result), .stall_req(div_stall), .unresolved(div_unresolved));
 
   // Directed recovery tests override only private injector selections/events.
@@ -287,8 +294,8 @@ module ft_recompute_fault_tb #(
     @(negedge clk);
     reset = 1;
     clock_edge();
-    check(random_out0 == random_input && random_fi0.lfsr == 16'hA001 && random_fi1.lfsr == 16'hA041,
-          "reset suppresses injection and restores seeds");
+    check(random_out0 == random_input && fault_lfsr == FI_LFSR_SEED && fault_count == '0,
+          "reset suppresses injection and restores the generator");
     random_enable = 0;
   endtask
   task automatic set_operation(input int op);

@@ -40,6 +40,23 @@
     logic fault_inject = 1'b0;
 `endif
 
+`ifdef ECE411_SIM_INJECT
+    // The unit mask resets to 0 on silicon; built with ECE411_SIM_INJECT it resets with the six
+    // core units armed (fault_inject_apb.sv).  The ECC programs pass whether or not anything was
+    // injected, so make sure it was armed.
+  `ifdef ECE411_DUT_FORTE
+    `define FICONTROL dut.top.chip.soc.uncore.faultcontrol
+  `else
+    `define FICONTROL dut.soc.uncoregen.uncore.faultcontrol
+  `endif
+    logic [1:0] fi_out_of_reset = '1;  // only a real reset (PRESETn low, then high) is checked
+    always @(posedge clk) begin
+      fi_out_of_reset <= {fi_out_of_reset[0], `FICONTROL.PRESETn};
+      if (fi_out_of_reset == 2'b01 && `FICONTROL.FaultInjectMask != 8'h3f)
+        $fatal(1, "fault-injection units not armed out of reset: mask %h", `FICONTROL.FaultInjectMask);
+    end
+`endif
+
 `ifdef ECE411_DUT_FORTE
     forte_dut_wrap dut (
 `else

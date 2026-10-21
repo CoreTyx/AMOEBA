@@ -104,6 +104,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic              wfiM, IntPendingM,                              // Stall in Memory stage for WFI until interrupt pending or timeout
   output logic [31:0]       RAND_INSTR_INSERT_FREQ_REGW,                    // AMOEBA: dummy instruction insertion divider period
   output logic              PrivModeUncorrectableFaultW,                   // TMR uncorrectable privilege mode fault
+  output logic              PrivModeSecFaultW,                             // TMR correctable privilege mode fault
   input  logic              RegEccSecErrW,                                 // IEU ECC SEC (correctable 1-bit flip)
   input  logic              RegEccDedErrW,                                 // IEU ECC DED, retained for MSECFAULT logging
   input  logic              EccDedFaultM,                                  // registered DED fault presented to trap logic
@@ -138,7 +139,6 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   logic                     BreakpointFaultM, EcallFaultM;                  // breakpoint and Ecall traps should retire
 
   logic                     wfiW;
-  logic                     PrivModeSecFaultW;
 
   // track the current privilege level
   privmode #(P) privmode(.clk, .reset, .StallW, .TrapM, .mretM, .sretM, .DelegateM,

@@ -31,6 +31,8 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
   // Per-unit enables from the core; each injector selects bit and kind locally.
   input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
+  input  logic [15:0]       FaultLfsr,                      // shared fault-injection generator (ft_fault_gen)
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic              StallM, StallW,
   input  logic              HoldE,                          // Execute's operands cannot be used this cycle (ECC stall)
   input  logic              FlushE, FlushM, FlushW,
@@ -43,7 +45,8 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // Retry requests and M-aligned terminal faults; PE reports replica isolation,
   // which a single residue-checked unit never has.
   output logic              FTStallM, FTUnresolvedM,
-  output logic              MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r
+  output logic              MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r,
+  output logic [1:0]        ResidueDetect, ResidueUnresolved  // {DIV, MUL}, for the fault counters
 );
 
   logic [P.XLEN-1:0]        ProdM;                          // the half of the product the multiply returns
@@ -64,8 +67,8 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM, .HoldE,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product bits before the M-stage check.
-    .fi_enable(fault_inject_mul),
-    .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM));
+    .fi_enable(fault_inject_mul), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
+    .ProdM, .stall_req(MulFTStallM), .unresolved(MulUnresolvedM), .fault_detect(ResidueDetect[0]));
 
   // Divider
   // Start a divide when a new division instruction is received and the divider isn't already busy or finishing
@@ -76,14 +79,18 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign DivBusyE = 1'b0;
     assign DivFTStallM = 1'b0;
     assign DivUnresolvedM = 1'b0;
+    assign ResidueDetect[1] = 1'b0;
+    assign ResidueUnresolved[1] = 1'b0;
   end else begin : div
     logic DivUnresolvedE;
     // Corrupt selected result bits before the E-stage completion check.
     // The resulting fault status is registered into M.
     ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .RemE(Funct3E[1]),
         .W64E, .IntDivE, .ForwardedSrcAE, .ForwardedSrcBE,
-        .fi_enable(fault_inject_div),
-        .DivBusyE, .DivResultM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE));
+        .fi_enable(fault_inject_div), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
+        .DivBusyE, .DivResultM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
+        .fault_detect(ResidueDetect[1]));
+    assign ResidueUnresolved[1] = DivUnresolvedE;
     // Division completes in E. Carry its terminal fault through the same
     // E->M enable/flush as its instruction and PC before requesting a trap.
     flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
@@ -91,6 +98,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
 
   assign FTStallM      = MulFTStallM | DivFTStallM;
   assign FTUnresolvedM = MulUnresolvedM | DivUnresolvedM;
+  assign ResidueUnresolved[0] = MulUnresolvedM;
   assign MUL_PE_p = 1'b0;
   assign MUL_PE_r = 1'b0;
   assign DIV_PE_p = 1'b0;

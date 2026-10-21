@@ -89,6 +89,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   input  logic       TagDedDirty,       // A valid+dirty way in the set being read (the flush way, during a flush) has an uncorrectable tag
   output logic       DropTagDedDirty,   // Pulse: invalidate that way -- its data can't be written back without an address
   output logic       EccDedLostLine,    // Pulse: a dirty line leaving the cache (eviction or flush) had uncorrectable data; it was dropped, not written back
+  output logic       EccDedCleanDrop,   // Pulse: an access found an uncorrectable error in a clean line (or its tag) and dropped it
   output logic       LatchHitWord,      // Capture the word the core will read, before a store/AMO hit's write lands
   output logic       SelHitWord,        // Return that captured word (ADDRESS_SETUP after a hit) instead of re-reading the array
   input  logic       ScrubOwnsWaySelect, // The scrubber has an operation in flight (or is being granted this cycle) that needs way-selection state a new demand sequence would otherwise contend for -- hold off starting one until it clears (see cache.sv)
@@ -362,6 +363,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign EccDedLostLine = ((CurrState == STATE_DATA_DECODE) & VictimDed) | FlushDedHit;
 
   assign DropTagDedDirty = ((CurrState == STATE_TAG_DECODE) | (CurrState == STATE_FLUSH)) & TagDedDirty & ~READ_ONLY_CACHE;
+  assign EccDedCleanDrop = (CurrState == STATE_DATA_DECODE) & (TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)));
   assign EccDedDirtyFault = ((CurrState == STATE_DATA_DECODE) & DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE) |
                             DropTagDedDirty | // modified data lost with its tag: reported, never silently dropped
                             EccDedLostLine;   // dirty line with uncorrectable data dropped on eviction/flush

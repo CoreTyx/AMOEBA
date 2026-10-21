@@ -32,9 +32,14 @@
 module cache import cvw::*; #(parameter cvw_t P,
                               parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE,
                               parameter SCRUBBER_ENABLED = 1'b0,
-                              parameter SCRUB_INTERVAL_CYCLES = 0) (
+                              parameter SCRUB_INTERVAL_CYCLES = 0,
+                              parameter logic [FI_COUNT_BITS-1:0] FI_PHASE = '0) (  // this cache's event phase on the shared generator
   input  logic                   clk,
   input  logic                   reset,
+  // Runtime fault injection (cachefi.sv): unit enables and the core's shared generator
+  input  logic                   FaultInjectSec, FaultInjectDed,
+  input  logic [15:0]            FaultLfsr,
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic                   Stall,             // Stall the cache, preventing new accesses. In-flight access finished but does not return to READY
   input  logic                   FlushStage,        // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                   InvalidateFlushStage, // Pipeline flush of second stage (prevent writes and bus operations)
@@ -56,7 +61,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   // to performance counters to cpu
   output logic                   CacheMiss,         // Cache miss
   output logic                   CacheAccess,       // Cache access
-  output logic [31:0]            SecCount,          // Number of SEC codewords corrected
+  output logic [2:0]             SecErr,            // Pulses: tag, line, and store-repaired line corrected this cycle
+  output logic                   DedErr,            // Pulse: an uncorrectable line or tag was dropped or reported
   // lsu control
   input  logic                   SelHPTW,           // Use PAdr from Hardware Page Table Walker rather than NextSet
   // Bus fsm interface
@@ -130,7 +136,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic                          HitLive, LineDirtyLive;
   logic                          StoreRepairsData;
   logic                          CacheBusyFsm;
-  logic [LINELEN-1:0]            LineEncodedData, LineCorrectionData, LineWriteFinal;
+  logic [LINELEN-1:0]            LineEncodedData, LineCorrectionData, LineWriteMux, LineWriteFinal;
   logic [LINECHECKWIDTH-1:0]     LineEncodedCheck, LineCorrectionCheck, LineCheckWriteFinal;
   logic [NUMWAYS-1:0]            HitWay, ValidWay, ValidMismatchWay;
   logic                          Hit;
@@ -142,6 +148,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            TagDedDirtyWay;     // valid+dirty ways whose tag is uncorrectable
   logic                          TagDedDirty, DropTagDedDirty;
   logic                          EccDedLostLine;     // cachefsm: dirty line dropped on eviction/flush (uncorrectable data)
+  logic                          EccDedCleanDrop;    // cachefsm: clean line dropped for an uncorrectable error
   logic                          LatchHitWord, SelHitWord;
   logic [WORDLEN-1:0]            ReadDataWordLine, HitWordQ;
   logic [SETLEN-1:0]             FlushAdr;
@@ -362,8 +369,20 @@ module cache import cvw::*; #(parameter cvw_t P,
     .data_i     (CorrectedLine),
     .codeword_o ({LineCorrectionData, LineCorrectionCheck})
   );
-  mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteFinal);
+  mux2 #(LINELEN) linedinmux(LineEncodedData, LineCorrectionData, SelCorrectData, LineWriteMux);
   mux2 #(LINECHECKWIDTH) linecheckdinmux(LineEncodedCheck, LineCorrectionCheck, SelCorrectData, LineCheckWriteFinal);
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  // Fault injection: flips armed by cachefi land in the next tag and line written, after encode
+  /////////////////////////////////////////////////////////////////////////////////////////////
+  logic [TAGLEN-1:0]             TagFlip;
+  logic [LINELEN-1:0]            LineFlip;
+  cachefi #(.TAGLEN(TAGLEN), .TAGR(TAGCHECKR), .LINELEN(LINELEN), .LINER(LINECHECKR), .PHASE(FI_PHASE)) faultinject(
+    .clk, .reset, .FaultInjectSec, .FaultInjectDed, .FaultLfsr, .FaultCount,
+    .TagWrite((SetValid & ~FlushStage) | SelCorrectTag),
+    .LineWrite(((SetValid | SetDirty) & ~FlushStage) | SelCorrectData),
+    .TagFlip, .LineFlip);
+  assign LineWriteFinal = LineWriteMux ^ LineFlip;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Tag encode
@@ -386,8 +405,8 @@ module cache import cvw::*; #(parameter cvw_t P,
     );
     mux2 #(TAGLEN) tagdinmux(TagEncodedData, TagCorrectionData, SelCorrectTag, TagWriteData);
     mux2 #(TAGCHECKWIDTH) tagcheckdinmux(TagEncodedCheck, TagCorrectionCheck, SelCorrectTag, TagCheckWriteData);
-    assign TagStoreWrite = {TagWriteData, TagCheckWriteData};
-  end else begin : tagwrite
+    assign TagStoreWrite = {TagWriteData ^ TagFlip, TagCheckWriteData};
+  end else begin : tagwrite                      // no tag ECC: nothing to inject into
     assign TagStoreWrite = PAdr[PA_BITS-1:SETTOP];
   end
 
@@ -456,7 +475,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .HitLive, .LineDirtyLive, .StoreRepairsData,
     .ScrubOwnsWaySelect,
     .TagDecodeCaptureEn(TagDecodeCaptureEnFsm), .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
-    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .LatchHitWord, .SelHitWord,
+    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .EccDedCleanDrop, .LatchHitWord, .SelHitWord,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
@@ -471,9 +490,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign LostLineAdr = FlushCache ? {Tag, FlushAdrCurr, {OFFSETLEN{1'b0}}} : {Tag, PAdr[SETTOP-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
   assign EccDedDirtyFaultAdr = ScrubTrap ? ScrubFaultAdr : EccDedLostLine ? LostLineAdr : PAdr;
 
-  always_ff @(posedge clk)
-    if (reset) SecCount <= '0;
-    else if (SelCorrectTag || SelCorrectData || StoreRepairsData)
-      SecCount <= SecCount + {31'b0, SelCorrectTag} + {31'b0, SelCorrectData} + {31'b0, StoreRepairsData};
+  // Fault flags for the counters (faultcount_apb), demand and scrubber alike
+  assign SecErr = {StoreRepairsData, SelCorrectData, SelCorrectTag};
+  assign DedErr = EccDedCleanDrop | EccDedDirtyFault | ScrubInvalidate;
 
 endmodule

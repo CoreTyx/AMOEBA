@@ -21,7 +21,7 @@ module ft_core_fault_tb;
   logic [1:0] div_fi_kind = 0;
   logic [5:0] div_fi_bit = 0;
   logic fault_inject = 0, directed = 1;
-  logic [5:0] fi_units_expected = 0;  // mask & pin as the core's enable register will have sampled them
+  logic [7:0] fi_units_expected = 0;  // mask & pin as the core's enable register will have sampled them
   logic fi_enable = 0;
   logic [1:0] fi_target = 1, fi_kind = 0, fi_channel = 0;
   logic [6:0] fi_bit = 0;
@@ -219,7 +219,7 @@ module ft_core_fault_tb;
     checks++;
     if (condition !== 1'b1) $fatal(1, "scenario=%0d %s at %0t", scenario, label_text, $time);
   endtask
-  task automatic check_unit_enables(input logic [5:0] expected);
+  task automatic check_unit_enables(input logic [7:0] expected);
     check(dut.soc.core.ieu.dp.ftalu.replica[0].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[1].result_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[1].result_fi.fi_enable");
     check(dut.soc.core.ieu.dp.ftalu.replica[0].arith_fi.fi_enable == expected[0], "unit gate: ieu.dp.ftalu.replica[0].arith_fi.fi_enable");
@@ -234,6 +234,10 @@ module ft_core_fault_tb;
     check(dut.soc.core.ieu.dp.regf.inj2.inject_en == expected[4], "unit gate: ieu.dp.regf.inj2.inject_en");
     // One flip-mask generator serves all seven ECC pipeline registers (datapath.sv).
     check(dut.soc.core.ieu.dp.pipeflipmask.inject_en == expected[5], "unit gate: ieu.dp.pipeflipmask.inject_en");
+    check(dut.soc.core.ifu.bus.icache.icache.faultinject.FaultInjectSec == expected[6], "unit gate: icache.faultinject.FaultInjectSec");
+    check(dut.soc.core.ifu.bus.icache.icache.faultinject.FaultInjectDed == expected[7], "unit gate: icache.faultinject.FaultInjectDed");
+    check(dut.soc.core.lsu.bus.dcache.dcache.faultinject.FaultInjectSec == expected[6], "unit gate: dcache.faultinject.FaultInjectSec");
+    check(dut.soc.core.lsu.bus.dcache.dcache.faultinject.FaultInjectDed == expected[7], "unit gate: dcache.faultinject.FaultInjectDed");
   endtask
 
   task automatic load_program(input logic bge);
@@ -267,8 +271,8 @@ module ft_core_fault_tb;
     end else if (monitor_valid) begin
       if (monitor_rd_addr != 0 && !monitor_trap) regs[monitor_rd_addr] = monitor_rd_wdata;
       if (scenario == SC_FAULT_CONTROL && monitor_rd_addr == 10 && !monitor_trap) begin
-        check(monitor_rd_wdata == ((control_reads == 0 || control_reads == 8) ? 63 :
-              ((control_reads == 1) ? 0 : (1 << (control_reads - 2)))), "software byte readback of unit mask");
+        check(monitor_rd_wdata == ((control_reads == 0 || control_reads == 1) ? 0 :
+              ((control_reads == 10) ? 63 : (1 << (control_reads - 2)))), "software byte readback of unit mask");
         control_reads++;
       end
       if (monitor_trap) begin
@@ -277,7 +281,7 @@ module ft_core_fault_tb;
               "fault trap retains original instruction PC");
       end
       if (!mdu_case(scenario) && monitor_pc_rdata == BRANCH_PC && !monitor_trap) retired_branches++;
-      if (monitor_pc_rdata == ((scenario == SC_FAULT_CONTROL) ? BASE + 108 : (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40))) ||
+      if (monitor_pc_rdata == ((scenario == SC_FAULT_CONTROL) ? BASE + 132 : (mdu_case(scenario) ? BASE + 28 : ((scenario == SC_SHARED_INJECTION) ? BASE + 44 : BASE + 40))) ||
               monitor_pc_rdata == BASE + 268)
         finished = 1;
     end
@@ -336,18 +340,25 @@ module ft_core_fault_tb;
         rom[0] = 32'h100702b7; // lui t0,0x10070
         rom[1] = addi(5, 5, 11);
         rom[2] = 32'h0002c503; // lbu a0,0(t0): reset mask
-        for (int unit_index = 0; unit_index < 8; unit_index++) begin
-          rom[3 + 3*unit_index] = addi(6, 0, (unit_index == 0) ? 0 : ((unit_index == 7) ? 63 : (1 << (unit_index-1))));
+        // 0, then each unit bit alone, then the reset mask back
+        for (int unit_index = 0; unit_index < 10; unit_index++) begin
+          rom[3 + 3*unit_index] = addi(6, 0, (unit_index == 0) ? 0 : ((unit_index == 9) ? 63 : (1 << (unit_index-1))));
           rom[4 + 3*unit_index] = 32'h00628023; // sb t1,0(t0)
           rom[5 + 3*unit_index] = 32'h0002c503; // lbu a0,0(t0)
         end
-        rom[27] = 32'h0000006f;
+        rom[33] = 32'h0000006f;
       end
       held_cycles = 0;
       injected = 0;
       held_last = 0;
+      // The unit mask resets to 0; for shared injection, boot software has armed the six core units.
+      if (scenario == SC_SHARED_INJECTION) force dut.soc.uncoregen.uncore.faultcontrol.FaultInjectMask = 8'h3f;
       repeat (6) @(negedge clk);
       rst = 0;
+      if (scenario == SC_SHARED_INJECTION) begin
+        wait (dut.soc.uncoregen.uncore.faultcontrol.PRESETn);
+        @(posedge clk) #1 release dut.soc.uncoregen.uncore.faultcontrol.FaultInjectMask;
+      end
       // Hang guard, not a performance check. The slowest scenario (SC_SHARED_INJECTION) needs ~3.1k
       // cycles on main and ~12.4k with swe-cache-ec's multi-cycle cache hits; 50k leaves headroom.
       for (int cycle = 0; cycle < 50000 && !finished; cycle++) begin
@@ -433,7 +444,7 @@ module ft_core_fault_tb;
           check_unit_enables(fi_units_expected);
           fault_inject = cycle[0]; // verify the pin gates every programmed mask
           #1;
-          fi_units_expected = dut.soc.FaultInjectMask & {6{fault_inject}};
+          fi_units_expected = dut.soc.FaultInjectMask & {8{fault_inject}};
         end
         #1;
         if (held_last) check(dut.soc.core.PCE == held_pc, "execute PC holds across FT stall edge");
@@ -476,13 +487,28 @@ module ft_core_fault_tb;
         check(injected && held_cycles > 0, "runtime fault actually exercised");
       if (scenario >= SC_CMP_BACKPRESSURE && scenario <= SC_DIV_BACKPRESSURE)
         check(backpressure_started, "terminal backpressure exercised");
+      // The fault counters saw what the scenario did: detections (ALU, CMP, MUL, DIV mismatch
+      // counters 8, 10, 12, 14) and unresolved faults (9, 11, 13, 15).
+      begin
+        int detected, unresolved, total;
+        detected = 0; unresolved = 0; total = 0;
+        for (int i = 0; i < 18; i++) total += int'(dut.soc.uncoregen.uncore.faultcount.Count[i]);
+        for (int i = 8; i < 16; i += 2) begin
+          detected   += int'(dut.soc.uncoregen.uncore.faultcount.Count[i]);
+          unresolved += int'(dut.soc.uncoregen.uncore.faultcount.Count[i+1]);
+        end
+        if (scenario == SC_HEALTHY) check(total == 0, "fault counters stay zero without faults");
+        else if (trap_case(scenario)) check(detected > 0 && unresolved == 1, "fault counters: detections and one unresolved fault");
+        else if (scenario < SC_SHARED_INJECTION) check(detected > 0 && unresolved == 0, "fault counters: recovered detections only");
+        else if (scenario == SC_SHARED_INJECTION) check(total > 0, "fault counters see shared injection");
+      end
       if (trap_case(scenario)) begin
         check(trap_count == 1 && regs[12] == 16 && regs[13] == (mdu_case(scenario) ? BASE + 20 : BRANCH_PC),
               "precise machine cause-16 trap");
         check(regs[14][6] && regs[10] == 0, "unresolved sticky status and no younger retirement");
       end else if (scenario == SC_FAULT_CONTROL) begin
-        check(trap_count == 0 && control_reads == 9 && regs[10] == 63,
-              "byte stores/loads control all six units without traps");
+        check(trap_count == 0 && control_reads == 11 && regs[10] == 63,
+              "byte stores/loads control all eight units without traps");
       end else if (scenario >= SC_LATE_DIV_INJECTION) begin
         check(
             injected && trap_count == 0 && regs[11] == 0 &&
