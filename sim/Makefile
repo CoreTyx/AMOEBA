@@ -693,8 +693,8 @@ ecc_test: ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_
 
 ecc_secded_dected_test:
 	mkdir -p verilator/ecc_tb
-	$(UNIT_TB_VERILATOR) --binary -O2 --top-module ecc_tb \
-	    $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
+	$(UNIT_TB_VERILATOR) --binary -O2 --top-module ecc_tb $(CURDIR)/verilator_warn.vlt $(CVW_INCDIRS) \
+	    $(CORE_SV) $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
 	    $(CURDIR)/../hvl/ecc/ecc_tb.sv \
 	    -Mdir verilator/ecc_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/ecc_tb/compile.log
 	verilator/ecc_tb/Vecc_tb
@@ -796,7 +796,7 @@ ft_core_test:
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_core_fault_tb.sv \
-	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(PRIM_INC) +define+ECE411_VERILATOR $(ECE411_NO_FLOAT) \
 	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_core_tb/compile.log
 	verilator/ft_core_tb/Vft_core_fault_tb
@@ -808,7 +808,7 @@ ft_control_test:
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_control_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_control_tb.sv \
-	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(PRIM_INC) +define+ECE411_VERILATOR $(ECE411_NO_FLOAT) \
 	    -Mdir verilator/ft_control_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_control_tb/compile.log
 	verilator/ft_control_tb/Vft_control_tb
