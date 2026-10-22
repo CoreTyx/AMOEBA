@@ -2,9 +2,9 @@
  * PID 1 for the boot test: print one string, then never exit.
  *
  * Written in raw assembly against the RISC-V Linux syscall ABI so the whole
- * userland needs no libc -- the bare-metal riscv64-unknown-elf- toolchain the
- * repo already uses is enough.  That keeps musl/glibc and buildroot entirely
- * off the critical path for "did we reach userspace".
+ * userland needs no libc -- it links against nothing, so the toolchain's own C
+ * library is never used.  That keeps musl/glibc and buildroot entirely off the
+ * critical path for "did we reach userspace".
  *
  * The kernel opens /dev/console as fds 0/1/2 for init, but only if the node
  * exists in the initramfs (see initramfs.spec).  We do not rely on that: open

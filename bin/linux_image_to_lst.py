@@ -2,13 +2,12 @@
 """Convert flat binary blobs into the byte-addressed .lst image that
 simple_memory_w_mask $readmemh's at reset.
 
-generate_memory_file.py takes an ELF and walks `objdump -h`, which hard-errors
-on any section whose VMA or size is not a multiple of the addressability.  The
-Linux boot image is not an ELF -- OpenSBI's fw_payload.bin is a flat blob with
-the kernel and its built-in initramfs already embedded -- so it goes through
-this path instead.
+bin/program.mk builds a test's image from its ELF with `objcopy -O verilog`.
+The Linux boot image is not an ELF -- OpenSBI's fw_payload.bin is a flat blob
+with the kernel and its built-in initramfs already embedded -- so it goes
+through this path instead.
 
-The output format matches generate_memory_file.py exactly: an `@<word-index>`
+The output format matches program.mk's exactly: an `@<word-index>`
 directive followed by one 64-bit little-endian word per line, most significant
 byte first.
 

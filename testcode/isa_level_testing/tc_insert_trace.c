@@ -24,7 +24,7 @@
  * globals, no linker symbols, so it builds without -mcmodel=medany even though the
  * image loads at 0x80000000.
  *
- *   riscv64-unknown-elf-gcc -march=rv64gc -mabi=lp64d -O2 -nostdlib \
+ *   $(python3 bin/toolchain.py)gcc -march=rv64gc -mabi=lp64d -O2 -ffreestanding -nostdlib \
  *       -T bin/link.ld bin/startup.s \
  *       testcode/isa_level_testing/tc_insert_trace.c \
  *       -o testcode/isa_level_testing/tc_insert_trace.elf

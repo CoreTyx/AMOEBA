@@ -19,8 +19,11 @@ FREERTOS_PORT_CHIP  := $(FREERTOS_PORT)/chip_specific_extensions/RISCV_MTIME_CLI
 PROG ?= $(abspath sorting_algo_app.c)
 
 # ---- Toolchain ----
-CC      := $(firstword $(foreach t,riscv64-unknown-elf-gcc riscv64-elf-gcc,$(if $(shell which $(t) 2>/dev/null),$(t))))
-OBJDUMP := $(firstword $(foreach t,riscv64-unknown-elf-objdump riscv64-elf-objdump,$(if $(shell which $(t) 2>/dev/null),$(t))))
+# The same compiler as every other test tier (bin/toolchain.mk).  Override by
+# setting CROSS_COMPILE.
+include $(BIN_DIR)/toolchain.mk
+CC      := $(CROSS_COMPILE)gcc
+OBJDUMP := $(CROSS_COMPILE)objdump
 
 # ---- ISA: rv64imac (no FPU, matches AMOEBA amoeba config) ----
 MARCH := rv64imac_zicsr_zifencei
@@ -28,12 +31,14 @@ MABI  := lp64
 
 CFLAGS := -march=$(MARCH) -mabi=$(MABI) -mcmodel=medany \
           -O2 -gdwarf-2 \
-          -nostdlib -static \
+          -ffreestanding -nostdlib -static \
           -fno-tree-loop-distribute-patterns \
           -ffunction-sections -fdata-sections \
           -Wa,-march=$(MARCH)
 
-# Add stub headers when the cross-sysroot lacks newlib (e.g. Ubuntu gcc-riscv64-unknown-elf)
+# Add stub headers when the cross-sysroot has no bare-metal libc at its top
+# level (a Linux toolchain's glibc headers are under usr/include, and are not
+# meant for freestanding code)
 _SYSROOT := $(shell $(CC) -print-sysroot 2>/dev/null)
 ifeq ($(wildcard $(_SYSROOT)/include/stdlib.h),)
 _STUB_INC := -isystem $(abspath stub_include)
@@ -84,7 +89,7 @@ $(ELF): $(FREERTOS_KERNEL_DIR)/tasks.c $(ALL_SRCS) freertos_wally.ld
 	$(OBJDUMP) -S -D $@ > $(ELF:.elf=.dis)
 
 $(SIM_DIR)/bin/memory_8.lst: $(ELF)
-	python3 $(BIN_DIR)/generate_memory_file.py -8 $<
+	$(MAKE) -f $(BIN_DIR)/program.mk PROG=$(abspath $<) IMAGE_DIR=$(SIM_DIR)/bin CROSS_COMPILE=$(CROSS_COMPILE)
 
 clean:
 	rm -rf $(ELF) $(ELF:.elf=.dis) dump.fst

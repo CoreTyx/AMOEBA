@@ -21,7 +21,7 @@
  * at 0x80000000.  A string constant would land in .rodata above medlow's reach and
  * fail to link with "relocation truncated to fit: R_RISCV_HI20".
  *
- *   riscv64-unknown-elf-gcc -march=rv64gc -mabi=lp64d -O2 -nostdlib \
+ *   $(python3 bin/toolchain.py)gcc -march=rv64gc -mabi=lp64d -O2 -ffreestanding -nostdlib \
  *       -T bin/link.ld bin/startup.s \
  *       testcode/isa_level_testing/tc_rand_instr_insert.c \
  *       -o testcode/isa_level_testing/tc_rand_instr_insert.elf

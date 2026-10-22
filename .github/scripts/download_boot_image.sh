@@ -11,8 +11,10 @@
 # THE BRANCH SCOPING IS CONDITIONAL, AND THAT IS THE POINT.  An unscoped lookup
 # takes the newest success on any branch, so a PR that edits the kernel could
 # silently boot main's kernel and prove nothing about the change under review.
-# But the image is built from testcode/linux/** and bin/linux_image_to_lst.py
-# and NOTHING ELSE, so a ref that touches neither cannot affect it, and for
+# But the image is built from testcode/linux/**, bin/linux_image_to_lst.py and
+# the toolchain (bin/toolchain.py, bin/toolchain.mk and
+# .github/scripts/install_riscv_gcc.sh) and NOTHING ELSE, so a ref that touches
+# none of them cannot affect it, and for
 # those the default branch's image IS the same image.  Scoping unconditionally
 # made these jobs permanently red on every hardware-only PR -- which is most of
 # them.  A job that always fails for a reason unrelated to the change is a job
@@ -50,7 +52,7 @@ if [ -z "$RUN_ID" ]; then
               "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
               --jq '.[].filename')
     CHANGED=$(printf '%s\n' "$FILES" \
-              | grep -E '^(testcode/linux/|bin/linux_image_to_lst\.py$)' || true)
+              | grep -E '^(testcode/linux/|bin/(linux_image_to_lst\.py|toolchain\.py|toolchain\.mk)$|\.github/scripts/install_riscv_gcc\.sh$)' || true)
   else
     CHANGED="(not a pull request, so there is no base to fall back from)"
   fi

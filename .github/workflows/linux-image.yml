@@ -12,12 +12,15 @@ on:
     paths:
       - 'testcode/linux/**'
       - 'bin/linux_image_to_lst.py'
+      - 'bin/toolchain.py'
+      - 'bin/toolchain.mk'
+      - '.github/scripts/install_riscv_gcc.sh'
       - '.github/workflows/linux-image.yml'
 
 jobs:
   build-image:
     name: Build boot.lst (Linux 6.6 + OpenSBI 1.4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +33,19 @@ jobs:
           sudo apt-get install -y python3 gcc g++ make curl xz-utils \
             bc bison flex libssl-dev libelf-dev device-tree-compiler cpio
 
-      # The kernel cross toolchain, sources and checksums are all pinned inside
+      # The compiler's packages, so only the first job after the script changes
+      # downloads them.
+      - name: Cache RISC-V gcc packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/riscv-gcc-debs
+          key: riscv-gcc-debs-ubuntu-24.04-${{ hashFiles('.github/scripts/install_riscv_gcc.sh') }}
+
+      # gcc 14.2.0, the version bin/toolchain.py requires; see the script.
+      - name: Install RISC-V gcc
+        run: .github/scripts/install_riscv_gcc.sh
+
+      # The kernel and OpenSBI sources and their checksums are pinned inside
       # testcode/linux/Makefile, so this cache key only has to track that file.
       - name: Cache downloads
         uses: actions/cache@v4

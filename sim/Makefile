@@ -181,7 +181,7 @@ verilator/$(NO_SPIKE_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 run_verilator_top_tb_no_spike: verilator/$(NO_SPIKE_DIR)/Vtop_tb $(PROG)
 	mkdir -p verilator/$(PROG_NAME)
 	find ./verilator -maxdepth 1 -type f -delete
-	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	$(MAKE) -f $(CURDIR)/../bin/program.mk PROG=$(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(NO_SPIKE_DIR)/Vtop_tb \
@@ -223,7 +223,7 @@ verilator/$(ECC_INJECT_DIR)/Vtop_tb: $(VER_SRCS) $(HDRS) $(CURDIR)/Makefile
 run_ecc_inject: verilator/$(ECC_INJECT_DIR)/Vtop_tb $(PROG)
 	mkdir -p verilator/$(PROG_NAME)
 	find ./verilator -maxdepth 1 -type f -delete
-	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	$(MAKE) -f $(CURDIR)/../bin/program.mk PROG=$(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(ECC_INJECT_DIR)/Vtop_tb \
@@ -386,7 +386,7 @@ $(VCS_NO_SPIKE_DIR)/top_tb: $(VCS_SRCS) $(HDRS) vcs_warn.config $(CURDIR)/Makefi
 .PHONY: run_vcs_top_tb
 run_vcs_top_tb: $(VCS_DIR)/top_tb $(PROG)
 	mkdir -p spike
-	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	$(MAKE) -f $(CURDIR)/../bin/program.mk PROG=$(PROG)
 	rm -f $(VCS_DIR)/dump.fsdb
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
@@ -399,7 +399,7 @@ run_vcs_top_tb: $(VCS_DIR)/top_tb $(PROG)
 
 .PHONY: run_vcs_top_tb_no_spike
 run_vcs_top_tb_no_spike: $(VCS_NO_SPIKE_DIR)/top_tb $(PROG)
-	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	$(MAKE) -f $(CURDIR)/../bin/program.mk PROG=$(PROG)
 	rm -f $(VCS_NO_SPIKE_DIR)/dump.fsdb
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
@@ -429,7 +429,7 @@ build: verilator/$(BUILD_DIR)/Vtop_tb
 run_verilator_top_tb: verilator/$(BUILD_DIR)/Vtop_tb $(PROG)
 	mkdir -p spike verilator/$(PROG_NAME)
 	find ./verilator -maxdepth 1 -type f -delete
-	python3 ../bin/generate_memory_file.py -8 $(PROG)
+	$(MAKE) -f $(CURDIR)/../bin/program.mk PROG=$(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(BUILD_DIR)/Vtop_tb \
@@ -581,11 +581,11 @@ link_abort:
 # in SystemVerilog, which this flow's C++ harness cannot do.  hvl/cdc/run.sh.
 .PHONY: cdc
 cdc:
-	$(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
+	MAKE=$(MAKE) $(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
 
 .PHONY: cdc_sweep
 cdc_sweep:
-	SWEEP=1 $(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
+	SWEEP=1 MAKE=$(MAKE) $(CURDIR)/../hvl/cdc/run.sh $(if $(PROG),$(PROG),)
 
 .PHONY: regression
 regression:
