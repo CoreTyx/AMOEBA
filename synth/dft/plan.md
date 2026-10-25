@@ -1,125 +1,138 @@
-# Area-constrained DFT plan for FORTE
+# FORTE DFT implementation plan
 
-## Recommendation and limits
+## Scope and design basis
 
-Start with **partial scan of pipeline control, the fetch PC, and critical privileged state**. Measure that candidate before adding wide datapath registers. In parallel, estimate a **single shared cache MBIST controller**; keep it only if its SRAM access muxes, comparison logic, and routing fit. Do not start with full-chip scan, scan compression, logic BIST, a JTAG TAP, or SRAM repair.
+The DFT architecture prioritizes partial scan of pipeline control, the fetch PC, and critical privileged state. Wider pipeline registers and a shared cache memory built-in self-test (MBIST) controller are additional area-dependent features. Full-chip scan, scan compression, logic BIST, a JTAG TAP, and SRAM repair are outside the minimum-area configuration.
 
-This is a proposed implementation plan, based on RTL revision `ede78e4`. It does not claim completed scan insertion, MBIST, ATPG coverage, or a measured DFT area overhead. The separate DC script is an adapted copy of `../synthesis.tcl`; the normal synthesis flow and RTL are unchanged. Current RTL can be inventoried and synthesized as a baseline, but needs the scan and MBIST integration described below before insertion.
+The architecture basis is RTL revision `ede78e4`. Scan insertion runs separately in `dc_shell` on an existing mapped netlist and its functional SDC; the original synthesis script remains the upstream flow. Scan stitching, MBIST hardware, ATPG patterns, and measured DFT area overhead remain incomplete. The existing lock, pad multiplexing, and scan placeholders provide the interface foundation.
 
-For each candidate, account for the delta in scan-flop versus ordinary-flop area, scan/ICG/reset control, memory ownership muxes and checkers, added clock load, and timing/hold repair. Use matched library/mapping reports followed by placement, not a generic per-flop percentage.
+## Area constraints
 
-The reported preliminary PnR utilization is 356,453 / 472,326 µm² (75.5%), **excluding SRAM area**. The numerical difference, 115,873 µm², is not a usable DFT budget: macro footprints/halos, placement blockages, routing, clock-tree and hold-fix cells are not accounted for by that subtraction. The older 0.526 mm² synthesis figure and 0.49 mm² target also cannot establish available placed area without reconciling their accounting. Obtain a small explicit cell-area allowance from the actual floorplan before accepting a tier; no percentage overhead is assumed here.
+Preliminary PnR reports 356,453 µm² used within 472,326 µm², or 75.5% utilization, excluding SRAM area. The resulting 115,873 µm² difference does not establish available DFT area. Macro footprints, halos, placement blockages, routing resources, clock-tree cells, and hold repair must be included in the placement budget. The 0.526 mm² pre-PnR estimate and 0.49 mm² target require consistent area accounting before comparison with these utilization figures.
 
-## Current implementation
+Each candidate requires an explicit area allowance from the implementation floorplan. Area estimates must include scan-flop replacement, test control, memory ownership muxes, comparison logic, additional clock load, and timing repair. Matched synthesis reports provide the initial comparison; placement and timing results determine acceptance. No fixed percentage of DFT overhead is assumed.
 
-| Item | What exists now |
+## Existing implementation
+
+| Component | Implemented state |
 |---|---|
-| Scan pins | Dedicated `test_mode` and `scan_en`; sixteen memory-link pins are shared with scan |
-| Scan data | In authorized test mode, `io[7:0]` inputs and `io[15:8]` outputs; fixed per-bit pad directions |
-| Scan chains | Eight one-flop `scan_q` placeholders in `hdl/forte_chip.sv`; no stitched processor chains |
-| Clock | Tester drives existing `core_clk`; top ties core and link clocks to this input. `clk_out` is a forwarded output, not a separate scan-clock input |
-| Lock | APB register at `0x0200F000`; resets unlocked, bit-0 write of zero locks until reset; writing one does not unlock |
-| Gating | Both test-mode pad remapping and scan shifting are lock-qualified; shifting also requires test mode |
-| Verification | `tcf_dft_lock.c` tests the software register path; the pin bench's `dft` command is still a stub |
-| Cache memory | Two I-cache ways and four D-cache ways, each with separate data and tag SRAM; no MBIST access mux/controller |
+| Dedicated DFT pins | `test_mode` and `scan_en` |
+| Shared scan data pins | `io[7:0]` inputs and `io[15:8]` outputs in authorized test mode; fixed per-bit pad directions |
+| Scan paths | Eight one-flop `scan_q` placeholders in `hdl/forte_chip.sv`; processor registers are not stitched |
+| Clock | Core and link clocks share the `core_clk` input at the top level; `clk_out` is a forwarded output |
+| DFT lock | APB register at `0x0200F000`; reset permits DFT; writing bit 0 as zero locks DFT until reset; writing one cannot unlock it |
+| Authorization | Lock qualification applies to test-mode pad remapping and scan shifting; shifting also requires test mode |
+| Verification | `tcf_dft_lock.c` exercises register accesses and sticky locking; the pin bench's `dft` command is a stub |
+| Cache SRAM | Two I-cache ways and four D-cache ways, each with separate data and tag banks; no MBIST controller or access muxes |
 
-Older planning documents mention two scan chains. The current pad mux reserves **eight**. Use the RTL and this eight-channel plan as the starting point, rather than the older chain count.
+The scan architecture uses the eight channels reserved by the RTL pad mux.
 
-## Tiers, from lowest intended area cost to highest
+## Area-dependent feature tiers
 
-The tiers are cumulative feature choices, not measured area rankings. Actual mapping and timing repair can change the relative cost of wide scan versus MBIST. Compare both candidates before choosing the next step.
+The tiers are cumulative feature configurations in increasing intended area order. Actual mapping, memory muxing, and timing repair may change the relative costs. Tier selection therefore depends on measured implementation results.
 
-| Tier | Features | Priority and limitation |
+| Tier | Register and memory scope | Constraints |
 |---|---|---|
-| 0: existing infrastructure | Existing lock, pad mux, functional software tests and ECC tests; no processor scan or MBIST | Baseline only. The one-flop scan placeholders and ECC tests are not manufacturing memory test coverage. |
-| 1: essential partial scan | IEU pipeline control/valid/destination state; fetch PC; privilege-mode data/check copies; status and interrupt CSRs; trap vectors, EPC/cause/delegation; PMP configuration/address registers; supervisor trap entry and `satp` | First insertion candidate. Exclude the large integer register array and cache SRAM storage. Fault coverage outside controllable/observable cones will be limited. |
-| 2: pipeline data and remaining trap state | Tier 1 plus instruction/PC pipeline boundaries, the seven ECC-protected IEU operand/result registers including their stored check bits, and remaining implemented machine/supervisor CSR storage | Improves access to datapath boundaries without immediately scanning the register file. Review mapped recovery/FSM registers individually; do not include an entire arithmetic unit just to reach its control state. |
-| 3: shared cache MBIST | Tier 2 scan plus one sequential MBIST controller serving all cache data/tag banks, raw-memory access muxes, sticky done/fail, and minimal result readout | Target all twelve banks, one at a time. No per-bank controllers, redundancy allocation, or wide failure log in the first version. Adds RTL; DC scan commands alone cannot implement it. |
-| 4: expanded observability | Tier 3 plus integer register-file storage, TLB/cache metadata and remaining core state; optional compact first-failure address/bank recording | Only if measured area and timing permit. No commitment to full-chip scan. Keep link falling-edge state out until mixed-edge stitching/lockup and test timing are explicitly designed. |
+| 0: interface baseline | Existing lock, pad mux, software tests, and ECC tests | No processor scan or MBIST coverage; scan placeholders do not test processor storage |
+| 1: essential partial scan | IEU pipeline control/valid/destination state; fetch PC; privilege-mode data/check copies; status and interrupt CSRs; trap vectors, EPC/cause/delegation; PMP configuration/address registers; supervisor trap entry and `satp` | Initial insertion target; integer register-file storage and cache SRAM remain outside scan |
+| 2: pipeline data and CSR expansion | Tier 1 plus instruction/PC pipeline boundaries, seven ECC-protected IEU operand/result registers with stored check bits, and remaining implemented machine/supervisor CSR storage | Arithmetic recovery/FSM registers require individual mapped-cell selection; entire arithmetic units are not selected solely to reach control state |
+| 3: shared cache MBIST | Tier 2 scan plus one controller for all cache data/tag banks, raw-memory access muxes, sticky done/fail, and minimal readout | Twelve banks tested serially; no per-bank controllers, repair allocation, or wide failure log |
+| 4: expanded observability | Tier 3 plus integer register-file storage, TLB/cache metadata, and remaining core state; optional compact first-failure recording | Subject to remaining area and timing margin; link falling-edge state requires a separate mixed-edge stitching and lockup design |
 
-If tier 2 is too expensive, also measure **tier 1 + shared MBIST** as an alternative; this is a separate candidate, not a claim that MBIST is free or cheaper. The supplied selector makes tier 3 use tier 2's scan population; edit the policy deliberately for that alternative and record the change.
+Tier 1 with shared MBIST is an alternative when the tier 2 datapath expansion does not fit. Its area is evaluated independently. The hookup file supplies the tier 1 mapped-register collection. Higher-tier scan populations require an extension of that collection; MBIST requires the additional controller and SRAM access RTL to be synthesized into the input netlist.
 
-### Register selection and chain layout
+### Register selection
 
-`scan_selection.tcl` is an initial hierarchy-based policy for the current RTL, not a verified mapped-cell list. Run inventory first and inspect every selected instance. Generic flops, generate blocks, optimization and multibit mapping can change the names and the number of register objects. Unmatched intended registers must be resolved before claiming that a tier is complete. Register-object counts before mapping are not flop-bit counts.
+`scan_regs` in the site-specific hookup file identifies the mapped register cells selected for tier 1. Review of the loaded netlist and final chain report must confirm intended matches and implemented bit widths. Retiming, ungrouping, name conversion, and multibit mapping can remove the original RTL hierarchy or change register names. Selection therefore uses the actual netlist, rather than assuming that RTL instance patterns still match. A synthesized DDC or source-to-netlist mapping information can assist identification.
 
-Relevant instances include:
-
-- `chip/soc/core/ieu/c/controlregD/E/M/W` and destination/source register identifiers.
-- `chip/soc/core/ifu/pcreg`, and instruction/PC boundary registers in tier 2.
-- `chip/soc/core/priv/privmode` and `priv/csr/{csrsr,csri,csrm,...csrs}`. PMP entries and `satp` deserve priority because they determine isolation and translation.
-- `chip/soc/core/ieu/dp/{RD1EReg,RD2EReg,ImmExtEReg,SrcAMReg,IEUResultMReg,WriteDataMReg,IFResultWReg}`. Scan stored codeword bits, not just corrected outputs.
-
-Retain all physical copies of selected redundant state, including privilege check copies. Scan permits loading inconsistent ECC/TMR states: ordinary logic patterns must initialize them consistently, or ATPG must model their recovery behavior. Test correction/recovery separately with deliberate corruptions. Do not assume redundancy eliminates the need to observe individual storage bits.
-
-Start with eight uncompressed chains using the available eight input/output pairs. Balance **scanned bits and physical location**, then preserve CSR identification in the chain map. Do not force every CSR onto chain 0 if that makes it the longest chain; this changes the older all-CSRs-on-chain-0 suggestion. Fewer chains may reduce endpoint overhead but do not remove the scan mux cost per selected flop. Test one/two-chain variants only if they recover useful area without requiring a costly new pad mux.
-
-Permanently exclude the lock flop, test-mode control/command latches, reset synchronizers and memory macros from scan replacement. In initial tiers also exclude the register-file array, large counters, and link/CDC datapath state. The initial policy is conservative; expand it through reviewed cell lists and ATPG evidence, not a default full-scan fallback.
-
-## Scan integration with pins and locking
-
-No additional pin is required for the baseline scan plan:
-
-| Signal | Use in test |
+| Priority group | RTL reference instances for identifying mapped state |
 |---|---|
-| `test_mode` | Session-level test selection, qualified by `dft_unlocked` |
-| `scan_en` | Shift when high; capture when low, with the selected test session active |
+| Pipeline control | `chip/soc/core/ieu/c/controlregD/E/M/W`, source/destination identifiers |
+| Fetch and instruction boundaries | `chip/soc/core/ifu/pcreg`; instruction and PC stage registers |
+| Privileged state | `chip/soc/core/priv/privmode`, `priv/csr/csrsr`, `csri`, `csrm`, and supervisor CSR instances |
+| Encoded datapath boundaries | `chip/soc/core/ieu/dp/{RD1EReg,RD2EReg,ImmExtEReg,SrcAMReg,IEUResultMReg,WriteDataMReg,IFResultWReg}` |
+
+PMP and `satp` receive priority because they determine protection and address translation. Selection of redundant state includes its physical data/check copies. Selection of encoded pipeline state includes stored codeword bits rather than only corrected outputs.
+
+ATPG initialization must account for ECC and TMR consistency. Patterns may load inconsistent copies or codewords, which can activate recovery behavior during capture. Correction/recovery tests use deliberate corruptions and are distinct from ordinary logic fault patterns.
+
+The lock flop, test-command/control latches, reset synchronizers, and memory macros remain excluded from scan replacement. Initial tiers additionally exclude the register-file array, large counters, and link/CDC datapath state. Register-object counts before mapping are not scan-bit counts.
+
+### Chain organization
+
+The initial architecture has eight uncompressed chains using the existing eight SI/SO pairs. Chain assignment balances scanned bits and physical locality. CSR membership remains identifiable in the chain map, without requiring every CSR to occupy chain 0.
+
+One- or two-chain variants are optional area experiments. Fewer chains may reduce endpoint overhead but retain the scan mux cost per selected flop and increase shift time. A variant is accepted only if its muxing and timing costs provide a measured benefit.
+
+## Test interface and authorization
+
+The baseline scan configuration requires no additional pins.
+
+| Signal | Test function |
+|---|---|
+| `test_mode` | Session-level selection qualified by `dft_unlocked` |
+| `scan_en` | High for shift; low for capture within a scan session |
 | `io[7:0]` | Eight parallel serial inputs |
 | `io[15:8]` | Eight parallel serial outputs |
-| `core_clk` | External shift/capture clock; begin with slow, non-at-speed tests |
-| `rst_n` | Initial reset and lock initialization; never bypass the lock's reset/security semantics |
-| `clk_out` | Existing forwarded observation/timing reference, not a new scan clock |
+| `core_clk` | Tester-driven shift/capture clock; initial testing is slow and non-at-speed |
+| `rst_n` | Reset and lock initialization |
+| `clk_out` | Forwarded clock observation/timing reference |
 
-There are two dedicated control pins, sixteen shared data pins, and existing shared clock/reset. Reusing pads makes the memory link unavailable during scan; the external agent must stop driving the upper byte and stop functional link traffic.
+The interface comprises two dedicated DFT controls and sixteen shared data pins, plus the functional clock/reset. Scan use disables the external memory link. The external agent must stop functional traffic and release the upper-byte pads before scan output is enabled.
 
-Replace the one-flop placeholders with real scan endpoints while retaining the existing pad mux. Add a preserved test-control boundary with DC-resolvable internal hookup pins. Drive actual scan-cell SE and ICG test controls from a signal equivalent to:
+### Scan hookup
+
+Real scan endpoints replace the one-flop placeholders while retaining the pad mux. A preserved test-control boundary provides DC-resolvable internal hookup pins. Scan-cell enable and ICG test controls require lock-qualified authorization:
 
 ```text
 authorized_test = test_mode AND dft_unlocked
 scan_shift      = scan_en AND authorized_test AND scan_session
 ```
 
-`scan_session` is constant true for a scan-only implementation; it becomes the latched session selection if MBIST shares the pins. Do not hook inserted scan cells directly to raw `scan_en`, add a parallel ungated tester path, or use the lock merely to hide scan outputs. Locking must prevent shifting and pad remapping. Preserve the lock and authorization logic through synthesis; exclude it from scan and from automatic reset/clock fixes that would bypass authorization.
+`scan_session` is constant true in a scan-only configuration and becomes the latched session selection when MBIST shares the interface. Raw `scan_en` must not bypass authorization. The lock must prevent shifting and pad remapping, rather than only hiding scan outputs. Authorization logic remains excluded from scan and from reset/clock fixes that would bypass it.
 
-Additional integration requirements:
+### Isolation, reset, and clock control
 
-Keep `fault_inject=0` during scan/MBIST and hold asynchronous interrupt and UART inputs at defined inactive levels. The DFT lock does not disable the separate runtime fault-injection mechanism.
+1. **APB isolation:** scanned APB state must not generate an unintended zero write to the lock. Functional APB transactions are inhibited during an authorized test session. This isolation is additional RTL; the existing lock register does not provide it.
+2. **Memory and bus isolation:** functional SRAM writes and external requests remain inactive during shifting. Capture requires controlled or modeled nonscan state and memory/peripheral outputs. MBIST receives exclusive SRAM ownership.
+3. **Reset initialization:** both reset synchronizers must reach defined state before shifting. Any test reset bypass must preserve the lock's authorization and reset semantics. Reset re-enables DFT.
+4. **Clock-gate control:** the synthesis flow requests clock gating. Inserted ICG cells require lock-qualified test overrides and verified scan-clock controllability.
+5. **External inputs:** `fault_inject` remains zero; interrupt and UART inputs remain at defined inactive levels. The DFT lock does not gate runtime fault injection.
+6. **Return to operation:** destructive scan/MBIST is followed by reset and architectural/cache initialization. Boot software must clear the lock before untrusted execution. A production boot lock write remains an integration requirement.
 
-1. **Prevent self-locking during shift.** Random scanned APB state must not synthesize a write of zero to the lock. Inhibit functional APB transactions while an authorized test session is active. The existing lock register does not implement this test isolation itself.
-2. **Prevent unintended memory writes and external transactions.** Hold functional SRAM writes and bus requests inactive during shifting. For capture, model or initialize the remaining nonscan state, memory and peripheral outputs so ATPG does not rely on uncontrolled X values. An MBIST session gets exclusive SRAM ownership instead.
-3. **Control reset.** Initialize both reset synchronizers before shifting; determine a test reset strategy for the scanned core. Reset bypass, if required, must never bypass authorization or place the lock into an ATPG-controlled chain. Physical reset continues to reopen DFT, as it does today.
-4. **Control clock gates.** `options.json` permits synthesis clock gating. Provide lock-qualified test overrides and verify their connectivity. A scan declaration is not proof that every inserted ICG opens correctly.
-5. **Exit deterministically.** Reset and reinitialize architectural/cache state after destructive scan/MBIST. Boot software must explicitly clear the lock before untrusted code runs; no production boot lock write was identified in the current checkout.
+The lock is volatile. It prevents software reopening DFT within a locked boot session but does not prevent access by an agent that controls reset.
 
-Reset reopens DFT. With no nonvolatile lock, this plan preserves the existing protection against software reopening scan during a boot session; it does not make scan inaccessible to someone who controls reset.
+## Cache MBIST architecture
 
-## Minimal shared cache MBIST
+### Memory scope
 
-### Memory scope and insertion point
+The configured caches contain six data banks and six tag banks, each 64 entries deep. Data words expose 137 bits: 128 payload bits and nine check bits. Tag words expose 53 bits: 46 payload bits and seven check bits. The linked memory inventory and compiler models must confirm the twelve physical instances and their widths.
 
-The current cache configuration has **six data banks and six tag banks**, each 64 entries deep. Data words are 137 logical bits (128 payload + 9 check bits); tag words are 53 logical bits (46 payload + 7 check bits). Confirm the twelve instances and physical widths from the linked memory inventory and actual compiler models before coding the controller.
+MBIST ownership is inserted at the SRAM-wrapper boundary below ECC correction and tag-hit logic. The `ram1p1rwe` path reaches `ram1p1rwbe_64x137` and `ram1p1rwbe_64x53`, which instantiate `rf_sp_*` macros. Controls include active-low `CEN/WEN` and fixed `RETN/EMA`. This cache path uses full-word writes; the generic wrapper's `BWEB` interface does not establish physical bit-write-mask support.
 
-Integrate test ownership at the SRAM-wrapper boundary, below cache ECC correction and normal tag-hit logic. The existing `ram1p1rwe` path reaches `ram1p1rwbe_64x137` / `ram1p1rwbe_64x53`, which instantiate `rf_sp_*` macros. Their macro controls include active-low `CEN/WEN`, and fixed `RETN/EMA`. The cache uses full-word writes on this path; `BWEB` on the generic wrapper is not evidence that the instantiated SRAM has bit-write enables.
+The wrappers pad writes with three bits and discard three read bits. Physical testing of those bits requires confirmation of the compiler interface and access below that padding. Testing only the 137/53 visible bits is reported as logical-interface coverage.
 
-The wrappers currently pad writes by three bits and discard three output bits. Test those physical bits only if the compiler model confirms them and the MBIST mux/checker is placed inside or below that padding. Testing just the 137/53 visible bits must be reported as that narrower coverage, not full physical-macro coverage.
+### Shared controller and datapath
 
 ```mermaid
 flowchart LR
-  T[Locked test/session control] --> B[One shared MBIST sequencer]
+  T[Locked test/session control] --> B[Shared MBIST sequencer]
   C[Normal cache controls] --> M[Per-bank ownership muxes]
   B --> M
-  M --> S[One selected data or tag SRAM]
+  M --> S[Selected data or tag SRAM]
   S --> R[Raw read comparison]
   B --> R
   R --> F[Sticky done / fail]
   F --> O[Shared test-pad readout]
 ```
 
-Use one address counter, bank selector, phase controller, small read/compare pipeline, and sticky result state. Run banks serially. Generate all-zero/all-one expected patterns combinationally rather than storing a 137-bit pattern register. Compare shared-output-mux versus local reduction-checker implementations: a wide 12:1 read mux can outweigh the controller savings. Muxing CE, WE, address and write data is likely the main area/timing risk; measure it explicitly.
+The minimum implementation uses one address counter, bank selector, phase controller, read/compare pipeline, and sticky result state. Banks run sequentially. All-zero/all-one expected values are generated combinationally without a wide pattern register.
 
-### Test sequence
+Area evaluation includes both a shared-output mux/checker and local reduction checkers. A wide 12:1 read mux can offset shared-controller savings. CE, WE, address, and write-data muxes are included in functional timing and area assessment.
 
-Propose a word-oriented March C-minus sequence:
+### Memory test algorithm
+
+The proposed algorithm is word-oriented March C-minus:
 
 ```text
 all addresses: write 0
@@ -130,79 +143,107 @@ descending:   read 1, write 0
 all addresses: read 0
 ```
 
-This is 10 operations per address, or 7,680 memory operations across twelve 64-entry banks, **not** a guaranteed cycle count. Honor synchronous read latency and write/read spacing from the macro model; additional compare/control cycles are expected. A failure sets a sticky flag and remains externally observable through completion. Do not route reads through ECC correction, which could hide a faulty cell. Report the algorithm and word backgrounds used; do not claim exhaustive coupling, timing, retention or byte-mask fault coverage. The high-area tier can add address/checkerboard backgrounds and compact first-failure diagnostics after assessing the targeted fault model.
+The sequence performs ten memory operations per address, or 7,680 operations across twelve 64-entry banks. Runtime additionally includes synchronous read latency, compare stages, and control overhead. The SRAM model defines legal read/write spacing.
 
-Testing is destructive. Run it before normal cache use or after isolating the processor, and reset/invalidate cache metadata before returning to execution. Without added repair resources this is test-and-report, not BISR. Software memory tests and the existing cache scrubber cannot substitute for this raw data/tag SRAM access path.
+Comparison uses raw SRAM outputs so ECC correction cannot conceal a storage fault. Fail status is sticky through completion. Reported coverage identifies the algorithm, tested word bits, and data backgrounds; exhaustive coupling, retention, timing, and write-mask fault coverage is not assumed. Additional address/checkerboard backgrounds and first-failure diagnostics are higher-area options.
 
-### MBIST control without new pins
+MBIST is destructive and runs before normal cache use or with the processor isolated. Cache metadata is reset or invalidated before execution resumes. No repair resources are allocated. Software memory tests, demand-access ECC, and optional cache scrubbing do not replace raw data/tag SRAM testing.
 
-A proposed zero-new-pin option is to latch a two-bit command from `io[1:0]` on the first `core_clk` edge of an authorized test session, with `scan_en=0`:
+### Shared-pin MBIST protocol
 
-- `00`: scan session; subsequent `scan_en` selects shift/capture.
-- `01`: start a cache MBIST session once; do not shift processor state.
-- `10`: reserved for diagnostics; leave disabled in the minimal implementation.
-- `11`: reserved.
+The zero-added-pin protocol latches a two-bit command from `io[1:0]` on the first `core_clk` edge of an authorized test session, with `scan_en=0`:
 
-Latch the command once per test-mode entry. **Do not combinationally decode the live scan input bits**, which change on every shift. The command latch, entry detector and status state are excluded from scan and reset between sessions. During MBIST, drive the shared upper-byte outputs with a defined status word, for example done/fail/busy plus zeros; hold it after completion until the session ends. This protocol is proposed RTL, not present functionality. Its initialization and mode-transition behavior need pin-level tests.
+| Command | Session |
+|---|---|
+| `00` | Scan; subsequent `scan_en` selects shift/capture |
+| `01` | Start cache MBIST once; processor scan remains inactive |
+| `10` | Reserved for diagnostics; disabled in the minimum configuration |
+| `11` | Reserved |
 
-The lock must gate MBIST start, SRAM ownership, command capture and result-pad remapping, not merely the scan shift enable. An in-progress MBIST must not regain access after locking. With a test-active bus isolated as above, normal software cannot change the lock during that session; verify mode entry/exit and reset explicitly.
+The command is captured once per test-mode entry. Live scan input bits are not combinationally decoded as mode controls. Command, entry-detection, and status state remain outside processor scan and reset between sessions.
 
-### Optional added pins
+During MBIST, the upper-byte pads report a defined status word containing done/fail/busy and reserved zeros. Completion status remains stable until session exit. Lock qualification applies to command capture, MBIST start, SRAM ownership, and result-pad remapping. This protocol and its controller are planned RTL; mode-entry, completion, reset, and lock behavior require pin-level verification.
 
-| Option | Added pins | Tradeoff |
+### Optional additional pins
+
+| Configuration | Added pins | Effect |
 |---|---:|---|
-| Shared scan and latched MBIST command | 0 | Preferred pad budget; small session decoder/latches and a tester protocol |
-| Dedicated `mbist_mode` input | 1 | Can simplify session selection; qualify with `test_mode` and the lock; still reuse data pins for status |
-| Dedicated `mbist_start`, `mbist_done`, `mbist_fail` | 3 | Simpler external control/readout; more pads/package routing; start still needs authorized test mode |
-| Dedicated scan SI/SO pair | 2 | Enables a separate narrow scan interface; longer shifts and new mux/pad logic; not a default area saving |
-| Dedicated scan clock | 1 | Adds a clock domain/pad and reset/clock constraints; unnecessary when tester controls `core_clk` |
-| JTAG TAP | Typically 4, optional fifth reset | Higher infrastructure and verification cost; omit from the minimum-area design |
+| Shared scan and latched MBIST command | 0 | Existing pad allocation; requires session decoder/latches |
+| `mbist_mode` input | 1 | Simpler session selection; remains test-mode/lock qualified; status uses shared data pins |
+| `mbist_start`, `mbist_done`, `mbist_fail` | 3 | Separate control/status; start requires authorized test mode |
+| Dedicated scan SI/SO pair | 2 | Separate narrow scan interface with longer shifts and additional pad/mux logic |
+| Dedicated scan clock | 1 | Additional clock input and timing/reset constraints; unnecessary for the baseline tester-driven `core_clk` |
+| JTAG TAP | Typically 4; optional reset adds 1 | Additional access/control infrastructure outside the minimum-area scope |
 
-Actual pad, power/ground and package budgets must be checked before adding any pins. Additional pads can consume more physical area than the small controller logic they replace.
+Pin additions require package and pad-ring review, including power/ground allocation. Pad area and routing are included in the tradeoff against session-control logic.
 
-## Design Compiler experiment
+## Netlist-based DFT tool flow
 
-Files in this folder:
+### Inputs and invocation
 
-- `synthesis_dft.tcl`: adapted synthesis script with inventory, matched baseline and partial-scan modes; scan architecture, DRC, preview, insertion and protocol export commands.
-- `scan_selection.tcl`: initial register-priority policy; tier 3 retains tier 2 scan population.
-- `hookup.example.tcl`: intentionally incomplete integration contract for real internal pins, lock-qualified controls, reset, ICG and memory isolation.
-- `constraints.sdc`: functional counterpart of the parent SDC with current link ports and a divide-by-one forwarded-clock declaration. Existing board/pad delay numbers remain placeholders. Supply actual constraints through `DFT_SDC`.
-- `run.sh`: separate source lists and output directory; does not run the parent's `clean` target. It uses the existing root `hdl/prim_*` copies rather than analyzing duplicate third-party definitions.
+`synthesis_dft.tcl` is a standalone `dc_shell` script for scan insertion on an existing mapped Verilog netlist. It does not analyze functional RTL, elaborate the processor, rerun `compile_ultra`, or replace `synth/synthesis.tcl`.
 
-Use the same actual libraries, SRAM models, period and implementation configuration for baseline and scan. The parent Makefile defaults to FreePDK45; that is not evidence of tapeout-process area. Do not use the timing flow's black-box calibration to assert final SRAM test coverage or physical area.
+The input netlist is loaded with `read_verilog`, linked against the same implementation libraries, and constrained with its original functional SDC. The working DC environment supplies standard-cell, SRAM, pad, and clock-gate libraries. `TSMC_DB_FAST` sets the target library containing the required scan-cell equivalents; the existing `link_library` must resolve the netlist references.
+
+| Variable | Input or output |
+|---|---|
+| `DFT_NETLIST` | Existing mapped Verilog netlist, including required subdesign definitions |
+| `DFT_SDC` | Functional SDC for that netlist |
+| `DFT_HOOKUP_TCL` | Site-specific mapped register/control/SI/SO definitions and test setup |
+| `TSMC_DB_FAST` | Target standard-cell library containing scan equivalents |
+| `REPORT_DIR` | Output directory for before/after area/timing and DFT reports |
+| `SYN_OUT_DIR` | Separate directory for scan-inserted netlist, DDC, SDC, and protocol |
 
 ```bash
-# Run after loading the site's DC environment and libraries.
-# STD_CELL_LIB, STD_CELL_ALIB and SRAM_LIB can override parent-flow defaults.
-synth/dft/run.sh inventory
-synth/dft/run.sh baseline
-
-# After RTL hookup/isolation is integrated and its exact DC pin names reviewed:
-DFT_TIER=1 DFT_HOOKUP_TCL=/absolute/path/to/hookup.tcl \
-  synth/dft/run.sh scan
+# Within the configured DC/library environment, from the repository root:
+export DFT_NETLIST=/absolute/path/to/forte_top.gate.v
+export DFT_SDC=/absolute/path/to/forte_top.gate.sdc
+export DFT_HOOKUP_TCL=/absolute/path/to/hookup.tcl
+export REPORT_DIR=/absolute/path/to/dft_reports
+export SYN_OUT_DIR=/absolute/path/to/dft_outputs
+dc_shell -f synth/dft/synthesis_dft.tcl
 ```
 
-The script inherits compile options from `options.json`, but preserves hierarchy and disables automatic ungrouping in both baseline and scan candidates. It refuses retiming for this first comparison. Compare to a matched baseline, not just the original flattened area number. It writes selected-instance and inventory reports before scan replacement. Source/configuration choices are recorded in each run directory; retain the full tool log for version and warnings.
+The input netlist remains the synthesis baseline. DFT results use separate `forte_top.dft.{v,ddc,sdc}` names, with `forte_top.scan.spf` for the test protocol. Output directories must differ from the input artifacts' locations when needed to preserve prior results. Library/tool setup and run records remain part of the established implementation environment.
 
-Scan mode deliberately fails without real hookup pins and a ready configuration. Cumulative tiers 3/4 additionally require an integrated controller instance named by `DFT_MBIST_CELL`; the script does not create it. The example is not ready: the current `scan_q` paths do not provide a locked scan-cell enable distribution or real chain endpoints. Check internal-pin syntax against the installed DFT Compiler/TestMAX release and library. The script rejects insertion that adds top-level ports, and protects the lock/control boundary. It does not silently expose new tester pins or implement MBIST through a fictitious DC command.
+`hookup.example.tcl` defines the integration variables. The completed file supplies `scan_regs`, mapped lock/control cells, lock-qualified mode/enable pins, and eight SI/SO pairs. The input netlist must contain the actual authorization, scan endpoints, reset/ICG control, and bus/memory isolation. A hookup file does not create those structures or replace the one-flop scan placeholders.
 
-`DFT_SCAN_PERIOD` defaults to 100 library time units as an exploratory slow test period; it is not an approved tester frequency. Functional timing remains the configured core period. Optional `DFT_MAX_MAPPED_AREA` is a cap on DC's mapped design-area attribute in the linked library's area units; it is not a post-route floorplan-utilization limit. No cap is inferred from the SRAM-excluding utilization figure.
+### Scan insertion sequence
 
-DC can map and integrate a hand-written MBIST controller. Automated memory-test IP generation/insertion requires separately available tools, memory descriptions and licenses; Synopsys STAR Memory System is a separate memory-test/repair solution. See the [Synopsys STAR Memory System datasheet](https://www.synopsys.com/content/dam/synopsys/implementation%26signoff/datasheets/star-bist-ds.pdf). DC scan insertion by itself does not generate an SRAM March controller. ATPG also requires a separate pattern-generation flow/license; inserting chains and running DFT DRC do not establish fault coverage.
+1. **Read and link:** load the mapped Verilog, select `forte_top`, link the implementation references, and read the functional SDC.
+2. **Select mapped state:** source the hookup definitions and record the input area's hierarchy and critical timing paths. Disable default scan replacement, enable the selected registers, and exclude the lock/control cells.
+3. **Preserve authorization:** protect the already-mapped lock and test-control logic with `set_dont_touch` during insertion. Retiming and RTL-boundary preservation commands are unnecessary because this flow does not rerun synthesis or retiming.
+4. **Specify scan architecture:** request eight uncompressed muxed-D scan chains with clock mixing disabled. Declare existing `core_clk` and active-low `rst_n`, lock-qualified internal mode/enable, and the eight SI/SO pairs. The tester waveform has period 100 and edges at 25/75 in library time units and adds no hardware clock divider.
+5. **Replace and stitch:** create the test protocol, run pre-insertion `dft_drc`, preview the architecture, execute `insert_dft`, and repeat `dft_drc`. Gate-level insertion replaces eligible nonscan cells with scan equivalents and assembles the chains. Scan-related mapping/optimization may occur inside insertion even though no RTL compile is requested.
+6. **Report and export:** apply Verilog naming rules, write the final chain report, record post-DFT area/setup/hold and constraint violations, and export the scan-inserted Verilog, DDC, functional SDC, and test protocol.
 
-## Acceptance and stop points
+DFT DRC reports require review; they are not ATPG patterns or fault-coverage measurements. The declarations do not implement authorization, memory isolation, reset strategy, or MBIST. The actual scan population must be confirmed after replacement, particularly for multibit or specialized sequential cells without scan equivalents.
 
-1. Save baseline area by sequential cells, combinational cells, macros and hierarchy; enumerate selected **mapped bits**, physical memory widths, scan-cell availability and library units. Resolve missing hierarchy matches.
-2. Evaluate tier 1 with eight uncompressed chains. Review pre/post-insertion DFT DRC, lock exclusion, actual chain membership, longest-chain length, ICG controls, reset initialization and absence of unexpected ports. Do not accept unexplained violations.
-3. Generate stuck-at ATPG patterns using partial-scan-aware/sequential procedures where necessary. Report detected, untestable, aborted and excluded faults and the coverage denominator. Unscanned state may require initialization; it is not automatically controllable.
-4. Simulate shift/capture and resulting patterns with real cell/pad models. Test locked-mode attempts to shift/remap/start MBIST; test reset reopening, one-way software lock, APB self-lock prevention and functional operation with test pins inactive. This extends the current register-only lock test and pin-bench stub.
-5. Measure the tier 2 and shared-MBIST alternatives separately. For MBIST, inject memory faults into behavioral test models to check detection, cover every bank/address/raw bit, verify read latency, and test completion/status after lock/reset transitions. Then verify the actual SRAM-model integration.
-6. Compare delta mapped area and post-placement timing/congestion with the matched baseline. Include scan clock load, hold buffers, lockup cells if any, memory muxes and test-mode power. Retain routing/CTS margin rather than filling the remaining placement capacity.
-7. Stop at the highest tier that meets the explicit area/timing allowance and verified test objectives. If only tier 1 fits, document partial scan and omitted MBIST rather than claiming comprehensive manufacturing coverage.
+### Area comparison and remaining tool work
 
-## Sources
+Before/after reports use the same input netlist, functional SDC, and libraries. This isolates replacement, stitching, control fanout, and scan-related optimization costs from an upstream synthesis rerun. MBIST controller/mux costs require a separate netlist containing that hardware and an equivalent baseline comparison. The complete candidate remains subject to the production placement allowance.
 
-Repository basis: `hdl/forte_chip.sv`, `hdl/forte_top.sv`, `hdl/forte_dft_lock.sv`, `hdl/forte_uncore.sv`, `hdl/core/cache/cacheway.sv`, `hdl/core/generic/mem/ram1p1rwe.sv`, the 64x137/64x53 wrappers, `pkg/config.vh`, `testcode/isa_level_testing/tcf_dft_lock.c`, and the existing synthesis/clock constraints. Earlier pin/chain proposals are in `docs/impl_plan_link_clocking.md` §11.
+The input SDC may contain functional case assumptions or exceptions. Test initialization and test-mode timing require review against the scan protocol rather than relying only on functional timing reports. Existing clock gates must have usable lock-qualified test control; reading a mapped netlist does not add the required test authorization automatically.
 
-Vendor references: [Synopsys TestMAX DFT](https://www.synopsys.com/implementation-and-signoff/test-automation/testmax-dft.html), [Synopsys TestMAX DFT training](https://training.synopsys.com/learn/courses/54/TestMAXDFTJumpstart). Verify the command options and test-protocol details using `man` in the installed DC/DFT release; they have not been executed in this workspace because `dc_shell` is unavailable.
+DC can insert scan on mapped logic but does not generate an SRAM March controller through this sequence. MBIST RTL or generated IP is integrated upstream and synthesized into the input netlist. ATPG pattern generation, fault simulation, and physical timing closure remain separate steps.
+
+## Verification and acceptance
+
+| Stage | Required evidence |
+|---|---|
+| Inventory | Selected mapped bits, reviewed hierarchy matches, physical memory widths, scan-cell availability, and library units |
+| Scan structure | Reviewed pre/post-insertion DFT DRC; actual membership, lock exclusion, chain lengths, clock-gate controls, reset initialization, and unchanged external ports |
+| ATPG | Stuck-at patterns with partial-scan initialization as needed; detected, untestable, aborted, and excluded faults with an explicit coverage denominator |
+| Gate-level simulation | Shift/capture and pattern execution; locked-mode shift/remap/MBIST attempts; reset reopening; sticky software lock; APB self-lock prevention; functional operation with test controls inactive |
+| MBIST | All banks/addresses/intended raw bits exercised; injected memory faults detected; SRAM latency and ownership checked; completion/status verified across reset and lock transitions |
+| Physical implementation | Total area, congestion, timing, clock load, hold repair, and test power compared with the production reference and matched baseline |
+
+The retained configuration is the highest tier satisfying the explicit area/timing allowance and test objectives. Omitted scan populations and unimplemented MBIST features remain documented coverage limitations.
+
+Script validation covers Tcl structure and mocked netlist-flow command ordering. Actual scan replacement, DFT DRC, area/timing changes, and test coverage require execution in the installed DC/TestMAX DFT environment.
+
+## References
+
+Repository sources: `hdl/forte_chip.sv`, `hdl/forte_top.sv`, `hdl/forte_dft_lock.sv`, `hdl/forte_uncore.sv`, `hdl/core/cache/cacheway.sv`, `hdl/core/generic/mem/ram1p1rwe.sv`, the 64x137/64x53 wrappers, `pkg/config.vh`, `testcode/isa_level_testing/tcf_dft_lock.c`, and `synth/synthesis.tcl`.
+
+Vendor documentation: [Synopsys TestMAX DFT](https://www.synopsys.com/implementation-and-signoff/test-automation/testmax-dft.html), [TestMAX DFT training](https://training.synopsys.com/learn/courses/54/TestMAXDFTJumpstart), and [STAR Memory System datasheet](https://www.synopsys.com/content/dam/synopsys/implementation%26signoff/datasheets/star-bist-ds.pdf). Release-specific commands and protocol behavior are defined by the installed DC/DFT manuals.

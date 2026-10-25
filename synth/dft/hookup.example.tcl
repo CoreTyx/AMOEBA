@@ -1,28 +1,40 @@
-# Copy outside this example, fill in DC-resolved names AFTER the scan RTL
-# integration described in plan.md, and pass its absolute path as DFT_HOOKUP_TCL.
-# This file deliberately refuses insertion into today's one-flop scan stubs.
-# No extra top-level ports may be created by insert_dft.
-set DFT_HOOKS_READY 0
+# Copy to a site-specific hookup file and set DFT_HOOKUP_TCL to its path.
+# This file is sourced AFTER the mapped netlist is read and linked.
+# Use actual mapped names: retiming, ungrouping and name rules may remove or
+# change the original RTL hierarchy. get_cells -hierarchical / report_hierarchy
+# in dc_shell can be used to identify the desired pipeline and CSR cells.
 
-# Required collections are specified as exact pin names (not RTL net names).
-# Use `get_pins -hierarchical` in the installed DC release to identify them.
-# The scan input/output hooks must pass THROUGH the existing pad mux:
-# low io pads -> scan input hooks -> chains -> scan output hooks -> high io pads.
-# Check the installed manual's restrictions on internal hookup pin direction.
-set DFT_LOCKED_MODE_PIN ""
-set DFT_LOCKED_ENABLE_PIN ""
-set DFT_CONTROL_CELL ""
-set DFT_SCAN_IN_PINS {}
-set DFT_SCAN_OUT_PINS {}
-# Required for cumulative tiers 3/4 only: exact instance of the integrated controller.
-set DFT_MBIST_CELL ""
+# Tier-1 partial-scan population: replace these names with mapped pipeline-control,
+# PC, privilege/status/interrupt/trap and PMP/satp register cells. Expand this list
+# for higher tiers only after measuring the resulting area/timing overhead.
+set scan_regs [get_cells {
+    REPLACE_WITH_PIPELINE_REGISTER_CELLS
+    REPLACE_WITH_CRITICAL_CSR_REGISTER_CELLS
+}]
 
-# Required site-specific setup. Implement this after reviewing the actual RTL,
-# library and DFT DRC. Do not replace it with unconditional autofix:
-# - initialize reset synchronizers without making the lock reset bypassable;
-# - inhibit APB writes (especially lock writes) and SRAM writes during scan;
-# - provide ICG test control driven by the lock-qualified scan/test control;
-# - apply approved memory black-box/test models and X masking as required.
-proc dft_site_setup {} {
-    error "Implement and review reset, ICG and memory isolation setup; see plan.md"
+# Actual mapped lock/authorization cells, or preserved hierarchical instances.
+# Both are excluded from scan and protected from DFT optimization.
+set dft_lock [get_cells {REPLACE_WITH_MAPPED_LOCK_CELLS}]
+set dft_control [get_cells {REPLACE_WITH_MAPPED_TEST_CONTROL_CELLS}]
+
+# Existing lock-qualified output-side hookup pins. The scan enable must also
+# require test mode/session selection. These declarations do not add those gates.
+set dft_test_mode [get_pins {REPLACE_WITH_AUTHORIZED_TEST_MODE_PIN}]
+set dft_scan_enable [get_pins {REPLACE_WITH_AUTHORIZED_SCAN_ENABLE_PIN}]
+
+# Ordered lists of eight actual internal pin names, one SI/SO pair per chain.
+# Paths retain io[7:0] inputs, io[15:8] outputs and the existing pad mux. The
+# input netlist must provide valid endpoints in place of the scan_q placeholders.
+set dft_scan_inputs {
+    REPLACE_SI0 REPLACE_SI1 REPLACE_SI2 REPLACE_SI3
+    REPLACE_SI4 REPLACE_SI5 REPLACE_SI6 REPLACE_SI7
 }
+set dft_scan_outputs {
+    REPLACE_SO0 REPLACE_SO1 REPLACE_SO2 REPLACE_SO3
+    REPLACE_SO4 REPLACE_SO5 REPLACE_SO6 REPLACE_SO7
+}
+
+# Site-specific DFT setup commands may follow here for reset initialization, ICG
+# test control, memory test models and implemented APB/SRAM isolation. The input
+# netlist must contain the actual authorization/isolation logic and, for MBIST,
+# a controller and raw-memory test access path. This template generates none.

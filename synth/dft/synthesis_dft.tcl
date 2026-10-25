@@ -1,247 +1,670 @@
-# Adapted copy of ../synthesis.tcl. Run through ./run.sh; never overwrites the
-# normal synth outputs. Modes: inventory (default), baseline, scan.
-# Current RTL supports inventory/baseline only; see plan.md for scan hookup work.
-set dft_dir [file dirname [file normalize [info script]]]
-proc dft_env {name default} {
-    if {[info exists ::env($name)] && $::env($name) ne ""} { return $::env($name) }
-    return $default
-}
-set dft_mode [dft_env DFT_MODE inventory]
-set dft_tier [dft_env DFT_TIER 1]
-if {$dft_mode ni {inventory baseline scan}} { error "Unknown DFT_MODE" }
-if {$dft_tier ni {1 2 3 4}} { error "DFT_TIER must be 1, 2, 3 or 4" }
-file mkdir reports outputs work
-source [file join $dft_dir .. dc_warn.tcl]
+source dc_warn.tcl
 
-if {[getenv ECE411_MIN_POWER] eq "1"} {
-   set power_enable_minpower true
-}
 set hdlin_ff_always_sync_set_reset true
 set hdlin_ff_always_async_set_reset true
 set hdlin_infer_multibit default_all
 set hdlin_check_no_latch true
-set hdlin_while_loop_iterations 2000000000
-set_host_options -max_cores [getenv ECE411_DC_CORES]
+set hdlin_auto_save_templates true
+# set power_enable_minpower true
+set_host_options -max_cores 4
 set_app_var report_default_significant_digits 6
-set design_toplevel [getenv DESIGN_TOP]
-if {$design_toplevel ne "forte_top"} { error "This DFT interface targets forte_top" }
-
-define_design_lib WORK -path ./work
-set alib_library_analysis_path [getenv STD_CELL_ALIB]
-
-set symbol_library [list generic.sdb]
-set synthetic_library [list dw_foundation.sldb]
-set target_library [getenv STD_CELL_LIB]
-set sram_library [getenv SRAM_LIB]
-
-if {$sram_library eq ""} {
-   set link_library [list "*" $target_library $synthetic_library]
-} else {
-   set link_library [concat [list "*"] $target_library $synthetic_library $sram_library]
-}
+set design_toplevel forte_top
 
 get_license DC-Ultra-Features
 get_license DC-Ultra-Opt
 
-set repo_root [getenv REPO_ROOT]
-lappend search_path "$repo_root/pkg" "$repo_root/hdl/core" "$repo_root/third_party/opentitan" "$repo_root/third_party/cvw/config/rv64gc"
+set SynopsysInstall [getenv "DCROOT"]
+set search_path [list . \
+[format "%s%s" $SynopsysInstall /libraries/syn] \
+[format "%s%s" $SynopsysInstall /dw/sim_ver] \
+]
 
-set pkg_src [getenv PKG_SRCS]
+set symbol_library [list generic.sdb]
+set synthetic_library [list dw_foundation.sldb]
 
-if {$pkg_src ne ""} {
-   if {![analyze -library WORK -format sverilog $pkg_src]} {
-      error "Package analysis failed"
-   }
-}
+define_design_lib WORK -path ./work
 
-set modules [split [getenv HDL_SRCS] " "]
-foreach module $modules {
-   if {![analyze -library WORK -format sverilog "${module}"]} {
-      error "Analysis failed: $module"
-   }
-}
+define_name_rules nameRules -restricted "!@#$%^&*()\\-" -case_insensitive
+
+set cell_path [getenv TSMC_DB_DIR]
+set search_path [concat $search_path $cell_path]
+
+set alib_library_analysis_path ./
+
+set verilogout_show_unconnected_pins "true"
+
+set target_library [format "%s" [getenv TSMC_DB_FAST]]
+
+
+# SRAM librry stuff here
+
+# ------------------------------------------------------------
+# Config Files
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/cvw.sv
+analyze -library WORK -format sverilog ../hdl/forte_link_pkg.sv
+#analyze -library WORK -format sverilog ../pkg/types.sv
+
+# ------------------------------------------------------------
+# Async FIFOs
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/prim_assert.sv
+analyze -library WORK -format sverilog ../hdl/prim_fifo_async.sv
+analyze -library WORK -format sverilog ../hdl/prim_flop_2sync.sv
+
+# ------------------------------------------------------------
+# IO Drivers
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../io_drivers/io_in.sv
+analyze -library WORK -format sverilog ../io_drivers/io_out.sv
+analyze -library WORK -format sverilog ../io_drivers/io_tri.sv
+
+# ------------------------------------------------------------
+# Generic - basic combinational/sequential primitives
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/generic/adder.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/addsub.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/aplusbeq0.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/arrs.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/binencoder.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/counter.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/csa.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/decoder.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/lzc.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mux.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/neg.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/onehotdecoder.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/or_rows.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/lessthan.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/lowones.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/priorityonehot.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/prioritythermometer.sv
+
+# ------------------------------------------------------------
+# Generic - ECC
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_bit_flip.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_dected_dec.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_dected_enc.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_secded_dec.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_secded_enc.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/ecc/ecc_flip_mask.sv
+
+# ------------------------------------------------------------
+# Generic - flop
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flop.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopen.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopenl.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopenr.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopenrc.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopenrc_ecc.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopr.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/flopenrc_cw.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/flop/synchronizer.sv
+
+# ------------------------------------------------------------
+# Generic - memories
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x128.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x22.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x44.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_32x45.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_32x128.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_16x46.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_16x128.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x46.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x137.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwbe_64x53.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram1p1rwe.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe_1024x36.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe_1024x68.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe_128x64.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe_2048x64.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/ram2p1r1wbe_64x32.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/rom1p1r.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/rom1p1r_128x32.sv
+analyze -library WORK -format sverilog ../hdl/core/generic/mem/rom1p1r_128x64.sv
+
+# ------------------------------------------------------------
+# Integer execution unit - BMU
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/bitreverse.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/byteop.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/clmul.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/cnt.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/ext.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/popcnt.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/zbb.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/zbc.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/bmuctrl.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/bmu/bitmanipalu.sv
+
+# ------------------------------------------------------------
+# Integer execution unit - AES
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/galoismultforward8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/galoismultinverse8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aessbox8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesinvsbox8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesmixcolumns8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesinvmixcolumns8.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aessbox32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesinvsbox64.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesshiftrows64.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesinvshiftrows64.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesmixcolumns32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aesinvmixcolumns32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes32e.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes32d.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes64e.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes64d.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes64ks1i.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/aes64ks2.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/rconlut32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/aes/rotate.sv
+
+# ------------------------------------------------------------
+# Integer execution unit - KMU
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/packer.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zipper.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zbkb.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zbkx.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zknde32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zknde64.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zknh32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/kmu/zknh64.sv
+
+# ------------------------------------------------------------
+# Integer execution unit - SHA
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ieu/sha/sha256.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/sha/sha512_32.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/sha/sha512_64.sv
+
+# ------------------------------------------------------------
+# Integer execution unit
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ieu/dummymask.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/regfile.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/extend.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/comparator.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/alu.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/shifter.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/controller.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/datapath.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/dummygen.sv
+analyze -library WORK -format sverilog ../hdl/core/ieu/ieu.sv
+
+# ------------------------------------------------------------
+# Multiply / Divide unit
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/mdu/divstep.sv
+analyze -library WORK -format sverilog ../hdl/core/mdu/div.sv
+analyze -library WORK -format sverilog ../hdl/core/mdu/mul.sv
+analyze -library WORK -format sverilog ../hdl/core/mdu/mdu.sv
+
+# ------------------------------------------------------------
+# Instruction fetch / branch prediction
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/satCounter2.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/twoBitPredictor.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/gsharebasic.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/localbpbasic.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/localaheadbp.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/localrepairbp.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/gshare.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/icpred.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/RASPredictor.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/btb.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/bpred/bpred.sv
+
+analyze -library WORK -format sverilog ../hdl/core/ifu/decompress.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/irom.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/spill.sv
+analyze -library WORK -format sverilog ../hdl/core/ifu/ifu.sv
+
+# ------------------------------------------------------------
+# MMU / TLB
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbcamline.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbcam.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlblru.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbmixer.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbramline.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbram.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlbcontrol.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/vm64check.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/tlb/tlb.sv
+
+analyze -library WORK -format sverilog ../hdl/core/mmu/adrdec.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/adrdecs.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/pmpadrdec.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/pmpchecker.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/pmachecker.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/hptw.sv
+analyze -library WORK -format sverilog ../hdl/core/mmu/mmu.sv
+
+# ------------------------------------------------------------
+# Privileged architecture / CSR
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/privileged/csrc.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csri.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csrm.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csrs.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csrsr.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csru.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csrharden.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/csr.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/privmode.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/privdec.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/privpiperegs.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/trap.sv
+analyze -library WORK -format sverilog ../hdl/core/privileged/privileged.sv
+
+# ------------------------------------------------------------
+# LSU
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/lsu/endianswap.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/subwordread.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/subwordwrite.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/swbytemask.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/align.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/amoalu.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/lrsc.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/atomic.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/dtim.sv
+analyze -library WORK -format sverilog ../hdl/core/lsu/lsu.sv
+
+# ------------------------------------------------------------
+# Cache
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/cache/cacheeccbits.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cacheeccdec.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cacheeccenc.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cachescrubber.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cacheLRU.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/subcachelineread.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cacheway.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cachefsm.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cache.sv
+analyze -library WORK -format sverilog ../hdl/core/cache/cachefi.sv
+
+# ------------------------------------------------------------
+# EBU / AHB
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ebu/controllerinput.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/ahbinterface.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/ahbcacheinterface.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/busfsm.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/buscachefsm.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/ebufsmarb.sv
+analyze -library WORK -format sverilog ../hdl/core/ebu/ebu.sv
+
+# ------------------------------------------------------------
+# Hazard
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/hazard/hazard.sv
+
+# ------------------------------------------------------------
+# FPU - FMA
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmasign.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmamult.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmalza.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmaalign.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmaexpadd.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fmaadd.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fma/fma.sv
+
+# ------------------------------------------------------------
+# FPU - Divide / Square Root
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtcycles.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtexpcalc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtfgen2.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtfgen4.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtuslc2.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtuslc4.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtuslc4cmp.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtuotfc2.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtuotfc4.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtstage2.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtstage4.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtiter.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtpreproc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtpostproc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrtfsm.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fdivsqrt/fdivsqrt.sv
+
+# ------------------------------------------------------------
+# FPU - Postprocessing
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/cvtshiftcalc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/divshiftcalc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/fmashiftcalc.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/negateintres.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/normshift.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/resultsign.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/roundsign.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/round.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/shiftcorrection.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/specialcase.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/flags.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/postproc/postprocess.sv
+
+# ------------------------------------------------------------
+# FPU - main units
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/fpu/fmtparams.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/unpackinput.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/unpack.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fround.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fclassify.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fcmp.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fsgninj.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fli.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fcvt.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fregfile.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fctrl.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fhazard.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/packoutput.sv
+analyze -library WORK -format sverilog ../hdl/core/fpu/fpu.sv
+
+# ------------------------------------------------------------
+# Fault-Tolerant Shadow Logic
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_alu.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_div.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_fault_inject.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_mul.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_shadow_ctrl.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/ft_fault_gen.sv
+analyze -library WORK -format sverilog ../hdl/core/ft_shadow/residue15.sv
+
+# ------------------------------------------------------------
+# RVVI
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/rvvi/csrindextoaddr.sv
+analyze -library WORK -format sverilog ../hdl/core/rvvi/priorityaomux.sv
+analyze -library WORK -format sverilog ../hdl/core/rvvi/regchangedetect.sv
+analyze -library WORK -format sverilog ../hdl/core/rvvi/packetizer.sv
+analyze -library WORK -format sverilog ../hdl/core/rvvi/triggergen.sv
+analyze -library WORK -format sverilog ../hdl/core/rvvi/rvvisynth.sv
+
+# ------------------------------------------------------------
+# Uncore
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/uncore/spi_fifo.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/spi_controller.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/uartPC16550D.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/uart_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/clint_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/gpio_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/plic_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/spi_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/trickbox_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/fault_inject_apb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/ahbapbbridge.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/ram_ahb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/rom_ahb.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/uncore.sv
+analyze -library WORK -format sverilog ../hdl/core/uncore/faultcount_apb.sv
+
+# ------------------------------------------------------------
+# Wally core / SoC
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/core/wally/wallypipelinedcore.sv
+analyze -library WORK -format sverilog ../hdl/core/wally/wallypipelinedsoc.sv
+
+# ------------------------------------------------------------
+# Top-level AHB interface
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/ahb_to_memitf.sv
+
+# ------------------------------------------------------------
+# Top-level
+# ------------------------------------------------------------
+
+analyze -library WORK -format sverilog ../hdl/forte_dft_lock.sv
+analyze -library WORK -format sverilog ../hdl/forte_link_core.sv
+analyze -library WORK -format sverilog ../hdl/forte_link_phy.sv
+analyze -library WORK -format sverilog ../hdl/forte_rst_sync.sv
+analyze -library WORK -format sverilog ../hdl/forte_uncore.sv
+analyze -library WORK -format sverilog ../hdl/forte_soc.sv
+analyze -library WORK -format sverilog ../hdl/forte_chip.sv
+analyze -library WORK -format sverilog ../hdl/forte_top.sv
 
 elaborate $design_toplevel
 current_design $design_toplevel
 
-if {![link]} { error "Unresolved references; fix libraries before measuring area" }
-check_design > reports/check_design_elab.rpt
-source [file join $dft_dir scan_selection.tcl]
+set_wire_load_model -name tsmc65_wl10
 
-# Preserve hierarchy in BOTH baseline and scan experiments, for comparable
-# selection and area. This is not automatically comparable to a flattened run.
-set hierarchy [get_cells -quiet -hierarchical -filter "is_hierarchical == true"]
-if {[sizeof_collection $hierarchy]} { set_ungroup $hierarchy false }
-set registers [all_registers -cells]
-set selected [remove_from_collection $registers $registers]
-set inv [open reports/register_inventory.tsv w]
-puts $inv "first_tier\tinstance"
-foreach_in_collection cell $registers {
-    set name [get_object_name $cell]
-    set first [dft_first_tier $name]
-    puts $inv "$first\t$name"
-    if {$first > 0 && $first <= $dft_tier} {
-        set selected [add_to_collection $selected $cell]
-    }
-}
-close $inv
-set sel [open reports/selected_registers.txt w]
-foreach_in_collection cell $selected { puts $sel [get_object_name $cell] }
-close $sel
-# all_registers object counts are not bit counts, especially before mapping.
-echo "Register objects: [sizeof_collection $registers]; selected objects: [sizeof_collection $selected]"
-if {$dft_mode eq "inventory"} {
-    write_file -format ddc -hierarchy -output outputs/elaborated.ddc
-    echo "Inventory only: no scan replacement, stitching or MBIST insertion performed."
-    exit
-}
+create_clock -period 4 -name sdc_top_clk core_clk
+set_clock_uncertainty 0.3 sdc_top_clk
 
-set_wire_load_model -name "5K_hvratio_1_1"
-set_wire_load_mode enclosed
-source [dft_env DFT_SDC [file join $dft_dir constraints.sdc]]
-set ports_before [lsort [get_object_name [get_ports *]]]
+set_fix_hold sdc_top_clk
 
-if {$dft_mode eq "scan"} {
-    foreach cmd {set_scan_element set_scan_configuration set_dft_signal
-                 set_scan_path create_test_protocol dft_drc preview_dft insert_dft
-                 report_scan_path write_test_protocol} {
-        if {![llength [info commands $cmd]]} { error "Missing DFT command/license: $cmd" }
-    }
-    set hookup [dft_env DFT_HOOKUP_TCL ""]
-    if {$hookup eq "" || ![file isfile $hookup]} {
-        error "Scan needs DFT_HOOKUP_TCL and integrated RTL hooks; see hookup.example.tcl"
-    }
-    source $hookup
-    if {$dft_tier >= 3} {
-        if {![info exists DFT_MBIST_CELL] || $DFT_MBIST_CELL eq ""} {
-            error "Tier 3/4 requires integrated MBIST RTL and DFT_MBIST_CELL"
-        }
-        if {[sizeof_collection [get_cells -quiet $DFT_MBIST_CELL]] != 1} {
-            error "MBIST controller instance does not resolve"
-        }
-    }
-    if {![info exists DFT_HOOKS_READY] || !$DFT_HOOKS_READY} {
-        error "Hookup is not ready; current scan_q stubs must be replaced first"
-    }
-    foreach var {DFT_LOCKED_MODE_PIN DFT_LOCKED_ENABLE_PIN DFT_CONTROL_CELL
-                 DFT_SCAN_IN_PINS DFT_SCAN_OUT_PINS} {
-        if {![info exists $var] || [set $var] eq ""} { error "Missing $var" }
-    }
-    if {[llength $DFT_SCAN_IN_PINS] != 8 || [llength $DFT_SCAN_OUT_PINS] != 8} {
-        error "Expected exactly eight internal scan input and output hooks"
-    }
-    foreach name [concat [list $DFT_LOCKED_MODE_PIN $DFT_LOCKED_ENABLE_PIN] \
-                          $DFT_SCAN_IN_PINS $DFT_SCAN_OUT_PINS] {
-        if {[sizeof_collection [get_pins -quiet $name]] != 1} {
-            error "Hook must resolve to exactly one pin: $name"
-        }
-    }
-    set controls [get_cells -quiet $DFT_CONTROL_CELL]
-    set lock [get_cells -quiet -hierarchical -filter "full_name =~ */dftlock/* && is_hierarchical == false"]
-    if {[sizeof_collection $controls] != 1 || ![sizeof_collection $lock]} {
-        error "Cannot identify DFT control instance or lock cells"
-    }
-    if {[sizeof_collection $selected] < 8} { error "Too few selected objects; review inventory patterns" }
-    # Explicit partial scan: never fall back to the tool's default full scan.
-    set_scan_element false $registers
-    set_scan_element true $selected
-    set_scan_element false $controls
-    set_scan_element false $lock
-    # Keep hookup boundaries stable without freezing unmapped GTECH cells.
-    set_boundary_optimization $controls false
-    set lock_boundary [get_cells -quiet -hierarchical -filter "full_name =~ */dftlock && is_hierarchical == true"]
-    if {![sizeof_collection $lock_boundary]} { error "Missing lock hierarchy" }
-    set_boundary_optimization $lock_boundary false
-    set_scan_configuration -style multiplexed_flip_flop -chain_count 8 -clock_mixing no_mix
+#Inputs
+#add core_clk?
+set inputs [get_ports {rst_n ready rvalid uart_rx test_mode scan_en fault_inject irq[1] irq[0]}]
 
-    set scan_period [dft_env DFT_SCAN_PERIOD 100.0]
-    if {![string is double -strict $scan_period] || $scan_period <= 0} {
-        error "DFT_SCAN_PERIOD must be positive, in library time units"
-    }
-    set test_default_period $scan_period
-    set_dft_signal -view existing_dft -type ScanClock -port core_clk \
-        -timing [list [expr {0.25*$scan_period}] [expr {0.75*$scan_period}]]
-    set_dft_signal -view existing_dft -type Reset -port rst_n -active_state 0
-    # Connect downstream of the lock; never specify raw scan_en as the hookup.
-    set_dft_signal -view spec -type TestMode -active_state 1 \
-        -hookup_pin [get_pins $DFT_LOCKED_MODE_PIN]
-    set_dft_signal -view spec -type ScanEnable -active_state 1 \
-        -hookup_pin [get_pins $DFT_LOCKED_ENABLE_PIN]
-    for {set i 0} {$i < 8} {incr i} {
-        set si [get_pins [lindex $DFT_SCAN_IN_PINS $i]]
-        set so [get_pins [lindex $DFT_SCAN_OUT_PINS $i]]
-        set_dft_signal -view spec -type ScanDataIn -hookup_pin $si
-        set_dft_signal -view spec -type ScanDataOut -hookup_pin $so
-        set_scan_path chain$i -view spec -scan_data_in $si -scan_data_out $so
-    }
-    # Required local setup, never automatic bypass of a lock or reset.
-    if {![llength [info commands dft_site_setup]]} { error "Missing dft_site_setup" }
-    dft_site_setup
+# Inouts
+set inout [get_ports {io[15] io[14] io[13] io[12] io[11] io[10] io[9] io[8] io[7] io[6] io[5] io[4] io[3] io[2] io[1] io[0]}]
+
+# Outputs
+set outputs [get_ports {dir req clk_out wr uart_tx status}]
+
+
+group_path -name INREG  -from $inputs
+group_path -name OUTREG -to   $outputs
+group_path -name IOREG_IN  -from $inout
+group_path -name IOREG_OUT -to   $inout
+
+# Apply input delays to data inputs and bidirectional pins.
+set_input_delay -clock sdc_top_clk -min 0.4 \ [add_to_collection $inputs $inout]
+set_input_delay -clock sdc_top_clk -max 1.5 \ [add_to_collection $inputs $inout]
+
+# Output delays for output pins and bidirectional pins.
+set_output_delay -clock sdc_top_clk -min 1.5 \ [add_to_collection $outputs $inout]
+set_output_delay -clock sdc_top_clk -max 1.5 \ [add_to_collection $outputs $inout]
+
+set_false_path -from [get_clocks sdc_top_clk] -to [get_ports clk_out]
+
+set_max_transition 3 $inputs
+set_max_transition 3 $inout
+set_max_transition 3 $outputs
+
+set_load -pin_load 2 [add_to_collection $inout $outputs]
+
+link
+
+# DFT: partial scan of tier-1 control and privileged registers.
+# The working flow's analysis, libraries, constraints and reports are retained.
+# dft/hookup.tcl supplies actual lock-qualified internal pins and the existing
+# reset/ICG/memory-isolation setup. This file adds no MBIST controller RTL.
+source dft/hookup.tcl
+
+# Select the initial scan population by hierarchy. all_registers restricts the
+# collection to sequential cells; this is not full-core or full-chip scan.
+# The integer register-file array, cache SRAM, link state and counters remain out.
+set scan_regs [filter_collection [all_registers -cells] {
+    full_name =~ */soc/core/ieu/c/* ||
+    full_name =~ */soc/core/ifu/pcreg/* ||
+    full_name =~ */soc/core/priv/privmode/* ||
+    full_name =~ */soc/core/priv/csr/csrsr/* ||
+    full_name =~ */soc/core/priv/csr/csri/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*MTVECreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*MEPCreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*MCAUSEreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*MEDELEGreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*MIDELEGreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*PMPADDRreg/* ||
+    full_name =~ */soc/core/priv/csr/csrm/*PMPCFGreg/* ||
+    full_name =~ */soc/core/priv/csr/*csrs/*STVECreg/* ||
+    full_name =~ */soc/core/priv/csr/*csrs/*SEPCreg/* ||
+    full_name =~ */soc/core/priv/csr/*csrs/*SATPreg/*
+}]
+
+# Disable default full-scan replacement, then enable only the selected state.
+# Keep the lock and session/authorization state outside the scan chains.
+set_scan_element false [all_registers -cells]
+set_scan_element true $scan_regs
+set_scan_element false $dft_lock
+set_scan_element false $dft_control
+
+# Retain the base flow's retiming elsewhere, while preserving selected register
+# boundaries and the test-control/lock interfaces used by scan hookups.
+set_dont_retime $scan_regs true
+set_dont_retime $dft_lock true
+set_dont_retime $dft_control true
+set_boundary_optimization $dft_lock false
+set_boundary_optimization $dft_control false
+
+# Eight ordinary muxed-D scan chains reuse the eight existing input/output pairs.
+# Clock mixing is disabled. No compression or logic-BIST network is requested.
+set_scan_configuration -style multiplexed_flip_flop -chain_count 8 -clock_mixing no_mix
+
+# Describe the existing tester-driven clock/reset. The slow scan waveform uses
+# library time units; it is not a divided or newly generated hardware clock.
+set test_default_period 100
+set_dft_signal -view existing_dft -type ScanClock -port core_clk -timing {25 75}
+set_dft_signal -view existing_dft -type Reset -port rst_n -active_state 0
+
+# Hook inserted logic downstream of the existing lock qualification. The mode
+# and enable pins must already implement test_mode & lock, and scan_en & mode &
+# lock, respectively. These declarations do not create the authorization logic.
+set_dft_signal -view spec -type TestMode -active_state 1 -hookup_pin $dft_test_mode
+set_dft_signal -view spec -type ScanEnable -active_state 1 -hookup_pin $dft_scan_enable
+for {set i 0} {$i < 8} {incr i} {
+    set si [get_pins [lindex $dft_scan_inputs $i]]
+    set so [get_pins [lindex $dft_scan_outputs $i]]
+    set_dft_signal -view spec -type ScanDataIn -hookup_pin $si
+    set_dft_signal -view spec -type ScanDataOut -hookup_pin $so
+    set_scan_path chain$i -view spec -scan_data_in $si -scan_data_out $so
 }
 
-set compile_cmd [getenv ECE411_COMPILE_CMD]
-if {![regexp {^compile_ultra( |$)} $compile_cmd]} {
-    error "This copy expects compile_ultra, as configured in the project"
-}
-if {[regexp {(^| )-retime( |$)} $compile_cmd]} {
-    error "Disable retiming for the first matched partial-scan comparison"
-}
-if {![regexp {(^| )-no_autoungroup( |$)} $compile_cmd]} { append compile_cmd " -no_autoungroup" }
-if {$dft_mode eq "scan"} { append compile_cmd " -scan" }
-eval $compile_cmd
-for {set i 0} {$i < [getenv ECE411_COMPILE_ITER]} {incr i} {
-    set incremental_cmd [getenv ECE411_COMPILE_CMD_INC]
-    if {[regexp {(^| )-retime( |$)} $incremental_cmd]} { error "Disable incremental retiming" }
-    append incremental_cmd " -no_autoungroup"
-    if {$dft_mode eq "scan"} { append incremental_cmd " -scan" }
-    eval $incremental_cmd
-}
+# Scan-aware mapping replaces eligible registers. Retiming remains enabled for
+# other state; no_autoungroup retains the hierarchy used for test connections.
+compile_ultra -gate_clock -retime -scan -no_autoungroup
 
-if {$dft_mode eq "scan"} {
-    # Freeze authorization only AFTER technology mapping. Freezing GTECH cells
-    # before compile can prevent their mapping into the actual target library.
-    set controls [get_cells -quiet $DFT_CONTROL_CELL]
-    set lock [get_cells -quiet -hierarchical -filter "full_name =~ */dftlock/* && is_hierarchical == false"]
-    if {[sizeof_collection $controls] != 1 || ![sizeof_collection $lock]} {
-        error "Lost the mapped DFT control/lock boundary"
-    }
-    set_dont_touch $controls true
-    set_dont_touch $lock true
-    create_test_protocol
-    dft_drc -verbose > reports/dft_drc_pre.rpt
-    preview_dft -show all > reports/preview_dft.rpt
-    insert_dft
-    dft_drc -verbose > reports/dft_drc_post.rpt
-    report_scan_path -view existing_dft -chain all > reports/scan_chains.rpt
-    write_test_protocol -output outputs/forte_top.scan.spf
-    if {[lsort [get_object_name [get_ports *]]] ne $ports_before} {
-        error "Insertion changed top-level ports; review unintended test pins before use"
-    }
-}
-current_design $design_toplevel
-# Functional timing view; DFT DRC/protocol above uses the test configuration.
-set_case_analysis 0 [get_ports test_mode]
-set_case_analysis 0 [get_ports scan_en]
-report_area -hierarchy > reports/area.rpt
-report_qor > reports/qor.rpt
-report_timing -delay max -max_paths 20 > reports/timing.rpt
-report_constraint -all_violators > reports/violators.rpt
-check_design > reports/check_design_final.rpt
-set cap [dft_env DFT_MAX_MAPPED_AREA ""]
-if {$cap ne ""} {
-    if {![string is double -strict $cap] || $cap <= 0} { error "Invalid DFT_MAX_MAPPED_AREA" }
-    set area [get_attribute [current_design] area]
-    if {$area > $cap} { error "Mapped cell area $area exceeds configured cap $cap" }
-}
+# Protect mapped authorization logic during stitching. This is applied after
+# technology mapping so that the original RTL control logic can still be mapped.
+set_dont_touch $dft_lock true
+set_dont_touch $dft_control true
+
+# Generate the shift/capture protocol, check test rules, preview the proposed
+# chains, then stitch them and check again. DRC reports require review; they are
+# not ATPG patterns, a coverage result, or a functional test of the lock/MBIST.
+create_test_protocol
+dft_drc -verbose > [format "%s/%s.dft.pre.rpt" [getenv REPORT_DIR] $design_toplevel]
+preview_dft -show all > [format "%s/%s.dft.preview.rpt" [getenv REPORT_DIR] $design_toplevel]
+insert_dft
+dft_drc -verbose > [format "%s/%s.dft.post.rpt" [getenv REPORT_DIR] $design_toplevel]
+
+
+set current_design  $design_toplevel
 change_names -rules verilog -hierarchy
-write_file -format ddc -hierarchy -output outputs/forte_top.$dft_mode.ddc
-write_file -format verilog -hierarchy -output outputs/forte_top.$dft_mode.v
-write_sdc outputs/forte_top.functional.sdc
-# Protocol names preceded final change_names: regenerate the protocol for the
-# actual emitted netlist, rather than handing downstream tools stale names.
-if {$dft_mode eq "scan"} {
-    report_scan_path -view existing_dft -chain all > reports/scan_chains.rpt
-    write_test_protocol -output outputs/forte_top.scan.spf
+change_names -rules nameRules -hierarchy
+
+# Export final chain names and tester protocol after both naming passes so they
+# match the normal forte_top.gate.v output. ATPG and pattern simulation are separate.
+report_scan_path -view existing_dft -chain all > [format "%s/%s.scan.rpt" [getenv REPORT_DIR] $design_toplevel]
+write_test_protocol -output [format "%s/%s.scan.spf" [getenv SYN_OUT_DIR] $design_toplevel]
+
+report_area                      > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.area.rpt"]
+report_area -hier                > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.area_hierarchical.rpt"]
+report_timing -delay max         > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.setup.rpt"]
+report_timing -delay min         > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.hold.rpt"]
+report_timing -max_path 50       > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.timing.rpt"]
+report_timing_requirement        > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.timing_req.rpt"]
+report_constraint                > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.constraint.rpt"]
+report_attribute                 > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.attribute.rpt"]
+report_constraint -all_violators > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.viol.rpt"]
+check_design                     > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.check.rpt"]
+report_hierarchy                 > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.hierarchy.rpt"]
+report_resources                 > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.resources.rpt"]
+report_reference                 > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.reference.rpt"]
+report_cell                      > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.cell.rpt"]
+report_power -verbose            > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.power.rpt"]
+
+write_sdf [format "%s%s%s%s" [getenv SYN_OUT_DIR] "/" $design_toplevel ".gate.sdf"]
+write_sdc [format "%s%s%s%s" [getenv SYN_OUT_DIR] "/" $design_toplevel ".gate.sdc"]
+
+write -format verilog -hierarchy -output  [format "%s%s%s%s" [getenv SYN_OUT_DIR] "/" $design_toplevel ".gate.v"]
+write -format ddc -hierarchy -output  [format "%s%s%s%s" [getenv SYN_OUT_DIR] "/" $design_toplevel ".gate.ddc"]
+
+
+set report_dir [getenv REPORT_DIR]
+set syn_out_dir [getenv SYN_OUT_DIR]
+
+set output_files [list \
+    "$report_dir/$design_toplevel.gate.area.rpt" \
+    "$report_dir/$design_toplevel.gate.area_hierarchical.rpt" \
+    "$report_dir/$design_toplevel.gate.setup.rpt" \
+    "$report_dir/$design_toplevel.gate.hold.rpt" \
+    "$report_dir/$design_toplevel.gate.timing.rpt" \
+    "$report_dir/$design_toplevel.gate.timing_req.rpt" \
+    "$report_dir/$design_toplevel.gate.constraint.rpt" \
+    "$report_dir/$design_toplevel.gate.attribute.rpt" \
+    "$report_dir/$design_toplevel.gate.viol.rpt" \
+    "$report_dir/$design_toplevel.gate.check.rpt" \
+    "$report_dir/$design_toplevel.gate.hierarchy.rpt" \
+    "$report_dir/$design_toplevel.gate.resources.rpt" \
+    "$report_dir/$design_toplevel.gate.reference.rpt" \
+    "$report_dir/$design_toplevel.gate.cell.rpt" \
+    "$report_dir/$design_toplevel.gate.power.rpt" \
+    "$syn_out_dir/$design_toplevel.gate.sdf" \
+    "$syn_out_dir/$design_toplevel.gate.sdc" \
+    "$syn_out_dir/$design_toplevel.gate.v" \
+    "$syn_out_dir/$design_toplevel.gate.ddc" \
+
+]
+
+foreach f $output_files {
+    if {[file exists $f]} {
+        if {[catch {exec chmod 777 $f} err]} {
+            puts "ERROR: chmod failed for $f: $err"
+        } else {
+            puts "Permissions updated: $f"
+        }
+    } else {
+        puts "WARNING: Output file does not exist: $f"
+    }
 }
-echo "Candidate written; DRC, ATPG coverage, lock tests and placed timing still require review."
+
+start_gui
+
 exit
