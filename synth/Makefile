@@ -61,6 +61,13 @@ outputs/synth.ddc:
 	rm -rf work
 	bash check_synth_error.sh
 
+# Reload the DFT-prepared checkpoint; do not rebuild or clean synthesis.
+.PHONY: dft
+dft: synout/forte_top.pre_dft.ddc
+	mkdir -p reports/dft synout/dft
+	REPORT_DIR="$(CURDIR)/reports/dft" SYN_OUT_DIR="$(CURDIR)/synout/dft" \
+		dc_shell -x 'set dft_standalone true; source dft_insert.tcl' |& tee reports/dft/dft.log
+
 ../sim/vcs/dump.fsdb.saif: ../sim/vcs/dump.fsdb
 	cd ../sim/vcs && fsdb2saif -licqueue dump.fsdb -bt $(shell head -n1 ../sim/vcs/time.txt)ps -et $(shell tail -n1 ../sim/vcs/time.txt)ps -s top_tb/dut
 

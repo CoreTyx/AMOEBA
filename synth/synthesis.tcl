@@ -36,7 +36,28 @@ set verilogout_show_unconnected_pins "true"
 set target_library [format "%s" [getenv TSMC_DB_FAST]]
 
 
-# SRAM librry stuff here
+set sram_library_44 [getenv SRAM_DB_FAST_44]
+set sram_library_128 [getenv SRAM_DB_FAST_128]
+set sram_library_68 [getenv SRAM_DB_FAST_68]
+set sram_library_32_45 [getenv SRAM_DB_FAST_32_45]
+set sram_library_32_128 [getenv SRAM_DB_FAST_32_128]
+set sram_library_16_46 [getenv SRAM_DB_FAST_16_46]
+set sram_library_16_128 [getenv SRAM_DB_FAST_16_128]
+set sram_library_64_46 [getenv SRAM_DB_FAST_64_46]
+set sram_library_64_53 [getenv SRAM_DB_FAST_64_53]
+set sram_library_64_137 [getenv SRAM_DB_FAST_64_137]
+
+set link_library [list "*" \
+    [concat "*" $target_library $synthetic_library $sram_library_44] \
+    [concat "*" $target_library $synthetic_library $sram_library_128] \
+    [concat "*" $target_library $synthetic_library $sram_library_68] \
+    [concat "*" $target_library $synthetic_library $sram_library_32_45] \
+    [concat "*" $target_library $synthetic_library $sram_library_32_128] \
+    [concat "*" $target_library $synthetic_library $sram_library_16_46] \
+    [concat "*" $target_library $synthetic_library $sram_library_16_128] \
+    [concat "*" $target_library $synthetic_library $sram_library_64_46] \
+    [concat "*" $target_library $synthetic_library $sram_library_64_53] \
+    [concat "*" $target_library $synthetic_library $sram_library_64_137]]
 
 # ------------------------------------------------------------
 # Config Files
@@ -511,11 +532,27 @@ set_load -pin_load 2 [add_to_collection $inout $outputs]
 
 link
 
-compile_ultra -gate_clock -retime
+
+# Resolve DFT objects and attach their attributes before mapping.
+source dft_setup.tcl
+compile_ultra -scan -gate_clock -retime
+# Setup preserves these named nets through mapping; insertion must be able to
+# add loads. Release them once, before saving the reusable DFT checkpoint.
+set_dont_touch [get_nets -hier {scan_en_dft test_mode_dft dft_unlocked}] false
+
 
 set current_design  $design_toplevel
 change_names -rules verilog -hierarchy
 change_names -rules nameRules -hierarchy
+
+# Immutable pre-insertion checkpoint for subsequent make dft iterations.
+# DDC retains the DFT signal definitions and scan-element attributes; ordinary
+# Tcl variables/collection handles are deliberately not used by dft_insert.tcl.
+current_design $design_toplevel
+file mkdir synout
+write -format ddc -hierarchy -output synout/forte_top.pre_dft.ddc
+set dft_standalone false
+source dft_insert.tcl
 
 report_area                      > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.area.rpt"]
 report_area -hier                > [format "%s%s%s%s" [getenv REPORT_DIR] "/" $design_toplevel ".gate.area_hierarchical.rpt"]
