@@ -1,0 +1,49 @@
+///////////////////////////////////////////
+// ram1p1rwbe_256x137.sv
+//
+// Written: james.stine@okstate.edu 28 January 2023
+// Modified: 2026: cache line/tag stored with its SECDED check bits in one word
+//
+// Purpose: RAM wrapper for instantiating RAM IP
+//
+// A component of the CORE-V-WALLY configurable RISC-V project.
+// https://github.com/openhwgroup/cvw
+//
+// Copyright (C) 2021-23 Harvey Mudd College & Oklahoma State University
+//
+// SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
+//
+// Licensed under the Solderpad Hardware License v 2.1 (the “License”); you may not use this file
+// except in compliance with the License, or, at your option, the Apache License version 2.0. You
+// may obtain a copy of the License at
+//
+// https://solderpad.org/licenses/SHL-2.1/
+//
+// Unless required by applicable law or agreed to in writing, any work distributed under the
+// License is distributed on an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied. See the License for the specific language governing permissions
+// and limitations under the License.
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+module ram1p1rwbe_256x137(
+  input  logic          CLK,
+  input  logic          CEB,
+  input  logic          WEB,
+  input  logic [7:0]    A,
+  input  logic [136:0]   D,
+  input  logic [136:0]   BWEB,
+  output logic [136:0]   Q
+);
+
+logic [139:0] Q_temp; 
+assign Q = Q_temp[136:0]; 
+
+   // replace "generic64x128RAM" with "TS1N..64X128.." module from your memory vendor
+   //generic64x128RAM sramIP (.CLK, .CEB, .WEB, .A, .D, .BWEB, .Q);
+   // RETN and EMA must be driven.  Left unconnected, synthesis tied them to 0:
+   // RETN=0 holds the macro in retention, and every read returns X (seen in
+   // the PDK model on the post-synthesis bench).  EMA=0 is a placeholder until
+   // the datasheet's recommended margin setting is known.
+   sram_sp_256_137 sramIP(.CLK, .CEN(CEB), .WEN(WEB), .A, .D({3'd0, D}), .Q(Q_temp),
+     .RETN(1'b1), .EMA('0));
+endmodule
