@@ -40,7 +40,8 @@ module cacheLRU
   input  logic                LRUWriteEn,      // Update the LRU state
   input  logic                SetValid,        // Set the dirty bit in the selected way and set
   input  logic                InvalidateCache, // Clear all valid bits
-  output logic [NUMWAYS-1:0]  VictimWay        // LRU selects a victim to evict
+  output logic [NUMWAYS-1:0]  VictimWay,       // LRU selects a victim to evict
+  output logic [$clog2(NUMWAYS)-1:0] VictimWayEnc // The same, binary encoded
 );
 
   localparam                           LOGNUMWAYS = $clog2(NUMWAYS);
@@ -61,7 +62,6 @@ module cacheLRU
 
   logic [NUMWAYS-1:0] FirstZero;
   logic [LOGNUMWAYS-1:0] FirstZeroWay;
-  logic [LOGNUMWAYS-1:0] VictimWayEnc;
 
   binencoder #(NUMWAYS) hitwayencoder(HitWay, HitWayEncoded);
 

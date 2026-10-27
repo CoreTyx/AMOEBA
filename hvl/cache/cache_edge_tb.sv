@@ -14,6 +14,7 @@
 //            - valid-bit 1->0 flip on a dirty line silently dropped modified data
 //            - uncorrectable tag on a dirty line lost the data / wrote back to a wrong address
 //            - dirty eviction / flush wrote back uncorrected (raw) data
+//          Section 13 covers cbo.zero, whose hit case left the line in two ways.
 //
 //          The final section is a seeded random load/store run checked against a reference
 //          memory, first without and then with injected single-bit data errors.
@@ -273,24 +274,15 @@ module cache_edge_tb;
   localparam int TB_TAGCHECKWIDTH = tbrequiredr(TAGLEN) + 1;
 
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
-      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
-    endcase
+    return dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH +: LINELEN];
   endfunction
 
   task automatic flipdatabit(input int w, input int s, input int b);
-    case (w)
-      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
-      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b] = ~dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH+b];
-    endcase
+    dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH+b] = ~dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH+b];
   endtask
 
   task automatic fliptagbit(input int w, input int s, input int b);
-    case (w)
-      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
-      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b] = ~dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH+b];
-    endcase
+    dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH+b] = ~dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH+b];
   endtask
 
   task automatic clearvalidredundant(input int w, input int s);
@@ -315,10 +307,7 @@ module cache_edge_tb;
   endfunction
 
   function automatic logic [TAGLEN-1:0] peektag(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
-      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN];
-    endcase
+    return dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH +: TAGLEN];
   endfunction
 
   function automatic int findway(input logic [PA_BITS-1:0] adr);
@@ -342,10 +331,7 @@ module cache_edge_tb;
     .codeword_i(probecw), .data_o(probedata), .sec_err_o(probesec), .ded_err_o(probeded));
 
   function automatic logic [TB_LINECHECKR:0] peekdatacheck(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
-      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
-    endcase
+    return dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH-1:0];
   endfunction
 
   task automatic lineclean(input int w, input int s, output bit clean);
@@ -500,6 +486,72 @@ module cache_edge_tb;
     check("tag DED flush: no writeback was issued for it", wbcount == wbbefore);
     check("tag DED flush: bad line is invalidated", !peekvalid(way, set));
     check("tag DED flush: next set's line survives the flush", findway(neighbour) >= 0);
+    doreset();
+  endtask
+
+  // ── 13. cbo.zero. A hit is zeroed where it is; a miss takes the victim's place, writing a dirty
+  //        victim back first. (A hit used to be handled as a miss whenever the LRU victim was dirty:
+  //        the victim was written back and refilled with zeros, and the line then sat in two ways.) ──
+  task automatic docbozero(input logic [PA_BITS-1:0] adr);
+    CMOpM = 4'b1000;
+    PAdr = adr;
+    NextSet = adr[11:0];
+    WriteData = '0;                         // as the LSU drives it for cbo.zero
+    ByteMask = '1;
+    @(posedge clk);
+    waitidle();
+    CMOpM = 4'b0000;
+    @(posedge clk);
+    refset(adr, '0);
+  endtask
+
+  function automatic int waysholding(input logic [PA_BITS-1:0] adr);
+    int n;
+    n = 0;
+    for (int w = 0; w < NUMWAYS; w++)
+      if (peekvalid(w, setof(adr)) && peektag(w, setof(adr)) == adr[PA_BITS-1:SETLEN+OFFSETLEN]) n++;
+    return n;
+  endfunction
+
+  task automatic test_cbo_zero;
+    logic [PA_BITS-1:0] x, y, z;
+    logic [WORDLEN-1:0] r;
+    int wbbefore, xway;
+    x = 16'h1300; y = alias_of(x, 0); z = alias_of(x, 1);
+    setline(x, 128'h1313131313131313_1212121212121212);
+    setline(y, 128'h2323232323232323_2222222222222222);
+    setline(z, 128'h3333333333333333_3232323232323232);
+
+    // Miss into an empty set: no victim to write back.
+    wbbefore = wbcount;
+    docbozero(z);
+    check("cbo.zero miss, clean victim: no writeback", wbcount == wbbefore);
+    doload(z + 8, r);
+    check("cbo.zero miss, clean victim: the line reads as zeros", r === '0);
+    doflush(); doreset();
+
+    // Hit, while the LRU victim is another, dirty way.
+    doload(y, r);
+    dostore(y, 64'hDDDDDDDDDDDDDDDD);       // y dirty
+    doload(x, r);                           // x clean and most recent: the victim is y's way
+    xway = findway(x);
+    wbbefore = wbcount;
+    docbozero(x);
+    check("cbo.zero hit: no writeback", wbcount == wbbefore);
+    check("cbo.zero hit: the line is in one way, the one it was in", waysholding(x) == 1 && findway(x) == xway);
+    check("cbo.zero hit: the dirty victim stays resident and dirty", findway(y) >= 0 && peekdirty(findway(y), setof(y)));
+    doload(x + 8, r);
+    check("cbo.zero hit: the line reads as zeros", r === '0);
+
+    // Miss, with a dirty victim (both ways are dirty now: x by the zeroing, y by the store).
+    wbbefore = wbcount;
+    docbozero(z);
+    check("cbo.zero miss, dirty victim: the victim is written back", wbcount == wbbefore + 1 && mem_read(y) === refget(y));
+    check("cbo.zero miss, dirty victim: the line is resident once", waysholding(z) == 1);
+    doload(z, r);
+    check("cbo.zero miss, dirty victim: the line reads as zeros", r === '0);
+    doflush();
+    check("cbo.zero: memory holds the zeroed lines after a flush", mem_read(x) === '0 && mem_read(z) === '0);
     doreset();
   endtask
 
@@ -731,6 +783,8 @@ module cache_edge_tb;
       check("FI DED clean: the refetched line is clean", peekdata(findway(a), s) === refget(a));
     end
     doreset();
+
+    test_cbo_zero();
 
     $display("cache_edge_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");
