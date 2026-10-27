@@ -92,6 +92,42 @@ module ram1p1rwe import cvw::* ; #(parameter USE_SRAM=0, DEPTH=64, WIDTH=44) (
       .A(addr), .D(din),
       .BWEB('0), .Q(dout));
 
+  end else if ((USE_SRAM == 1) & (WIDTH == 137) & (DEPTH == 64)) begin
+    // 64 x 137-bit SRAM: cache data line (128) with its SECDED check bits (9)
+    ram1p1rwbe_64x137 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 53)  & (DEPTH == 64)) begin
+    // 64 x 53-bit SRAM: cache tag (46) with its SECDED check bits (7)
+    ram1p1rwbe_64x53 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 53)  & (DEPTH == 256)) begin
+    // 256 x 53-bit SRAM: cache tag (46) with its SECDED check bits (7)
+    ram1p1rwbe_256x53 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 137)  & (DEPTH == 256)) begin
+    // 256 x 137-bit SRAM: cache data line (128) with its SECDED check bits (9)
+    ram1p1rwbe_256x137 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 53)  & (DEPTH == 128)) begin
+    // 128 x 53-bit SRAM: cache tag (46) with its SECDED check bits (7)
+    ram1p1rwbe_128x53 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
+  end else if ((USE_SRAM == 1) & (WIDTH == 137)  & (DEPTH == 128)) begin
+    // 128 x 137-bit SRAM: cache data line (128) with its SECDED check bits (9)
+    ram1p1rwbe_128x137 sram1B (.CLK(clk), .CEB(~ce), .WEB(~we),
+      .A(addr), .D(din),
+      .BWEB('0), .Q(dout));
+
     //////////////////////////////////////////////////////////////////////////////
     // READ first SRAM model
     //////////////////////////////////////////////////////////////////////////////

@@ -53,8 +53,10 @@ for d in search_dir_all:
 
 allowed_sv_tasks_pat = '|'.join(allowed_sv_tasks)
 exclude_grep = ' '.join(f'--exclude-dir={e}' for e in exclude_dirs)
-# types.sv uses /* verilator lint_off */ block comments for Verilator suppressors — exclude from keyword scan
-sv_only = '--include=*.sv --exclude=types.sv'
+# types.sv uses /* verilator lint_off */ block comments for Verilator suppressors — exclude from keyword scan.
+# prim_*.sv are vendored OpenTitan primitives (third_party/opentitan); they use $past, bit and int
+# unsigned and are not ours to rewrite.
+sv_only = '--include=*.sv --exclude=types.sv --exclude=prim_*.sv'
 search_all = ' '.join(search_dir_all)
 search_hdl  = ' '.join(search_dir_hdl)
 

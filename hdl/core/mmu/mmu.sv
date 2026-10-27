@@ -121,7 +121,7 @@ module mmu import cvw::*;  #(parameter cvw_t P,
     .PMAInstrAccessFaultF, .PMALoadAccessFaultM, .PMAStoreAmoAccessFaultM);
 
   if (P.PMP_ENTRIES > 0) begin : pmp
-    pmpchecker #(P) pmpchecker(.PhysicalAddress, .EffectivePrivilegeModeW,
+    pmpchecker #(.P(P), .MATCH_REG(IMMU)) pmpchecker(.clk, .reset, .PhysicalAddress, .EffectivePrivilegeModeW,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
       .ExecuteAccessF, .WriteAccessM, .ReadAccessM, .Size, .CMOpM,
       .PMPInstrAccessFaultF, .PMPLoadAccessFaultM, .PMPStoreAmoAccessFaultM);
@@ -155,7 +155,17 @@ module mmu import cvw::*;  #(parameter cvw_t P,
 
   // Access faults
   // If TLB miss and translating we want to not have faults from the PMA and PMP checkers.
-  assign InstrAccessFaultF    = (PMAInstrAccessFaultF    | PMPInstrAccessFaultF)    & ~TLBMiss;
+  // The instruction MMU's PMP checker takes two cycles (MATCH_REG in pmpchecker.sv), so its
+  // access fault is put together a cycle late as a whole: the PMP's part arrives then, and the
+  // PMA's part and the TLB miss are held for it.  The IFU does not use the fault before that
+  // (ifu.sv, fetch check cycle).
+  if (IMMU) begin : instrfault
+    logic PMAInstrAccessFaultQ, TLBMissQ;
+    flopr #(2) latefaultreg(clk, reset, {PMAInstrAccessFaultF, TLBMiss}, {PMAInstrAccessFaultQ, TLBMissQ});
+    assign InstrAccessFaultF  = (PMAInstrAccessFaultQ    | PMPInstrAccessFaultF)    & ~TLBMissQ;
+  end else begin : instrfault
+    assign InstrAccessFaultF  = (PMAInstrAccessFaultF    | PMPInstrAccessFaultF)    & ~TLBMiss;
+  end
   assign LoadAccessFaultM     = (PMALoadAccessFaultM     | PMPLoadAccessFaultM     | AtomicMisalignedCausesAccessFaultM & ReadNoAmoAccessM)     & ~TLBMiss;
   assign StoreAmoAccessFaultM = (PMAStoreAmoAccessFaultM | PMPStoreAmoAccessFaultM | AtomicMisalignedCausesAccessFaultM & WriteAccessM) & ~TLBMiss;
 

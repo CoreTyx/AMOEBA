@@ -17,7 +17,7 @@ set_fix_hold [get_clocks my_clk]
 
 # Asynchronous or on-chip-synchronised inputs: no timing arc to constrain.
 set_false_path -from [get_ports rst_n]
-set_false_path -from [get_ports {irq[*] uart_rx test_mode scan_en}]
+set_false_path -from [get_ports {irq[*] uart_rx fault_inject test_mode scan_en}]
 
 # ---- link ---------------------------------------------------------------
 # FPGA launches on the rising edge; delays are FPGA clock-to-out + board

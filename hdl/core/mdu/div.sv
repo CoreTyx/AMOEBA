@@ -34,11 +34,18 @@ module div import cvw::*;  #(parameter cvw_t P) (
   input  logic              FlushE,
   input  logic              IntDivE,                        // integer division/remainder instruction of any type
   input  logic              DivSignedE,                     // signed division
+  input  logic              RemE,                           // remainder instruction (rem, remu, remw, remuw)
   input  logic              W64E,                           // W-type instructions (divw, divuw, remw, remuw)
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // Forwarding mux outputs for Source A and B
   output logic              DivBusyE,                       // Divide is busy - stall pipeline
   output logic              DivDoneE,                       // Divide result is valid
-  output logic [P.XLEN-1:0] QuotM, RemM                     // Quotient and remainder outputs
+  output logic [P.XLEN-1:0] ResultM,                        // Quotient or remainder, as the instruction asks
+  // The divider's own registers, for the residue check in ft_div
+  output logic              DivFirstE,                      // first iteration cycle: XQ holds |X|
+  output logic [P.XLEN-1:0] XQ0, W0,                        // |X| on the first cycle; |Q| and |R| when done
+  output logic [P.XLEN-1:0] DAbsBOut,                       // -|D|, constant from the first cycle on
+  output logic [P.XLEN-1:0] MagM,                           // |Q| or |R|, the magnitude ResultM is made from
+  output logic              Div0M, NegM, RemM               // divide by 0; ResultM is negated; ResultM is the remainder
  );
 
   localparam STEPBITS = $clog2(P.XLEN/P.IDIV_BITSPERCYCLE); // Number of steps
@@ -55,9 +62,9 @@ module div import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]   DAbsB;                               // registered absolute value of D, constant during division
   logic [P.XLEN-1:0]   XnE;                                 // DXnE = ~XinE
   logic [P.XLEN-1:0]   XInitE;                              // |X|, or original X for divide by 0
-  logic [P.XLEN-1:0]   WnM, XQnM;                           // negated residual W and quotient XQ for postprocessing sign correction
+  logic [P.XLEN-1:0]   MagnM;                               // negated magnitude for postprocessing sign correction
   logic [STEPBITS:0]   step;                                // division step
-  logic                Div0E, Div0M;                        // divide by 0
+  logic                Div0E;                               // divide by 0
   logic                DivStartE;                           // start integer division
   logic                SignXE, SignDE;                      // sign of dividend and divisor
   logic                NegQE, NegWM, NegQM;                 // negate quotient or residual during postprocessing
@@ -114,14 +121,22 @@ module div import cvw::*;  #(parameter cvw_t P) (
   // Memory Stage: output sign correction and special cases
   //////////////////////////////
 
-  flopen #(3) Div0eMReg(clk, DivStartE, {Div0E, NegQE, SignXE}, {Div0M, NegQM, NegWM});
+  flopen #(4) Div0eMReg(clk, DivStartE, {Div0E, NegQE, SignXE, RemE}, {Div0M, NegQM, NegWM, RemM});
 
-  // On final setp of signed operations, negate outputs as needed to get correct sign
-  neg #(P.XLEN) qneg(XQ[0], XQnM);
-  neg #(P.XLEN) wneg(W[0], WnM);
-  // Select appropriate output: normal, negated, or for divide by zero
-  mux3 #(P.XLEN) qmux(XQ[0], XQnM, {P.XLEN{1'b1}}, {Div0M, NegQM}, QuotM); // Q taken from XQ register, negated if necessary, or all 1s when dividing by zero
-  mux3 #(P.XLEN) remmux(W[0], WnM, XQ[0], {Div0M, NegWM}, RemM); // REM taken from W register, negated if necessary, or from X when dividing by zero
+  // Only one of quotient and remainder is returned, so pick it before the sign correction and
+  // negate once: Q from the XQ register, REM from the W register
+  mux2 #(P.XLEN) magmux(XQ[0], W[0], RemM, MagM);
+  assign NegM = RemM ? NegWM : NegQM;
+  neg #(P.XLEN) magneg(MagM, MagnM);
+  // Select appropriate output: normal, negated, or for divide by zero all 1s (Q) or X (REM, from XQ)
+  always_comb
+    if (Div0M) ResultM = RemM ? XQ[0] : {P.XLEN{1'b1}};
+    else       ResultM = NegM ? MagnM : MagM;
+
+  assign DivFirstE = (state == BUSY) & (step == (STEPBITS+1)'(1));
+  assign XQ0       = XQ[0];
+  assign W0        = W[0];
+  assign DAbsBOut  = DAbsB;
 
   //////////////////////////////
   // Divider FSM to sequence Busy and Done

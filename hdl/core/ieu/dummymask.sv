@@ -14,7 +14,7 @@
 // happens; this module decorrelates *what* the dummies touch.
 //
 // On an injection cycle each register read port is XORed with an independent
-// pseudo-random 64-bit mask, so a dummy's operand, ALU switching activity and
+// pseudo-random 64-bit mask (applied to the stored codeword; see below), so a dummy's operand, ALU switching activity and
 // shadow-register write are all uncorrelated with the real register contents.
 // Real instructions are untouched: the mask is gated by InjectD.
 //
@@ -34,11 +34,19 @@
 // state would correlate mask value with insertion timing.
 ///////////////////////////////////////////
 
-module dummymask #(parameter WIDTH = 64) (
+module dummymask #(
+  parameter WIDTH = 64,
+  parameter int R = (WIDTH <=   1) ? 2 :                // SECDED check bits for WIDTH
+                    (WIDTH <=   4) ? 3 :
+                    (WIDTH <=  11) ? 4 :
+                    (WIDTH <=  26) ? 5 :
+                    (WIDTH <=  57) ? 6 :
+                    (WIDTH <= 120) ? 7 : 8
+) (
   input  logic             clk, reset,
   input  logic             InjectD,                  // decode stage holds an injected dummy this cycle
-  input  logic [WIDTH-1:0] Rd1D, Rd2D,               // register file read data, after ECC correction
-  output logic [WIDTH-1:0] Rd1MaskedD, Rd2MaskedD    // operands as seen by the rest of the pipeline
+  input  logic [WIDTH+R:0] Rd1D, Rd2D,               // register file read codewords
+  output logic [WIDTH+R:0] Rd1MaskedD, Rd2MaskedD    // operand codewords as seen by the rest of the pipeline
 );
 
   // Free-running so that the mask sequence does not correlate with when
@@ -54,10 +62,21 @@ module dummymask #(parameter WIDTH = 64) (
     if (reset) LfsrB <= 64'hFEDC_BA98_7654_3210;
     else       LfsrB <= {LfsrB[62:0], LfsrB[63] ^ LfsrB[10] ^ LfsrB[1] ^ LfsrB[0]};
 
-  // The mask comes straight out of a flop, so this adds a single XOR level to
-  // the decode-stage read path and nothing to the execute-stage ALU path.
-  assign Rd1MaskedD = InjectD ? (Rd1D ^ LfsrA[WIDTH-1:0]) : Rd1D;
-  assign Rd2MaskedD = InjectD ? (Rd2D ^ LfsrB[WIDTH-1:0]) : Rd2D;
+  // The operands are SECDED codewords, and the code is linear: the codeword of
+  // (data ^ mask) is the codeword of data XORed with the codeword of mask.  So
+  // the mask is encoded and applied to the whole codeword, check bits included,
+  // and the result is still a valid codeword of the masked data -- the ECC check
+  // downstream sees nothing unusual.
+  //
+  // The mask comes straight out of a flop and its encoding is done by the time
+  // the register file read arrives, so this adds a single XOR level to the
+  // decode-stage read path and nothing to the execute-stage ALU path.
+  logic [WIDTH+R:0] MaskA, MaskB;
+  ecc_secded_enc #(.DATA_WIDTH(WIDTH)) enca (.data_i(LfsrA[WIDTH-1:0]), .codeword_o(MaskA));
+  ecc_secded_enc #(.DATA_WIDTH(WIDTH)) encb (.data_i(LfsrB[WIDTH-1:0]), .codeword_o(MaskB));
+
+  assign Rd1MaskedD = InjectD ? (Rd1D ^ MaskA) : Rd1D;
+  assign Rd2MaskedD = InjectD ? (Rd2D ^ MaskB) : Rd2D;
 
 `ifdef ECE411_DUMMY_TRACE
   // Debug-only: show the operands a dummy would have read against what it
@@ -65,9 +84,9 @@ module dummymask #(parameter WIDTH = 64) (
   always_ff @(posedge clk)
     if (~reset & InjectD) begin
       $display("[dmask] %0t  rs1 %016h -> %016h   (mask %016h)",
-               $time, Rd1D, Rd1MaskedD, LfsrA[WIDTH-1:0]);
+               $time, Rd1D[WIDTH+R:R+1], Rd1MaskedD[WIDTH+R:R+1], LfsrA[WIDTH-1:0]);
       $display("[dmask] %0t  rs2 %016h -> %016h   (mask %016h)",
-               $time, Rd2D, Rd2MaskedD, LfsrB[WIDTH-1:0]);
+               $time, Rd2D[WIDTH+R:R+1], Rd2MaskedD[WIDTH+R:R+1], LfsrB[WIDTH-1:0]);
     end
 `endif
 

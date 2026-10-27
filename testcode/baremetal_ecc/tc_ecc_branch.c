@@ -46,7 +46,10 @@ int main(void) {
     /* Each call is done twice; mismatches indicate forwarding ECC failure */
     uint64_t vals[]     = {0xCAFEBABEDEADBEEFULL, 0x0123456789ABCDEFULL,
                             0x0ULL, 0xFFFFFFFFFFFFFFFFULL, 0x1ULL};
-    uint64_t expected[] = {0xFFFFULL, 0xFFFFULL, 0x0ULL, 0x7FFFULL, 0x7FFFULL};
+    /* Bits 0-7 are unsigned >-thresholds, 8-13 mask tests, 14 x!=0, 15 x!=~0.
+     * Three of these were wrong (0xFFFF, 0x0, 0x7FFF) and the test could never
+     * pass; it went unnoticed while bin/startup.s ignored main's return value. */
+    uint64_t expected[] = {0xFFFFULL, 0xFF80ULL, 0x8000ULL, 0x7FFFULL, 0xEA00ULL};
     int i;
     for (i = 0; i < 5; i++) {
         if (branch_tree(vals[i], expected[i]))

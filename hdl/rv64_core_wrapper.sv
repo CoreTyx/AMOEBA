@@ -373,10 +373,12 @@ module rv64_core_wrapper import cvw::*; (
             end else if (FlushE) begin
                 // E-stage instruction killed; clear stash.
                 E_stash_valid <= 1'b0;
-            end else if (!E_stash_valid) begin
+            end else if (!E_stash_valid & ~soc.core.EccStallE) begin
                 // First cycle of E-stage stall (MDU busy): ForwardedSrcAE/BE are
                 // correct here because R1E/R2E were loaded last cycle and the
                 // previous instruction is still in M/W providing forwarded values.
+                // Not in an ECC stall cycle: Execute's operands are uncorrected
+                // then, and the pipeline is holding them for the next cycle.
                 Rs1DataE_stash <= soc.core.ieu.ForwardedSrcAE;
                 Rs2DataE_stash <= soc.core.ieu.ForwardedSrcBE;
                 E_stash_valid  <= 1'b1;

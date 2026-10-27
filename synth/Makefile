@@ -9,9 +9,18 @@ SHELL=/bin/bash -o pipefail
 # forte_link_phy, every one of which imports it.
 LINK_PKG       := $(CURDIR)/../hdl/forte_link_pkg.sv
 export PKG_SRCS = $(CURDIR)/../pkg/types.sv
-export REPO_ROOT = $(abspath $(CURDIR)/..)
-CVW_SRCS       := $(shell find $(CURDIR)/../third_party/cvw/src -name '*.sv' -o -name '*.v' 2>/dev/null)
-export HDL_SRCS = $(filter-out $(LINK_PKG),$(shell find $(CURDIR)/../hdl -name '*.sv')) $(CVW_SRCS)
+# Not $(abspath): the first make on the EWS PATH is 3.80, which lacks it and
+# would leave REPO_ROOT empty.
+export REPO_ROOT = $(shell cd $(CURDIR)/.. && pwd)
+# The core is hdl/core ONLY.  hdl/cvw is the unmodified upstream tree it was
+# forked from and defines every one of the same module names, so globbing all
+# of hdl/ analyses each module twice and synthesizes whichever copy `find`
+# happened to list last.  Same explicit list as lint/Makefile; the cvw package
+# goes first because every core module imports it.
+CORE_PKG       := $(CURDIR)/../hdl/core/cvw.sv
+CORE_SRCS      := $(filter-out $(CORE_PKG),$(sort $(shell find $(CURDIR)/../hdl/core -name '*.sv')))
+TOP_SRCS       := $(filter-out $(LINK_PKG),$(sort $(wildcard $(CURDIR)/../hdl/*.sv)))
+export HDL_SRCS = $(CORE_PKG) $(CORE_SRCS) $(TOP_SRCS)
 export SRAM_LIB = $(shell find $(CURDIR)/../sram/output/ -name "*.db")
 # Overridable so `make synth DESIGN_TOP=forte_top` synthesizes the ASIC top.
 export DESIGN_TOP ?= rv64_core_wrapper
@@ -74,6 +83,33 @@ power_verilator: outputs/synth.ddc ../sim/verilator/dump.fst.saif
 	export ECE411_SAIF_TOP=vtop/top_tb/dut ;\
 	export ECE411_POWER_RPT_PATH=./reports ;\
 	dc_shell -f power.tcl |& tee reports/power.log
+
+# ---- calibrated 65 nm timing flow (timing/README.md) -------------------------
+# Synthesizes TIMING_TOP with FreePDK45 standing in for TSMC 65GP and reports
+# every area of the design against the 400 MHz target.  Independent of `synth`:
+# it has its own script, constraints and output directories under timing/.
+#   make timing                    full run; summary in timing/reports/summary.rpt
+#   make timing_elab               elaborate and link only (minutes, not hours)
+#   make timing_report             re-report the last full run without recompiling
+#   make timing TARGET_FO4_PS=45   any knob in timing/tech.cfg can be overridden
+export TIMING_TOP ?= forte_top
+TIMING_DIR := $(CURDIR)/timing
+# lc_shell bundles older copies of these two libraries and will not start on
+# the RHEL 9 EWS hosts unless the system ones are loaded ahead of them.
+LC_SHELL   ?= env LD_PRELOAD="$(wildcard /lib64/libk5crypto.so.3 /lib64/libtinfo.so.5)" lc_shell
+
+.PHONY: timing timing_elab timing_report
+timing:        TIMING_MODE = full
+timing_elab:   TIMING_MODE = elab
+timing_report: TIMING_MODE = report
+timing timing_elab timing_report:
+	mkdir -p $(TIMING_DIR)/reports $(TIMING_DIR)/work
+	cd $(TIMING_DIR) && dc_shell -f fo4.tcl |& tee reports/fo4.log
+	cd $(TIMING_DIR) && python3 gen_blackbox_libs.py tech.cfg $$(cat reports/fo4.txt) work/forte_blackbox.lib
+	cd $(TIMING_DIR) && $(LC_SHELL) -x 'read_lib work/forte_blackbox.lib; write_lib forte_blackbox -format db -output work/forte_blackbox.db; exit' |& tee reports/lc.log
+	cd $(TIMING_DIR) && export ECE411_DC_CORES=4 TIMING_MODE=$(TIMING_MODE) ;\
+	dc_shell -f run_timing.tcl |& tee reports/run_timing_$(TIMING_MODE).log
+	rm -f $(TIMING_DIR)/*.log $(TIMING_DIR)/default.svf $(TIMING_DIR)/lc_output.txt $(TIMING_DIR)/moduleparamid
 
 .PHONY: dv
 dv:

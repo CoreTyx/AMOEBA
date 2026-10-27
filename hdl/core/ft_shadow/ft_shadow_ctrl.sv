@@ -16,6 +16,13 @@
 // diagnostic relation isolates the failing replica; ambiguous or unsupported
 // diagnosis reports unresolved until acceptance. Isolation persists until
 // reset/flush; the owning core records reset-sticky diagnostic status.
+//
+// check marks the cycles in which mismatch and the recompute results are to
+// be acted on. A wrapper that compares combinationally ties it high and gets
+// one evaluation per clock. ft_alu compares registered copies of its channels
+// and pulses check once per evaluation; between pulses the controller holds
+// its state, and stall_req means "the evaluation in progress did not produce
+// a trusted result" rather than a stall to apply directly.
 ///////////////////////////////////////////
 
 module ft_shadow_ctrl #(
@@ -25,6 +32,7 @@ module ft_shadow_ctrl #(
   // Clock/reset/flush define the lifetime of the held transaction.
   input  logic clk, reset, flush,
   input  logic valid,                 // operation currently occupies the wrapper
+  input  logic check,                 // mismatch and the recompute results are valid this cycle: evaluate them
   input  logic advance,               // owning pipeline stage accepts the transaction
   input  logic mismatch,              // primary and shadow outputs disagree
   input  logic recompute_supported,   // wrapper supplies a trusted alternate test
@@ -51,7 +59,7 @@ module ft_shadow_ctrl #(
 
   assign recompute_mode = (state == RECOMPUTE);
   // Capture unmasked post-injection results once, including threshold 1.
-  assign capture_normal = (state == NORMAL) & valid & mismatch & ~reset & ~flush;
+  assign capture_normal = (state == NORMAL) & check & valid & mismatch & ~reset & ~flush;
   assign isolated       = (state == ISOLATED);
   assign unresolved     = (state == UNRESOLVED);
   // A mismatch/recompute holds every architectural stage.  UNRESOLVED is
@@ -72,7 +80,7 @@ module ft_shadow_ctrl #(
       case (state)
         // First disagreement starts the retry count; normal execution has
         // no added latency when both copies agree.
-        NORMAL: begin
+        NORMAL: if (check) begin
           mismatch_count <= '0;
           if (valid & mismatch) begin
             mismatch_count <= COUNT_W'(1);
@@ -86,7 +94,7 @@ module ft_shadow_ctrl #(
         // again. A matching retry returns directly to NORMAL.
         // Threshold one bypasses RETRY; its zero retry limit is intentional.
         /* verilator lint_off UNSIGNED */
-        RETRY: begin
+        RETRY: if (check) begin
           if (!valid | !mismatch) begin
             state          <= NORMAL;
             mismatch_count <= '0;
@@ -100,7 +108,7 @@ module ft_shadow_ctrl #(
         /* verilator lint_on UNSIGNED */
         // Recompute is one diagnostic cycle. Exactly one passing relation is
         // required; agreement or disagreement by both copies is ambiguous.
-        RECOMPUTE: begin
+        RECOMPUTE: if (check) begin
           // A copy is bad when its alternate result no longer has the known
           // relationship to its own saved normal result.
           if (recompute_primary_ok & ~recompute_shadow_ok) begin

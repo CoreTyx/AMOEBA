@@ -18,6 +18,9 @@ static inline void __attribute__((noreturn)) sim_exit(uint64_t code) {
     // Per RISC-V test convention: write (code << 1) | 1 to tohost.
     // Code 0 = success, nonzero = failure.
     tohost = (code << 1) | 1;
+    // fence.i writes the whole D$ back (Wally: FenceI -> FlushDCache), so the
+    // store reaches the link and a pin-level testbench sees the exit.
+    __asm__ volatile ("fence.i" ::: "memory");
     // Spin in case the testbench doesn't halt us immediately
     while (1) { __asm__ volatile ("wfi"); }
 }

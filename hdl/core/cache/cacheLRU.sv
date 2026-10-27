@@ -36,22 +36,21 @@ module cacheLRU
   input  logic                CacheEn,         // Enable the cache memory arrays.  Disable hold read data constant
   input  logic [NUMWAYS-1:0]  HitWay,          // Which way is valid and matches PAdr's tag
   input  logic [NUMWAYS-1:0]  ValidWay,        // Which ways for a particular set are valid, ignores tag
-  input  logic [SETLEN-1:0]   CacheSetLRU,     // Cache address, the output of the address select mux, NextAdr, PAdr, or FlushAdr
   input  logic [SETLEN-1:0]   PAdr,            // Physical address
   input  logic                LRUWriteEn,      // Update the LRU state
   input  logic                SetValid,        // Set the dirty bit in the selected way and set
   input  logic                InvalidateCache, // Clear all valid bits
-  output logic [NUMWAYS-1:0]  VictimWay        // LRU selects a victim to evict
+  output logic [NUMWAYS-1:0]  VictimWay,       // LRU selects a victim to evict
+  output logic [$clog2(NUMWAYS)-1:0] VictimWayEnc // The same, binary encoded
 );
 
   localparam                           LOGNUMWAYS = $clog2(NUMWAYS);
 
   logic [NUMWAYS-2:0]                  LRUMemory [NUMSETS-1:0];
-  logic [NUMWAYS-2:0]                  CurrLRU, NextLRU, ReadLRU, BypassedLRU;
+  logic [NUMWAYS-2:0]                  CurrLRU, NextLRU;
   logic [LOGNUMWAYS-1:0]               HitWayEncoded, Way;
   logic [NUMWAYS-2:0]                  WayExpanded;
   logic                                AllValid;
-  logic                                ForwardLRU;
 
   genvar                               row;
 
@@ -63,7 +62,6 @@ module cacheLRU
 
   logic [NUMWAYS-1:0] FirstZero;
   logic [LOGNUMWAYS-1:0] FirstZeroWay;
-  logic [LOGNUMWAYS-1:0] VictimWayEnc;
 
   binencoder #(NUMWAYS) hitwayencoder(HitWay, HitWayEncoded);
 
@@ -141,9 +139,10 @@ module cacheLRU
       for (int set = 0; set < NUMSETS; set++) LRUMemory[set] <= '0; // exclusion-tag: initialize
     else if (CacheEn & LRUWriteEn) LRUMemory[PAdr] <= NextLRU;
 
-  // LRU read path with write forwarding
-  assign ReadLRU = LRUMemory[CacheSetLRU];
-  assign ForwardLRU = LRUWriteEn & (PAdr == CacheSetLRU);
-  mux2 #(NUMWAYS-1) ReadLRUmux(ReadLRU, NextLRU, ForwardLRU, BypassedLRU);
-  flop #(NUMWAYS-1) CurrLRUReg(clk, BypassedLRU, CurrLRU);
+  // The LRU state is a small flop array, so the current set's bits are read directly.  It used to
+  // be read a cycle ahead, like an SRAM, into a register -- at the next access's set, or at this
+  // one's again if the pipeline stalled -- with a bypass for a write to the same set.  That put
+  // the stall, which is the last signal in the core to settle, in front of a 64:1 read.  The set
+  // being accessed is PAdr's, and PAdr is a register.
+  assign CurrLRU = LRUMemory[PAdr];
 endmodule

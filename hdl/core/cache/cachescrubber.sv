@@ -29,7 +29,8 @@
 module cachescrubber #(
   parameter NUMSETS, NUMWAYS, SETLEN,
   parameter READ_ONLY_CACHE,
-  parameter SCRUB_INTERVAL_CYCLES  // cycles to wait between round-robin steps; left untuned by design
+  parameter SCRUB_INTERVAL_CYCLES, // cycles to wait between round-robin steps; left untuned by design
+  localparam int WAYLOG2 = (NUMWAYS > 1) ? $clog2(NUMWAYS) : 1
 ) (
   input  logic clk, reset,
 
@@ -38,10 +39,11 @@ module cachescrubber #(
   input  logic                ScrubGrant,     // cache.sv: granted this cycle
   output logic [SETLEN-1:0]   ScrubSet,
   output logic [NUMWAYS-1:0]  ScrubWay,       // one-hot target of this sweep step
+  output logic [WAYLOG2-1:0]  ScrubWayIdx,    // the same, binary encoded: the way field of the array row
 
-  // Decode status for whichever way ScrubWay currently selects (via the same SelectedWay/AND-OR
-  // mux machinery the demand path uses), valid on the same 2-cycle-after-grant schedule as the
-  // demand path (tag info one cycle after grant, data info the cycle after that).
+  // Decode status of the row {ScrubWay, ScrubSet}, which the arrays read while the scrubber holds
+  // the address (cachearray.sv), valid on the same schedule as the demand path: tag info one
+  // cycle after grant, data info the cycle after that.
   input  logic                ValidWay,
   input  logic                DirtyWay,        // D$ only; tied 0 for I$
   input  logic                TagSecErr,
@@ -56,13 +58,6 @@ module cachescrubber #(
   output logic                ScrubInvalidate,   // clean line (or I$, which has no dirty state): cheap invalidate-and-refetch
   output logic                ScrubTrap,         // D$ only: dirty line, uncorrectable -- escalate, do not invalidate
 
-  // Mirrors cachefsm's TagDecodeCaptureEn for the scrub path: pulses during SCRUB_TAG_WAIT (the
-  // cycle tag info for ScrubWay is valid) so cacheway.sv's SelectedWayDataQ register captures the
-  // scrubber's target way, not whatever way the last demand access left it pointing at. Without
-  // this, the shared data decoder in cache.sv would silently decode the wrong way's data whenever
-  // a scrub read follows a demand access.
-  output logic                ScrubTagDecodeCaptureEn,
-
   // True from the granted read cycle through commit: the scrubber is actively using ScrubWay-based
   // way-selection (SelectedWay in cacheway.sv, and this module's own TagSecErr/TagDedErr/etc
   // inputs, which cache.sv aggregates using the SAME ScrubWay signal -- see cache.sv). A demand
@@ -73,8 +68,6 @@ module cachescrubber #(
   // access -- only once granted does the scrubber start actually touching shared way-selection state.
   output logic                ScrubBusy
 );
-
-  localparam int WAYLOG2 = (NUMWAYS > 1) ? $clog2(NUMWAYS) : 1;
 
   typedef enum logic [2:0] {
     SCRUB_WAIT,        // between sweep steps, counting down the scrub interval
@@ -98,6 +91,7 @@ module cachescrubber #(
 
   assign ScrubSet = SetCount;
   assign ScrubWay = NUMWAYS'(1'b1) << WayCount;
+  assign ScrubWayIdx = WayCount;
 
   // ---------------------------------------------------------------------------------------------
   // Interval counter: paces round-robin steps. SCRUB_INTERVAL_CYCLES==0 disables the counter (steps
@@ -147,7 +141,6 @@ module cachescrubber #(
   assign FoundSomething = ValidWay & (TagDedErr | TagSecErr | DataDedErr | DataSecErr);
   // DirtyWay alone is never itself a fault -- it only affects how SCRUB_COMMIT routes a DataDedErr.
 
-  assign ScrubTagDecodeCaptureEn = (CurrState == SCRUB_TAG_WAIT);
   assign ScrubBusy = (CurrState == SCRUB_TAG_WAIT) || (CurrState == SCRUB_DATA_WAIT) || (CurrState == SCRUB_COMMIT);
 
   always_comb begin

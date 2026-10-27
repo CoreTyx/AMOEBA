@@ -32,11 +32,15 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Per-unit injection enables after the core applies the software mask and master pin.
   input  logic              fault_inject_alu, fault_inject_cmp,
   input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
+  input  logic [15:0]       FaultLfsr,               // shared fault-injection generator (ft_fault_gen)
+  input  logic [FI_COUNT_BITS-1:0] FaultCount,
   // ECC error aggregation outputs (correctable / uncorrectable)
   output logic              RegEccSecErrW,
   output logic              RegEccDedErrW,
   output logic              RegEccDedErrPipeW,       // DED from W-stage pipeline reg only (for precise EPC)
-  output logic [31:0]       RegfileSecCount,
+  output logic [1:0]        RegfileSec, RegfileDed,  // fault flags for the counters (datapath.sv)
+  output logic [4:0]        PipeSec, PipeDed,
+  output logic [1:0]        FTDetect, FTUnresolved,
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
@@ -51,6 +55,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              PCSrcE,                          // Select next PC (between PC+4 and IEUAdrE)
   input  logic              FWriteIntE, FCvtIntE,            // FPU writes to integer register file, FPU converts float to int
   output logic              FTStallE, FTUnresolvedE,          // shadow execution control/fault status
+  output logic              EccStallE,                        // Execute read a register with a single-bit error; hold while it repairs
   output logic              ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, // diagnosis bits
   output logic [P.XLEN-1:0] IEUAdrE,                         // Memory address
   output logic              IntDivE, W64E,                   // Integer divide, RV64 W-type instruction
@@ -92,7 +97,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              CSRReadM, CSRWriteM, PrivilegedM,// CSR read, CSR write, is privileged instruction
   output logic              CSRWriteFenceM,                  // CSR write or fence instruction needs to flush subsequent instructions
   // AMOEBA random instruction insertion
-  input  logic              InjectD,                         // Inject DummyInstrD into Decode this cycle
+  input  logic              InjectD,                         // Decode presents DummyInstrD this cycle (the core connects dummygen's request)
   input  logic [31:0]       DummyInstrD,                     // Dummy instruction to inject
   input  logic              DummySelD,                       // Which shadow physical register the dummy writes
   output logic              DummyW                           // Writeback stage holds a dummy instruction
@@ -135,7 +140,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .InjectD, .DummySelD, .DummyW, .DummySelW,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
-    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
+    .StallE, .FlushE, .FlagsE, .FWriteIntE, .FTStall(FTStallE | FTStallM | EccStallE), .FTUnresolved(FTUnresolvedE | FTUnresolvedM),
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
     .BranchSignedE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE, .MDUActiveE,
@@ -146,7 +151,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline,
+    .clk, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline, .FaultLfsr, .FaultCount,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .InjectD, .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
@@ -154,6 +159,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,
     .StallW, .FlushW, .RegWriteW, .IntDivW, .SquashSCW, .ResultSrcW, .ReadDataW, .FCvtIntResW,
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW,
-    .InstrValidE, .FTStallE, .FTUnresolvedE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
-    .InstrValidD, .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW, .RegfileSecCount);
+    .InstrValidE, .FTStallE, .FTUnresolvedE, .EccStallE, .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r,
+    .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
+    .RegfileSec, .RegfileDed, .PipeSec, .PipeDed, .FTDetect, .FTUnresolved);
 endmodule
