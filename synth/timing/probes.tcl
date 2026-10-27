@@ -43,13 +43,17 @@ set TIMING_PROBES [subst -nocommands {
    div_internal        {probe_ck $core/mdu.mdu/div.ftdiv/*}   {}                                   {probe_d $core/mdu.mdu/div.ftdiv/*}
    div_step            {probe_ck $core/mdu.mdu/div.ftdiv/primary/dabsreg/*} {}                     {probe_d $core/mdu.mdu/div.ftdiv/primary/wreg/*}
    "Data cache"
-   dc_tag_to_way       {probe_pin $dc/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $dc/CacheWays*/selectedwaydatareg/*}
-   dc_data_to_word     {probe_pin $dc/*/wordram.CacheDataMem/*/sramIP/CLK} {}                      {probe_d $dc/HitWordReg/*}
-   dc_data_to_store    {probe_pin $dc/*/wordram.CacheDataMem/*/sramIP/CLK} {}                      {probe_pin $dc/*/sramIP/D*}
+   dc_tag_to_hit       {probe_pin $dc/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $dc/CacheWays*/HitWayQ*}
+   dc_tag_to_scan      {probe_pin $dc/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $dc/cachefsm/CurrState*}
+   dc_data_to_decode   {probe_pin $dc/*/CacheDataMem/*/sramIP/CLK} {}                              {probe_d $dc/*/datadecreg/*}
+   dc_line_to_store    {probe_ck $dc/*/datadecreg/*}          {}                                   {probe_pin $dc/*/CacheDataMem/*/sramIP/D*}
+   dc_line_to_word     {probe_ck $dc/*/datadecreg/*}          {}                                   {probe_d $dc/HitWordReg/*}
    dc_read_to_W        {}                                     {probe_pin $dc/ReadDataWord*}        {probe_d $core/lsu/ReadDataMWReg/*}
    "Instruction cache / fetch"
-   ic_tag_to_way       {probe_pin $ic/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $ic/CacheWays*/selectedwaydatareg/*}
-   ic_data_to_word     {probe_pin $ic/*/wordram.CacheDataMem/*/sramIP/CLK} {}                      {probe_d $ic/HitWordReg/*}
+   ic_tag_to_hit       {probe_pin $ic/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $ic/CacheWays*/HitWayQ*}
+   ic_tag_to_scan      {probe_pin $ic/*/CacheTagMem/*/sramIP/CLK} {}                               {probe_d $ic/cachefsm/CurrState*}
+   ic_data_to_decode   {probe_pin $ic/*/CacheDataMem/*/sramIP/CLK} {}                              {probe_d $ic/*/datadecreg/*}
+   ic_line_to_word     {probe_ck $ic/*/datadecreg/*}          {}                                   {probe_d $ic/HitWordReg/*}
    ic_read_to_instr    {}                                     {probe_pin $ic/ReadDataWord*}        {probe_d $core/ifu/AlignedInstrRawDFlop/*}
    pc_to_pc            {probe_ck $core/ifu/pcreg/*}           {}                                   {probe_d $core/ifu/pcreg/*}
    "MMU checks into their registers"

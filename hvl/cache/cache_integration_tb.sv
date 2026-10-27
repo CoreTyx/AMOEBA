@@ -157,10 +157,11 @@ module cache_integration_tb;
     end else $display("PASS: %s", what);
   endtask
 
-  // Hierarchical peek/poke into way `w`'s internal arrays for set `s`. USE_SRAM=0 in this config,
-  // so these are plain behavioral `bit` arrays (see ram1p1rwe.sv's `ram` fallback block), reachable
-  // directly -- no vendor macro stands in the way. Widths computed independently (same ladder as
-  // cacheway.sv/cache.sv) rather than pulled hierarchically from the DUT, since Verilator doesn't
+  // Hierarchical peek/poke into the arrays for way `w` of set `s`, which is row w*NUMSETS+s (see
+  // cachearray.sv). USE_SRAM=0 in this config, so these are plain behavioral `bit` arrays (see
+  // ram1p1rwe.sv's `ram` fallback block), reachable directly -- no vendor macro stands in the way.
+  // Widths computed independently (same ladder as cache.sv) rather than pulled hierarchically
+  // from the DUT, since Verilator doesn't
   // support a hierarchical parameter reference as a type width outside the instance's own scope.
   function automatic int tbrequiredr(input int dw);
     return (dw <=    1) ?  2 :
@@ -177,17 +178,11 @@ module cache_integration_tb;
   localparam int TB_TAGCHECKWIDTH = tbrequiredr(TAGLEN) + 1;
 
   function automatic logic [TB_LINECHECKWIDTH-1:0] peekdatacheck(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
-      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0];
-    endcase
+    return dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH-1:0];
   endfunction
 
   function automatic logic [LINELEN-1:0] peekdata(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
-      default: return dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH +: LINELEN];
-    endcase
+    return dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH +: LINELEN];
   endfunction
 
   task automatic flipdatacheckbits(input int w, input int s, input int bit0, input int bit1 = -1);
@@ -195,17 +190,11 @@ module cache_integration_tb;
     v = peekdatacheck(w, s);
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
-    case (w)
-      0: dut.CacheWays[0].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
-      default: dut.CacheWays[1].CacheDataMem.ram.RAM[s][TB_LINECHECKWIDTH-1:0] = v;
-    endcase
+    dut.CacheArray.CacheDataMem.ram.RAM[w*NUMSETS+s][TB_LINECHECKWIDTH-1:0] = v;
   endtask
 
   function automatic logic [TB_TAGCHECKWIDTH-1:0] peektagcheck(input int w, input int s);
-    case (w)
-      0: return dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
-      default: return dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0];
-    endcase
+    return dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH-1:0];
   endfunction
 
   task automatic fliptagcheckbits(input int w, input int s, input int bit0, input int bit1 = -1);
@@ -213,10 +202,7 @@ module cache_integration_tb;
     v = peektagcheck(w, s);
     v[bit0] = ~v[bit0];
     if (bit1 >= 0) v[bit1] = ~v[bit1];
-    case (w)
-      0: dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
-      default: dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH-1:0] = v;
-    endcase
+    dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH-1:0] = v;
   endtask
 
   function automatic logic peekvalid(input int w, input int s);
@@ -238,8 +224,8 @@ module cache_integration_tb;
   function automatic int findway(input logic [PA_BITS-1:0] adr);
     int s;
     s = adr[SETLEN+OFFSETLEN-1:OFFSETLEN];
-    if (peekvalid(0, s) && dut.CacheWays[0].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 0;
-    if (peekvalid(1, s) && dut.CacheWays[1].CacheTagMem.ram.RAM[s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return 1;
+    for (int w = 0; w < NUMWAYS; w++)
+      if (peekvalid(w, s) && dut.CacheArray.CacheTagMem.ram.RAM[w*NUMSETS+s][TB_TAGCHECKWIDTH +: TAGLEN] == adr[PA_BITS-1:SETLEN+OFFSETLEN]) return w;
     return -1;
   endfunction
 
@@ -515,8 +501,8 @@ module cache_integration_tb;
             @(negedge clk);
             if (CacheBusRW[0]) begin
               writebackseen = 1;
-              check("dirty eviction: victim data way selected before first writeback beat",
-                    dut.SelectedWayDataQ === (2'b01 << victimway));
+              check("dirty eviction: arrays hold the victim's row at the first writeback beat",
+                    dut.ReadWayQ === victimway[0]);
               check("dirty eviction: first writeback line matches the dirty victim",
                     dut.CorrectedLine === expectedvictimline);
             end
@@ -551,8 +537,8 @@ module cache_integration_tb;
               flushway = dut.FlushWay[0] ? 0 : 1;
               flushset = dut.FlushAdr;
               flushwrites++;
-              check("flush: selected data way matches flush-way counter",
-                    dut.SelectedWayDataQ === dut.FlushWay);
+              check("flush: arrays hold the flush way's row",
+                    dut.ReadWayQ === flushway[0]);
               check("flush: writeback line matches selected dirty cache line",
                     dut.CorrectedLine === peekdata(flushway, flushset));
             end

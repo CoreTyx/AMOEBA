@@ -6,13 +6,11 @@
 // Modified: 20 January 2023
 // Modified: SECDED ECC hardening + scrub support, 2026
 //
-// Purpose: Storage and read/write access to data cache data, tag valid, dirty, and replacement.
-//          Tag array is SECDED-protected (extended Hamming, see cacheeccenc/cacheeccdec). Data
-//          array storage lives here, and so does its decode: each way decodes the line it reads
-//          into a register, and the corrected line is selected across ways from those registers.
-//          (The decode used to be shared, once per cache, behind the way select. That saved three
-//          decoders but left the decode between the data SRAM and every use of a line.) The tag
-//          match, the tag decoder's flags and the corrected tag are registered the same way.
+// Purpose: Per-way state of a cache: valid, dirty, and the way's share of the lookup.
+//          The tags and lines themselves are in cachearray.sv, where every way shares one tag macro
+//          and one data macro; the ways are looked up one after another.  This module keeps, for its
+//          way, what the lookup found when the way's row came out of the arrays (hit, tag SEC/DED),
+//          and decides whether this way is the one an access reads or writes (SelectedWay).
 //          Valid and dirty bits are protected by simple 2-copy
 //          redundancy: cheap, and sufficient to catch the one dangerous flip direction for each
 //          (0->1 for valid, 1->0 for dirty) without requiring a Hamming read-modify-write on every
@@ -39,60 +37,21 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module cacheway import cvw::*; #(parameter cvw_t P,
-                  parameter PA_BITS, NUMSETS=512, LINELEN = 256, TAGLEN = 26,
-                  OFFSETLEN = 5, INDEXLEN = 9, READ_ONLY_CACHE = 0, TAG_ECC_SUPPORTED = 1,
-                  // ECC check-bit sizing, needed here (not just in the body) because
-                  // LINECHECKWIDTH sizes the DataCheckWay port below. R has no default in
-                  // cacheeccbits/enc/dec by design (see those files) -- an insufficient R fails
-                  // elaboration there rather than silently aliasing -- so it must be computed
-                  // correctly here. This ladder extends the smallest-R-such-that-2^R>=dw+R+1
-                  // formula (the same one hdl/core/generic/ecc/ecc_secded_enc.sv uses) past its
-                  // R=8/dw=247 ceiling, which is where that IP's version silently under-provisions
-                  // for anything wider -- exactly the bug class this cache ECC is independent of.
-                  localparam int TAGCHECKR      = (TAGLEN <=    1) ?  2 :
-                                                   (TAGLEN <=    4) ?  3 :
-                                                   (TAGLEN <=   11) ?  4 :
-                                                   (TAGLEN <=   26) ?  5 :
-                                                   (TAGLEN <=   57) ?  6 :
-                                                   (TAGLEN <=  120) ?  7 :
-                                                   (TAGLEN <=  247) ?  8 :
-                                                   (TAGLEN <=  502) ?  9 :
-                                                   (TAGLEN <= 1013) ? 10 :
-                                                   (TAGLEN <= 2036) ? 11 :
-                                                   (TAGLEN <= 4083) ? 12 : 13,
-                  localparam int TAGCHECKWIDTH  = TAGCHECKR + 1,
-                  localparam int TAGSTOREWIDTH  = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0),
-                  localparam int LINECHECKR     = (LINELEN <=    1) ?  2 :
-                                                   (LINELEN <=    4) ?  3 :
-                                                   (LINELEN <=   11) ?  4 :
-                                                   (LINELEN <=   26) ?  5 :
-                                                   (LINELEN <=   57) ?  6 :
-                                                   (LINELEN <=  120) ?  7 :
-                                                   (LINELEN <=  247) ?  8 :
-                                                   (LINELEN <=  502) ?  9 :
-                                                   (LINELEN <= 1013) ? 10 :
-                                                   (LINELEN <= 2036) ? 11 :
-                                                   (LINELEN <= 4083) ? 12 : 13,
-                  localparam int LINECHECKWIDTH = LINECHECKR + 1) (
+module cacheway #(parameter NUMSETS=512, READ_ONLY_CACHE = 0) (
   input  logic                        clk,
   input  logic                        reset,
   input  logic                        FlushStage,     // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                        InvalidateFlushStage,     // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                        CacheEn,        // Enable the cache memory arrays.  Disable hold read data constant
-  input  logic [$clog2(NUMSETS)-1:0]  CacheSetData,       // Cache address, the output of the address select mux, NextAdr, PAdr, or FlushAdr
-  input  logic [$clog2(NUMSETS)-1:0]  CacheSetTag,       // Cache address, the output of the address select mux, NextAdr, PAdr, or FlushAdr
-  input  logic [PA_BITS-1:0]          PAdr,           // Physical address
-  input  logic [LINELEN-1:0]          LineWriteFinal, // Final data written to the data array: new data, or a corrected line (see cache.sv)
-  input  logic [LINECHECKWIDTH-1:0]   LineCheckWriteFinal, // ... and its check bits.  Encoded once in cache.sv: every way is given the same line
+  input  logic [$clog2(NUMSETS)-1:0]  CacheSetData,   // Set written: the output of the data address select mux
+  input  logic [$clog2(NUMSETS)-1:0]  CacheSetTag,    // Set read: the output of the tag address select mux
   input  logic                        SetValid,       // Set the valid bit in the selected way and set
   input  logic                        ClearValid,     // Clear the valid bit in the selected way and set
   input  logic                        ScrubInvalidate, // Invalidate the scrubber's selected way and set
   input  logic                        SetDirty,       // Set the dirty bit in the selected way and set
   input  logic                        SelVictim,      // Overrides HitWay Tag matching.  Selects selects the victim tag/data regardless of hit
-  input  logic                        SelVictimLive,  // SelVictim as decided in the tag cycle; affects SelectedWayDataQ only
   input  logic                        ClearDirty,     // Clear the dirty bit in the selected way and set
-  input  logic                        FlushCache,       // [0] Use SelAdr, [1] SRAM reads/writes from FlushAdr
+  input  logic                        FlushCache,     // Flush in progress: FlushWay selects
   input  logic                        VictimWay,      // LRU selected this way as victim to evict
   input  logic                        FlushWay,       // This way is selected for flush and possible writeback if dirty
   input  logic                        InvalidateCache,// Clear all valid bits
@@ -102,29 +61,16 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   input  logic                        SelScrub,       // Scrubber is driving CacheSetTag/CacheSetData this cycle
   input  logic                        ScrubWay,       // This way is the scrubber's current target (one-hot across ways)
 
-  // Correction writeback: commit a corrected line (tag or data) into the currently selected way.
-  // Both arrive already encoded from cache.sv: the tag word on TagStoreWrite, the line on
-  // LineWriteFinal.
-  input  logic                        SelCorrectTag,  // Commit a corrected tag (what TagStoreWrite carries then) into the tag array
-  input  logic [TAGSTOREWIDTH-1:0]    TagStoreWrite,  // Tag word to write: {tag, check bits}.  Encoded once in cache.sv: every way is given the same word
-  input  logic                        SelCorrectData, // Commit a corrected line into the data array (it is what LineWriteFinal carries then)
+  // The lookup (see cachearray.sv).  The arrays return one way's row per cycle; ArriveWay says it
+  // is this way's.  What the row's tag decoded to is then kept here, per way, until the next scan
+  // starts: so HitWay, TagSecErr and TagDedErr describe the access through all its later states.
+  input  logic                        ArriveWay,      // The arrays are returning this way's row (a read)
+  input  logic                        TagMatchLive,   // The arriving tag matches the access
+  input  logic                        TagSecErrLive,  // The arriving tag had a correctable error
+  input  logic                        TagDedErrLive,  // The arriving tag had an uncorrectable error
+  input  logic                        ScanStart,      // cachefsm: a lookup starts; forget the last one
 
-  // A second, held-one-cycle-later copy of "which way is selected," used only to gate the data
-  // array's AND-part-of-mux. This breaks the tag-decode -> data-decode combinational path into two
-  // cycles (tag decode resolves HitWay; NEXT cycle, the now-registered HitWay gates which way's raw
-  // data feeds the shared data decoder), per the locked "stall, tag first then data" decision.
-  input  logic                        TagDecodeCaptureEn,      // cachefsm: capture SelectedWay for data-decode use now
-  output logic                        SelectedWayDataQ,        // registered SelectedWay-for-data, one cycle delayed
-
-  // Decode results are registered in this module, one cycle after the arrays present them.  The
-  // FSMs already leave a cycle between a read and anything they do with its decoded result (tag
-  // decode, then data decode, then act), so every consumer of the outputs below sees exactly what
-  // it saw before -- except that it now starts at a register and not at an SRAM output.  The few
-  // decisions taken in the same cycle the tags arrive (victim selection for the data read, the
-  // lost-tag check, the flush walk) use the *Live outputs instead.
-  output logic [LINELEN-1:0]          CorrectedLineWay,// This way's corrected line if selected (AND part of AO mux), from the decode register
-  output logic                        DataSecErrWay,  // This way is selected and its line had a correctable error
-  output logic                        DataDedErrWay,  // This way is selected and its line had an uncorrectable error
+  output logic                        SelectedWay,    // This way is the one being read and written
   output logic                        HitWay,         // This way hits (tag matches AND tag is not uncorrectable); registered
   output logic                        HitWayLive,     // The same in the cycle the tag is read
   output logic                        ValidWay,       // This way is valid (redundancy-checked)
@@ -139,29 +85,23 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   // It is excluded from DirtyWay so no eviction or flush ever writes it to a wrong address, flagged
   // here, and dropped when cachefsm pulses DropTagDedDirty (which also raises the dirty-data fault).
   output logic                        TagDedDirtyWay,  // This way holds a valid, dirty line with an uncorrectable tag
-  input  logic                        DropTagDedDirty, // cachefsm: invalidate this way if TagDedDirtyWay (gated to FlushWay during a flush)
-  output logic [TAGLEN-1:0]           TagWay);        // This way's corrected tag if selected (AND part of AO mux)
+  input  logic                        DropTagDedDirty); // cachefsm: invalidate this way if TagDedDirtyWay (gated to FlushWay during a flush)
 
   logic [NUMSETS-1:0]                ValidBits, ValidBitsRedundant;
   logic [NUMSETS-1:0]                DirtyBits, DirtyBitsRedundant;
-  logic [LINELEN-1:0]                 ReadDataLine;
-  logic [LINECHECKWIDTH-1:0]          ReadDataCheck;
-  logic [TAGLEN-1:0]                  ReadTag;
   logic                               Dirty, DirtyRedundant;
   logic                               SelecteDirty;
-  logic                               SelectedWriteWordEn;
   logic                               SetValidEN, ClearValidEN, ScrubInvalidateWay;
   logic                               SetValidWay;
   logic                               ClearValidWay;
   logic                               SetDirtyWay;
   logic                               ClearDirtyWay;
-  logic                               SelectedWay;
-  logic                               SelectedWayLive;  // SelectedWay with the tag match of the cycle the tag is read
-  logic                               TagSecErrLive, TagDedErrLive;
+  logic                               TagDedErrWayLive;
   logic [1:0]                         SelectedWaySel;
   logic                               InvalidateCacheDelay;
   logic                               DirtyEff;        // effective dirty: either copy set (safe direction)
   logic                               TagDedDropWay;
+  logic                               HitWayQ;
 
   if (!READ_ONLY_CACHE) begin : flushlogic
     mux2 #(1) seltagmux(VictimWay, FlushWay, FlushCache, SelecteDirty);
@@ -169,8 +109,6 @@ module cacheway import cvw::*; #(parameter cvw_t P,
                             SelVictim ? 2'b10 :
                             FlushCache ? 2'b01 : 2'b00;
     mux4 #(1) selectedmux(HitWay, FlushWay, VictimWay, ScrubWay, SelectedWaySel, SelectedWay);
-    mux4 #(1) selectedlivemux(HitWayLive, FlushWay, VictimWay, ScrubWay,
-      (SelVictimLive & ~SelScrub) ? 2'b10 : SelectedWaySel, SelectedWayLive);
     // Widened from the original mux3 to a mux4 with SelScrub as the new top-priority leg. Scrub
     // grants only ever occur when no demand access -- and hence no SelVictim/FlushCache -- is in
     // flight (see cache.sv's ScrubGrant definition), so priority among the other three legs is
@@ -178,11 +116,11 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   end else begin : flushlogic // no flush operation for read-only caches.
     assign SelecteDirty = VictimWay;
     mux3 #(1) selectedwaymux(HitWay, SelecteDirty, ScrubWay, {SelScrub, SelVictim}, SelectedWay);
-    mux3 #(1) selectedwaylivemux(HitWayLive, SelecteDirty, ScrubWay, {SelScrub, SelVictim | SelVictimLive}, SelectedWayLive);
   end
 
   /////////////////////////////////////////////////////////////////////////////////////////////
-  // Write Enable demux
+  // Write Enable demux.  The array writes themselves are made in cachearray.sv, at this way's row
+  // when SelectedWay is set (cache.sv); only the valid and dirty bits are written here.
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   assign SetValidWay = SetValid & SelectedWay;
@@ -190,107 +128,31 @@ module cacheway import cvw::*; #(parameter cvw_t P,
   assign ScrubInvalidateWay = ScrubInvalidate & SelectedWay;
   assign SetDirtyWay = SetDirty & SelectedWay;                                 // exclusion-tag: icache SetDirtyWay
   assign ClearDirtyWay = ClearDirty & SelectedWay;
-  assign SelectedWriteWordEn = (SetValidWay | SetDirtyWay) & ~FlushStage;  // exclusion-tag: icache SelectedWiteWordEn
   assign SetValidEN = SetValidWay & ~FlushStage;                           // exclusion-tag: cache SetValidEN
   assign ClearValidEN = ClearValidWay & ~FlushStage;                       // exclusion-tag: cache ClearValidEN
 
   /////////////////////////////////////////////////////////////////////////////////////////////
-  // Tag Array (optional SECDED: each word holds the whole codeword, {tag, check bits})
+  // This way's share of the lookup
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  // The check bits share the tag's word, so one macro per way holds both, and they are read and
-  // written in the same access by construction.  The word written (TagStoreWrite) is built in
-  // cache.sv; only the decode of what this way reads is done here.
-
-  logic [TAGLEN-1:0]       CorrectedTag;
-  logic [TAGSTOREWIDTH-1:0] TagStoreRead;
-  logic TagWe;
-  assign TagWe = SetValidEN | (TAG_ECC_SUPPORTED ? (SelCorrectTag & SelectedWay) : 1'b0);
-
-  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(TAGSTOREWIDTH)) CacheTagMem(.clk, .ce(CacheEn),
-    .addr(CacheSetTag), .dout(TagStoreRead),
-    .din(TagStoreWrite), .we(TagWe));
-  assign ReadTag = TagStoreRead[TAGSTOREWIDTH-1 -: TAGLEN];
-
-  if (TAG_ECC_SUPPORTED) begin : tag_ecc
-    logic [TAGCHECKWIDTH-1:0] ReadTagCheck;
-
-    assign ReadTagCheck  = TagStoreRead[TAGCHECKWIDTH-1:0];
-
-    cacheeccdec #(.DATA_WIDTH(TAGLEN), .R(TAGCHECKR)) tagdec (
-      .codeword_i ({ReadTag, ReadTagCheck}),
-      .data_o     (CorrectedTag),
-      .sec_err_o  (TagSecErrLive),
-      .ded_err_o  (TagDedErrLive)
-    );
-  end else begin : tag_ecc_disabled
-    assign CorrectedTag = ReadTag;
-    assign TagSecErrLive = 1'b0;
-    assign TagDedErrLive = 1'b0;
-  end
-
-  // Tag decode register.  The tag match, the decoder's flags and the corrected tag are captured
-  // every cycle; the registered copies are what the rest of the cache acts on.
-  logic [TAGLEN-1:0] CorrectedTagQ;
-  logic              HitWayQ;
-  assign HitWayLive = ValidWay & (CorrectedTag == PAdr[PA_BITS-1:OFFSETLEN+INDEXLEN]) & ~InvalidateCacheDelay & ~TagDedErrLive; // exclusion-tag: dcache HitWay
-  flop #(TAGLEN+3) tagdecreg(clk, {CorrectedTag, HitWayLive, TagSecErrLive, TagDedErrLive},
-                                  {CorrectedTagQ, HitWayQ, TagSecErr, TagDedErr});
+  // The hit and the tag's error flags, from the row as it arrives, and kept until the next scan
+  // starts.  A scan that stops early never reads the later ways; with nothing kept from an older
+  // access, they count as not hit and not in error.
+  assign TagDedErrWayLive = ArriveWay & TagDedErrLive;
+  assign HitWayLive = ArriveWay & ValidWay & TagMatchLive & ~InvalidateCacheDelay & ~TagDedErrLive; // exclusion-tag: dcache HitWay
+  always_ff @(posedge clk)
+    if (reset | ScanStart) {HitWayQ, TagSecErr, TagDedErr} <= '0;
+    else if (ArriveWay)    {HitWayQ, TagSecErr, TagDedErr} <= {HitWayLive, TagSecErrLive, TagDedErrLive};
   // An invalidate must not be outlived by a registered hit.
   assign HitWay = HitWayQ & ~InvalidateCacheDelay;
   flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, 1'b1, InvalidateCache, InvalidateCacheDelay);
 
-  // AND portion of distributed tag multiplexer
-  assign TagWay = SelectedWay ? CorrectedTagQ : '0; // AND part of AOMux
   assign HitDirtyWay = DirtyEff & ValidWay;
   // The lost-tag check and the flush walk act in the cycle the tag is read.
-  assign TagDedDirtyWay = HitDirtyWay & TagDedErrLive;
-  assign DirtyWayLive = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErrLive;
+  assign TagDedDirtyWay = HitDirtyWay & TagDedErrWayLive;
+  assign DirtyWayLive = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErrWayLive;
   assign DirtyWay = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErr;        // exclusion-tag: icache DirtyWay
   assign TagDedDropWay = DropTagDedDirty & TagDedDirtyWay & (~FlushCache | FlushWay);
-
-  // Registered, one-cycle-delayed SelectedWay used only to gate the data array's AND-part-of-mux.
-  // Breaks the tag-decode -> data-decode combinational path into two cycles.
-  // Victim and flush selections also need refreshing when they bypass tag-hit selection.
-  flopenr #(1) selectedwaydatareg(clk, reset, TagDecodeCaptureEn | SelVictim | SelVictimLive | FlushCache,
-    SelectedWayLive, SelectedWayDataQ);
-
-  /////////////////////////////////////////////////////////////////////////////////////////////
-  // Data Array (SECDED-protected: one codeword per full line, stored whole as {line, check bits};
-  // each way decodes its own line into a register -- see the data decode register below)
-  //
-  // Every write is a whole line, D$ included: a store is merged into the corrected resident line
-  // and the result is re-encoded (cache.sv WriteSelLogic), so the check bits always describe all
-  // of LineWriteFinal and there is no partial write to make.  With the check bits in the same
-  // word, one macro per way holds the line and its code.
-  /////////////////////////////////////////////////////////////////////////////////////////////
-
-  logic DataWe;
-  assign DataWe = SelectedWriteWordEn | (SelCorrectData & SelectedWay);
-
-  ram1p1rwe #(.USE_SRAM(P.USE_SRAM), .DEPTH(NUMSETS), .WIDTH(LINELEN+LINECHECKWIDTH)) CacheDataMem(.clk, .ce(CacheEn),
-    .addr(CacheSetData), .dout({ReadDataLine, ReadDataCheck}), .din({LineWriteFinal, LineCheckWriteFinal}), .we(DataWe));
-
-  // Data decode register.  Each way decodes the line it reads and registers the result; the
-  // corrected line and its flags are then selected across ways (AND here, OR in cache.sv) from
-  // those registers.  With one shared decoder behind the way select, the decode sat between the
-  // data SRAM and everything done with a line: the store merge and re-encode, the bus on a
-  // writeback, the FSM's error handling.
-  logic [LINELEN-1:0] CorrectedLineLive, CorrectedLineQ;
-  logic               DataSecErrLive, DataDedErrLive, DataSecErrQ, DataDedErrQ;
-  cacheeccdec #(.DATA_WIDTH(LINELEN), .R(LINECHECKR)) datadec (
-    .codeword_i ({ReadDataLine, ReadDataCheck}),
-    .data_o     (CorrectedLineLive),
-    .sec_err_o  (DataSecErrLive),
-    .ded_err_o  (DataDedErrLive)
-  );
-  flop #(LINELEN+2) datadecreg(clk, {CorrectedLineLive, DataSecErrLive, DataDedErrLive},
-                                    {CorrectedLineQ, DataSecErrQ, DataDedErrQ});
-
-  // AND portion of distributed read multiplexers
-  assign CorrectedLineWay = SelectedWayDataQ ? CorrectedLineQ : '0;
-  assign DataSecErrWay = SelectedWayDataQ & DataSecErrQ;
-  assign DataDedErrWay = SelectedWayDataQ & DataDedErrQ;
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Valid Bits -- 2-copy redundancy. A mismatch on a CLEAN line resolves to invalid, since a 0->1
