@@ -86,7 +86,7 @@ if [ "$SIM" = vcs ]; then
   echo "== SRAM models vs the RTL's behavioural RAM"
   SIM=vcs "$P/selftest/sram_cmp.sh" >"$OUT/sram_cmp.log" 2>&1
   if grep -q '^SRAM_CMP_RESULT: SKIP' "$OUT/sram_cmp.log"; then skp "sram: no SRAM_MODELS in vm_paths.sh"
-  elif ! grep -q '^SRAM_CMP rf_sp' "$OUT/sram_cmp.log"; then bad "sram: did not run ($OUT/sram_cmp.log)"; tail -15 "$OUT/sram_cmp.log" | sed 's/^/        | /'
+  elif ! grep -qE '^SRAM_CMP (rf|sram)_sp' "$OUT/sram_cmp.log"; then bad "sram: did not run ($OUT/sram_cmp.log)"; tail -15 "$OUT/sram_cmp.log" | sed 's/^/        | /'
   else
     while read -r _ name rest; do
       name="${name%:}"
@@ -95,7 +95,7 @@ if [ "$SIM" = vcs ]; then
         *"after read 0,"*)   ok "sram $name: reads match; $rest -- Q after write/idle differs from the RTL's RAM (matters only if the caches use it then)";;
         *) bad "sram $name: $rest"; grep "^SRAM_CMP $name: cycle" "$OUT/sram_cmp.log" | sed 's/^/        | /';;
       esac
-    done < <(grep -E '^SRAM_CMP rf_sp[^ ]*: [0-9]+ cycles' "$OUT/sram_cmp.log")
+    done < <(grep -E '^SRAM_CMP (rf|sram)_sp[^ ]*: [0-9]+ cycles' "$OUT/sram_cmp.log")
   fi
 fi
 

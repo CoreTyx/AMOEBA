@@ -3,7 +3,7 @@
 //
 // `SYNTHESIS sets USE_SRAM=1 (pkg/config.vh), so the netlist -- and the pin
 // bench's `rtl` reference, built the same way -- goes through the wrappers in
-// hdl/core/generic/mem/ram1p1rwbe_<D>x<W>.sv down to rf_sp_<D>_<W> macros whose
+// hdl/core/generic/mem/ram1p1rwbe_<D>x<W>.sv down to rf_sp_<D>_<W> / sram_sp_<D>_<W> macros whose
 // models come with the PDK and are not in this repository.  On the VM the real
 // models are compiled instead (hvl/pin/vm_paths.sh: SRAM_MODELS); this file
 // exists only so the bench elaborates under Verilator.
@@ -62,4 +62,9 @@ endmodule
 `PIN_RF_SP(rf_sp_16_46,  16, 48)
 `PIN_RF_SP(rf_sp_64_53,  64, 56)
 `PIN_RF_SP(rf_sp_64_137, 64, 140)
+// One tag and one data array per cache (4f54add): exact width, no padding.
+`PIN_RF_SP(sram_sp_128_137, 128, 137)
+`PIN_RF_SP(sram_sp_128_53,  128, 53)
+`PIN_RF_SP(sram_sp_256_137, 256, 137)
+`PIN_RF_SP(sram_sp_256_53,  256, 53)
 `endif

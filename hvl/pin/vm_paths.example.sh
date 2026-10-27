@@ -27,7 +27,7 @@ SDF_CORNER="${SDF_CORNER:-max}"          # min | typ | max
 # cells the netlist uses are elaborated).  build.log starts with the command.
 PDK_FIRST=()                             # PDK primitives/headers the pad or SRAM models build on
 PAD_MODELS=()                            # io_in / io_out / io_tri (and what they instantiate)
-SRAM_MODELS=()                           # rf_sp_<D>_<W> macro models (PDK)
+SRAM_MODELS=()                           # rf_sp_/sram_sp_<D>_<W> macro models (PDK)
 STDCELL_MODELS=()                        # standard-cell library .v
 
 # Used for the RTL reference too: forte_top under `SYNTHESIS instantiates the

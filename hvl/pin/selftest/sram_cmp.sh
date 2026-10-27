@@ -34,8 +34,8 @@ rm -f "$OUT/simv"   # the generated top depends on SRAM_TIES; always rebuild it
 declare -A GEOM
 while read -r name dep wid; do GEOM[$name]="$dep $wid"; done < <(
   sed -nE 's/^`PIN_RF_SP\(([a-z0-9_]+), *([0-9]+), *([0-9]+)\).*/\1 \2 \3/p' "$P/models/sram_behav.sv")
-mapfile -t DEFINED < <(cat "${SRAM_MODELS[@]}" | grep -oE '^[[:space:]]*module[[:space:]]+rf_sp_[0-9]+_[0-9]+' | awk '{print $2}' | sort -u)
-[ ${#DEFINED[@]} -gt 0 ] || { echo "SRAM_CMP_RESULT: FAIL (SRAM_MODELS define no rf_sp_* module)"; exit 1; }
+mapfile -t DEFINED < <(cat "${SRAM_MODELS[@]}" | grep -oE '^[[:space:]]*module[[:space:]]+(rf|sram)_sp_[0-9]+_[0-9]+' | awk '{print $2}' | sort -u)
+[ ${#DEFINED[@]} -gt 0 ] || { echo "SRAM_CMP_RESULT: FAIL (SRAM_MODELS define no rf_sp_*/sram_sp_* module)"; exit 1; }
 
 TOP="$OUT/sram_cmp_tb.sv"
 {

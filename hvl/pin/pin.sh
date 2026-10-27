@@ -131,7 +131,7 @@ preflight() {
     [ -n "$hdr" ] || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
     # Every SRAM macro and pad cell the netlist instantiates must be defined by a model.
     local defs; defs="$(cat ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^[[:space:]]*module[[:space:]]+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
-    for m in $(grep -oE '^[[:space:]]*(rf_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
+    for m in $(grep -oE '^[[:space:]]*((rf|sram)_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done
     # The ports the bench connects.
