@@ -1036,6 +1036,10 @@ xc7z020clg400-1, 40 ns constraint:
     defaults to 0 in `cache.sv` and no instance sets it (Q9).
   - `ft_shadow_ctrl`'s RECOMPUTE/ISOLATED states are removed in the MUL
     instance, which ties `recompute_supported` to 0. That is by design.
+- **Fmax:** the worst-*slack* path is the half-cycle path `scan_q` → the
+  link phy's negedge capture flop (2 ns against 20 ns), which `fit_report.sh`
+  turns into an Fmax as if it were a full cycle. The full-cycle critical
+  path has 18.09 ns of slack (21.9 ns, 27 levels), so ≈45 MHz holds.
 - **§11 BRAM risk retired:** the chip uses 6 of 140 tiles, so a 128 KiB BRAM
   backend (~32 tiles) fits easily. The 45 MHz is a post-synthesis estimate;
   P2's place-and-route gives the real number.
@@ -1188,6 +1192,15 @@ Still open:
    RTL (and Vivado, §9.1) has no scrubber. Is that intended for tapeout? If
    so, a stored cache SEC flip in a line that is never read again stays
    latent until eviction. The FPGA tests are written for the RTL as frozen.
+   **Measured cost** (Vivado OOC, same flow as §9.1, `SCRUBBER_ENABLED=1` on
+   both caches in a scratch copy of `lsu.sv`/`ifu.sv`, `hdl/` untouched):
+   +72 LUT (+0.3 %), +37 FF (+0.3 %), no BRAM/DSP change. The worst
+   full-cycle path grows from 21.9 ns (27 levels) to 28.5 ns (39 levels),
+   HPTW walker state → D$ data-array write data, through the scrubber's
+   correction write-back mux. Fmax drops from ≈45 to ≈35 MHz, still above
+   25 MHz. `SCRUB_INTERVAL_CYCLES=0`, so a tuned interval adds its counter
+   (≈log2(interval) FFs). The ASIC timing effect needs a DC run to confirm.
+   Decision (2026-10-28): proceed without the scrubber.
 
 ---
 
