@@ -100,6 +100,19 @@ package fbu_pkg;
   localparam logic [11:0] REG_CYC_TOTAL_LO     = 12'h178;
   localparam logic [11:0] REG_CYC_TOTAL_HI     = 12'h17C;
 
+  localparam logic [11:0] REG_FI_CTRL          = 12'h150;   // [3:0] mode, [5:4] start on, W [8] start, [9] stop, [10] clear counts; R [16] running
+  localparam logic [11:0] REG_FI_ARG0          = 12'h154;
+  localparam logic [11:0] REG_FI_ARG1          = 12'h158;
+  localparam logic [11:0] REG_FI_SEED          = 12'h15C;
+  localparam logic [11:0] REG_FI_HIGH_CYC_LO   = 12'h160;
+  localparam logic [11:0] REG_FI_HIGH_CYC_HI   = 12'h164;
+  localparam logic [11:0] REG_FI_EDGES         = 12'h168;
+  localparam logic [11:0] REG_FI_LATENCY       = 12'h16C;
+  localparam logic [11:0] REG_FI_PHASE_OFS     = 12'h180;
+  localparam logic [11:0] REG_FI_PHASE_NOW     = 12'h184;
+  localparam logic [11:0] REG_FI_EVENTS        = 12'h188;   // 9 words: ALU0 ALU1 CMP MUL DIV RF PIPE I$ D$
+  localparam logic [11:0] REG_FI_PHASE_MASK    = 12'h1C0;   // 16 words, bit p = chip counter phase p
+
   localparam logic [11:0] REG_LINK_CFG         = 12'h200;
   localparam logic [11:0] REG_LINK_WDOG        = 12'h204;
   localparam logic [11:0] REG_PRNG_INIT_LO     = 12'h208;
@@ -149,5 +162,9 @@ package fbu_pkg;
   localparam logic [11:0] REG_UART_CLEAR       = 12'h438;
   localparam logic [11:0] REG_UART_MATCH0      = 12'h440;   // 8 words
   localparam logic [11:0] REG_UART_MATCH1      = 12'h460;   // 8 words
+
+  localparam logic [11:0] REG_TRIG             = 12'h580;   // 4 triggers x 4 words: CTRL, ARG0, ARG1, FIRED
+  //   CTRL [3:0] source, [7:4] action, [8] repeat, [9] line, [31:16] length;
+  //        W [10] arm, [11] disarm; R [12] armed
 
 endpackage

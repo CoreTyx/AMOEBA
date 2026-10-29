@@ -155,13 +155,13 @@ expand_script() {   # script memory.lst out [sed-expression]
   fi
 }
 
-script_test() {   # test
-  local t="$1" d bv fv cmp ok=1
-  d="$OUT/$t/script"
+script_test() {   # test [gateware script, default the bench's own]
+  local t="$1" fbu_script="${2:-$TESTS/$1.cmd}" d bv fv cmp ok=1
+  d="$OUT/$t/script${2:+_$(basename "${2%.cmd}")}"
   rm -rf "$d"
   bench_run "$d/bench" "$TESTS/$t.c" "$TESTS/$t.cmd"
   mkdir -p "$d/fbu"
-  expand_script "$TESTS/$t.cmd" "$d/bench/memory.lst" "$d/fbu/script.cmd"
+  expand_script "$fbu_script" "$d/bench/memory.lst" "$d/fbu/script.cmd"
   fbu_run "$d/fbu" +CMD="$d/fbu/script.cmd"
   # The PS polls, so a console-triggered irq lands some cycles after the
   # bench's and may fall on the other side of a line fill: transactions and
@@ -181,7 +181,7 @@ script_test() {   # test
   [[ "$cmp" == "link MATCH"* ]] || ok=0
   cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" || ok=0
   [ "$bv" = PASS ] && [ "$fv" = PASS ] || ok=0
-  report $ok "$t/script" "bench=$bv fbu=$fv $cmp, uart.log $(cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" && echo identical || echo DIFFERS)"
+  report $ok "$t/$(basename "$d")" "bench=$bv fbu=$fv $cmp, uart.log $(cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" && echo identical || echo DIFFERS)"
 }
 
 planted_script_fault() {   # test name sed-expression expected-text
@@ -194,6 +194,17 @@ planted_script_fault() {   # test name sed-expression expected-text
   [ "$(verdict_of "$d/run.log")" = FAIL ] || ok=0
   grep -q "$expect" "$d/run.log" || ok=0
   report $ok "$t/$name" "$(grep -m1 -E 'ERROR|RESULT: FAIL' "$d/run.log" | cut -c1-80)"
+}
+
+self_test() {   # name plusargs expected-line
+  local name="$1" args="$2" expect="$3" d ok=1
+  d="$OUT/smoke/$name"
+  rm -rf "$d"
+  # shellcheck disable=SC2086
+  fbu_run "$d" +MEMLST="$OUT/smoke/d/bench/memory.lst" +FPGA_SEED=1 $args
+  [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  grep -q "$expect" "$d/run.log" || ok=0
+  report $ok "smoke/$name" "$(verdict_of "$d/run.log"); $(grep -m1 -o "$expect.*" "$d/run.log" | cut -c1-60)"
 }
 
 boot_gate_tests() {
@@ -225,9 +236,17 @@ if [ $FULL = 1 ]; then
   mutation_test early_stop "+FPGA_GAP_PCT=60 +FPGA_SEED=3 +FPGA_WDOG=20"
   natural_test
   link_test "$TESTS/smoke.c" wstrb "+FPGA_SEED=1 +WSTRB_TEST"
+  link_test "$TESTS/smoke.c" fi_gen "+FPGA_SEED=1 +FI_TEST"
+  for st in 1 3 5; do
+    link_test "$TESTS/smoke.c" "reset_in_state$st" "+FPGA_SEED=1 +TRIG_RESET_STATE=$st"
+  done
+  for st in 2 6; do
+    self_test "reset_in_state$st" "+TRIG_RESET_STATE=$st" "reset trigger fired once"
+  done
   for t in irq uart_echo uart_lsr; do
     script_test "$t"
   done
+  script_test irq "$R/fpga/bringup/tests/irq_trig.cmd"
   planted_script_fault uart_lsr clean_byte 's/^uart_send_ferr 55/uart_send U/' 'exit code 1, expected 0'
   planted_script_fault uart_echo wrong_div 's/^uart_div 1/uart_div 2/' 'framing error'
   planted_script_fault irq no_irq 's/^irq 0 1/irq 0 0/' 'never printed "IRQ3"'

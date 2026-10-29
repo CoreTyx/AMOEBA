@@ -177,6 +177,21 @@ class Run:
             with open(path, "w") as fh:
                 for i in range(0, nbytes, 8):
                     fh.write(f"{base + i:016x} {d.read_mem64(base + i):016x}\n")
+        elif cmd == "dialect":
+            pass
+        elif cmd == "irq_clear_on":
+            d.set_match(1, unescape(rest_after(line, 2)).encode("latin-1"))
+            d.arm_trigger(1, R.TRIG_SRC_MATCH1, R.TRIG_IRQ_CLEAR, line=int(args[0]))
+        elif cmd == "reset_at":
+            # reset_at state <name> [cycles] | reset_at cycle <n> [cycles]
+            length = int(args[2]) if len(args) > 2 else 16
+            if args[0] == "state":
+                d.arm_trigger(0, R.TRIG_SRC_STATE, R.TRIG_RESET, length=length,
+                              arg0=R.LINK_STATES.index(args[1]))
+            else:
+                d.arm_trigger(0, R.TRIG_SRC_CYCLE, R.TRIG_RESET, length=length, arg0=int(args[1]))
+        elif cmd == "fault_pattern":
+            self.fault_pattern(args)
         elif cmd == "finish":
             return "PASS"
         else:
@@ -184,6 +199,40 @@ class Run:
         if self.stopped():
             return f"FAIL {self.total_errors()} checker errors"
         return ""
+
+    def fault_pattern(self, args) -> None:
+        """fault_pattern off | static | square <period> <high> | random <min> <span_mask> [seed]
+        | pulse <cycles> | burst <periods> | phase <periods> <site-or-phase>... | single <site-or-phase>...
+        A site is a group name (alu0, cmp, dcache, ...) and stands for all its phases."""
+        d = self.dev
+        mode = args[0]
+        if mode == "off":
+            d.fault_stop()
+            return
+
+        def phases(names):
+            out = []
+            for n in names:
+                out += R.FI_SITE_PHASES[n] if n in R.FI_SITE_PHASES else [int(n, 0)]
+            return out
+
+        n = [int(a, 0) for a in args[1:] if a.lstrip("-").isdigit() or a.startswith("0x")]
+        if mode == "static":
+            d.fault_pattern(R.FI_STATIC, start=False)
+        elif mode == "square":
+            d.fault_pattern(R.FI_SQUARE, n[0], n[1])
+        elif mode == "random":
+            d.fault_pattern(R.FI_RANDOM, n[0], n[1], n[2] if len(n) > 2 else 1)
+        elif mode == "pulse":
+            d.fault_pattern(R.FI_PULSE, n[0])
+        elif mode == "burst":
+            d.fault_pattern(R.FI_BURST, n[0])
+        elif mode == "phase":
+            d.fault_pattern(R.FI_PHASE, int(args[1], 0), phases=phases(args[2:]))
+        elif mode == "single":
+            d.fault_pattern(R.FI_SINGLE, phases=phases(args[1:]))
+        else:
+            self.error(f"fault_pattern: unknown mode {mode}")
 
     def verdict(self, result: str) -> str:
         self.finish()
