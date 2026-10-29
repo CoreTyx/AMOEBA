@@ -272,6 +272,24 @@ test-top: $(SRCS_F)
 	@$(TOP_TB_DIR)/Vtb_pynq_top +IMAGE=$(TOP_TB_DIR)/$(TEST).hex $(if $(filter 1,$(SERIAL)),+SERIAL) | grep -v '^-' | tee $(TOP_TB_DIR)/$(TEST).log
 	@grep -q 'tb_pynq_top PASS' $(TOP_TB_DIR)/$(TEST).log
 
+# fbu_link_slave against the pin bench (docs/impl_plan_fpga_rtl_freeze.md s8.1):
+# builds the gateware testbench; fpga/bringup/tb/fbu_vs_pin.sh runs it and the
+# bench on the same images and knobs and requires identical pin traces.
+FBU_TB_DIR := $(BUILD)/tb_fbu_vs_pin
+.PHONY: build-fbu test-fbu
+build-fbu: $(SRCS_F)
+	@mkdir -p $(FBU_TB_DIR)
+	verilator --binary -sv --top-module tb_fbu_vs_pin --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(FBU_TB_DIR) \
+	    $(addprefix +incdir+,$(INCDIRS)) \
+	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR \
+	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_vs_pin.sv > $(FBU_TB_DIR)/build.log 2>&1 \
+	    || { grep -E '%Error' $(FBU_TB_DIR)/build.log | head -20; exit 1; }
+	@echo "built $(FBU_TB_DIR)/Vtb_fbu_vs_pin"
+
+test-fbu: build-fbu
+	bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
+
 lint: $(SRCS_F)
 	verilator --lint-only -sv --top-module $(DESIGN_TOP) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
