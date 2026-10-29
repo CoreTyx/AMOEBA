@@ -81,9 +81,30 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .s_rdata(s_axil_rdata), .s_rresp(s_axil_rresp), .s_rvalid(s_axil_rvalid), .s_rready(s_axil_rready),
     .reg_write, .reg_waddr, .reg_wdata, .reg_wstrb, .reg_read, .reg_raddr, .reg_rdata);
 
+  // Data registers take the bytes WSTRB selects.  A register whose write has a
+  // side effect (a pop, a push, a pulse) acts only on a whole-word write; any
+  // narrower write is counted in PARTIAL_WRITES instead of guessed at.
+  logic        full_word;
+  logic [31:0] byte_mask;
+  logic [31:0] partial_writes;
+
+  assign full_word = reg_wstrb == 4'hF;
+  assign byte_mask = {{8{reg_wstrb[3]}}, {8{reg_wstrb[2]}}, {8{reg_wstrb[1]}}, {8{reg_wstrb[0]}}};
+
   function automatic logic written(input logic [11:0] offset);
-    return reg_write && reg_waddr == offset;
+    return reg_write && full_word && reg_waddr == offset;
   endfunction
+
+  function automatic logic [31:0] merged(input logic [31:0] old);
+    return (old & ~byte_mask) | (reg_wdata & byte_mask);
+  endfunction
+
+  always_ff @(posedge clk or negedge arst_n) begin
+    if (!arst_n)
+      partial_writes <= '0;
+    else if (reg_write && !full_word)
+      partial_writes <= partial_writes + 32'd1;
+  end
 
   // ---- soft reset: everything below the register file, for a few cycles ----
   logic [2:0] soft_reset_cycles;
@@ -143,31 +164,31 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       match_pattern  <= '{default: '0};
     end else if (reg_write) begin
       case (reg_waddr)
-        REG_SCRATCH:        scratch        <= reg_wdata;
-        REG_PIN_CTRL:       pin_ctrl       <= reg_wdata[7:0];
-        REG_BOOTGATE:       bootgate       <= reg_wdata;
-        REG_LINK_CFG:       link_cfg       <= reg_wdata;
-        REG_LINK_WDOG:      link_wdog      <= reg_wdata;
-        REG_PRNG_INIT_LO:   prng_init[31:0]  <= reg_wdata;
-        REG_PRNG_INIT_HI:   prng_init[63:32] <= reg_wdata;
-        REG_MEM_BASE:       mem_base       <= reg_wdata;
-        REG_MEM_LIMIT:      mem_limit      <= reg_wdata;
-        REG_RESET_VEC:      reset_vec      <= reg_wdata;
-        REG_TOHOST_ADDR:    tohost_addr    <= reg_wdata;
-        REG_TRACE_CTRL:     trace_ctrl     <= reg_wdata[1:0];
-        REG_UART_RX_BIT:    uart_rx_bit    <= reg_wdata[23:0];
-        REG_UART_TX_PERIOD: uart_tx_period <= reg_wdata;
-        REG_UART_TX_GAP:    uart_tx_gap    <= reg_wdata[7:0];
+        REG_SCRATCH:        scratch          <= merged(scratch);
+        REG_PIN_CTRL:       pin_ctrl         <= 8'(merged(32'(pin_ctrl)));
+        REG_BOOTGATE:       bootgate         <= merged(bootgate);
+        REG_LINK_CFG:       link_cfg         <= merged(link_cfg);
+        REG_LINK_WDOG:      link_wdog        <= merged(link_wdog);
+        REG_PRNG_INIT_LO:   prng_init[31:0]  <= merged(prng_init[31:0]);
+        REG_PRNG_INIT_HI:   prng_init[63:32] <= merged(prng_init[63:32]);
+        REG_MEM_BASE:       mem_base         <= merged(mem_base);
+        REG_MEM_LIMIT:      mem_limit        <= merged(mem_limit);
+        REG_RESET_VEC:      reset_vec        <= merged(reset_vec);
+        REG_TOHOST_ADDR:    tohost_addr      <= merged(tohost_addr);
+        REG_TRACE_CTRL:     trace_ctrl       <= 2'(merged(32'(trace_ctrl)));
+        REG_UART_RX_BIT:    uart_rx_bit      <= 24'(merged(32'(uart_rx_bit)));
+        REG_UART_TX_PERIOD: uart_tx_period   <= merged(uart_tx_period);
+        REG_UART_TX_GAP:    uart_tx_gap      <= 8'(merged(32'(uart_tx_gap)));
         REG_UART_MATCH_LEN: begin
-          match_len[0] <= reg_wdata[MATCH_LEN_W-1:0];
-          match_len[1] <= reg_wdata[8 +: MATCH_LEN_W];
+          match_len[0] <= MATCH_LEN_W'(merged(32'(match_len[0])));
+          match_len[1] <= MATCH_LEN_W'(merged(32'(match_len[1]) << 8) >> 8);
         end
         default: begin
           for (int w = 0; w < MATCH_BYTES / 4; w++) begin
             if (reg_waddr == REG_UART_MATCH0 + 12'(4 * w))
-              match_pattern[0][32 * w +: 32] <= reg_wdata;
+              match_pattern[0][32 * w +: 32] <= merged(match_pattern[0][32 * w +: 32]);
             if (reg_waddr == REG_UART_MATCH1 + 12'(4 * w))
-              match_pattern[1][32 * w +: 32] <= reg_wdata;
+              match_pattern[1][32 * w +: 32] <= merged(match_pattern[1][32 * w +: 32]);
           end
         end
       endcase
@@ -305,6 +326,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_VERSION:          reg_rdata = FBU_VERSION;
       REG_CAPS:             reg_rdata = {16'd0, 8'(TRACE_DEPTH_LOG2), 4'd0, 4'(BEATS)};
       REG_SCRATCH:          reg_rdata = scratch;
+      REG_PARTIAL_WRITES:   reg_rdata = partial_writes;
       REG_PIN_CTRL:         reg_rdata = {24'd0, pin_ctrl};
       REG_PIN_IN:           reg_rdata = pin_in;
       REG_RST_COUNT:        reg_rdata = reset_count;

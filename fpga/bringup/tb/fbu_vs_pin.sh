@@ -224,6 +224,7 @@ if [ $FULL = 1 ]; then
   mutation_test m3 "+FPGA_MUTATE=3 +FPGA_WDOG=200"
   mutation_test early_stop "+FPGA_GAP_PCT=60 +FPGA_SEED=3 +FPGA_WDOG=20"
   natural_test
+  link_test "$TESTS/smoke.c" wstrb "+FPGA_SEED=1 +WSTRB_TEST"
   for t in irq uart_echo uart_lsr; do
     script_test "$t"
   done
