@@ -732,80 +732,81 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
 
 ---
 
-## 6. Register map (`fbu_regs`, `0x43C0_0000`, 4 KiB)
+## 6. Register map (`fbu_top`, `0x43C0_0000`, 4 KiB)
 
-The same offsets are used on every board. `check_regs_forte.py` parses
-`fbu_pkg.sv` and `sw/forte/regs.py` and fails on any disagreement, as
-`check_regs.py` does today.
+**The source of truth is `fpga/bringup/rtl/fbu_pkg.sv` (`REG_*`).** This
+table follows it. `check_regs_forte.py` parses `fbu_pkg.sv` and
+`sw/forte/regs.py` and fails on any disagreement. Every register is 32 bits
+wide and written whole. "W" registers act on the write, and no read has a
+side effect: FIFOs pop through their own `*_POP` register.
+
+**Implemented** (P1):
 
 | Offset | Name | Access | Fields |
 |---|---|---|---|
-| **0x000** | ID | RO | `0x46425530` "FBU0" |
-| 0x004 | VERSION | RO | |
-| 0x008 | CAPS | RO | [3:0] BEATS, [4] mem=BRAM, [5] EMU_TAPS, [6] mailbox, [15:8] log2 trace depth, [31] sram RETN error (sticky) |
+| 0x000 | ID | RO | `0x46425530` "FBU0" |
+| 0x004 | VERSION | RO | `0x0001_0000` |
+| 0x008 | CAPS | RO | [3:0] BEATS, [15:8] log2 trace depth |
 | 0x00C | SCRATCH | RW | |
-| 0x0F0 | CLK_CFG | RW | split build: MMCM1 M/D/O (DRP), [31] LINK_SRC; reads 0 in single-clock builds |
-| 0x0F4 | LINK_PAUSE | RW | split build: pause `link_clk` N cycles at trigger |
-| 0x0F8 | LINK_FREQ_MEAS | RO | split build: `link_clk` edges per 2^20 `core_clk` |
-| **0x100** | PIN_CTRL | RW | [0] RST_N (resets 0), [1] FAULT_INJECT, [2] TEST_MODE, [3] SCAN_EN, [5:4] IRQ, [6] RX_FORCE_EN, [7] RX_FORCE_VAL |
-| 0x104 | PIN_IN | RO | live: [15:0] io, [16] dir, [17] req, [18] wr, [19] status, [20] uart_tx, [21] clk_out_alive |
-| 0x108 | RST_PULSE | W | assert `rst_n` for n cycles |
-| 0x10C–0x118 | RST_TRIG, _ARG0, _ARG1, _SEED | RW | mode: off / at-cycle / at-xact-in-state / on-error / random |
-| 0x11C | RST_COUNT | RO | |
-| 0x120 | BOOTGATE | RW | [0] EN, [1] SELFTEST, [7:4] retries, [31:16] timeout |
-| 0x124 | BOOTGATE_STAT | RO | [15:0] fails, [16] gave up; 0x128 last header seen |
-| 0x130–0x13C | IRQ_TRIG0/1, IRQ_ARG0/1 | RW | |
-| 0x140–0x14C | IRQ_LAT_LAST/MIN/MAX, IRQ_COUNT | RO | |
-| 0x150–0x15C | FI_PATTERN, FI_ARG0, FI_ARG1, FI_SEED | RW | [3:0] mode (§5.4.1), [7:4] trigger, [8] busy (RO) |
-| 0x160/164 | FI_HIGH_CYC_LO/HI | RO | |
-| 0x168 | TEST_TRIG | RW | raise TEST_MODE at cycle/event |
-| 0x170/174 | CYC_SINCE_RST_LO/HI | RO | |
-| 0x178/17C | CYC_TOTAL_LO/HI | RO | |
-| 0x180 | FI_PHASE_OFS | RW | reset-to-counter offset (CTRL-12b) |
-| 0x184 | FI_PHASE_NOW | RO | mirror of the chip's 9-bit fault counter |
-| 0x188 | FI_EDGES | RO | |
-| 0x18C/190 | FI_WIN_START/STOP | RW | cycle window (since release), 0 = unbounded |
-| 0x1A0–0x1BC | FI_EVENTS[8] | RO | per site group: ALU0, ALU1, CMP, MUL, DIV, RF/pipe, I$, D$ |
-| 0x1C0–0x1FC | FI_PHASE_MASK[16] | RW | 512-bit phase mask for `PHASE`/`SINGLE` |
-| **0x200** | LINK_CFG | RW | [0] DET, [7:1] gap_pct, [31:16] rd_latency |
-| 0x204 | LINK_SEED | RW | |
-| 0x208 | READY_POLICY | RW | [2:0] mode, [15:8] arg0, [31:16] arg1 |
-| 0x20C/210 | STALL_XACT, STALL_CYC | RW | |
-| 0x214 | WDOG | RW | default 1000 |
-| 0x220/224 | LINK_RD, LINK_WR | RO | since `rst_n` release |
-| 0x228 | LINK_RST_ABORT | RO | transactions cut by `rst_n` |
-| 0x22C | LAT_OVERRUN | RO | |
-| 0x230 | LINK_ERR | RO/W1C | sticky bitmask, §5.2 |
-| 0x234/238/23C | FIRST_ERR_CODE, FIRST_ERR_CYC_LO/HI | RO | |
-| 0x240–0x24C | LANE_COV_HDR/WR/RD/SCAN | RO | {seen1, seen0} |
-| 0x250 | REQ_AFTER_READY_MAX | RO | |
-| 0x254–0x25C | HIST_SEL, HIST_DATA | RW/RO | 4 histograms × 8 bins |
-| 0x260 | MEM_ERR | RO/W1C | backend RESP errors |
-| **0x280** | TOHOST_ADDR | RW | default `0x8080_0000` |
-| 0x284/288 | TOHOST_LO/HI | RO | |
-| 0x28C | TOHOST_VALID | RO/W1C | |
-| **0x2A0** | MBX_CTRL | RW | [0] EN, [31:20] base[31:20] |
-| 0x2A4 | MBX_EVT_LEVEL | RO | |
-| 0x2A8/2AC/2B0 | MBX_EVT_POP (cyc_lo, cyc_hi, {wr, addr}) | RO, pop on cyc_lo | |
-| 0x2C0–0x2DC | MBX_RDATA0..7 | RW | |
-| **0x300** | TRACE_CTRL | RW | mode, clear |
-| 0x304 | TRACE_LEVEL | RO | [31] overflow |
-| 0x308–0x31C | TRACE_POP0..5 | RO | one record, pop on POP0 |
-| **0x400** | UART_RX_DATA | RO | [8] valid, [7:0]; pop |
-| 0x404 | UART_RX_LEVEL | RO | [31] overflow |
-| 0x408 | UART_RX_DIV | RW | 16.16 core cycles per bit |
-| 0x40C | UART_RX_ERR | RO | [15:0] framing, [31:16] breaks |
-| 0x410 | UART_TX_DATA | W | [7:0] byte, [15:8] per-byte control (ferr / parity flip / break / glitch) |
-| 0x414 | UART_TX_LEVEL | RO | |
-| 0x418 | UART_TX_DIV | RW | 16.16 |
-| 0x41C | UART_TX_GAP | RW | bit times |
-| 0x420–0x43C | UART_MATCH[32 B], MATCH_CTL, MATCH_CYC | RW/RO | |
-| **0x500–0x514** | STAT_HALF_LAST/MIN/MAX, STAT_EDGES, STAT_CLASS, STAT_GLITCH | RO | |
-| 0x518/51C | CLKOUT_EDGES, CLKOUT_WINDOW | RO | |
-| **0x600** | SCAN_CTRL | RW | start, length, scan_en mode |
-| 0x800–0xBFF | SCAN_IN[1024] | RW | byte per word |
-| 0xC00–0xEFF | SCAN_OUT[768] | RO | capture (depth 768 keeps the page) |
-| **0xF00** | EMU_TAPS page | RO | retired, traps, PC (EMU_TAPS builds only) |
+| 0x010 | SOFT_RESET | W | resets the gateware below the register file (the chip is held in reset meanwhile) |
+| 0x100 | PIN_CTRL | RW | [0] RELEASE (rst_n, resets 0), [1] FAULT_INJECT, [2] TEST_MODE, [3] SCAN_EN, [5:4] IRQ, [6] RX_FORCE_EN, [7] RX_FORCE_VAL |
+| 0x104 | PIN_IN | RO | [15:0] io, [16] dir, [17] req, [18] wr, [19] status, [20] uart_tx, [21] rst_n, [22] ready, [23] rvalid, [24] clk_out |
+| 0x108 | RST_PULSE | W | hold rst_n low for N cycles |
+| 0x10C | RST_COUNT | RO | rst_n assertions |
+| 0x120 | BOOTGATE | RW | [0] EN, [1] SELFTEST, [7:4] RETRIES, [31:16] TIMEOUT (default 1000) |
+| 0x124 | BOOTGATE_STAT | RO | [15:0] fails, [16] gave up, [17] last header's wr |
+| 0x128 | BOOTGATE_HDR | RO | last header {A[31:16], A[15:0]} |
+| 0x12C | BOOTGATE_PASSES | RO | [15:0] |
+| 0x170/174 | LINK_CYC_LO/HI | RO | link cycles since rst_n release |
+| 0x178/17C | CYC_TOTAL_LO/HI | RO | cycles since the FPGA's reset |
+| 0x200 | LINK_CFG | RW | [0] DET (resets 1), [7:1] GAP_PCT, [31:16] RD_LAT |
+| 0x204 | LINK_WDOG | RW | [15:0] watchdog cycles (1000), [17:16] MUTATE (self-test) |
+| 0x208/20C | PRNG_INIT_LO/HI | RW | `fbu_pkg::prng_seed_state(seed)` |
+| 0x210 | PRNG_LOAD | W | load PRNG_INIT into the generator |
+| 0x214/218 | MEM_BASE / MEM_LIMIT | RW | EXT_MEM window checked on every header |
+| 0x21C | RESET_VEC | RW | expected first fetch |
+| 0x220 | LINK_ERR | RO | sticky, bit per `link_err_t` |
+| 0x224 | LINK_ERR_COUNT | RO | |
+| 0x228 | FIRST_ERR | RO | `link_err_t` |
+| 0x22C/230 | FIRST_ERR_CYC_LO/HI | RO | |
+| 0x234/238 | LINK_RD / LINK_WR | RO | finished transactions |
+| 0x280 | TOHOST_ADDR | RW | default `0x8080_0000` |
+| 0x284 | TOHOST_STAT | RO | [0] seen (cleared while rst_n is low) |
+| 0x288/28C | TOHOST_VAL_LO/HI | RO | |
+| 0x300 | TRACE_CTRL | RW | [0] EN, [1] STOP_ON_ERROR |
+| 0x304 | TRACE_LEVEL | RO | records waiting |
+| 0x308/30C | TRACE_WRITTEN / TRACE_DROPPED | RO | |
+| 0x310 | TRACE_POP | W | drop the head record |
+| 0x314 | TRACE_STAT | RO | [0] head valid, [1] overflow |
+| 0x318 | TRACE_CLEAR | W | |
+| 0x340–0x364 | TRACE_HEAD[10] | RO | the head record (`fbu_link_trace.sv` format) |
+| 0x400 | UART_RX_BIT | RW | core cycles per received bit (32 = div 1) |
+| 0x404 | UART_TX_PERIOD | RW | transmitted bit period, 1/256 cycle |
+| 0x408 | UART_TX_GAP | RW | idle bit times between frames |
+| 0x40C | UART_RX_DATA | RO | [31] valid, [8] framing error, [7:0] byte |
+| 0x410 | UART_RX_POP | W | |
+| 0x414 | UART_TX_PUSH | W | [9:8] kind (byte, bad stop, break, idle), [7:0] data |
+| 0x418 | UART_STAT | RO | [0] rx overflow, [1] tx full, [2] tx overflow, [3] tx busy |
+| 0x41C/420 | UART_RX_LEVEL / UART_TX_LEVEL | RO | |
+| 0x424/428/42C | UART_N_RX / N_TX / N_FERR | RO | |
+| 0x430 | UART_MATCH_LEN | RW | [7:0] matcher 0, [15:8] matcher 1 |
+| 0x434 | UART_MATCH_CTRL | RW | write [1:0]: clear matcher; read [1:0]: hit |
+| 0x438 | UART_CLEAR | W | |
+| 0x440–0x45C | UART_MATCH0[8] | RW | pattern, last byte in byte 0 |
+| 0x460–0x47C | UART_MATCH1[8] | RW | |
+
+**Reserved for later stages** (offsets kept free): `0x0F0–0x0FC` split
+clock; `0x110–0x11C` RST_TRIG; `0x130–0x14C` IRQ_TRIG and latency;
+`0x150–0x1FC` fault-inject generator (§5.4.1); `0x240–0x27C` lane coverage,
+histograms, ready policy and stalls; `0x2A0–0x2FC` mailbox; `0x500–0x51C`
+status monitor; `0x600–0xEFF` scan; `0xF00` EMU_TAPS.
+
+**Trace depth on the board.** Draining one record over AXI-Lite takes 11
+accesses. A busy link can produce one every 14 cycles, faster than the PS
+can drain. The 2 048-record FIFO therefore bounds what a board run can
+compare cycle for cycle. Longer runs report `TRACE_DROPPED` and are judged
+on results and error counters. (`tb_fbu_vs_pin` builds `fbu_top` with a
+32 k-record FIFO.)
 
 ---
 

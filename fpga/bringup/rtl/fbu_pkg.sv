@@ -76,4 +76,75 @@ package fbu_pkg;
     return 7'(r);
   endfunction
 
+  // ---- register map (fbu_top, AXI4-Lite, byte offsets) ----
+  localparam logic [31:0] FBU_ID      = 32'h4642_5530;   // "FBU0"
+  localparam logic [31:0] FBU_VERSION = 32'h0001_0000;
+
+  localparam logic [11:0] REG_ID               = 12'h000;
+  localparam logic [11:0] REG_VERSION          = 12'h004;
+  localparam logic [11:0] REG_CAPS             = 12'h008;
+  localparam logic [11:0] REG_SCRATCH          = 12'h00C;
+  localparam logic [11:0] REG_SOFT_RESET       = 12'h010;
+
+  localparam logic [11:0] REG_PIN_CTRL         = 12'h100;
+  localparam logic [11:0] REG_PIN_IN           = 12'h104;
+  localparam logic [11:0] REG_RST_PULSE        = 12'h108;
+  localparam logic [11:0] REG_RST_COUNT        = 12'h10C;
+  localparam logic [11:0] REG_BOOTGATE         = 12'h120;
+  localparam logic [11:0] REG_BOOTGATE_STAT    = 12'h124;
+  localparam logic [11:0] REG_BOOTGATE_HDR     = 12'h128;
+  localparam logic [11:0] REG_BOOTGATE_PASSES  = 12'h12C;
+  localparam logic [11:0] REG_LINK_CYC_LO      = 12'h170;
+  localparam logic [11:0] REG_LINK_CYC_HI      = 12'h174;
+  localparam logic [11:0] REG_CYC_TOTAL_LO     = 12'h178;
+  localparam logic [11:0] REG_CYC_TOTAL_HI     = 12'h17C;
+
+  localparam logic [11:0] REG_LINK_CFG         = 12'h200;
+  localparam logic [11:0] REG_LINK_WDOG        = 12'h204;
+  localparam logic [11:0] REG_PRNG_INIT_LO     = 12'h208;
+  localparam logic [11:0] REG_PRNG_INIT_HI     = 12'h20C;
+  localparam logic [11:0] REG_PRNG_LOAD        = 12'h210;
+  localparam logic [11:0] REG_MEM_BASE         = 12'h214;
+  localparam logic [11:0] REG_MEM_LIMIT        = 12'h218;
+  localparam logic [11:0] REG_RESET_VEC        = 12'h21C;
+  localparam logic [11:0] REG_LINK_ERR         = 12'h220;
+  localparam logic [11:0] REG_LINK_ERR_COUNT   = 12'h224;
+  localparam logic [11:0] REG_FIRST_ERR        = 12'h228;
+  localparam logic [11:0] REG_FIRST_ERR_CYC_LO = 12'h22C;
+  localparam logic [11:0] REG_FIRST_ERR_CYC_HI = 12'h230;
+  localparam logic [11:0] REG_LINK_RD          = 12'h234;
+  localparam logic [11:0] REG_LINK_WR          = 12'h238;
+
+  localparam logic [11:0] REG_TOHOST_ADDR      = 12'h280;
+  localparam logic [11:0] REG_TOHOST_STAT      = 12'h284;
+  localparam logic [11:0] REG_TOHOST_VAL_LO    = 12'h288;
+  localparam logic [11:0] REG_TOHOST_VAL_HI    = 12'h28C;
+
+  localparam logic [11:0] REG_TRACE_CTRL       = 12'h300;
+  localparam logic [11:0] REG_TRACE_LEVEL      = 12'h304;
+  localparam logic [11:0] REG_TRACE_WRITTEN    = 12'h308;
+  localparam logic [11:0] REG_TRACE_DROPPED    = 12'h30C;
+  localparam logic [11:0] REG_TRACE_POP        = 12'h310;
+  localparam logic [11:0] REG_TRACE_STAT       = 12'h314;
+  localparam logic [11:0] REG_TRACE_CLEAR      = 12'h318;
+  localparam logic [11:0] REG_TRACE_HEAD       = 12'h340;   // 10 words
+
+  localparam logic [11:0] REG_UART_RX_BIT      = 12'h400;
+  localparam logic [11:0] REG_UART_TX_PERIOD   = 12'h404;
+  localparam logic [11:0] REG_UART_TX_GAP      = 12'h408;
+  localparam logic [11:0] REG_UART_RX_DATA     = 12'h40C;
+  localparam logic [11:0] REG_UART_RX_POP      = 12'h410;
+  localparam logic [11:0] REG_UART_TX_PUSH     = 12'h414;
+  localparam logic [11:0] REG_UART_STAT        = 12'h418;
+  localparam logic [11:0] REG_UART_RX_LEVEL    = 12'h41C;
+  localparam logic [11:0] REG_UART_TX_LEVEL    = 12'h420;
+  localparam logic [11:0] REG_UART_N_RX        = 12'h424;
+  localparam logic [11:0] REG_UART_N_TX        = 12'h428;
+  localparam logic [11:0] REG_UART_N_FERR      = 12'h42C;
+  localparam logic [11:0] REG_UART_MATCH_LEN   = 12'h430;
+  localparam logic [11:0] REG_UART_MATCH_CTRL  = 12'h434;
+  localparam logic [11:0] REG_UART_CLEAR       = 12'h438;
+  localparam logic [11:0] REG_UART_MATCH0      = 12'h440;   // 8 words
+  localparam logic [11:0] REG_UART_MATCH1      = 12'h460;   // 8 words
+
 endpackage
