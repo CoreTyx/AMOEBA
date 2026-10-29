@@ -30,6 +30,19 @@ REG_LINK_CYC_HI = 0x174
 REG_CYC_TOTAL_LO = 0x178
 REG_CYC_TOTAL_HI = 0x17C
 
+REG_FI_CTRL = 0x150
+REG_FI_ARG0 = 0x154
+REG_FI_ARG1 = 0x158
+REG_FI_SEED = 0x15C
+REG_FI_HIGH_CYC_LO = 0x160
+REG_FI_HIGH_CYC_HI = 0x164
+REG_FI_EDGES = 0x168
+REG_FI_LATENCY = 0x16C
+REG_FI_PHASE_OFS = 0x180
+REG_FI_PHASE_NOW = 0x184
+REG_FI_EVENTS = 0x188
+REG_FI_PHASE_MASK = 0x1C0
+
 REG_LINK_CFG = 0x200
 REG_LINK_WDOG = 0x204
 REG_PRNG_INIT_LO = 0x208
@@ -80,6 +93,8 @@ REG_UART_CLEAR = 0x438
 REG_UART_MATCH0 = 0x440
 REG_UART_MATCH1 = 0x460
 
+REG_TRIG = 0x580
+
 # (lsb, width) of each field, by register
 FIELDS = {
     REG_PIN_CTRL: {"release": (0, 1), "fault_inject": (1, 1), "test_mode": (2, 1),
@@ -90,7 +105,23 @@ FIELDS = {
     REG_TRACE_CTRL: {"enable": (0, 1), "stop_on_error": (1, 1)},
     REG_UART_TX_PUSH: {"data": (0, 8), "kind": (8, 2)},
     REG_UART_MATCH_LEN: {"len0": (0, 8), "len1": (8, 8)},
+    REG_FI_CTRL: {"mode": (0, 4), "start_on_release": (4, 1), "start": (8, 1), "stop": (9, 1),
+                  "clear_counts": (10, 1), "running": (16, 1)},
+    REG_TRIG: {"source": (0, 4), "action": (4, 4), "repeat": (8, 1), "line": (9, 1),
+               "arm": (10, 1), "disarm": (11, 1), "armed": (12, 1), "length": (16, 16)},
 }
+
+FI_STATIC, FI_SQUARE, FI_RANDOM, FI_PULSE, FI_BURST, FI_PHASE, FI_SINGLE = range(7)
+FI_GROUPS = ["alu0", "alu1", "cmp", "mul", "div", "rf", "pipe", "icache", "dcache"]
+# chip fault-counter phase of each injection site (fbu_fi_gen.sv)
+FI_SITE_PHASES = {
+    "alu0": [0x1FE, 0x1EE, 0x1DE], "alu1": [0x1BE, 0x1AE, 0x19E], "cmp": [0x1CE, 0x18E],
+    "mul": [0x17E], "div": [0x15E], "rf": [0x1FF], "pipe": [0x1FF], "icache": [0x13E], "dcache": [0x11E],
+}
+
+TRIG_SRC_CYCLE, TRIG_SRC_MATCH0, TRIG_SRC_MATCH1, TRIG_SRC_STATE, TRIG_SRC_RANDOM, TRIG_SRC_ERROR = range(1, 7)
+TRIG_RESET, TRIG_IRQ_SET, TRIG_IRQ_CLEAR, TRIG_IRQ_PULSE, TRIG_FAULT = range(1, 6)
+LINK_STATES = ["idle", "header", "write_data", "read_turnaround", "read_latency", "read_data", "read_release"]
 
 UART_TX_BYTE, UART_TX_BAD_STOP, UART_TX_BREAK, UART_TX_IDLE = range(4)
 

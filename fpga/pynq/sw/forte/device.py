@@ -56,7 +56,6 @@ class Forte:
         found = self.ctl.read(R.REG_ID)
         if found != R.FBU_ID:
             raise RuntimeError(f"ID reads 0x{found:08X}, expected 0x{R.FBU_ID:08X}: wrong bitstream?")
-        self.pin_ctrl = 0
 
     # ---- registers ----
     def rd(self, reg: int) -> int:
@@ -79,7 +78,6 @@ class Forte:
                   tohost=0x8080_0000, stop_on_error=True, boot_gate=False,
                   boot_gate_selftest=False, boot_gate_retries=2):
         self.wr(R.REG_PIN_CTRL, 0)
-        self.pin_ctrl = 0
         self.wr(R.REG_SOFT_RESET, 1)
         self.wr(R.REG_LINK_CFG, R.pack(R.REG_LINK_CFG, det=int(det), gap_pct=gap_pct, rd_lat=rd_lat))
         self.wr(R.REG_LINK_WDOG, R.pack(R.REG_LINK_WDOG, wdog=wdog, mutate=mutate))
@@ -148,17 +146,19 @@ class Forte:
 
     # ---- pins ----
     def set_pins(self, **fields) -> None:
+        """Read-modify-write: triggers change PIN_CTRL's irq bits too."""
+        word = self.rd(R.REG_PIN_CTRL)
         for name, value in fields.items():
             lsb, width = R.FIELDS[R.REG_PIN_CTRL][name]
-            self.pin_ctrl = (self.pin_ctrl & ~(((1 << width) - 1) << lsb)) | (value << lsb)
-        self.wr(R.REG_PIN_CTRL, self.pin_ctrl)
+            word = (word & ~(((1 << width) - 1) << lsb)) | (value << lsb)
+        self.wr(R.REG_PIN_CTRL, word)
 
     def reset(self, cycles: int) -> None:
         self.wr(R.REG_RST_PULSE, cycles + 1)
         self.set_pins(release=1)
 
     def irq(self, line: int, level: int) -> None:
-        irq = (self.pin_ctrl >> 4) & 3
+        irq = R.unpack(R.REG_PIN_CTRL, self.rd(R.REG_PIN_CTRL), "irq")
         irq = (irq & ~(1 << line)) | (level << line)
         self.set_pins(irq=irq)
 
@@ -214,6 +214,40 @@ class Forte:
             self.wr(R.REG_TRACE_POP, 1)
             records.append(sum(w << (32 * i) for i, w in enumerate(words)))
         return records
+
+    # ---- triggers ----
+    def arm_trigger(self, slot: int, source: int, action: int, *, line: int = 0, length: int = 0,
+                    arg0: int = 0, arg1: int = 0, repeat: bool = False) -> None:
+        base = R.REG_TRIG + 16 * slot
+        self.wr(base + 4, arg0)
+        self.wr(base + 8, arg1)
+        self.wr(base, R.pack(R.REG_TRIG, source=source, action=action, repeat=int(repeat),
+                             line=line, length=length, arm=1))
+
+    def trigger_fired(self, slot: int) -> int:
+        return self.rd(R.REG_TRIG + 16 * slot + 12)
+
+    # ---- fault_inject ----
+    def fault_pattern(self, mode: int, arg0: int = 0, arg1: int = 0, seed: int = 1,
+                      phases=(), start: bool = True) -> None:
+        mask = 0
+        for p in phases:
+            mask |= 1 << (p & 0x1FF)
+        for w in range(16):
+            self.wr(R.REG_FI_PHASE_MASK + 4 * w, mask >> (32 * w) & 0xFFFF_FFFF)
+        self.wr(R.REG_FI_ARG0, arg0)
+        self.wr(R.REG_FI_ARG1, arg1)
+        self.wr(R.REG_FI_SEED, seed)
+        self.wr(R.REG_FI_CTRL, R.pack(R.REG_FI_CTRL, mode=mode, clear_counts=1))
+        if start:
+            self.wr(R.REG_FI_CTRL, R.pack(R.REG_FI_CTRL, mode=mode, start=1))
+
+    def fault_stop(self) -> None:
+        mode = R.unpack(R.REG_FI_CTRL, self.rd(R.REG_FI_CTRL), "mode")
+        self.wr(R.REG_FI_CTRL, R.pack(R.REG_FI_CTRL, mode=mode, stop=1))
+
+    def fault_events(self) -> dict:
+        return {g: self.rd(R.REG_FI_EVENTS + 4 * i) for i, g in enumerate(R.FI_GROUPS)}
 
     # ---- status ----
     def link_errors(self) -> int:

@@ -19,7 +19,7 @@ DEST=${DEST:-forte}
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/images" "$STAGE/scripts"
-cp "$REPO"/hvl/pin/tests/*.cmd "$STAGE/scripts/"
+cp "$REPO"/hvl/pin/tests/*.cmd "$REPO"/fpga/bringup/tests/*.cmd "$STAGE/scripts/"
 for x in "$@"; do
   if [[ -d $x && -f $x/memory.lst ]]; then
     cp "$x/memory.lst" "$STAGE/images/$(basename "$x").lst"

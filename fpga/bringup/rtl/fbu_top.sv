@@ -61,6 +61,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
 );
 
   localparam int MATCH_BYTES = 32;
+  localparam int TRIGGERS    = 4;
   localparam int MATCH_LEN_W = $clog2(MATCH_BYTES + 1);
 
   // ---- register port ----
@@ -143,6 +144,20 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [7:0]  uart_tx_gap;
   logic [MATCH_LEN_W-1:0]   match_len     [2];
   logic [8*MATCH_BYTES-1:0] match_pattern [2];
+  logic [3:0]   fi_mode;
+  logic         fi_start_on_release;
+  logic [31:0]  fi_arg0;
+  logic [31:0]  fi_arg1;
+  logic [31:0]  fi_seed;
+  logic [3:0]   fi_latency;
+  logic [8:0]   fi_phase_ofs;
+  logic [511:0] fi_phase_mask;
+  logic [31:0]  fi_ctrl_written;
+  logic [31:0]  trig_ctrl [TRIGGERS];
+  logic [31:0]  trig_arg0 [TRIGGERS];
+  logic [31:0]  trig_arg1 [TRIGGERS];
+
+  assign fi_ctrl_written = merged({27'd0, fi_start_on_release, fi_mode});
 
   always_ff @(posedge clk or negedge arst_n) begin
     if (!arst_n) begin
@@ -162,7 +177,19 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       uart_tx_gap    <= '0;
       match_len      <= '{default: '0};
       match_pattern  <= '{default: '0};
-    end else if (reg_write) begin
+      fi_mode             <= '0;
+      fi_start_on_release <= 1'b0;
+      fi_arg0             <= '0;
+      fi_arg1             <= '0;
+      fi_seed             <= 32'h1;
+      fi_latency          <= 4'd4;
+      fi_phase_ofs        <= '0;
+      fi_phase_mask       <= '0;
+      trig_ctrl           <= '{default: '0};
+      trig_arg0           <= '{default: '0};
+      trig_arg1           <= '{default: '0};
+    end else begin
+      if (reg_write) begin
       case (reg_waddr)
         REG_SCRATCH:        scratch          <= merged(scratch);
         REG_PIN_CTRL:       pin_ctrl         <= 8'(merged(32'(pin_ctrl)));
@@ -179,6 +206,15 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
         REG_UART_RX_BIT:    uart_rx_bit      <= 24'(merged(32'(uart_rx_bit)));
         REG_UART_TX_PERIOD: uart_tx_period   <= merged(uart_tx_period);
         REG_UART_TX_GAP:    uart_tx_gap      <= 8'(merged(32'(uart_tx_gap)));
+        REG_FI_CTRL: begin
+          fi_mode             <= fi_ctrl_written[3:0];
+          fi_start_on_release <= fi_ctrl_written[4];
+        end
+        REG_FI_ARG0:        fi_arg0      <= merged(fi_arg0);
+        REG_FI_ARG1:        fi_arg1      <= merged(fi_arg1);
+        REG_FI_SEED:        fi_seed      <= merged(fi_seed);
+        REG_FI_LATENCY:     fi_latency   <= 4'(merged(32'(fi_latency)));
+        REG_FI_PHASE_OFS:   fi_phase_ofs <= 9'(merged(32'(fi_phase_ofs)));
         REG_UART_MATCH_LEN: begin
           match_len[0] <= MATCH_LEN_W'(merged(32'(match_len[0])));
           match_len[1] <= MATCH_LEN_W'(merged(32'(match_len[1]) << 8) >> 8);
@@ -190,8 +226,22 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
             if (reg_waddr == REG_UART_MATCH1 + 12'(4 * w))
               match_pattern[1][32 * w +: 32] <= merged(match_pattern[1][32 * w +: 32]);
           end
+          for (int w = 0; w < 16; w++)
+            if (reg_waddr == REG_FI_PHASE_MASK + 12'(4 * w))
+              fi_phase_mask[32 * w +: 32] <= merged(fi_phase_mask[32 * w +: 32]);
+          for (int t = 0; t < TRIGGERS; t++) begin
+            if (reg_waddr == REG_TRIG + 12'(16 * t))
+              trig_ctrl[t] <= merged(trig_ctrl[t]) & 32'hFFFF_03FF;
+            if (reg_waddr == REG_TRIG + 12'(16 * t + 4))
+              trig_arg0[t] <= merged(trig_arg0[t]);
+            if (reg_waddr == REG_TRIG + 12'(16 * t + 8))
+              trig_arg1[t] <= merged(trig_arg1[t]);
+          end
         end
       endcase
+      end
+      pin_ctrl[5:4] <= (reg_write && reg_waddr == REG_PIN_CTRL ? 2'(merged(32'(pin_ctrl)) >> 4) : pin_ctrl[5:4])
+                       & ~trigger_irq_clear | trigger_irq_set;
     end
   end
 
@@ -215,6 +265,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [63:0]       rec_end_cyc;
   logic [63:0]       rec_tohost_val;
   logic              slave_io_oe;
+  logic [2:0]        link_state;
 
   fbu_link_slave #(.BEATS(BEATS)) link (
     .clk, .arst_n(blocks_rst_n),
@@ -226,7 +277,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o, .io_oe(slave_io_oe), .ready, .rvalid,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err,
-    .cyc(link_cyc), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val, .tohost_cyc,
+    .cyc(link_cyc), .state_now(link_state), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val, .tohost_cyc,
     .err_now, .err_sticky, .err_count, .first_err, .first_err_cyc,
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
     .rec_tohost, .rec_tohost_cyc(rec_end_cyc), .rec_tohost_val);
@@ -243,12 +294,21 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic        gate_gave_up;
   logic [32:0] gate_last_header;
 
+  logic        fault_inject_d;
+  logic [1:0]  trigger_irq_set;
+  logic [1:0]  trigger_irq_clear;
+  logic [1:0]  trigger_irq_pulse;
+  logic        trigger_reset;
+  logic [31:0] trigger_reset_cycles;
+  logic        trigger_fault_start;
+
   fbu_pin_ctl pins (
     .clk, .arst_n(blocks_rst_n),
-    .cfg_release(pin_ctrl[0]), .cfg_fault_inject(pin_ctrl[1]),
-    .cfg_test_mode(pin_ctrl[2]), .cfg_scan_en(pin_ctrl[3]), .cfg_irq(pin_ctrl[5:4]),
+    .cfg_release(pin_ctrl[0]), .cfg_fault_inject(fault_inject_d),
+    .cfg_test_mode(pin_ctrl[2]), .cfg_scan_en(pin_ctrl[3]), .cfg_irq(pin_ctrl[5:4] | trigger_irq_pulse),
     .cfg_rx_force_en(pin_ctrl[6]), .cfg_rx_force_val(pin_ctrl[7]),
-    .reset_pulse_start(written(REG_RST_PULSE)), .reset_pulse_cycles(reg_wdata),
+    .reset_pulse_start(written(REG_RST_PULSE) || trigger_reset),
+    .reset_pulse_cycles(trigger_reset ? trigger_reset_cycles : reg_wdata),
     .cfg_gate_enable(bootgate[0]), .cfg_gate_selftest(bootgate[1]),
     .cfg_gate_retries(bootgate[7:4]), .cfg_gate_timeout(bootgate[31:16]),
     .req, .wr, .io_i, .uart_rx_from_uart,
@@ -289,6 +349,70 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .n_rx(uart_n_rx), .n_tx(uart_n_tx), .n_framing_errors(uart_n_ferr),
     .cfg_match_len(match_len), .cfg_match_pattern(match_pattern),
     .match_clear, .match_hit, .match_pulse);
+
+  // ---- fault_inject pattern ----
+  logic        rst_n_q;
+  logic        released;
+  logic        fi_running;
+  logic [8:0]  fi_phase_now;
+  logic [63:0] fi_high_cycles;
+  logic [31:0] fi_edges;
+  logic [31:0] fi_events [9];
+
+  always_ff @(posedge clk or negedge arst_n) begin
+    if (!arst_n)
+      rst_n_q <= 1'b0;
+    else
+      rst_n_q <= rst_n;
+  end
+
+  assign released = rst_n && !rst_n_q;
+
+  fbu_fi_gen fault (
+    .clk, .arst_n(blocks_rst_n),
+    .cfg_mode(fi_mode), .cfg_static(pin_ctrl[1]), .cfg_arg0(fi_arg0), .cfg_arg1(fi_arg1),
+    .cfg_seed(fi_seed), .cfg_phase_ofs(fi_phase_ofs), .cfg_latency(fi_latency),
+    .cfg_phase_mask(fi_phase_mask),
+    .start((written(REG_FI_CTRL) && reg_wdata[8]) || trigger_fault_start || (fi_start_on_release && released)),
+    .stop(written(REG_FI_CTRL) && reg_wdata[9]),
+    .clear_counts(written(REG_FI_CTRL) && reg_wdata[10]),
+    .chip_in_reset(!rst_n), .link_cyc_low(link_cyc[8:0]),
+    .fault_inject_d, .running(fi_running), .chip_phase_now(fi_phase_now),
+    .high_cycles(fi_high_cycles), .edges(fi_edges), .events(fi_events));
+
+  // ---- triggers ----
+  logic [3:0]  trig_source [TRIGGERS];
+  logic [3:0]  trig_action [TRIGGERS];
+  logic        trig_repeat [TRIGGERS];
+  logic        trig_line   [TRIGGERS];
+  logic [15:0] trig_length [TRIGGERS];
+  logic        trig_arm    [TRIGGERS];
+  logic        trig_disarm [TRIGGERS];
+  logic        trig_armed  [TRIGGERS];
+  logic [31:0] trig_fired  [TRIGGERS];
+
+  always_comb begin
+    for (int t = 0; t < TRIGGERS; t++) begin
+      trig_source[t] = trig_ctrl[t][3:0];
+      trig_action[t] = trig_ctrl[t][7:4];
+      trig_repeat[t] = trig_ctrl[t][8];
+      trig_line[t]   = trig_ctrl[t][9];
+      trig_length[t] = trig_ctrl[t][31:16];
+      trig_arm[t]    = written(REG_TRIG + 12'(16 * t)) && reg_wdata[10];
+      trig_disarm[t] = written(REG_TRIG + 12'(16 * t)) && reg_wdata[11];
+    end
+  end
+
+  fbu_triggers #(.TRIGGERS(TRIGGERS)) triggers (
+    .clk, .arst_n(blocks_rst_n),
+    .cfg_source(trig_source), .cfg_action(trig_action), .cfg_repeat(trig_repeat),
+    .cfg_line(trig_line), .cfg_length(trig_length), .cfg_arg0(trig_arg0), .cfg_arg1(trig_arg1),
+    .arm(trig_arm), .disarm(trig_disarm),
+    .link_cyc_low(link_cyc[31:0]), .match_pulse, .link_state, .link_error(err_now != '0),
+    .armed(trig_armed), .fired(trig_fired),
+    .reset_start(trigger_reset), .reset_cycles(trigger_reset_cycles),
+    .irq_set(trigger_irq_set), .irq_clear(trigger_irq_clear), .irq_pulse(trigger_irq_pulse),
+    .fault_start(trigger_fault_start));
 
   // ---- link trace ----
   logic [319:0]              trace_head;
@@ -376,10 +500,36 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_UART_N_FERR:      reg_rdata = uart_n_ferr;
       REG_UART_MATCH_LEN:   reg_rdata = {16'd0, 8'(match_len[1]), 8'(match_len[0])};
       REG_UART_MATCH_CTRL:  reg_rdata = {30'd0, match_hit[1], match_hit[0]};
+      REG_FI_CTRL:          reg_rdata = {15'd0, fi_running, 11'd0, fi_start_on_release, fi_mode};
+      REG_FI_ARG0:          reg_rdata = fi_arg0;
+      REG_FI_ARG1:          reg_rdata = fi_arg1;
+      REG_FI_SEED:          reg_rdata = fi_seed;
+      REG_FI_HIGH_CYC_LO:   reg_rdata = fi_high_cycles[31:0];
+      REG_FI_HIGH_CYC_HI:   reg_rdata = fi_high_cycles[63:32];
+      REG_FI_EDGES:         reg_rdata = fi_edges;
+      REG_FI_LATENCY:       reg_rdata = 32'(fi_latency);
+      REG_FI_PHASE_OFS:     reg_rdata = 32'(fi_phase_ofs);
+      REG_FI_PHASE_NOW:     reg_rdata = 32'(fi_phase_now);
       default: begin
         for (int w = 0; w < 10; w++)
           if (reg_raddr == REG_TRACE_HEAD + 12'(4 * w))
             reg_rdata = trace_head[32 * w +: 32];
+        for (int g = 0; g < 9; g++)
+          if (reg_raddr == REG_FI_EVENTS + 12'(4 * g))
+            reg_rdata = fi_events[g];
+        for (int w = 0; w < 16; w++)
+          if (reg_raddr == REG_FI_PHASE_MASK + 12'(4 * w))
+            reg_rdata = fi_phase_mask[32 * w +: 32];
+        for (int t = 0; t < TRIGGERS; t++) begin
+          if (reg_raddr == REG_TRIG + 12'(16 * t))
+            reg_rdata = trig_ctrl[t] | {19'd0, trig_armed[t], 12'd0};
+          if (reg_raddr == REG_TRIG + 12'(16 * t + 4))
+            reg_rdata = trig_arg0[t];
+          if (reg_raddr == REG_TRIG + 12'(16 * t + 8))
+            reg_rdata = trig_arg1[t];
+          if (reg_raddr == REG_TRIG + 12'(16 * t + 12))
+            reg_rdata = trig_fired[t];
+        end
         for (int w = 0; w < MATCH_BYTES / 4; w++) begin
           if (reg_raddr == REG_UART_MATCH0 + 12'(4 * w))
             reg_rdata = match_words[0][w];

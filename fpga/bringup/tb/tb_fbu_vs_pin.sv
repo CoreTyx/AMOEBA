@@ -339,6 +339,14 @@ module tb_fbu_vs_pin;
   endfunction
 `endif
 
+  // PIN_CTRL is read back each time: triggers change its irq bits too.
+  task automatic set_pin_ctrl_bit(input int b, input logic value);
+    logic [31:0] v;
+    reg_read(REG_PIN_CTRL, v);
+    v[b] = value;
+    reg_write(REG_PIN_CTRL, v);
+  endtask
+
   task automatic reg_read64(input logic [11:0] lo, output logic [63:0] d);
     logic [31:0] l;
     logic [31:0] h;
@@ -358,7 +366,6 @@ module tb_fbu_vs_pin;
   bit     fail_reported   = 0;
   bit     done            = 0;
   int     exit_code       = -1;
-  logic [7:0] pin_ctrl    = '0;
 
   function automatic int total_errors();
     return link_errors + tb_errors;
@@ -674,8 +681,7 @@ module tb_fbu_vs_pin;
         exit_code = -1;
         tohost_cyc = -1;
         reg_write(REG_RST_PULSE, 32'(t + 1));
-        pin_ctrl[0] = 1'b1;
-        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
+        set_pin_ctrl_bit(0, 1'b1);
         run_cycles(t + 1);
       end
       "run": begin
@@ -755,13 +761,11 @@ module tb_fbu_vs_pin;
       "irq": begin
         void'($sscanf(a1, "%d", v));
         void'($sscanf(a2, "%d", t));
-        pin_ctrl[4 + v] = t[0];
-        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
+        set_pin_ctrl_bit(4 + int'(v), t[0]);
       end
       "fault_inject": begin
         void'($sscanf(a1, "%d", v));
-        pin_ctrl[1] = v[0];
-        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
+        set_pin_ctrl_bit(1, v[0]);
       end
       "dump_mem": begin
         logic [63:0] base;
@@ -785,6 +789,14 @@ module tb_fbu_vs_pin;
 `endif
         end
         $fclose(fd);
+      end
+      "dialect": ;
+      "irq_clear_on": begin
+        string text;
+        void'($sscanf(a1, "%d", v));
+        text = unescape(rest_after(ln, 2));
+        set_match(1, text);
+        arm_trigger(1, 3, 3, int'(v), 0, 0);
       end
       "finish": verdict(1, "");
       default:  tb_err($sformatf("line %0d: unknown command '%s'", lineno, cmd));
@@ -828,6 +840,96 @@ module tb_fbu_vs_pin;
     if (sent_after - sent_before != 1)
       tb_err($sformatf("wstrb: one whole-word write to UART_TX_PUSH queued %0d entries, expected 1", sent_after - sent_before));
     $display("[FBU_TB] wstrb self-test done");
+  endtask
+
+  // fbu_fi_gen against its own definition, through its counters.  Run while
+  // the chip is released and FI_CONTROL is still 0, so nothing is injected.
+  task automatic fi_run(input int mode, input logic [31:0] arg0, input logic [31:0] arg1,
+                        input int wait_cycles, input logic [511:0] mask);
+    for (int w = 0; w < 16; w++)
+      reg_write(REG_FI_PHASE_MASK + 12'(4 * w), mask[32 * w +: 32]);
+    reg_write(REG_FI_ARG0, arg0);
+    reg_write(REG_FI_ARG1, arg1);
+    reg_write(REG_FI_CTRL, 32'(mode) | 32'h400);
+    reg_write(REG_FI_CTRL, 32'(mode) | 32'h100);
+    repeat (wait_cycles) step();
+    reg_write(REG_FI_CTRL, 32'(mode) | 32'h200);
+  endtask
+
+  task automatic fi_expect(input string what, input int expect_events [9], input longint expect_high, input int expect_edges);
+    logic [31:0] v;
+    logic [63:0] high;
+    string       got = "";
+    bit          ok = 1;
+    for (int g = 0; g < 9; g++) begin
+      reg_read(REG_FI_EVENTS + 12'(4 * g), v);
+      got = {got, $sformatf(" %0d", v)};
+      if (expect_events[g] >= 0 && int'(v) != expect_events[g])
+        ok = 0;
+    end
+    reg_read64(REG_FI_HIGH_CYC_LO, high);
+    reg_read(REG_FI_EDGES, v);
+    if (expect_high >= 0 && longint'(high) != expect_high)
+      ok = 0;
+    if (expect_edges >= 0 && int'(v) != expect_edges)
+      ok = 0;
+    if (!ok)
+      tb_err($sformatf("fi %s: events%s high %0d edges %0d", what, got, high, v));
+    else
+      $display("[FBU_TB] fi %s: events%s high %0d edges %0d", what, got, high, v);
+  endtask
+
+  task automatic fi_self_test();
+    logic [511:0] mask;
+    logic [63:0]  high;
+    logic [31:0]  edges;
+    int           none [9];
+    none = '{default: -1};
+    mask = '0;
+    mask[9'h1EE] = 1'b1;
+    fi_run(6, 0, 0, 1200, mask);
+    fi_expect("SINGLE at 0x1EE", '{1, 0, 0, 0, 0, 0, 0, 0, 0}, 1, 1);
+    mask = '0;
+    mask[9'h1FE] = 1'b1;
+    fi_run(6, 0, 0, 1200, mask);
+    fi_expect("SINGLE at 0x1FE (pipeline mask samples a cycle early)", '{1, 0, 0, 0, 0, 0, 1, 0, 0}, 1, 1);
+    mask = '0;
+    mask[9'h1FF] = 1'b1;
+    fi_run(6, 0, 0, 1200, mask);
+    fi_expect("SINGLE at 0x1FF", '{0, 0, 0, 0, 0, 1, 0, 0, 0}, 1, 1);
+    fi_run(4, 3, 0, 4 * 512 + 600, '0);
+    fi_expect("BURST 3", '{9, 9, 6, 3, 3, 3, 3, 3, 3}, 3 * 512, 1);
+    fi_run(3, 37, 0, 200, '0);
+    fi_expect("PULSE 37", none, 37, 1);
+    fi_run(1, 10, 3, 1000, '0);
+    reg_read64(REG_FI_HIGH_CYC_LO, high);
+    reg_read(REG_FI_EDGES, edges);
+    if (edges < 90 || high > 3 * longint'(edges) || high < 3 * longint'(edges) - 2)
+      tb_err($sformatf("fi SQUARE 10/3: high %0d edges %0d", high, edges));
+    else
+      $display("[FBU_TB] fi SQUARE 10/3: high %0d edges %0d", high, edges);
+    reg_write(REG_FI_CTRL, 32'h400);
+    set_pin_ctrl_bit(1, 1'b1);
+    repeat (100) step();
+    set_pin_ctrl_bit(1, 1'b0);
+    reg_read64(REG_FI_HIGH_CYC_LO, high);
+    if (high < 100 || high > 120)
+      tb_err($sformatf("fi STATIC: high %0d for a 100-cycle PS pulse", high));
+    else
+      $display("[FBU_TB] fi STATIC: high %0d", high);
+  endtask
+
+  // REG_TRIG CTRL fields by name (fbu_pkg).
+  function automatic logic [31:0] trigger_ctrl(input int source, input int action, input int line,
+                                               input int length, input bit arm);
+    return (32'(source) << 0) | (32'(action) << 4) | (32'(line) << 9) |
+           (32'(arm) << 10) | (32'(length) << 16);
+  endfunction
+
+  task automatic arm_trigger(input int t, input int source, input int action, input int line,
+                             input int length, input logic [31:0] arg0);
+    reg_write(REG_TRIG + 12'(16 * t + 4), arg0);
+    reg_write(REG_TRIG + 12'(16 * t), trigger_ctrl(source, action, line, length, 1));
   endtask
 
   task automatic configure();
@@ -881,6 +983,8 @@ module tb_fbu_vs_pin;
     configure();
     if ($test$plusargs("WSTRB_TEST"))
       wstrb_self_test();
+    if ($value$plusargs("TRIG_RESET_STATE=%d", v))
+      arm_trigger(0, 4, 1, 0, 16, 32'(v));
     if ($value$plusargs("UART_DIV=%d", v))
       exec($sformatf("uart_div %0d", v), 0);
     $display("[FBU_TB] seed %0d gap %0d%% rd_lat %0d mem_lat %0d %s%s",
@@ -908,6 +1012,18 @@ module tb_fbu_vs_pin;
       exec($sformatf("run_until_tohost %0d", timeout), 3);
       check_stop();
       exec("expect_tohost 0", 4);
+      if ($test$plusargs("FI_TEST"))
+        fi_self_test();
+      if ($test$plusargs("TRIG_RESET_STATE")) begin
+        logic [31:0] fired;
+        logic [31:0] resets;
+        reg_read(REG_TRIG + 12'd12, fired);
+        reg_read(REG_RST_COUNT, resets);
+        if (fired != 1 || resets != 1)
+          tb_err($sformatf("reset trigger fired %0d times, rst_n asserted %0d times; expected 1 and 1", fired, resets));
+        else
+          $display("[FBU_TB] reset trigger fired once");
+      end
     end
     check_stop();
     verdict(1, "");

@@ -54,6 +54,7 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   input  logic              m_rsp_err,
 
   output logic [63:0]       cyc,
+  output logic [2:0]        state_now,
   output logic [31:0]       n_rd,
   output logic [31:0]       n_wr,
   output logic              tohost_seen,
@@ -152,6 +153,7 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   logic                  queue_push;
 
   assign chip_in_reset = !rst_n_pin;
+  assign state_now     = state;
   assign draw_random   = !chip_in_reset && cfg_gap_pct != '0;
   assign gap           = draw_random && rand_next_mod100 < cfg_gap_pct;
 
