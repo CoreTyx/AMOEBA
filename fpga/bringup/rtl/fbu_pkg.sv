@@ -85,6 +85,7 @@ package fbu_pkg;
   localparam logic [11:0] REG_CAPS             = 12'h008;
   localparam logic [11:0] REG_SCRATCH          = 12'h00C;
   localparam logic [11:0] REG_SOFT_RESET       = 12'h010;
+  localparam logic [11:0] REG_PARTIAL_WRITES   = 12'h014;   // writes with WSTRB != 4'hF
 
   localparam logic [11:0] REG_PIN_CTRL         = 12'h100;
   localparam logic [11:0] REG_PIN_IN           = 12'h104;

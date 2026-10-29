@@ -26,6 +26,7 @@ as a bitstream or bridge fault and is neither.  The cost is that these writes
 run at uncached speed, which is why load() does not scrub the whole carve-out.
 """
 
+import ctypes
 import mmap
 import os
 import struct
@@ -55,13 +56,18 @@ class Mmio:
             raise
 
     # ---- single word ------------------------------------------------------
-    def read(self, offset: int) -> int:
+    # One 32-bit access each, through ctypes.  struct.pack_into on the mapping
+    # reaches the PL as two halfword AXI writes on the PYNQ-Z2's Linux
+    # (diag_write_width.py), which fires a register with a side effect twice.
+    def _word(self, offset: int) -> ctypes.c_uint32:
         self._check(offset, 4)
-        return struct.unpack_from("<I", self._map, self._delta + offset)[0]
+        return ctypes.c_uint32.from_buffer(self._map, self._delta + offset)
+
+    def read(self, offset: int) -> int:
+        return self._word(offset).value
 
     def write(self, offset: int, value: int) -> None:
-        self._check(offset, 4)
-        struct.pack_into("<I", self._map, self._delta + offset, value & 0xFFFFFFFF)
+        self._word(offset).value = value & 0xFFFFFFFF
 
     # ---- bulk -------------------------------------------------------------
     def write_bytes(self, offset: int, data: bytes) -> None:
@@ -83,8 +89,7 @@ class Mmio:
         if pad:
             data = data + b"\x00" * pad
         for i in range(0, len(data), 4):
-            struct.pack_into("<I", self._map, self._delta + offset + i,
-                             struct.unpack_from("<I", data, i)[0])
+            self.write(offset + i, struct.unpack_from("<I", data, i)[0])
 
     def read_bytes(self, offset: int, length: int) -> bytes:
         self._check(offset, length)

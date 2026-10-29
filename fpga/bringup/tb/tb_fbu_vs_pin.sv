@@ -58,6 +58,7 @@ module tb_fbu_vs_pin;
   logic        awvalid = 1'b0;
   logic        awready;
   logic [31:0] wdata   = '0;
+  logic [3:0]  wstrb   = 4'hF;
   logic        wvalid  = 1'b0;
   logic        wready;
   logic [1:0]  bresp;
@@ -98,7 +99,7 @@ module tb_fbu_vs_pin;
   forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15)) board (
     .aclk(clk), .aresetn(arst_n),
     .s_axi_ctl_awaddr(awaddr[11:0]), .s_axi_ctl_awvalid(awvalid && !bus_to_mem), .s_axi_ctl_awready(ctl_awready),
-    .s_axi_ctl_wdata(wdata), .s_axi_ctl_wstrb(4'hF), .s_axi_ctl_wvalid(wvalid && !bus_to_mem),
+    .s_axi_ctl_wdata(wdata), .s_axi_ctl_wstrb(wstrb), .s_axi_ctl_wvalid(wvalid && !bus_to_mem),
     .s_axi_ctl_wready(ctl_wready), .s_axi_ctl_bresp(ctl_bresp), .s_axi_ctl_bvalid(ctl_bvalid),
     .s_axi_ctl_bready(bready && !bus_to_mem), .s_axi_ctl_araddr(araddr[11:0]),
     .s_axi_ctl_arvalid(arvalid && !bus_to_mem), .s_axi_ctl_arready(ctl_arready),
@@ -131,7 +132,7 @@ module tb_fbu_vs_pin;
   fbu_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15)) fbu (
     .clk, .arst_n,
     .s_axil_awaddr(awaddr), .s_axil_awvalid(awvalid), .s_axil_awready(awready),
-    .s_axil_wdata(wdata), .s_axil_wstrb(4'hF), .s_axil_wvalid(wvalid), .s_axil_wready(wready),
+    .s_axil_wdata(wdata), .s_axil_wstrb(wstrb), .s_axil_wvalid(wvalid), .s_axil_wready(wready),
     .s_axil_bresp(bresp), .s_axil_bvalid(bvalid), .s_axil_bready(bready),
     .s_axil_araddr(araddr), .s_axil_arvalid(arvalid), .s_axil_arready(arready),
     .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
@@ -225,6 +226,7 @@ module tb_fbu_vs_pin;
 
   logic [19:0] bus_addr;
   logic [31:0] bus_wdata;
+  logic [3:0]  bus_wstrb = 4'hF;
   logic [31:0] bus_rdata;
   bit          bus_write;
   bit          bus_busy = 0;
@@ -241,6 +243,7 @@ module tb_fbu_vs_pin;
         awaddr  = bus_addr;
         awvalid = 1'b1;
         wdata   = bus_wdata;
+        wstrb   = bus_wstrb;
         wvalid  = 1'b1;
         do begin
           aw_taken = awvalid && awready;
@@ -284,6 +287,12 @@ module tb_fbu_vs_pin;
     bus_write = 1;
     bus_busy  = 1;
     wait (!bus_busy);
+  endtask
+
+  task automatic reg_write_strobe(input logic [11:0] a, input logic [31:0] d, input logic [3:0] strobe);
+    bus_wstrb = strobe;
+    reg_write(a, d);
+    bus_wstrb = 4'hF;
   endtask
 
   task automatic reg_read(input logic [11:0] a, output logic [31:0] d);
@@ -777,6 +786,45 @@ module tb_fbu_vs_pin;
     endcase
   endtask
 
+  // A write narrower than a word merges into a data register and is ignored,
+  // and counted, by a register with a side effect (diag_write_width.py found
+  // the PYNQ's Linux splitting Python's word stores into two halfwords).
+  task automatic wstrb_self_test();
+    logic [31:0] v;
+    logic [31:0] partial_before;
+    logic [31:0] sent_before;
+    logic [31:0] partial_after;
+    logic [31:0] sent_after;
+    logic [31:0] idle_entry;
+    idle_entry = {22'd0, 2'd3, 8'd1};
+    reg_write(REG_SCRATCH, 32'h0000_0000);
+    reg_write_strobe(REG_SCRATCH, 32'hDEAD_BEEF, 4'b0011);
+    reg_read(REG_SCRATCH, v);
+    if (v != 32'h0000_BEEF)
+      tb_err($sformatf("wstrb: SCRATCH after a low-half write reads %08h, expected 0000beef", v));
+    reg_write_strobe(REG_SCRATCH, 32'hCAFE_0000, 4'b1100);
+    reg_read(REG_SCRATCH, v);
+    if (v != 32'hCAFE_BEEF)
+      tb_err($sformatf("wstrb: SCRATCH after a high-half write reads %08h, expected cafebeef", v));
+    reg_read(REG_PARTIAL_WRITES, partial_before);
+    reg_read(REG_UART_N_TX, sent_before);
+    reg_write_strobe(REG_UART_TX_PUSH, idle_entry, 4'b0011);
+    reg_write_strobe(REG_UART_TX_PUSH, idle_entry, 4'b1100);
+    repeat (4) step();
+    reg_read(REG_PARTIAL_WRITES, partial_after);
+    reg_read(REG_UART_N_TX, sent_after);
+    if (sent_after != sent_before)
+      tb_err($sformatf("wstrb: two half-word writes to UART_TX_PUSH queued %0d entries, expected 0", sent_after - sent_before));
+    if (partial_after - partial_before != 2)
+      tb_err($sformatf("wstrb: PARTIAL_WRITES rose by %0d, expected 2", partial_after - partial_before));
+    reg_write(REG_UART_TX_PUSH, idle_entry);
+    repeat (4) step();
+    reg_read(REG_UART_N_TX, sent_after);
+    if (sent_after - sent_before != 1)
+      tb_err($sformatf("wstrb: one whole-word write to UART_TX_PUSH queued %0d entries, expected 1", sent_after - sent_before));
+    $display("[FBU_TB] wstrb self-test done");
+  endtask
+
   task automatic configure();
     logic [63:0] init;
     logic [31:0] id;
@@ -826,6 +874,8 @@ module tb_fbu_vs_pin;
     arst_n = 1'b1;
     repeat (8) step();
     configure();
+    if ($test$plusargs("WSTRB_TEST"))
+      wstrb_self_test();
     if ($value$plusargs("UART_DIV=%d", v))
       exec($sformatf("uart_div %0d", v), 0);
     $display("[FBU_TB] seed %0d gap %0d%% rd_lat %0d mem_lat %0d %s%s",
