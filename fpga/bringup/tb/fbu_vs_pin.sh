@@ -242,6 +242,31 @@ fault_tests() {
   done
 }
 
+# fe_fault_cal.c: the console handshake on both sides with the pin low, then
+# the gateware's 512-phase calibration sweeps, from the reset offset and from
+# a planted one.
+calibration_tests() {
+  local base="$OUT/fe_fault_cal" d ok=1
+  rm -rf "$base"
+  bench_run "$base/bench" "$FPGA_TESTS/fe_fault_cal.c" "$FPGA_TESTS/fe_fault_cal_bench.cmd"
+  d="$base/handshake"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_fault_cal_bench.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  same_console "$base/bench/uart.log" "$d/uart.log" || ok=0
+  [ "$(verdict_of "$base/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_fault_cal/handshake" "bench=$(verdict_of "$base/bench/run.log") fbu=$(verdict_of "$d/run.log"), uart.log $(same_console "$base/bench/uart.log" "$d/uart.log" && echo identical || echo DIFFERS)"
+  for t in fe_fault_cal fe_fault_cal_planted; do
+    ok=1
+    d="$base/$t"
+    mkdir -p "$d"
+    expand_script "$FPGA_TESTS/$t.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+    fbu_run "$d" +CMD="$d/script.cmd"
+    [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+    report $ok "fe_fault_cal/$t" "$(verdict_of "$d/run.log"); $(grep -o 'delta [-0-9]*, FI_PHASE_OFS [0-9]* -> [0-9]*' "$d/run.log" | paste -sd ';')"
+  done
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -287,6 +312,7 @@ if [ $FULL = 1 ]; then
   planted_script_fault irq no_irq 's/^irq 0 1/irq 0 0/' 'never printed "IRQ3"'
   boot_gate_tests
   fault_tests
+  calibration_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"

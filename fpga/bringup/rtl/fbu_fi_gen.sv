@@ -3,12 +3,13 @@
 //
 // The pin is the chip's master enable for its own injectors.  Every injection
 // site fires when the chip's free-running 9-bit fault counter equals the
-// site's phase.  The counter is a function of the cycles since rst_n release,
-// so it is mirrored here:
+// site's phase.  The counter starts when the core leaves reset, a fixed number
+// of cycles after rst_n release, so it is mirrored here:
 //   chip_phase(t) = (link cycles since release (t) - cfg_phase_ofs) mod 512
 // and the pin decided at cycle t enables the sites at chip_phase(t + latency).
-// cfg_phase_ofs is calibrated once (CTRL-12b); cfg_latency covers this
-// module's output flop, the chip's synchronizer and its enable register.
+// cfg_phase_ofs is the core's reset synchronisers, checked by calibration
+// (CTRL-12b); cfg_latency covers this module's output flop, the chip's
+// synchronizer and its enable register.
 //
 // Modes: STATIC follows cfg_static; SQUARE high arg1 of every arg0 cycles;
 // RANDOM alternates dwells of arg0 + (rand & arg1) cycles; PULSE high arg0

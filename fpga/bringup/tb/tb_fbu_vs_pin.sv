@@ -358,10 +358,23 @@ module tb_fbu_vs_pin;
   localparam int          TRIG_SRC_MATCH1      = 3;
   localparam int          TRIG_ACT_FAULT       = 5;
   localparam logic [31:0] TRIG_REPEAT          = 32'h100;
+  localparam logic [31:0] TRIG_DISARM          = 32'h800;
   localparam int          FAULT_TRIGGER        = 2;
   localparam int          FI_MODE_PULSE        = 3;
   localparam int          FI_MODE_BURST        = 4;
+  localparam int          FI_MODE_PHASE        = 5;
+  localparam int          FI_RUNNING_BIT       = 16;
   localparam logic [31:0] FI_CTRL_CLEAR_COUNTS = 32'h400;
+
+  // calibrate_phase's units and the phase fbu_fi_gen's mask must select for
+  // their site to fire: the register file's 0x1FF, and one earlier for the
+  // pipeline registers, whose flip mask samples the enable a cycle early.
+  localparam int RF_ECC_UNIT   = 4;
+  localparam int PIPE_ECC_UNIT = 5;
+
+  function automatic int unit_mask_phase(input int unit);
+    return unit == PIPE_ECC_UNIT ? 'h1FE : 'h1FF;
+  endfunction
 
   // fe_fault_pin.c's units: each one's detect counter, and how far it may rise
   // per 512-cycle period of pin-high: one count per site event for the FT
@@ -382,6 +395,8 @@ module tb_fbu_vs_pin;
   bit     fault_match_on  = 0;
   string  console_line    = "";
   string  fi_round_lines [$];
+  string  cal_lines      [$];
+  int     phase_delta     = 0;
   bit     fail_reported   = 0;
   bit     done            = 0;
   int     exit_code       = -1;
@@ -477,6 +492,8 @@ module tb_fbu_vs_pin;
     end
     if (console_line.len() > 8 && console_line.substr(0, 7) == "FI unit ")
       fi_round_lines.push_back(console_line);
+    if (console_line.len() > 6 && console_line.substr(0, 5) == "CAL d ")
+      cal_lines.push_back(console_line);
     console_line = "";
   endtask
 
@@ -855,6 +872,90 @@ module tb_fbu_vs_pin;
             tb_err($sformatf("FI_EVENTS[%0d] = %0d, expected %0d", g, e, rounds * periods * sites[g]));
         end
         $display("[FBU_TB] fault_inject events checked: %0d rounds x %0d periods", rounds, periods);
+      end
+      "fi_phase_ofs": begin
+        void'($sscanf(a1, "%d", v));
+        reg_write(REG_FI_PHASE_OFS, 32'(v) & 32'h1FF);
+      end
+      "calibrate_phase": begin
+        int          unit;
+        int          periods;
+        int          detected;
+        int          others;
+        int          hit_phase;
+        int          hits;
+        logic [31:0] ofs;
+        void'($sscanf(a1, "%d", unit));
+        void'($sscanf(a2, "%d", periods));
+        if (unit != RF_ECC_UNIT && unit != PIPE_ECC_UNIT)
+          tb_err($sformatf("calibrate_phase: unit %0d has no single site; use %0d or %0d",
+                           unit, RF_ECC_UNIT, PIPE_ECC_UNIT));
+        hits      = 0;
+        hit_phase = -1;
+        reg_write(REG_FI_ARG0, 32'(periods));
+        reg_write(REG_FI_CTRL, 32'(FI_MODE_PHASE) | FI_CTRL_CLEAR_COUNTS);
+        for (int w = 0; w < 16; w++)
+          reg_write(REG_FI_PHASE_MASK + 12'(4 * w), 32'd0);
+        set_match(1, "CAL GO");
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER + 4), 32'd0);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER),
+                  trigger_ctrl(TRIG_SRC_MATCH1, TRIG_ACT_FAULT, 0, 0, 1) | TRIG_REPEAT);
+        cal_lines.delete();
+        for (int phase = 0; phase < 512; phase++) begin
+          logic [31:0] fired_before;
+          logic [31:0] fired_now;
+          logic [31:0] fi_ctrl;
+          reg_write(REG_FI_PHASE_MASK + 12'(4 * (phase / 32)), 32'd1 << (phase % 32));
+          if (phase % 32 == 0 && phase > 0)
+            reg_write(REG_FI_PHASE_MASK + 12'(4 * (phase / 32 - 1)), 32'd0);
+          reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_before);
+          send_entry(2'd0, 8'("0") + 8'(unit));
+          do begin
+            service();
+            reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_now);
+            reg_read(REG_FI_CTRL, fi_ctrl);
+          end while (!stopped() && (fired_now == fired_before || fi_ctrl[FI_RUNNING_BIT]));
+          send_entry(2'd0, 8'("x"));
+          while (!stopped() && cal_lines.size() == 0)
+            service();
+          if (stopped())
+            return;
+          void'($sscanf(cal_lines.pop_front(), "CAL d %d f %d", detected, others));
+          if (others != 0)
+            tb_err($sformatf("calibrate_phase: phase %0d moved other units' counters by %0d", phase, others));
+          if (detected != 0) begin
+            $display("[FBU_TB] calibrate_phase unit %0d: phase %03h detected %0d", unit, phase, detected);
+            hits++;
+            hit_phase = phase;
+          end
+        end
+        reg_write(REG_FI_PHASE_MASK + 12'(4 * 15), 32'd0);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER), TRIG_DISARM);
+        if (hits != 1) begin
+          tb_err($sformatf("calibrate_phase unit %0d: detections at %0d phases, expected exactly 1", unit, hits));
+        end else begin
+          phase_delta = hit_phase - unit_mask_phase(unit);
+          if (phase_delta > 255)
+            phase_delta -= 512;
+          if (phase_delta < -256)
+            phase_delta += 512;
+          reg_read(REG_FI_PHASE_OFS, ofs);
+          reg_write(REG_FI_PHASE_OFS, (ofs + 32'(phase_delta)) & 32'h1FF);
+          $display("[FBU_TB] calibrate_phase unit %0d: site at mask phase %03h, model %03h: delta %0d, FI_PHASE_OFS %0d -> %0d",
+                   unit, hit_phase, unit_mask_phase(unit), phase_delta, ofs, (ofs + 32'(phase_delta)) & 32'h1FF);
+        end
+      end
+      "expect_phase_ofs": begin
+        logic [31:0] ofs;
+        void'($sscanf(a1, "%d", v));
+        reg_read(REG_FI_PHASE_OFS, ofs);
+        if (ofs != 32'(v))
+          tb_err($sformatf("FI_PHASE_OFS %0d, expected %0d", ofs, v));
+      end
+      "expect_phase_delta": begin
+        void'($sscanf(a1, "%d", v));
+        if (phase_delta != int'(v))
+          tb_err($sformatf("phase delta %0d, expected %0d", phase_delta, v));
       end
       "check_fi_rounds": begin
         int          periods;
