@@ -163,11 +163,22 @@ script_test() {   # test
   mkdir -p "$d/fbu"
   expand_script "$TESTS/$t.cmd" "$d/bench/memory.lst" "$d/fbu/script.cmd"
   fbu_run "$d/fbu" +CMD="$d/fbu/script.cmd"
+  # The PS polls, so a console-triggered irq lands some cycles after the
+  # bench's and may fall on the other side of a line fill: transactions and
+  # irq changes are compared as two sequences.
   strip_error_text "$d/bench/pin_trace.log" "$d/a.log"
-  cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a.log" "$d/fbu/pin_trace.log" --no-cycles 2>&1 | head -1 || true)
+  grep -v '^I ' "$d/a.log" > "$d/a_link.log" || true
+  grep -v '^I ' "$d/fbu/pin_trace.log" > "$d/b_link.log" || true
+  grep '^I ' "$d/a.log" > "$d/a_irq.log" || true
+  grep '^I ' "$d/fbu/pin_trace.log" > "$d/b_irq.log" || true
+  cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a_link.log" "$d/b_link.log" --no-cycles 2>&1 | head -1 || true)
+  local irq_cmp
+  irq_cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a_irq.log" "$d/b_irq.log" --no-cycles 2>&1 | head -1 || true)
+  [[ "$irq_cmp" == MATCH* ]] || ok=0
+  cmp="link $cmp; irq $irq_cmp"
   bv=$(verdict_of "$d/bench/run.log")
   fv=$(verdict_of "$d/fbu/run.log")
-  [[ "$cmp" == MATCH* ]] || ok=0
+  [[ "$cmp" == "link MATCH"* ]] || ok=0
   cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" || ok=0
   [ "$bv" = PASS ] && [ "$fv" = PASS ] || ok=0
   report $ok "$t/script" "bench=$bv fbu=$fv $cmp, uart.log $(cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" && echo identical || echo DIFFERS)"

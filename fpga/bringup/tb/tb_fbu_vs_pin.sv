@@ -1,12 +1,13 @@
 ///////////////////////////////////////////////////////////////////////////////
 // tb_fbu_vs_pin.sv -- the bring-up gateware against the pin bench.
 //
-// forte_emu_dut (frozen forte_top with the FPGA's stand-ins) driven by
-// fbu_link_slave, fbu_pin_ctl and fbu_uart.  The PS is modelled here: it
-// interprets the pin bench's command language (+CMD, same commands and
-// meaning as hvl/pin/pin_tb.sv) by setting the gateware's controls, and writes
-// pin_trace.log and uart.log in the bench's formats.  Without +CMD it runs the
-// bench's default flow.  fpga/bringup/tb/fbu_vs_pin.sh compares the results.
+// forte_emu_dut (frozen forte_top with the FPGA's stand-ins) driven by fbu_top,
+// with a behavioural line memory behind it.  The PS is modelled here and
+// touches fbu_top only through its AXI4-Lite registers, polling in one loop as
+// sw/forte does: it interprets the pin bench's command language (+CMD, same
+// commands and meaning as hvl/pin/pin_tb.sv), drains the link trace and the
+// console, and writes pin_trace.log and uart.log in the bench's formats.
+// Without +CMD it runs the bench's default flow.  fbu_vs_pin.sh compares.
 //
 // Plusargs as the bench: +MEMLST +CMD +FPGA_SEED +FPGA_GAP_PCT +FPGA_RD_LAT
 // +FPGA_MEM +FPGA_WDOG +FPGA_MUTATE +TOHOST +TIMEOUT +MAX_ERRORS +UART_DIV.
@@ -41,120 +42,60 @@ module tb_fbu_vs_pin;
   string       trace_path  = "pin_trace.log";
   string       uart_path   = "uart.log";
   bit          det         = 1;
+  bit          gate_enable   = 0;
+  bit          gate_selftest = 0;
+  int          gate_retries  = 2;
 
-  // ---- PS-side controls ----
-  logic        arst_n          = 1'b0;
-  logic        prng_load       = 1'b0;
-  logic [63:0] prng_init_v     = '0;
-  logic        release_chip    = 1'b0;
-  logic [1:0]  irq_level       = '0;
-  logic        fault_level     = 1'b0;
-  logic        pulse_start     = 1'b0;
-  logic [31:0] pulse_cycles    = '0;
-  logic        gate_enable     = 1'b0;
-  logic        gate_selftest   = 1'b0;
-  logic [3:0]  gate_retries    = 4'd2;
-  logic [23:0] uart_bit_cycles = 24'(16 << PRESCALE);
-  logic [7:0]  uart_gap_bits   = '0;
-  logic        tx_push         = 1'b0;
-  logic [9:0]  tx_entry        = '0;
-  logic        rx_pop;
-
-  logic [$clog2(MATCH_BYTES + 1)-1:0] match_len     [2] = '{default: '0};
-  logic [8*MATCH_BYTES-1:0]           match_pattern [2] = '{default: '0};
-  logic                               match_clear   [2] = '{default: 1'b0};
-  logic                               match_hit     [2];
-  logic                               match_pulse   [2];
+  // ---- AXI4-Lite, driven by the PS model ----
+  logic        arst_n  = 1'b0;
+  logic [11:0] awaddr  = '0;
+  logic        awvalid = 1'b0;
+  logic        awready;
+  logic [31:0] wdata   = '0;
+  logic        wvalid  = 1'b0;
+  logic        wready;
+  logic [1:0]  bresp;
+  logic        bvalid;
+  logic        bready  = 1'b0;
+  logic [11:0] araddr  = '0;
+  logic        arvalid = 1'b0;
+  logic        arready;
+  logic [31:0] rdata;
+  logic [1:0]  rresp;
+  logic        rvalid;
+  logic        rready  = 1'b0;
 
   // ---- pins ----
   logic              rst_n;
   logic [1:0]        irq;
-  logic              fault_inject, test_mode, scan_en, uart_rx, uart_rx_from_uart;
-  logic [LINK_W-1:0] io_o, io_i;
-  logic              io_oe, ready, rvalid;
+  logic              fault_inject, test_mode, scan_en, uart_rx;
+  logic [LINK_W-1:0] io_o, io_oe, io_i;
+  logic              ready, rvalid_pin;
   logic              dir, req, wr, clk_out, uart_tx, status;
 
   forte_emu_dut dut (
     .core_clk(clk), .rst_n,
-    .fpga_io_o(io_o), .fpga_io_oe({LINK_W{io_oe}}), .fpga_io_i(io_i),
+    .fpga_io_o(io_o), .fpga_io_oe(io_oe), .fpga_io_i(io_i),
     .dir, .req, .wr, .clk_out, .uart_tx, .status,
-    .ready, .rvalid, .irq, .uart_rx,
+    .ready, .rvalid(rvalid_pin), .irq, .uart_rx,
     .test_mode, .scan_en, .fault_inject);
 
-  // ---- link slave ----
   logic              m_req_valid, m_req_ready, m_req_wr, m_rsp_valid;
   logic [31:0]       m_req_addr;
   logic [LINE_W-1:0] m_req_data, m_rsp_data;
-  logic [63:0]       cyc, tohost_val, first_err_cyc, rec_cyc, rec_tohost_cyc, rec_tohost_val;
-  logic [31:0]       n_rd, n_wr, err_now, err_sticky, err_count, rec_addr;
-  logic [4:0]        first_err;
-  logic              tohost_seen, rec_valid, rec_wr, rec_tohost;
-  logic [LINE_W-1:0] rec_line;
 
-  fbu_link_slave #(.BEATS(BEATS)) slave (
+  fbu_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15)) fbu (
     .clk, .arst_n,
-    .cfg_det(det), .cfg_gap_pct(7'(gap_pct)), .cfg_rd_lat(16'(rd_lat)), .cfg_wdog(16'(wdog)),
-    .cfg_mem_base(32'h8000_0000), .cfg_mem_limit(32'h8FFF_FFFF), .cfg_reset_vec(32'h8000_0000),
-    .cfg_tohost_addr(tohost_addr[31:0]), .cfg_mutate(2'(mutate)),
-    .prng_load, .prng_init(prng_init_v),
-    .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o, .io_oe, .ready, .rvalid,
-    .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
-    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0),
-    .cyc, .n_rd, .n_wr, .tohost_seen, .tohost_val,
-    .err_now, .err_sticky, .err_count, .first_err, .first_err_cyc,
-    .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
-    .rec_tohost, .rec_tohost_cyc, .rec_tohost_val);
-
-  // ---- pin control ----
-  logic [31:0] reset_count;
-  logic [63:0] cycles_total;
-  logic [15:0] gate_passes, gate_fails;
-  logic        gate_gave_up;
-  logic [32:0] gate_last_header;
-
-  fbu_pin_ctl pin_ctl (
-    .clk, .arst_n,
-    .cfg_release(release_chip), .cfg_irq(irq_level), .cfg_fault_inject(fault_level),
-    .cfg_test_mode(1'b0), .cfg_scan_en(1'b0), .cfg_rx_force_en(1'b0), .cfg_rx_force_val(1'b1),
-    .reset_pulse_start(pulse_start), .reset_pulse_cycles(pulse_cycles),
-    .cfg_gate_enable(gate_enable), .cfg_gate_selftest(gate_selftest),
-    .cfg_gate_retries(gate_retries), .cfg_gate_timeout(16'd1000),
-    .req, .wr, .io_i, .uart_rx_from_uart,
+    .s_axil_awaddr(awaddr), .s_axil_awvalid(awvalid), .s_axil_awready(awready),
+    .s_axil_wdata(wdata), .s_axil_wstrb(4'hF), .s_axil_wvalid(wvalid), .s_axil_wready(wready),
+    .s_axil_bresp(bresp), .s_axil_bvalid(bvalid), .s_axil_bready(bready),
+    .s_axil_araddr(araddr), .s_axil_arvalid(arvalid), .s_axil_arready(arready),
+    .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
     .rst_n, .irq, .fault_inject, .test_mode, .scan_en, .uart_rx,
-    .reset_count, .cycles_total, .gate_passes, .gate_fails, .gate_gave_up, .gate_last_header);
-
-  // ---- console ----
-  logic [8:0]  rx_head;
-  logic        rx_valid, rx_overflow, tx_full, tx_overflow, tx_busy;
-  logic [31:0] n_uart_rx, n_uart_tx, n_framing_errors;
-
-  fbu_uart #(.MATCH_BYTES(MATCH_BYTES)) uart (
-    .clk, .arst_n, .clear(1'b0),
-    .cfg_rx_bit_cycles(uart_bit_cycles), .cfg_tx_bit_period_q8({uart_bit_cycles, 8'd0}),
-    .cfg_tx_gap_bits(uart_gap_bits),
-    .uart_tx, .uart_rx(uart_rx_from_uart),
-    .rx_head, .rx_valid, .rx_pop, .rx_level(), .rx_overflow,
-    .tx_push, .tx_entry, .tx_full, .tx_overflow, .tx_level(), .tx_busy,
-    .n_rx(n_uart_rx), .n_tx(n_uart_tx), .n_framing_errors,
-    .cfg_match_len(match_len), .cfg_match_pattern(match_pattern),
-    .match_clear, .match_hit, .match_pulse);
-
-  // ---- link trace ----
-  logic [319:0] trace_head;
-  logic         trace_valid;
-  logic         trace_pop;
-  logic [11:0]  trace_level;
-  logic [31:0]  trace_written, trace_dropped;
-  logic         trace_overflow;
-
-  fbu_link_trace #(.BEATS(BEATS)) trace (
-    .clk, .arst_n, .clear(1'b0),
-    .cfg_enable(1'b1), .cfg_stop_on_error(max_errors == 1),
-    .link_cyc(cyc), .chip_in_reset(!rst_n),
-    .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line, .rec_tohost,
-    .rec_end_cyc(rec_tohost_cyc), .rec_tohost_val, .err_now, .irq,
-    .head(trace_head), .head_valid(trace_valid), .pop(trace_pop), .level(trace_level),
-    .records_written(trace_written), .records_dropped(trace_dropped), .overflow(trace_overflow));
+    .io_o, .io_oe, .ready, .rvalid(rvalid_pin),
+    .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
+    .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
+    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0));
 
   // ---- behavioural line memory, as pin_link_agent's ----
   logic [63:0] mem [longint unsigned];
@@ -225,37 +166,125 @@ module tb_fbu_vs_pin;
     end
   end
 
-  // ---- errors, trace and console log ----
-  // Link errors stop the trace inside fbu_link_trace.  Errors only this
-  // testbench sees (console, exit code) stop it here, the same way.
+  // ---- AXI4-Lite accesses ----
+  // One process performs every bus handshake; the PS code posts a request and
+  // waits for it, so each access costs a few lines wherever it is used.
+  task automatic step();
+    @(posedge clk);
+    #1;
+  endtask
+
+  logic [11:0] bus_addr;
+  logic [31:0] bus_wdata;
+  logic [31:0] bus_rdata;
+  bit          bus_write;
+  bit          bus_busy = 0;
+
+  initial begin : bus_server
+    bit aw_taken;
+    bit w_taken;
+    bit b_taken;
+    bit ar_taken;
+    bit r_taken;
+    forever begin
+      wait (bus_busy);
+      if (bus_write) begin
+        awaddr  = bus_addr;
+        awvalid = 1'b1;
+        wdata   = bus_wdata;
+        wvalid  = 1'b1;
+        do begin
+          aw_taken = awvalid && awready;
+          w_taken  = wvalid && wready;
+          step();
+          if (aw_taken)
+            awvalid = 1'b0;
+          if (w_taken)
+            wvalid = 1'b0;
+        end while (awvalid || wvalid);
+        bready = 1'b1;
+        do begin
+          b_taken = bvalid;
+          step();
+        end while (!b_taken);
+        bready = 1'b0;
+      end else begin
+        araddr  = bus_addr;
+        arvalid = 1'b1;
+        do begin
+          ar_taken = arready;
+          step();
+        end while (!ar_taken);
+        arvalid = 1'b0;
+        rready  = 1'b1;
+        do begin
+          r_taken   = rvalid;
+          bus_rdata = rdata;
+          step();
+        end while (!r_taken);
+        rready = 1'b0;
+      end
+      bus_busy = 0;
+    end
+  end
+
+  task automatic reg_write(input logic [11:0] a, input logic [31:0] d);
+    bus_addr  = a;
+    bus_wdata = d;
+    bus_write = 1;
+    bus_busy  = 1;
+    wait (!bus_busy);
+  endtask
+
+  task automatic reg_read(input logic [11:0] a, output logic [31:0] d);
+    bus_addr  = a;
+    bus_write = 0;
+    bus_busy  = 1;
+    wait (!bus_busy);
+    d = bus_rdata;
+  endtask
+
+  task automatic reg_read64(input logic [11:0] lo, output logic [63:0] d);
+    logic [31:0] l;
+    logic [31:0] h;
+    reg_read(lo, l);
+    reg_read(lo + 12'd4, h);
+    d = {h, l};
+  endtask
+
+  // ---- PS state ----
   int     trace_fd;
   int     uart_fd;
-  bit     finished    = 0;
-  longint stop_cyc    = -1;
-  longint tb_stop_cyc = -1;
-  int     link_errors = 0;
-  int     tb_errors   = 0;
+  int     link_errors     = 0;
+  int     tb_errors       = 0;
+  longint tb_stop_cyc     = -1;
+  longint tohost_cyc      = -1;
+  bit     fail_pattern_on = 0;
+  bit     fail_reported   = 0;
+  bit     done            = 0;
+  int     exit_code       = -1;
+  logic [7:0] pin_ctrl    = '0;
 
   function automatic int total_errors();
     return link_errors + tb_errors;
   endfunction
 
-  function automatic void tb_err(input string m);
+  task automatic tb_err(input string m);
+    logic [63:0] c;
     tb_errors++;
-    $display("[FBU_TB] ERROR cyc %0d: %s", cyc, m);
-    if (total_errors() >= max_errors && stop_cyc < 0) begin
-      stop_cyc    = longint'(cyc) + 1;
-      tb_stop_cyc = stop_cyc;
-    end
-  endfunction
+    reg_read64(REG_LINK_CYC_LO, c);
+    $display("[FBU_TB] ERROR cyc %0d: %s", c, m);
+    if (total_errors() >= max_errors && tb_stop_cyc < 0)
+      tb_stop_cyc = longint'(c) + 1;
+  endtask
 
-  always @(posedge clk) begin
-    if (!finished && err_now != '0 && stop_cyc < 0) begin
-      link_errors += $countones(err_now);
-      if (total_errors() >= max_errors)
-        stop_cyc = longint'(cyc) + 1;
-    end
-  end
+  function automatic bit after_stop(input logic [63:0] at);
+    if (tb_stop_cyc >= 0 && longint'(at) > tb_stop_cyc)
+      return 1;
+    if (tohost_cyc >= 0 && longint'(at) > tohost_cyc)
+      return 1;
+    return 0;
+  endfunction
 
   function automatic void write_record(input logic [319:0] r);
     logic [3:0]  kind;
@@ -267,7 +296,7 @@ module tb_fbu_vs_pin;
     end_at = r[319:256];
     case (kind)
       4'd1: begin
-        if (tb_stop_cyc >= 0 && longint'(end_at) > tb_stop_cyc)
+        if (after_stop(end_at))
           return;
         s = "";
         for (int b = 0; b < BEATS; b++)
@@ -275,11 +304,15 @@ module tb_fbu_vs_pin;
         $fdisplay(trace_fd, "L %0d %s %08h%s", at, r[27] ? "W" : "R", r[127:96], s);
       end
       4'd2: begin
-        if (tb_stop_cyc >= 0 && longint'(at) > tb_stop_cyc)
+        if (after_stop(at))
           return;
         $fdisplay(trace_fd, "T %0d %016h", at, r[191:128]);
+        if (tohost_cyc < 0)
+          tohost_cyc = longint'(at);
       end
       4'd3: begin
+        if (after_stop(at))
+          return;
         for (int i = 1; i < 32; i++) begin
           if (r[96 + i]) begin
             link_err_t e = link_err_t'(i);
@@ -287,64 +320,146 @@ module tb_fbu_vs_pin;
           end
         end
       end
-      4'd4: $fdisplay(trace_fd, "I %0d %0d %0d", at, r[25:24], r[23]);
+      4'd4: begin
+        if (after_stop(at))
+          return;
+        $fdisplay(trace_fd, "I %0d %0d %0d", at, r[25:24], r[23]);
+      end
       default: $display("[FBU_TB] ERROR: trace record of unknown kind %0d", kind);
     endcase
   endfunction
 
-  assign trace_pop = trace_valid;
-
-  always @(posedge clk) begin
-    if (trace_valid && !finished)
-      write_record(trace_head);
-  end
-
-  assign rx_pop = rx_valid;
-
-  always @(posedge clk) begin
-    if (rx_valid && !finished) begin
-      if (rx_head[8])
-        tb_err($sformatf("framing error on uart_tx (byte %02h)", rx_head[7:0]));
-      else
-        $fwrite(uart_fd, "%c", rx_head[7:0]);
+  task automatic drain_trace(input int max_records);
+    logic [31:0]  stat;
+    logic [319:0] r;
+    logic [31:0]  w;
+    for (int n = 0; n < max_records; n++) begin
+      reg_read(REG_TRACE_STAT, stat);
+      if (!stat[0])
+        return;
+      for (int i = 0; i < 10; i++) begin
+        reg_read(REG_TRACE_HEAD + 12'(4 * i), w);
+        r[32 * i +: 32] = w;
+      end
+      reg_write(REG_TRACE_POP, 32'd1);
+      write_record(r);
     end
-    if (match_pulse[1] && !finished)
-      tb_err("console printed the fail pattern");
-  end
+  endtask
 
-  // ---- the PS model ----
-  task automatic cycles(input longint n);
-    repeat (n) @(posedge clk);
+  task automatic drain_uart(input int max_bytes);
+    logic [31:0] d;
+    for (int n = 0; n < max_bytes; n++) begin
+      reg_read(REG_UART_RX_DATA, d);
+      if (!d[31])
+        return;
+      reg_write(REG_UART_RX_POP, 32'd1);
+      if (d[8])
+        tb_err($sformatf("framing error on uart_tx (byte %02h)", d[7:0]));
+      else
+        $fwrite(uart_fd, "%c", d[7:0]);
+    end
+  endtask
+
+  task automatic service();
+    logic [31:0] v;
+    reg_read(REG_LINK_ERR_COUNT, v);
+    link_errors = int'(v);
+    if (fail_pattern_on && !fail_reported) begin
+      reg_read(REG_UART_MATCH_CTRL, v);
+      if (v[1]) begin
+        fail_reported = 1;
+        tb_err("console printed the fail pattern");
+      end
+    end
+    drain_uart(16);
+    drain_trace(8);
+  endtask
+
+  function automatic bit stopped();
+    return total_errors() >= max_errors;
+  endfunction
+
+  task automatic verdict(input bit pass, input string why);
+    logic [31:0] stat;
+    logic [31:0] v [8];
+    if (done)
+      return;
+    done = 1;
+    repeat (8) step();
+    do begin
+      drain_trace(1 << 16);
+      drain_uart(1 << 16);
+      reg_read(REG_TRACE_STAT, stat);
+    end while (stat[0]);
+    $fclose(trace_fd);
+    $fclose(uart_fd);
+    reg_read(REG_LINK_RD, v[0]);
+    reg_read(REG_LINK_WR, v[1]);
+    reg_read(REG_UART_N_RX, v[2]);
+    reg_read(REG_UART_N_TX, v[3]);
+    reg_read(REG_TRACE_WRITTEN, v[4]);
+    reg_read(REG_TRACE_DROPPED, v[5]);
+    reg_read(REG_BOOTGATE_STAT, v[6]);
+    reg_read(REG_BOOTGATE_PASSES, v[7]);
+    $display("[FBU_TB] link_rd=%0d link_wr=%0d uart_rx=%0d uart_tx=%0d errors=%0d",
+             v[0], v[1], v[2], v[3], total_errors());
+    $display("[FBU_TB] trace written=%0d dropped=%0d", v[4], v[5]);
+    $display("[FBU_TB] gate passes=%0d fails=%0d gave_up=%0d", v[7][15:0], v[6][15:0], v[6][16]);
+    if (pass && total_errors() == 0)
+      $display("PIN_TB_RESULT: PASS");
+    else if (!pass)
+      $display("PIN_TB_RESULT: FAIL %s", why);
+    else
+      $display("PIN_TB_RESULT: FAIL %0d checker errors", total_errors());
+    $finish;
+  endtask
+
+  task automatic check_stop();
+    service();
+    if (stopped())
+      verdict(0, $sformatf("%0d checker errors", total_errors()));
+  endtask
+
+  // Wait n chip cycles, servicing as the PS would.
+  task automatic run_cycles(input longint n);
+    logic [63:0] start;
+    logic [63:0] now_cyc;
+    reg_read64(REG_CYC_TOTAL_LO, start);
+    do begin
+      service();
+      if (stopped())
+        return;
+      reg_read64(REG_CYC_TOTAL_LO, now_cyc);
+    end while (now_cyc - start < 64'(n));
   endtask
 
   task automatic set_match(input int m, input string text);
-    match_len[m]     <= '0;
-    match_pattern[m] <= '0;
-    @(posedge clk);
-    for (int i = 0; i < text.len() && i < MATCH_BYTES; i++)
-      match_pattern[m][8 * i +: 8] <= text.getc(text.len() - 1 - i);
-    match_len[m]   <= ($clog2(MATCH_BYTES + 1))'(text.len());
-    match_clear[m] <= 1'b1;
-    @(posedge clk);
-    match_clear[m] <= 1'b0;
+    logic [31:0] lens;
+    logic [31:0] w;
+    logic [11:0] base;
+    base = (m == 0) ? REG_UART_MATCH0 : REG_UART_MATCH1;
+    for (int word = 0; word < MATCH_BYTES / 4; word++) begin
+      w = '0;
+      for (int b = 0; b < 4; b++) begin
+        int i;
+        i = 4 * word + b;
+        if (i < text.len())
+          w[8 * b +: 8] = text.getc(text.len() - 1 - i);
+      end
+      reg_write(base + 12'(4 * word), w);
+    end
+    reg_read(REG_UART_MATCH_LEN, lens);
+    lens[8 * m +: 8] = 8'(text.len());
+    reg_write(REG_UART_MATCH_LEN, lens);
+    reg_write(REG_UART_MATCH_CTRL, 32'(1 << m));
   endtask
 
   task automatic send_entry(input logic [1:0] kind, input logic [7:0] data);
-    while (tx_full)
-      @(posedge clk);
-    tx_entry <= {kind, data};
-    tx_push  <= 1'b1;
-    @(posedge clk);
-    tx_push  <= 1'b0;
-  endtask
-
-  task automatic do_reset(input longint n);
-    pulse_cycles <= 32'(n + 1);
-    pulse_start  <= 1'b1;
-    release_chip <= 1'b1;
-    @(posedge clk);
-    pulse_start  <= 1'b0;
-    cycles(n + 1);
+    logic [31:0] stat;
+    do
+      reg_read(REG_UART_STAT, stat);
+    while (stat[1]);
+    reg_write(REG_UART_TX_PUSH, {22'd0, kind, data});
   endtask
 
   function automatic string rest_after(input string s, input int n);
@@ -383,41 +498,6 @@ module tb_fbu_vs_pin;
     return o;
   endfunction
 
-  bit    done       = 0;
-  int    exit_code  = -1;
-  bit    have_fail_pattern = 0;
-
-  task automatic verdict(input bit pass, input string why);
-    link_err_t fe;
-    if (done)
-      return;
-    done = 1;
-    repeat (4) @(posedge clk);
-    for (int i = 0; i < 100 && trace_valid; i++)
-      @(posedge clk);
-    finished = 1;
-    $fclose(trace_fd);
-    $fclose(uart_fd);
-    fe = link_err_t'(first_err);
-    $display("[FBU_TB] cycles=%0d link_rd=%0d link_wr=%0d uart_rx=%0d uart_tx=%0d errors=%0d first=%s@%0d",
-             cyc, n_rd, n_wr, n_uart_rx, n_uart_tx, total_errors(), fe.name(), first_err_cyc);
-    $display("[FBU_TB] trace written=%0d dropped=%0d overflow=%0d", trace_written, trace_dropped, trace_overflow);
-    $display("[FBU_TB] gate passes=%0d fails=%0d gave_up=%0d last_header=%09h resets=%0d",
-             gate_passes, gate_fails, gate_gave_up, gate_last_header, reset_count);
-    if (pass && total_errors() == 0)
-      $display("PIN_TB_RESULT: PASS");
-    else if (!pass)
-      $display("PIN_TB_RESULT: FAIL %s", why);
-    else
-      $display("PIN_TB_RESULT: FAIL %0d checker errors", total_errors());
-    $finish;
-  endtask
-
-  task automatic check_stop();
-    if (stop_cyc >= 0)
-      verdict(0, $sformatf("%0d checker errors", total_errors()));
-  endtask
-
   task automatic exec(input string raw, input int lineno);
     string       ln;
     string       cmd;
@@ -427,6 +507,10 @@ module tb_fbu_vs_pin;
     int          n;
     longint      t;
     longint      v;
+    logic [31:0] r;
+    logic [63:0] r64;
+    logic [63:0] start;
+    logic [63:0] now_cyc;
     ln = chomp(raw);
     n  = $sscanf(ln, "%s %s %s %s", cmd, a1, a2, a3);
     if (n < 1 || cmd.getc(0) == "#")
@@ -448,36 +532,50 @@ module tb_fbu_vs_pin;
       "reset": begin
         void'($sscanf(a1, "%d", t));
         exit_code = -1;
-        do_reset(t);
+        tohost_cyc = -1;
+        reg_write(REG_RST_PULSE, 32'(t + 1));
+        pin_ctrl[0] = 1'b1;
+        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
+        run_cycles(t + 1);
       end
       "run": begin
         void'($sscanf(a1, "%d", t));
-        for (v = 0; v < t && stop_cyc < 0; v++)
-          @(posedge clk);
+        run_cycles(t);
       end
       "run_until_tohost": begin
         void'($sscanf(a1, "%d", t));
-        for (v = 0; v < t && !tohost_seen && stop_cyc < 0; v++)
-          @(posedge clk);
-        check_stop();
-        if (!tohost_seen)
+        reg_read64(REG_CYC_TOTAL_LO, start);
+        do begin
+          service();
+          if (stopped())
+            return;
+          reg_read(REG_TOHOST_STAT, r);
+          reg_read64(REG_CYC_TOTAL_LO, now_cyc);
+        end while (!r[0] && now_cyc - start < 64'(t));
+        if (!r[0])
           verdict(0, $sformatf("timeout: no tohost write in %0d cycles", t));
-        exit_code = int'(tohost_val >> 1);
-        $display("[FBU_TB] tohost = %h (exit code %0d) after %0d cycles", tohost_val, exit_code, v);
-        if (tohost_val[0] !== 1'b1)
-          tb_err($sformatf("tohost %h has bit 0 clear", tohost_val));
+        reg_read64(REG_TOHOST_VAL_LO, r64);
+        exit_code = int'(r64 >> 1);
+        $display("[FBU_TB] tohost = %h (exit code %0d)", r64, exit_code);
+        if (r64[0] !== 1'b1)
+          tb_err($sformatf("tohost %h has bit 0 clear", r64));
       end
       "run_until_uart": begin
         string want;
         void'($sscanf(a1, "%d", t));
         want = unescape(rest_after(ln, 2));
         set_match(0, want);
-        for (v = 0; v < t && !match_hit[0] && stop_cyc < 0; v++)
-          @(posedge clk);
-        check_stop();
-        if (!match_hit[0])
+        reg_read64(REG_CYC_TOTAL_LO, start);
+        do begin
+          service();
+          if (stopped())
+            return;
+          reg_read(REG_UART_MATCH_CTRL, r);
+          reg_read64(REG_CYC_TOTAL_LO, now_cyc);
+        end while (!r[0] && now_cyc - start < 64'(t));
+        if (!r[0])
           verdict(0, $sformatf("timeout: console never printed \"%s\" in %0d cycles", want, t));
-        $display("[FBU_TB] console printed \"%s\" after %0d cycles", want, v);
+        $display("[FBU_TB] console printed \"%s\"", want);
       end
       "expect_tohost": begin
         void'($sscanf(a1, "%d", v));
@@ -486,8 +584,8 @@ module tb_fbu_vs_pin;
       end
       "uart_div": begin
         void'($sscanf(a1, "%d", v));
-        uart_bit_cycles <= 24'(16 * (v << PRESCALE));
-        @(posedge clk);
+        reg_write(REG_UART_RX_BIT, 32'(16 * (v << PRESCALE)));
+        reg_write(REG_UART_TX_PERIOD, 32'(16 * (v << PRESCALE)) << 8);
       end
       "uart_send": begin
         string text;
@@ -501,25 +599,24 @@ module tb_fbu_vs_pin;
       end
       "uart_gap": begin
         void'($sscanf(a1, "%d", v));
-        uart_gap_bits <= 8'(v);
-        @(posedge clk);
+        reg_write(REG_UART_TX_GAP, 32'(v));
       end
       "uart_fail": begin
-        if (have_fail_pattern)
+        if (fail_pattern_on)
           tb_err("uart_fail: the gateware matches one fail pattern");
-        have_fail_pattern = 1;
+        fail_pattern_on = 1;
         set_match(1, unescape(rest_after(ln, 1)));
       end
       "irq": begin
         void'($sscanf(a1, "%d", v));
         void'($sscanf(a2, "%d", t));
-        irq_level[v] <= t[0];
-        @(posedge clk);
+        pin_ctrl[4 + v] = t[0];
+        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
       end
       "fault_inject": begin
         void'($sscanf(a1, "%d", v));
-        fault_level <= v[0];
-        @(posedge clk);
+        pin_ctrl[1] = v[0];
+        reg_write(REG_PIN_CTRL, {24'd0, pin_ctrl});
       end
       "dump_mem": begin
         logic [63:0] base;
@@ -534,6 +631,23 @@ module tb_fbu_vs_pin;
       "finish": verdict(1, "");
       default:  tb_err($sformatf("line %0d: unknown command '%s'", lineno, cmd));
     endcase
+  endtask
+
+  task automatic configure();
+    logic [63:0] init;
+    logic [31:0] id;
+    reg_read(REG_ID, id);
+    if (id != FBU_ID)
+      verdict(0, $sformatf("ID register reads %08h, expected %08h", id, FBU_ID));
+    init = prng_seed_state(seed);
+    reg_write(REG_LINK_CFG, {16'(rd_lat), 8'd0, 7'(gap_pct), det});
+    reg_write(REG_LINK_WDOG, {14'd0, 2'(mutate), 16'(wdog)});
+    reg_write(REG_PRNG_INIT_LO, init[31:0]);
+    reg_write(REG_PRNG_INIT_HI, init[63:32]);
+    reg_write(REG_PRNG_LOAD, 32'd1);
+    reg_write(REG_TOHOST_ADDR, tohost_addr[31:0]);
+    reg_write(REG_TRACE_CTRL, {30'd0, max_errors == 1, 1'b1});
+    reg_write(REG_BOOTGATE, {16'd1000, 8'd0, 4'(gate_retries), 2'b00, gate_selftest, gate_enable});
   endtask
 
   initial begin
@@ -553,25 +667,23 @@ module tb_fbu_vs_pin;
     if ($value$plusargs("FPGA_MEM=%s", s))     mem_policy = s;
     if ($value$plusargs("MEM_LAT=%d", v))      mem_lat = v;
     if ($value$plusargs("MAX_ERRORS=%d", v))   max_errors = v;
-    if ($value$plusargs("UART_DIV=%d", v))     uart_bit_cycles = 24'(16 * (v << PRESCALE));
     if ($value$plusargs("TOHOST=%h", tohost_addr)) ;
     if ($value$plusargs("TIMEOUT=%d", timeout)) ;
     if ($value$plusargs("TRACE=%s", s))        trace_path = s;
     if ($value$plusargs("UART_LOG=%s", s))     uart_path = s;
     if ($test$plusargs("NODET"))               det = 0;
-    if ($test$plusargs("BOOT_GATE"))           gate_enable = 1'b1;
-    if ($test$plusargs("BOOT_GATE_SELFTEST"))  gate_selftest = 1'b1;
-    if ($value$plusargs("BOOT_GATE_RETRIES=%d", v)) gate_retries = 4'(v);
+    if ($test$plusargs("BOOT_GATE"))           gate_enable = 1;
+    if ($test$plusargs("BOOT_GATE_SELFTEST"))  gate_selftest = 1;
+    if ($value$plusargs("BOOT_GATE_RETRIES=%d", v)) gate_retries = v;
     trace_fd = $fopen(trace_path, "w");
     uart_fd  = $fopen(uart_path, "w");
 
-    prng_init_v = prng_seed_state(seed);
-    cycles(2);
-    arst_n <= 1'b1;
-    @(posedge clk);
-    prng_load <= 1'b1;
-    @(posedge clk);
-    prng_load <= 1'b0;
+    repeat (2) step();
+    arst_n = 1'b1;
+    repeat (8) step();
+    configure();
+    if ($value$plusargs("UART_DIV=%d", v))
+      exec($sformatf("uart_div %0d", v), 0);
     $display("[FBU_TB] seed %0d gap %0d%% rd_lat %0d mem_lat %0d %s%s",
              seed, gap_pct, rd_lat, mem_lat, det ? "DET" : "natural",
              gate_enable ? (gate_selftest ? " boot-gate-selftest" : " boot-gate") : "");
@@ -593,9 +705,12 @@ module tb_fbu_vs_pin;
         verdict(0, "neither +CMD nor +MEMLST given");
       exec({"load_lst ", memlst}, 1);
       exec("reset 16", 2);
+      check_stop();
       exec($sformatf("run_until_tohost %0d", timeout), 3);
+      check_stop();
       exec("expect_tohost 0", 4);
     end
+    check_stop();
     verdict(1, "");
   end
 
