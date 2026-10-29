@@ -2,7 +2,11 @@
 
 Same commands and meaning as the bench; `run`, `run_until_*` and timeouts count
 chip cycles from CYC_TOTAL.  The PS polls, so console-triggered commands land
-some cycles later than in the bench."""
+some cycles later than in the bench.
+
+Console waits search the text received since the previous wait was satisfied,
+as the bench's do.  Arming the PL matcher when the command starts would miss
+text the chip printed while Python was still on its way there."""
 
 from . import regs as R
 from .device import Forte, record_lines
@@ -26,11 +30,13 @@ class Run:
         self.errors = []
         self.link_errors = 0
         self.exit_code = None
-        self.fail_pattern_on = False
         self.fail_reported = False
         self.tohost_cyc = None
         self.stop_cyc = None
         self.policy = "rand"
+        self.console = bytearray()
+        self.console_cursor = 0
+        self.fail_pattern = None
 
     # ---- bookkeeping ----
     def error(self, msg: str) -> None:
@@ -51,11 +57,12 @@ class Run:
 
     def service(self) -> None:
         self.link_errors = self.dev.link_errors()
-        if self.fail_pattern_on and not self.fail_reported and self.dev.match_hit(1):
-            self.fail_reported = True
-            self.error("console printed the fail pattern")
         data, framing = self.dev.drain_uart(64)
         self.uart.write(data)
+        self.console += data
+        if self.fail_pattern is not None and not self.fail_reported and self.fail_pattern in self.console:
+            self.fail_reported = True
+            self.error("console printed the fail pattern")
         for b in framing:
             self.error(f"framing error on uart_tx (byte {b:02x})")
         for record in self.dev.drain_trace(64):
@@ -123,11 +130,15 @@ class Run:
                 self.error(f"tohost {value:016x} has bit 0 clear")
         elif cmd == "run_until_uart":
             want = unescape(rest_after(line, 2)).encode("latin-1")
-            d.set_match(0, want)
-            if not self.run_cycles(int(args[0]), until=lambda: d.match_hit(0)):
+
+            def printed():
+                return self.console.find(want, self.console_cursor) >= 0
+
+            if not self.run_cycles(int(args[0]), until=printed):
                 if self.stopped():
                     return f"FAIL {self.total_errors()} checker errors"
                 return f'FAIL timeout: console never printed "{want.decode()}" in {args[0]} cycles'
+            self.console_cursor = self.console.find(want, self.console_cursor) + len(want)
         elif cmd == "expect_tohost":
             if self.exit_code != int(args[0]):
                 self.error(f"exit code {self.exit_code}, expected {args[0]}")
@@ -140,10 +151,9 @@ class Run:
         elif cmd == "uart_gap":
             d.wr(R.REG_UART_TX_GAP, int(args[0]))
         elif cmd == "uart_fail":
-            if self.fail_pattern_on:
-                self.error("uart_fail: the gateware matches one fail pattern")
-            self.fail_pattern_on = True
-            d.set_match(1, unescape(rest_after(line, 1)).encode("latin-1"))
+            if self.fail_pattern is not None:
+                self.error("uart_fail: one fail pattern per run")
+            self.fail_pattern = unescape(rest_after(line, 1)).encode("latin-1")
         elif cmd == "irq":
             d.irq(int(args[0]), int(args[1]))
         elif cmd == "fault_inject":
