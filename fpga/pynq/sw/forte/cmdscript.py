@@ -74,7 +74,16 @@ class Run:
                 if line.startswith("T ") and self.tohost_cyc is None:
                     self.tohost_cyc = at
 
+    def drain_all(self) -> None:
+        while True:
+            self.service()
+            if not self.dev.rd(R.REG_UART_RX_DATA) >> 31 and not self.dev.rd(R.REG_TRACE_STAT) & 1:
+                return
+
     def run_cycles(self, n: int, until=None) -> bool:
+        """Wait n chip cycles, or until `until` holds.  A polling pass can take
+        longer than a short budget, so when the budget runs out everything the
+        chip already produced is drained and `until` checked once more."""
         start = self.dev.cycles()
         while True:
             self.service()
@@ -83,7 +92,10 @@ class Run:
             if until is not None and until():
                 return True
             if self.dev.cycles() - start >= n:
-                return until is None
+                if until is None:
+                    return True
+                self.drain_all()
+                return not self.stopped() and until()
 
     def finish(self) -> None:
         while True:
