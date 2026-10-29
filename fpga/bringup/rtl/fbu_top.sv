@@ -200,6 +200,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [31:0]       link_rd;
   logic [31:0]       link_wr;
   logic [63:0]       tohost_val;
+  logic [63:0]       tohost_cyc;
   logic [31:0]       err_now;
   logic [31:0]       err_sticky;
   logic [31:0]       err_count;
@@ -225,7 +226,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o, .io_oe(slave_io_oe), .ready, .rvalid,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err,
-    .cyc(link_cyc), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val,
+    .cyc(link_cyc), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val, .tohost_cyc,
     .err_now, .err_sticky, .err_count, .first_err, .first_err_cyc,
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
     .rec_tohost, .rec_tohost_cyc(rec_end_cyc), .rec_tohost_val);
@@ -356,6 +357,8 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_TOHOST_STAT:      reg_rdata = {31'd0, tohost_seen};
       REG_TOHOST_VAL_LO:    reg_rdata = tohost_val[31:0];
       REG_TOHOST_VAL_HI:    reg_rdata = tohost_val[63:32];
+      REG_TOHOST_CYC_LO:    reg_rdata = tohost_cyc[31:0];
+      REG_TOHOST_CYC_HI:    reg_rdata = tohost_cyc[63:32];
       REG_TRACE_CTRL:       reg_rdata = {30'd0, trace_ctrl};
       REG_TRACE_LEVEL:      reg_rdata = 32'(trace_level);
       REG_TRACE_WRITTEN:    reg_rdata = trace_written;

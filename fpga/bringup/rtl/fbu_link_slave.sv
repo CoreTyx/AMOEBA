@@ -58,6 +58,7 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   output logic [31:0]       n_wr,
   output logic              tohost_seen,
   output logic [63:0]       tohost_val,
+  output logic [63:0]       tohost_cyc,
   output logic [31:0]       err_now,
   output logic [31:0]       err_sticky,
   output logic [31:0]       err_count,
@@ -455,6 +456,7 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
       n_wr        <= '0;
       tohost_seen <= 1'b0;
       tohost_val  <= '0;
+      tohost_cyc  <= '0;
     end else begin
       if (transaction_done && transaction_is_write)
         n_wr <= n_wr + 32'd1;
@@ -463,10 +465,13 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
       if (chip_in_reset) begin
         tohost_seen <= 1'b0;
         tohost_val  <= '0;
+        tohost_cyc  <= '0;
       end else if (tohost_write) begin
         tohost_val <= tohost_word;
-        if (tohost_hit)
+        if (tohost_hit && !tohost_seen) begin
           tohost_seen <= 1'b1;
+          tohost_cyc  <= cyc_d;
+        end
       end
     end
   end

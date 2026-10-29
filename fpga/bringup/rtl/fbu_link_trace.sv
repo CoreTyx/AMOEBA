@@ -9,9 +9,11 @@
 //   words 4-7  L: the line; T: words 4-5 the tohost value
 //   words 8-9  L: the cycle the transaction finished
 //
-// Records of one cycle are kept in the bench's order: T, L, E, I.  With
-// cfg_stop_on_error, nothing that happened after the cycle of the first error
-// is kept, as the bench stops at its first error.
+// Records leave in the order they arrived, those of one cycle as T, L, E, I.
+// Each kind waits in its own short queue at its own width; a queue of kind
+// tags keeps the order, and the full record is assembled only as it enters
+// the FIFO.  With cfg_stop_on_error nothing after the cycle of the first
+// error is kept, as the bench stops at its first.
 ///////////////////////////////////////////////////////////////////////////////
 module fbu_link_trace #(
   parameter int BEATS      = 2,
@@ -53,65 +55,38 @@ module fbu_link_trace #(
   localparam logic [3:0] KIND_E = 4'd3;
   localparam logic [3:0] KIND_I = 4'd4;
 
-  localparam int CANDIDATES = 5;
-  localparam int STAGE_LOG2 = 3;
-  localparam int STAGE      = 1 << STAGE_LOG2;
+  typedef enum logic [2:0] {SRC_T, SRC_L, SRC_E, SRC_I0, SRC_I1} source_t;
+  localparam int SOURCES = 5;
 
-  // ---- this cycle's records, in order ----
-  logic [RECORD_W-1:0] candidate       [CANDIDATES];
-  logic                candidate_valid [CANDIDATES];
-  logic [63:0]         candidate_cyc   [CANDIDATES];
-  logic [1:0]          irq_prev;
-  logic [63:0]         err_cyc;
+  localparam int T_W = 64 + 64;
+  localparam int L_W = 64 + 1 + 32 + LINE_W + 64;
+  localparam int E_W = 64 + 32;
+  localparam int I_W = 64 + 1;
+
+  // ---- this cycle's arrivals ----
+  logic [1:0]  irq_prev;
+  logic [63:0] err_cyc;
+  logic        arriving      [SOURCES];
+  logic [63:0] arrival_cyc   [SOURCES];
+  logic        kept          [SOURCES];
+  logic        stopped;
+  logic [63:0] stop_cyc;
 
   assign err_cyc = link_cyc + 64'd1;
 
   always_comb begin
-    for (int c = 0; c < CANDIDATES; c++) begin
-      candidate[c]       = '0;
-      candidate_valid[c] = 1'b0;
-      candidate_cyc[c]   = '0;
-    end
-
-    candidate[0][31:28]   = KIND_T;
-    candidate[0][95:32]   = rec_end_cyc;
-    candidate[0][191:128] = rec_tohost_val;
-    candidate_valid[0]    = rec_valid && rec_tohost;
-    candidate_cyc[0]      = rec_end_cyc;
-
-    candidate[1][31:28]   = KIND_L;
-    candidate[1][27]      = rec_wr;
-    candidate[1][95:32]   = rec_cyc;
-    candidate[1][127:96]  = rec_addr;
-    candidate[1][128 +: LINE_W] = rec_line;
-    candidate[1][319:256] = rec_end_cyc;
-    candidate_valid[1]    = rec_valid;
-    candidate_cyc[1]      = rec_end_cyc;
-
-    candidate[2][31:28]   = KIND_E;
-    candidate[2][95:32]   = err_cyc;
-    candidate[2][127:96]  = err_now;
-    candidate_valid[2]    = err_now != '0;
-    candidate_cyc[2]      = err_cyc;
-
-    for (int line = 0; line < 2; line++) begin
-      candidate[3 + line][31:28] = KIND_I;
-      candidate[3 + line][25:24] = 2'(line);
-      candidate[3 + line][23]    = irq[line];
-      candidate[3 + line][95:32] = link_cyc;
-      candidate_valid[3 + line]  = irq[line] != irq_prev[line] && !chip_in_reset;
-      candidate_cyc[3 + line]    = link_cyc;
-    end
-  end
-
-  // ---- stop at the first error ----
-  logic        stopped;
-  logic [63:0] stop_cyc;
-  logic        keep [CANDIDATES];
-
-  always_comb begin
-    for (int c = 0; c < CANDIDATES; c++)
-      keep[c] = cfg_enable && candidate_valid[c] && !(stopped && candidate_cyc[c] > stop_cyc);
+    arriving[SRC_T]     = rec_valid && rec_tohost;
+    arrival_cyc[SRC_T]  = rec_end_cyc;
+    arriving[SRC_L]     = rec_valid;
+    arrival_cyc[SRC_L]  = rec_end_cyc;
+    arriving[SRC_E]     = err_now != '0;
+    arrival_cyc[SRC_E]  = err_cyc;
+    arriving[SRC_I0]    = irq[0] != irq_prev[0] && !chip_in_reset;
+    arrival_cyc[SRC_I0] = link_cyc;
+    arriving[SRC_I1]    = irq[1] != irq_prev[1] && !chip_in_reset;
+    arrival_cyc[SRC_I1] = link_cyc;
+    for (int s = 0; s < SOURCES; s++)
+      kept[s] = cfg_enable && arriving[s] && !(stopped && arrival_cyc[s] > stop_cyc);
   end
 
   always_ff @(posedge clk or negedge arst_n) begin
@@ -124,70 +99,151 @@ module fbu_link_trace #(
       irq_prev <= irq;
     end else begin
       irq_prev <= irq;
-      if (cfg_stop_on_error && !stopped && keep[2]) begin
+      if (cfg_stop_on_error && !stopped && kept[SRC_E]) begin
         stopped  <= 1'b1;
         stop_cyc <= err_cyc;
       end
     end
   end
 
-  // ---- staging: up to CANDIDATES in per cycle, one out to the FIFO ----
-  logic [RECORD_W-1:0] stage [STAGE];
-  logic [STAGE_LOG2:0] stage_count;
-  logic [STAGE_LOG2-1:0] stage_head;
-  logic [STAGE_LOG2:0] kept_count;
-  logic [STAGE_LOG2:0] slot_offset [CANDIDATES];
-  logic                stage_fits;
-  logic                stage_pop;
-  logic                fifo_full;
-  logic                fifo_empty;
+  // ---- per-kind queues and the tag queue that orders them ----
+  logic           queue_full  [SOURCES];
+  logic           queue_empty [SOURCES];
+  logic           queue_push  [SOURCES];
+  logic           queue_pop   [SOURCES];
+  logic [T_W-1:0] t_head;
+  logic [L_W-1:0] l_head;
+  logic [E_W-1:0] e_head;
+  logic [I_W-1:0] i_head      [2];
+
+  localparam int TAG_LOG2 = 3;
+  localparam int TAGS     = 1 << TAG_LOG2;
+
+  source_t           tags [TAGS];
+  logic [TAG_LOG2:0] tag_count;
+  logic [TAG_LOG2-1:0] tag_head;
+  logic [TAG_LOG2:0] tag_offset [SOURCES];
+  logic [TAG_LOG2:0] arrivals;
+  logic [TAG_LOG2:0] kept_count;
+  logic              accepted [SOURCES];
+  logic              arrivals_fit;
+  logic              tag_pop;
+  source_t           next_source;
+  logic              fifo_full;
+  logic              fifo_empty;
+  logic [RECORD_W-1:0] record;
 
   always_comb begin
+    arrivals   = '0;
     kept_count = '0;
-    for (int c = 0; c < CANDIDATES; c++) begin
-      slot_offset[c] = kept_count;
-      if (keep[c])
+    for (int s = 0; s < SOURCES; s++) begin
+      accepted[s]   = kept[s] && !queue_full[s];
+      tag_offset[s] = arrivals;
+      if (accepted[s])
+        arrivals = arrivals + 1'b1;
+      if (kept[s])
         kept_count = kept_count + 1'b1;
     end
   end
 
-  assign stage_pop  = stage_count != '0 && !fifo_full;
-  assign stage_fits = stage_count - (STAGE_LOG2 + 1)'(stage_pop) + kept_count <= (STAGE_LOG2 + 1)'(STAGE);
+  assign tag_pop      = tag_count != '0 && !fifo_full && !queue_empty[next_source];
+  assign next_source  = tags[tag_head];
+  assign arrivals_fit = tag_count - (TAG_LOG2 + 1)'(tag_pop) + arrivals <= (TAG_LOG2 + 1)'(TAGS);
+
+  always_comb begin
+    for (int s = 0; s < SOURCES; s++) begin
+      queue_push[s] = accepted[s] && arrivals_fit;
+      queue_pop[s]  = tag_pop && next_source == source_t'(s);
+    end
+  end
+
+  fbu_fifo #(.WIDTH(T_W), .DEPTH_LOG2(1)) t_queue (
+    .clk, .arst_n, .clear,
+    .push(queue_push[SRC_T]), .push_data({rec_tohost_val, rec_end_cyc}),
+    .full(queue_full[SRC_T]), .overflow(),
+    .pop(queue_pop[SRC_T]), .empty(queue_empty[SRC_T]), .head(t_head), .level());
+
+  fbu_fifo #(.WIDTH(L_W), .DEPTH_LOG2(1)) l_queue (
+    .clk, .arst_n, .clear,
+    .push(queue_push[SRC_L]), .push_data({rec_end_cyc, rec_line, rec_addr, rec_wr, rec_cyc}),
+    .full(queue_full[SRC_L]), .overflow(),
+    .pop(queue_pop[SRC_L]), .empty(queue_empty[SRC_L]), .head(l_head), .level());
+
+  fbu_fifo #(.WIDTH(E_W), .DEPTH_LOG2(1)) e_queue (
+    .clk, .arst_n, .clear,
+    .push(queue_push[SRC_E]), .push_data({err_now, err_cyc}),
+    .full(queue_full[SRC_E]), .overflow(),
+    .pop(queue_pop[SRC_E]), .empty(queue_empty[SRC_E]), .head(e_head), .level());
+
+  for (genvar line = 0; line < 2; line++) begin : g_irq_queue
+    fbu_fifo #(.WIDTH(I_W), .DEPTH_LOG2(1)) i_queue (
+      .clk, .arst_n, .clear,
+      .push(queue_push[SRC_I0 + line]), .push_data({irq[line], link_cyc}),
+      .full(queue_full[SRC_I0 + line]), .overflow(),
+      .pop(queue_pop[SRC_I0 + line]), .head(i_head[line]), .empty(queue_empty[SRC_I0 + line]), .level());
+  end
 
   always_ff @(posedge clk) begin
-    if (stage_fits) begin
-      for (int c = 0; c < CANDIDATES; c++) begin
-        if (keep[c])
-          stage[STAGE_LOG2'(stage_head + stage_count[STAGE_LOG2-1:0] + slot_offset[c][STAGE_LOG2-1:0])] <= candidate[c];
-      end
-    end
+    for (int s = 0; s < SOURCES; s++)
+      if (queue_push[s])
+        tags[TAG_LOG2'(tag_head + tag_count[TAG_LOG2-1:0] + tag_offset[s][TAG_LOG2-1:0])] <= source_t'(s);
   end
 
   always_ff @(posedge clk or negedge arst_n) begin
     if (!arst_n) begin
-      stage_count     <= '0;
-      stage_head      <= '0;
+      tag_count       <= '0;
+      tag_head        <= '0;
       records_written <= '0;
       records_dropped <= '0;
     end else if (clear) begin
-      stage_count     <= '0;
-      stage_head      <= '0;
+      tag_count       <= '0;
+      tag_head        <= '0;
       records_written <= '0;
       records_dropped <= '0;
     end else begin
-      stage_count <= stage_count - (STAGE_LOG2 + 1)'(stage_pop) + (stage_fits ? kept_count : '0);
-      if (stage_pop)
-        stage_head <= stage_head + 1'b1;
-      if (stage_pop)
+      tag_count <= tag_count - (TAG_LOG2 + 1)'(tag_pop) + (arrivals_fit ? arrivals : '0);
+      if (tag_pop)
+        tag_head <= tag_head + 1'b1;
+      if (tag_pop)
         records_written <= records_written + 32'd1;
-      if (!stage_fits)
-        records_dropped <= records_dropped + 32'(kept_count);
+      records_dropped <= records_dropped + 32'(kept_count) - (arrivals_fit ? 32'(arrivals) : 32'd0);
     end
+  end
+
+  // ---- the record entering the FIFO ----
+  always_comb begin
+    record = '0;
+    case (next_source)
+      SRC_T: begin
+        record[31:28]   = KIND_T;
+        record[95:32]   = t_head[63:0];
+        record[191:128] = t_head[127:64];
+      end
+      SRC_L: begin
+        record[31:28]              = KIND_L;
+        record[95:32]              = l_head[63:0];
+        record[27]                 = l_head[64];
+        record[127:96]             = l_head[96:65];
+        record[128 +: LINE_W]      = l_head[97 +: LINE_W];
+        record[319:256]            = l_head[97 + LINE_W +: 64];
+      end
+      SRC_E: begin
+        record[31:28]  = KIND_E;
+        record[95:32]  = e_head[63:0];
+        record[127:96] = e_head[95:64];
+      end
+      default: begin
+        record[31:28] = KIND_I;
+        record[25:24] = next_source == SRC_I1 ? 2'd1 : 2'd0;
+        record[23]    = next_source == SRC_I1 ? i_head[1][64] : i_head[0][64];
+        record[95:32] = next_source == SRC_I1 ? i_head[1][63:0] : i_head[0][63:0];
+      end
+    endcase
   end
 
   fbu_fifo #(.WIDTH(RECORD_W), .DEPTH_LOG2(DEPTH_LOG2)) records (
     .clk, .arst_n, .clear,
-    .push(stage_pop), .push_data(stage[stage_head]), .full(fifo_full), .overflow(overflow),
+    .push(tag_pop), .push_data(record), .full(fifo_full), .overflow(overflow),
     .pop, .head, .empty(fifo_empty), .level);
 
   assign head_valid = !fifo_empty;

@@ -120,6 +120,8 @@ package fbu_pkg;
   localparam logic [11:0] REG_TOHOST_STAT      = 12'h284;
   localparam logic [11:0] REG_TOHOST_VAL_LO    = 12'h288;
   localparam logic [11:0] REG_TOHOST_VAL_HI    = 12'h28C;
+  localparam logic [11:0] REG_TOHOST_CYC_LO    = 12'h290;   // link cycle of the first tohost write
+  localparam logic [11:0] REG_TOHOST_CYC_HI    = 12'h294;
 
   localparam logic [11:0] REG_TRACE_CTRL       = 12'h300;
   localparam logic [11:0] REG_TRACE_LEVEL      = 12'h304;

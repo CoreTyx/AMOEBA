@@ -125,6 +125,8 @@ class Run:
                 return f"FAIL timeout: no tohost write in {args[0]} cycles"
             value = d.tohost()
             self.exit_code = value >> 1
+            if self.tohost_cyc is None:
+                self.tohost_cyc = d.rd64(R.REG_TOHOST_CYC_LO)
             print(f"[FORTE] tohost = {value:016x} (exit code {self.exit_code})")
             if not value & 1:
                 self.error(f"tohost {value:016x} has bit 0 clear")

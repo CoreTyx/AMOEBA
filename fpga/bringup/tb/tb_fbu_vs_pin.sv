@@ -696,6 +696,11 @@ module tb_fbu_vs_pin;
           verdict(0, $sformatf("timeout: no tohost write in %0d cycles", t));
         reg_read64(REG_TOHOST_VAL_LO, r64);
         exit_code = int'(r64 >> 1);
+        if (tohost_cyc < 0) begin
+          logic [63:0] c;
+          reg_read64(REG_TOHOST_CYC_LO, c);
+          tohost_cyc = longint'(c);
+        end
         $display("[FBU_TB] tohost = %h (exit code %0d)", r64, exit_code);
         if (r64[0] !== 1'b1)
           tb_err($sformatf("tohost %h has bit 0 clear", r64));
