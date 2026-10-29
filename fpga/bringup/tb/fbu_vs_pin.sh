@@ -21,7 +21,7 @@
 # One simulation at a time: the bench shares sim/bin/memory_8.lst.
 set -euo pipefail
 R="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-TB="$R/fpga/pynq/build/tb_fbu_vs_pin/Vtb_fbu_vs_pin"
+TB="${TB:-$R/fpga/pynq/build/tb_fbu_vs_pin/Vtb_fbu_vs_pin}"
 OUT="${OUT:-$R/sim/fbu_vs_pin}"
 BENCH_RUNS="$R/sim/pin/runs/verilator_rtl"
 TESTS="$R/hvl/pin/tests"

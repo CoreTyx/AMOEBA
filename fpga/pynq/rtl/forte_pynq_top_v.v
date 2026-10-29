@@ -1,0 +1,96 @@
+//////////////////////////////////////////////////////////////////////////////
+// forte_pynq_top_v.v -- Verilog-2001 pass-through around forte_pynq_top.
+// IPI's module reference must name a Verilog or VHDL top
+// ([filemgmt 56-195]); everything below it is SystemVerilog.
+//////////////////////////////////////////////////////////////////////////////
+module forte_pynq_top_v #(
+  parameter TRACE_DEPTH_LOG2 = 11,
+  parameter MEM_W0_KB        = 128,
+  parameter MEM_W1_KB        = 4,
+  parameter MEM_W2_KB        = 16
+)(
+  input  wire         aclk,
+  input  wire         aresetn,
+  input  wire [11:0]  s_axi_ctl_awaddr,
+  input  wire         s_axi_ctl_awvalid,
+  output wire         s_axi_ctl_awready,
+  input  wire [31:0]  s_axi_ctl_wdata,
+  input  wire [3:0]   s_axi_ctl_wstrb,
+  input  wire         s_axi_ctl_wvalid,
+  output wire         s_axi_ctl_wready,
+  output wire [1:0]   s_axi_ctl_bresp,
+  output wire         s_axi_ctl_bvalid,
+  input  wire         s_axi_ctl_bready,
+  input  wire [11:0]  s_axi_ctl_araddr,
+  input  wire         s_axi_ctl_arvalid,
+  output wire         s_axi_ctl_arready,
+  output wire [31:0]  s_axi_ctl_rdata,
+  output wire [1:0]   s_axi_ctl_rresp,
+  output wire         s_axi_ctl_rvalid,
+  input  wire         s_axi_ctl_rready,
+  input  wire [19:0]  s_axi_mem_awaddr,
+  input  wire         s_axi_mem_awvalid,
+  output wire         s_axi_mem_awready,
+  input  wire [31:0]  s_axi_mem_wdata,
+  input  wire [3:0]   s_axi_mem_wstrb,
+  input  wire         s_axi_mem_wvalid,
+  output wire         s_axi_mem_wready,
+  output wire [1:0]   s_axi_mem_bresp,
+  output wire         s_axi_mem_bvalid,
+  input  wire         s_axi_mem_bready,
+  input  wire [19:0]  s_axi_mem_araddr,
+  input  wire         s_axi_mem_arvalid,
+  output wire         s_axi_mem_arready,
+  output wire [31:0]  s_axi_mem_rdata,
+  output wire [1:0]   s_axi_mem_rresp,
+  output wire         s_axi_mem_rvalid,
+  input  wire         s_axi_mem_rready,
+  output wire [3:0]   led
+);
+
+  forte_pynq_top #(
+    .TRACE_DEPTH_LOG2(TRACE_DEPTH_LOG2),
+    .MEM_W0_KB(MEM_W0_KB),
+    .MEM_W1_KB(MEM_W1_KB),
+    .MEM_W2_KB(MEM_W2_KB)
+  ) top (
+    .aclk(aclk),
+    .aresetn(aresetn),
+    .s_axi_ctl_awaddr(s_axi_ctl_awaddr),
+    .s_axi_ctl_awvalid(s_axi_ctl_awvalid),
+    .s_axi_ctl_awready(s_axi_ctl_awready),
+    .s_axi_ctl_wdata(s_axi_ctl_wdata),
+    .s_axi_ctl_wstrb(s_axi_ctl_wstrb),
+    .s_axi_ctl_wvalid(s_axi_ctl_wvalid),
+    .s_axi_ctl_wready(s_axi_ctl_wready),
+    .s_axi_ctl_bresp(s_axi_ctl_bresp),
+    .s_axi_ctl_bvalid(s_axi_ctl_bvalid),
+    .s_axi_ctl_bready(s_axi_ctl_bready),
+    .s_axi_ctl_araddr(s_axi_ctl_araddr),
+    .s_axi_ctl_arvalid(s_axi_ctl_arvalid),
+    .s_axi_ctl_arready(s_axi_ctl_arready),
+    .s_axi_ctl_rdata(s_axi_ctl_rdata),
+    .s_axi_ctl_rresp(s_axi_ctl_rresp),
+    .s_axi_ctl_rvalid(s_axi_ctl_rvalid),
+    .s_axi_ctl_rready(s_axi_ctl_rready),
+    .s_axi_mem_awaddr(s_axi_mem_awaddr),
+    .s_axi_mem_awvalid(s_axi_mem_awvalid),
+    .s_axi_mem_awready(s_axi_mem_awready),
+    .s_axi_mem_wdata(s_axi_mem_wdata),
+    .s_axi_mem_wstrb(s_axi_mem_wstrb),
+    .s_axi_mem_wvalid(s_axi_mem_wvalid),
+    .s_axi_mem_wready(s_axi_mem_wready),
+    .s_axi_mem_bresp(s_axi_mem_bresp),
+    .s_axi_mem_bvalid(s_axi_mem_bvalid),
+    .s_axi_mem_bready(s_axi_mem_bready),
+    .s_axi_mem_araddr(s_axi_mem_araddr),
+    .s_axi_mem_arvalid(s_axi_mem_arvalid),
+    .s_axi_mem_arready(s_axi_mem_arready),
+    .s_axi_mem_rdata(s_axi_mem_rdata),
+    .s_axi_mem_rresp(s_axi_mem_rresp),
+    .s_axi_mem_rvalid(s_axi_mem_rvalid),
+    .s_axi_mem_rready(s_axi_mem_rready),
+    .led(led)
+  );
+
+endmodule
