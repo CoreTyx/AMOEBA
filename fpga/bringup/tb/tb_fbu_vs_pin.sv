@@ -355,6 +355,22 @@ module tb_fbu_vs_pin;
     d = {h, l};
   endtask
 
+  localparam int          TRIG_SRC_MATCH1      = 3;
+  localparam int          TRIG_ACT_FAULT       = 5;
+  localparam logic [31:0] TRIG_REPEAT          = 32'h100;
+  localparam int          FAULT_TRIGGER        = 2;
+  localparam int          FI_MODE_PULSE        = 3;
+  localparam int          FI_MODE_BURST        = 4;
+  localparam logic [31:0] FI_CTRL_CLEAR_COUNTS = 32'h400;
+
+  // fe_fault_pin.c's units: each one's detect counter, and how far it may rise
+  // per 512-cycle period of pin-high: one count per site event for the FT
+  // units (ALU 6 sites, CMP 2), two for the register file (both read ports),
+  // five for the pipeline registers, three for the D$ (tag, line, repaired).
+  localparam int FI_UNITS = 7;
+  localparam int FI_DETECT_COUNTER    [FI_UNITS] = '{8, 10, 12, 14, 0, 2, 6};
+  localparam int FI_COUNTS_PER_PERIOD [FI_UNITS] = '{6, 2, 1, 1, 2, 5, 3};
+
   // ---- PS state ----
   int     trace_fd;
   int     uart_fd;
@@ -363,6 +379,9 @@ module tb_fbu_vs_pin;
   longint tb_stop_cyc     = -1;
   longint tohost_cyc      = -1;
   bit     fail_pattern_on = 0;
+  bit     fault_match_on  = 0;
+  string  console_line    = "";
+  string  fi_round_lines [$];
   bit     fail_reported   = 0;
   bit     done            = 0;
   int     exit_code       = -1;
@@ -448,6 +467,19 @@ module tb_fbu_vs_pin;
     end
   endtask
 
+  // fe_fault_pin.c's per-round lines, "FI unit <u> PASS|FAIL d <18 deltas> ...",
+  // are kept for check_fi_rounds.
+  task automatic console_byte(input logic [7:0] b);
+    $fwrite(uart_fd, "%c", b);
+    if (b != 8'h0A) begin
+      console_line = {console_line, string'(b)};
+      return;
+    end
+    if (console_line.len() > 8 && console_line.substr(0, 7) == "FI unit ")
+      fi_round_lines.push_back(console_line);
+    console_line = "";
+  endtask
+
   task automatic drain_uart(input int max_bytes);
     logic [31:0] d;
     for (int n = 0; n < max_bytes; n++) begin
@@ -458,7 +490,7 @@ module tb_fbu_vs_pin;
       if (d[8])
         tb_err($sformatf("framing error on uart_tx (byte %02h)", d[7:0]));
       else
-        $fwrite(uart_fd, "%c", d[7:0]);
+        console_byte(d[7:0]);
     end
   endtask
 
@@ -726,7 +758,7 @@ module tb_fbu_vs_pin;
         end while (!r[0] && now_cyc - start < 64'(t));
         if (!r[0])
           verdict(0, $sformatf("timeout: console never printed \"%s\" in %0d cycles", want, t));
-        $display("[FBU_TB] console printed \"%s\"", want);
+        $display("[FBU_TB] console printed \"%s\" by cycle %0d", want, now_cyc);
       end
       "expect_tohost": begin
         void'($sscanf(a1, "%d", v));
@@ -755,6 +787,8 @@ module tb_fbu_vs_pin;
       "uart_fail": begin
         if (fail_pattern_on)
           tb_err("uart_fail: the gateware matches one fail pattern");
+        if (fault_match_on)
+          tb_err("fault_on_match and uart_fail both need console matcher 1");
         fail_pattern_on = 1;
         set_match(1, unescape(rest_after(ln, 1)));
       end
@@ -791,6 +825,68 @@ module tb_fbu_vs_pin;
         $fclose(fd);
       end
       "dialect": ;
+      "fault_on_match": begin
+        string text;
+        int    mode;
+        void'($sscanf(a2, "%d", v));
+        mode = a1 == "burst" ? FI_MODE_BURST : FI_MODE_PULSE;
+        text = unescape(rest_after(ln, 3));
+        if (fail_pattern_on)
+          tb_err("fault_on_match and uart_fail both need console matcher 1");
+        fault_match_on = 1;
+        reg_write(REG_FI_ARG0, 32'(v));
+        reg_write(REG_FI_CTRL, 32'(mode) | FI_CTRL_CLEAR_COUNTS);
+        set_match(1, text);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER + 4), 32'd0);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER),
+                  trigger_ctrl(TRIG_SRC_MATCH1, TRIG_ACT_FAULT, 0, 0, 1) | TRIG_REPEAT);
+      end
+      "expect_fi_events": begin
+        int          rounds;
+        int          periods;
+        int          sites [9];
+        logic [31:0] e;
+        sites = '{3, 3, 2, 1, 1, 1, 1, 1, 1};
+        void'($sscanf(a1, "%d", rounds));
+        void'($sscanf(a2, "%d", periods));
+        for (int g = 0; g < 9; g++) begin
+          reg_read(REG_FI_EVENTS + 12'(4 * g), e);
+          if (int'(e) != rounds * periods * sites[g])
+            tb_err($sformatf("FI_EVENTS[%0d] = %0d, expected %0d", g, e, rounds * periods * sites[g]));
+        end
+        $display("[FBU_TB] fault_inject events checked: %0d rounds x %0d periods", rounds, periods);
+      end
+      "check_fi_rounds": begin
+        int          periods;
+        int          unit;
+        int          detected;
+        int          bound;
+        int          total_detected;
+        string       verdict_text;
+        int          deltas [18];
+        void'($sscanf(a1, "%d", periods));
+        total_detected = 0;
+        if (fi_round_lines.size() != FI_UNITS)
+          tb_err($sformatf("check_fi_rounds: %0d rounds reported, expected %0d", fi_round_lines.size(), FI_UNITS));
+        foreach (fi_round_lines[r]) begin
+          void'($sscanf(fi_round_lines[r], "FI unit %d %s d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+                        unit, verdict_text, deltas[0], deltas[1], deltas[2], deltas[3], deltas[4], deltas[5],
+                        deltas[6], deltas[7], deltas[8], deltas[9], deltas[10], deltas[11], deltas[12],
+                        deltas[13], deltas[14], deltas[15], deltas[16], deltas[17]));
+          detected = deltas[FI_DETECT_COUNTER[unit]];
+          bound    = periods * FI_COUNTS_PER_PERIOD[unit];
+          total_detected += detected;
+          $display("[FBU_TB] FI unit %0d: %s, detect counter %0d rose %0d (bound %0d)",
+                   unit, verdict_text, FI_DETECT_COUNTER[unit], detected, bound);
+          if (verdict_text != "PASS")
+            tb_err($sformatf("fe_fault_pin unit %0d failed: %s", unit, fi_round_lines[r]));
+          if (detected > bound)
+            tb_err($sformatf("fe_fault_pin unit %0d: counter %0d rose %0d, more than the %0d the pin allowed",
+                             unit, FI_DETECT_COUNTER[unit], detected, bound));
+        end
+        if (periods > 0 && total_detected == 0)
+          tb_err("check_fi_rounds: the pin was high and no unit detected a fault");
+      end
       "irq_clear_on": begin
         string text;
         void'($sscanf(a1, "%d", v));

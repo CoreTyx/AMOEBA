@@ -192,6 +192,20 @@ class Run:
                 d.arm_trigger(0, R.TRIG_SRC_CYCLE, R.TRIG_RESET, length=length, arg0=int(args[1]))
         elif cmd == "fault_pattern":
             self.fault_pattern(args)
+        elif cmd == "fault_on_match":
+            # fault_on_match <burst|pulse> <n> <text...>: start the pattern each time the console prints text
+            mode = {"burst": R.FI_BURST, "pulse": R.FI_PULSE}[args[0]]
+            d.fault_pattern(mode, int(args[1]), start=False)
+            d.set_match(1, unescape(rest_after(line, 3)).encode("latin-1"))
+            d.arm_trigger(2, R.TRIG_SRC_MATCH1, R.TRIG_FAULT, repeat=True)
+        elif cmd == "expect_fi_events":
+            rounds, periods = int(args[0]), int(args[1])
+            for g, n in d.fault_events().items():
+                want = rounds * periods * len(R.FI_SITE_PHASES[g])
+                if n != want:
+                    self.error(f"FI_EVENTS[{g}] = {n}, expected {want}")
+        elif cmd == "check_fi_rounds":
+            self.check_fi_rounds(int(args[0]))
         elif cmd == "finish":
             return "PASS"
         else:
@@ -233,6 +247,32 @@ class Run:
             d.fault_pattern(R.FI_SINGLE, phases=phases(args[1:]))
         else:
             self.error(f"fault_pattern: unknown mode {mode}")
+
+    # fe_fault_pin.c's per-round lines: "FI unit <u> PASS|FAIL d <18 deltas> ...".
+    # A detect counter may not exceed what the pin let through, per 512-cycle
+    # period of pin-high: one count per site event for the FT units (ALU 6
+    # sites, CMP 2), two for the register file (both read ports),
+    # five for the pipeline registers, three for the D$ (tag, line, repaired).
+    FI_ROUND_DETECT = {0: (8, 6), 1: (10, 2), 2: (12, 1), 3: (14, 1), 4: (0, 2), 5: (2, 5), 6: (6, 3)}
+
+    def check_fi_rounds(self, periods: int) -> None:
+        rounds = [l.split() for l in self.console.decode("latin-1").splitlines() if l.startswith("FI unit ")]
+        if len(rounds) != len(self.FI_ROUND_DETECT):
+            self.error(f"check_fi_rounds: {len(rounds)} rounds reported, expected {len(self.FI_ROUND_DETECT)}")
+        total_detected = 0
+        for r in rounds:
+            unit, verdict, deltas = int(r[2]), r[3], [int(x) for x in r[5:23]]
+            counter, per_event = self.FI_ROUND_DETECT[unit]
+            bound = periods * per_event
+            total_detected += deltas[counter]
+            print(f"[FORTE] FI unit {unit}: {verdict}, detect counter {counter} rose {deltas[counter]} (bound {bound})")
+            if verdict != "PASS":
+                self.error(f"fe_fault_pin unit {unit} failed: {' '.join(r)}")
+            if deltas[counter] > bound:
+                self.error(f"fe_fault_pin unit {unit}: counter {counter} rose {deltas[counter]}, "
+                           f"more than the {bound} the pin allowed")
+        if periods > 0 and total_detected == 0:
+            self.error("check_fi_rounds: the pin was high and no unit detected a fault")
 
     def verdict(self, result: str) -> str:
         self.finish()
