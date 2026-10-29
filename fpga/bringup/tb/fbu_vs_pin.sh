@@ -25,6 +25,7 @@ TB="${TB:-$R/fpga/pynq/build/tb_fbu_vs_pin/Vtb_fbu_vs_pin}"
 OUT="${OUT:-$R/sim/fbu_vs_pin}"
 BENCH_RUNS="$R/sim/pin/runs/verilator_rtl"
 TESTS="$R/hvl/pin/tests"
+FPGA_TESTS="$R/fpga/bringup/tests"
 [ -x "$TB" ] || { echo "no $TB: make -C fpga/pynq build-fbu"; exit 2; }
 
 IMAGES=("$@")
@@ -207,6 +208,40 @@ self_test() {   # name plusargs expected-line
   report $ok "smoke/$name" "$(verdict_of "$d/run.log"); $(grep -m1 -o "$expect.*" "$d/run.log" | cut -c1-60)"
 }
 
+upto_tohost() { awk '{print} $1=="T"{exit}' "$1" > "$2"; }
+# The bench stops at tohost before the console's last newline arrives.
+same_console() { diff -q <(sed -e '$a\' "$1") <(sed -e '$a\' "$2") > /dev/null; }
+
+# fe_fault_burst.c (fe_fault_pin.c for a patterned pin).  Pin high on both
+# sides: the gateware must reproduce the bench's console and trace.  Then the
+# gateware alone: a 512-period burst per round, started by a PL trigger on the
+# round's "FI GO", and the pin held low.
+fault_tests() {
+  local base="$OUT/fe_fault_burst" d cmp ok=1
+  rm -rf "$base"
+  bench_run "$base/bench" "$FPGA_TESTS/fe_fault_burst.c" "$FPGA_TESTS/fe_fault_pin_bench.cmd"
+  d="$base/pin_high"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_fault_pin_bench.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  upto_tohost "$base/bench/pin_trace.log" "$base/a.log"
+  upto_tohost "$d/pin_trace.log" "$base/b.log"
+  cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$base/a.log" "$base/b.log" 2>&1 | head -1 || true)
+  [[ "$cmp" == MATCH* ]] || ok=0
+  same_console "$base/bench/uart.log" "$d/uart.log" || ok=0
+  [ "$(verdict_of "$base/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_fault_burst/pin_high" "$cmp, uart.log $(same_console "$base/bench/uart.log" "$d/uart.log" && echo identical || echo DIFFERS)"
+  for t in fe_fault_burst fe_fault_off; do
+    ok=1
+    d="$base/$t"
+    mkdir -p "$d"
+    expand_script "$FPGA_TESTS/$t.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+    fbu_run "$d" +CMD="$d/script.cmd"
+    [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+    report $ok "fe_fault_burst/$t" "$(verdict_of "$d/run.log"); $(grep -c 'FI unit .*: PASS' "$d/run.log") rounds PASS"
+  done
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -251,6 +286,7 @@ if [ $FULL = 1 ]; then
   planted_script_fault uart_echo wrong_div 's/^uart_div 1/uart_div 2/' 'framing error'
   planted_script_fault irq no_irq 's/^irq 0 1/irq 0 0/' 'never printed "IRQ3"'
   boot_gate_tests
+  fault_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"

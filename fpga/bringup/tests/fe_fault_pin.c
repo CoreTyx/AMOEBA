@@ -8,7 +8,9 @@
 //
 // Each round passes when the result equals the golden one, the unit's
 // detect counter rose, its unresolved/uncorrectable counters did not, and no
-// other unit's counter moved.  The pipeline mask also flips RD1E/RD2E, whose
+// other unit's counter moved.  Built with FI_PIN_PATTERNED (fe_fault_burst.c)
+// the detect counter may stay still: the pin then lets through only what the
+// PS chose, and the PS bounds the counts itself.  The pipeline mask also flips RD1E/RD2E, whose
 // checks are the register-file counters, so pipeline ECC owns counters 0-3.  One line per round for the PS:
 //   FI unit <u> <PASS|FAIL> d <18 counter deltas>
 // Exit code: the number of failed rounds.  Bit 7 (cache DED) traps on a dirty
@@ -19,6 +21,12 @@
 #define FAULT_COUNTER  ((volatile uint32_t *)0x10080000UL)
 #define COUNTERS       18
 #define UNITS          7
+
+#ifdef FI_PIN_PATTERNED
+#define DETECT_REQUIRED 0
+#else
+#define DETECT_REQUIRED 1
+#endif
 
 // faultcount_apb.sv: 0/1 RF SEC/DED, 2/3 pipe SEC/DED, 4/5 I$ SEC/DED,
 // 6/7 D$ SEC/DED, 8/9 ALU, 10/11 CMP, 12/13 MUL, 14/15 DIV (detect,
@@ -166,7 +174,7 @@ static int round_for(int unit) {
         delta[i] = after[i] - before[i];
     if (got != golden)
         ok = 0;
-    if (delta[detect_counter[unit]] == 0)
+    if (DETECT_REQUIRED && delta[detect_counter[unit]] == 0)
         ok = 0;
     for (int i = 0; i < COUNTERS; i++) {
         int mine = i == detect_counter[unit] || ((unit_counters[unit] >> i) & 1);
