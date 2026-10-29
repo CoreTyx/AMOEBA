@@ -62,6 +62,10 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
 
   localparam int MATCH_BYTES = 32;
   localparam int TRIGGERS    = 4;
+  // The core leaves reset after forte_rst_sync's and forte_soc's 2-flop
+  // synchronisers, so its fault counter starts 4 cycles into the link count
+  // (measured: fe_fault_cal.cmd).
+  localparam logic [8:0] CHIP_RESET_SYNC_CYCLES = 9'd4;
   localparam int MATCH_LEN_W = $clog2(MATCH_BYTES + 1);
 
   // ---- register port ----
@@ -183,7 +187,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       fi_arg1             <= '0;
       fi_seed             <= 32'h1;
       fi_latency          <= 4'd4;
-      fi_phase_ofs        <= '0;
+      fi_phase_ofs        <= CHIP_RESET_SYNC_CYCLES;
       fi_phase_mask       <= '0;
       trig_ctrl           <= '{default: '0};
       trig_arg0           <= '{default: '0};

@@ -227,6 +227,9 @@ class Forte:
     def trigger_fired(self, slot: int) -> int:
         return self.rd(R.REG_TRIG + 16 * slot + 12)
 
+    def disarm_trigger(self, slot: int) -> None:
+        self.wr(R.REG_TRIG + 16 * slot, R.pack(R.REG_TRIG, disarm=1))
+
     # ---- fault_inject ----
     def fault_pattern(self, mode: int, arg0: int = 0, arg1: int = 0, seed: int = 1,
                       phases=(), start: bool = True) -> None:
@@ -245,6 +248,9 @@ class Forte:
     def fault_stop(self) -> None:
         mode = R.unpack(R.REG_FI_CTRL, self.rd(R.REG_FI_CTRL), "mode")
         self.wr(R.REG_FI_CTRL, R.pack(R.REG_FI_CTRL, mode=mode, stop=1))
+
+    def fault_running(self) -> bool:
+        return bool(R.unpack(R.REG_FI_CTRL, self.rd(R.REG_FI_CTRL), "running"))
 
     def fault_events(self) -> dict:
         return {g: self.rd(R.REG_FI_EVENTS + 4 * i) for i, g in enumerate(R.FI_GROUPS)}

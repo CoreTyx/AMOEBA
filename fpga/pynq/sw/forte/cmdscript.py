@@ -37,6 +37,7 @@ class Run:
         self.console = bytearray()
         self.console_cursor = 0
         self.fail_pattern = None
+        self.phase_delta = 0
 
     # ---- bookkeeping ----
     def error(self, msg: str) -> None:
@@ -204,6 +205,16 @@ class Run:
                 want = rounds * periods * len(R.FI_SITE_PHASES[g])
                 if n != want:
                     self.error(f"FI_EVENTS[{g}] = {n}, expected {want}")
+        elif cmd == "fi_phase_ofs":
+            d.wr(R.REG_FI_PHASE_OFS, int(args[0]) & 0x1FF)
+        elif cmd == "calibrate_phase":
+            self.calibrate_phase(int(args[0]), int(args[1]))
+        elif cmd == "expect_phase_ofs":
+            if d.rd(R.REG_FI_PHASE_OFS) != int(args[0]):
+                self.error(f"FI_PHASE_OFS {d.rd(R.REG_FI_PHASE_OFS)}, expected {args[0]}")
+        elif cmd == "expect_phase_delta":
+            if self.phase_delta != int(args[0]):
+                self.error(f"phase delta {self.phase_delta}, expected {args[0]}")
         elif cmd == "check_fi_rounds":
             self.check_fi_rounds(int(args[0]))
         elif cmd == "finish":
@@ -247,6 +258,71 @@ class Run:
             d.fault_pattern(R.FI_SINGLE, phases=phases(args[1:]))
         else:
             self.error(f"fault_pattern: unknown mode {mode}")
+
+    # calibrate_phase's units and the phase fbu_fi_gen's mask must select for
+    # their site to fire: the register file's 0x1FF, and one earlier for the
+    # pipeline registers, whose flip mask samples the enable a cycle early.
+    CAL_MASK_PHASE = {4: 0x1FF, 5: 0x1FE}
+    FAULT_TRIGGER = 2
+
+    def calibrate_phase(self, unit: int, periods: int) -> None:
+        """Sweep a one-cycle pin pulse over all 512 phases, one fe_fault_cal.c
+        round each; the one phase that detects gives the FI_PHASE_OFS correction."""
+        d = self.dev
+        if unit not in self.CAL_MASK_PHASE:
+            self.error(f"calibrate_phase: unit {unit} has no single site; use 4 or 5")
+            return
+        d.fault_pattern(R.FI_PHASE, periods, start=False)
+        d.set_match(1, b"CAL GO")
+        d.arm_trigger(self.FAULT_TRIGGER, R.TRIG_SRC_MATCH1, R.TRIG_FAULT, repeat=True)
+        hits = []
+        for phase in range(512):
+            word = phase // 32
+            d.wr(R.REG_FI_PHASE_MASK + 4 * word, 1 << (phase % 32))
+            if phase % 32 == 0 and phase > 0:
+                d.wr(R.REG_FI_PHASE_MASK + 4 * (word - 1), 0)
+            fired = d.trigger_fired(self.FAULT_TRIGGER)
+            d.uart_send(str(unit).encode())
+            if not self.run_cycles(10_000_000, until=lambda: d.trigger_fired(self.FAULT_TRIGGER) != fired
+                                   and not d.fault_running()):
+                self.error(f"calibrate_phase: the pulse at phase {phase} never ran")
+                return
+            d.uart_send(b"x")
+            line = self.next_console_line(b"CAL d ")
+            if line is None:
+                self.error(f"calibrate_phase: no CAL line for phase {phase}")
+                return
+            detected, others = int(line.split()[2]), int(line.split()[4])
+            if others:
+                self.error(f"calibrate_phase: phase {phase} moved other units' counters by {others}")
+            if detected:
+                print(f"[FORTE] calibrate_phase unit {unit}: phase {phase:03x} detected {detected}")
+                hits.append(phase)
+        d.wr(R.REG_FI_PHASE_MASK + 4 * 15, 0)
+        d.disarm_trigger(self.FAULT_TRIGGER)
+        if len(hits) != 1:
+            self.error(f"calibrate_phase unit {unit}: detections at {len(hits)} phases, expected exactly 1")
+            return
+        model = self.CAL_MASK_PHASE[unit]
+        self.phase_delta = (hits[0] - model + 256) % 512 - 256
+        old_ofs = d.rd(R.REG_FI_PHASE_OFS)
+        new_ofs = (old_ofs + self.phase_delta) & 0x1FF
+        d.wr(R.REG_FI_PHASE_OFS, new_ofs)
+        print(f"[FORTE] calibrate_phase unit {unit}: site at mask phase {hits[0]:03x}, model {model:03x}: "
+              f"delta {self.phase_delta}, FI_PHASE_OFS {old_ofs} -> {new_ofs}")
+
+    def next_console_line(self, prefix: bytes, budget: int = 10_000_000):
+        """The next whole console line starting with prefix, after console_cursor."""
+        def complete():
+            start = self.console.find(prefix, self.console_cursor)
+            return start >= 0 and self.console.find(b"\n", start) >= 0
+
+        if not self.run_cycles(budget, until=complete):
+            return None
+        start = self.console.find(prefix, self.console_cursor)
+        end = self.console.find(b"\n", start)
+        self.console_cursor = end + 1
+        return self.console[start:end].decode("latin-1")
 
     # fe_fault_pin.c's per-round lines: "FI unit <u> PASS|FAIL d <18 deltas> ...".
     # A detect counter may not exceed what the pin let through, per 512-cycle
