@@ -572,8 +572,10 @@ release) and can be gated by a global window `FI_WIN_START`/`FI_WIN_STOP`:
   - "One event every 512 clocks leaves time for a transient mismatch to
     retry" (`ft_fault_inject.sv`).
   - The RF injector sits on the read path only, so flips do not accumulate.
-  - Cache SEC flips are stored, but each write carries at most one, and a later
-    read or the scrubber corrects them.
+  - Cache SEC flips are stored, but each write carries at most one, and a
+    write replaces the whole word, so flips cannot pile up in one codeword.
+    The next read corrects them. The scrubber does **not**: it is disabled in
+    the frozen RTL (Q9).
 
   **`fault_inject = 1, FI_CONTROL = 0x7F` therefore becomes the background
   condition for the soak and chaos tests (SYS-06/07) and for CTRL-20.** This is
@@ -1009,6 +1011,35 @@ same target.
 
 ---
 
+### 9.1 P0 results (2026-10-28, Vivado 2024.1, `make -C fpga/pynq utilization`)
+
+OOC synthesis of `forte_emu_dut` (frozen `forte_top` + `rtl/emu/` stand-ins),
+xc7z020clg400-1, 40 ns constraint:
+
+| LUT | FF | DSP48 | BRAM36 tiles | WNS @ 25 MHz | Est. Fmax |
+|---|---|---|---|---|---|
+| 22 840 / 53 200 (42.9 %) | 13 484 (12.7 %) | 16 (7.3 %) | 6 (4.3 %) | +17.9 ns | 45.3 MHz |
+
+- **No black boxes.** Every pad and macro resolved by a stand-in.
+- **SRAMs:** only four macros are instantiated by the frozen RTL, one tag and
+  one data array per cache: `sram_sp_128_53`/`_137` (I$) and
+  `sram_sp_256_53`/`_137` (D$). All four became block RAM (write-first,
+  4 RAMB18 + 4 RAMB36). The nine `rf_sp_*` branches of `ram1p1rwe` are
+  dead parameter combinations since 4f54add. The async FIFOs and the UART TX
+  FIFO went to LUTRAM.
+- **`io`:** the 16 lanes' tristates were converted to logic (Synth 8-5799,
+  the only critical warnings), as on `feature/top_level`.
+- **Assertions:** `prim_fifo_async`'s concurrent assertions are ignored by
+  synthesis (Synth 8-2898), as expected.
+- **Pruning checked by hand:**
+  - Both cache scrubbers are removed entirely, because `SCRUBBER_ENABLED`
+    defaults to 0 in `cache.sv` and no instance sets it (Q9).
+  - `ft_shadow_ctrl`'s RECOMPUTE/ISOLATED states are removed in the MUL
+    instance, which ties `recompute_supported` to 0. That is by design.
+- **§11 BRAM risk retired:** the chip uses 6 of 140 tiles, so a 128 KiB BRAM
+  backend (~32 tiles) fits easily. The 45 MHz is a post-synthesis estimate;
+  P2's place-and-route gives the real number.
+
 ## 10. PS-side firmware (`fpga/pynq/sw/forte/`)
 
 Python on PYNQ Linux, `/dev/mem` via the existing `amoeba/mmio.py`. Everything
@@ -1152,6 +1183,11 @@ Still open:
    intended silicon behaviour for long-running fault-tolerance demos? It cannot
    change now. The question is whether bring-up and demo software should plan
    on periodic resets.
+3. **Q9: cache scrubber disabled.** `cache.sv` defaults `SCRUBBER_ENABLED`
+   to 0, and neither the I$ nor the D$ instance overrides it, so the frozen
+   RTL (and Vivado, §9.1) has no scrubber. Is that intended for tapeout? If
+   so, a stored cache SEC flip in a line that is never read again stays
+   latent until eviction. The FPGA tests are written for the RTL as frozen.
 
 ---
 
