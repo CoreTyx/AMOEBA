@@ -50,10 +50,17 @@ proc get_property {prop obj} {
     return ""
 }
 
-set srcs_f [lindex $argv 0]
-set argv [list $srcs_f amoeba_soc_wrapper xc7z020clg400-1 40.000 \
+# The Makefile passes the build's own top, defines, include dirs and clock and
+# reset ports, so the dry run constructs the command the real run will.  With
+# only <srcs.f>, the feature/top_level soft-core defaults stand in.
+lassign $argv srcs_f top defines incdirs clk_port rst_port
+if {$top eq ""} {
+    lassign {amoeba_soc_wrapper AMOEBA_CONFIG_BAREMETAL_LINUX "/inc/a /inc/b" clk reset_ext} \
+        top defines incdirs clk_port rst_port
+}
+set argv [list $srcs_f $top xc7z020clg400-1 40.000 \
                [file join [file dirname $srcs_f] dryrun_reports] \
-               AMOEBA_CONFIG_BAREMETAL_LINUX "/inc/a /inc/b" clk reset_ext]
+               $defines $incdirs $clk_port $rst_port]
 set argc [llength $argv]
 
 source [file join [file dirname [info script]] .. tcl synth_ooc.tcl]

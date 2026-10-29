@@ -1,6 +1,13 @@
 # FPGA build for the PYNQ-Z2 (Zynq XC7Z020-1CLG400).
 #
+# Branch fpga/rtl_freeze builds DUT=forte (the default): the frozen
+# hdl/forte_top.sv behind its pins (docs/impl_plan_fpga_rtl_freeze.md).  The
+# soc and asic DUTs of feature/top_level need hdl/amoeba_*.sv, which this
+# branch does not have; their RTL under rtl/ is kept as the reference the
+# fpga/bringup gateware is ported from.
+#
 #   make lint                      Verilator elaboration check -- no Vivado needed
+#   make check-frozen              hdl/ pkg/ sram/ untouched; stand-ins match the pin bench models
 #   make dryrun                    exercise the synthesis TCL with Vivado stubbed out
 #   make utilization               out-of-context synthesis, area + timing reports
 #   make utilization-all           the same for every config, into one summary
@@ -36,7 +43,14 @@ CLK_PERIOD_NS = $(shell echo "scale=3; 1000 / $(FCLK_MHZ)" | bc)
 # Same CONFIG names as sim/Makefile, synth/Makefile and testcode/linux/Makefile.
 # baremetal_linux is the tapeout config; the others are here so the gate can
 # report all of them side by side and show what the pruning bought.
-CONFIG ?= baremetal_linux
+# DUT=forte uses pkg/config.vh as is, with the pin bench's defines (hvl/pin/pin.sh
+# rtl_sources): that is the configuration forte_top was synthesized in.
+DUT ?= forte
+ifeq ($(DUT),forte)
+  CONFIG ?=
+else
+  CONFIG ?= baremetal_linux
+endif
 ifeq ($(CONFIG),)
   CONFIG_DEFINES :=
 else ifeq ($(CONFIG),freertos)
@@ -52,17 +66,21 @@ else
 endif
 
 # ---- DUT -------------------------------------------------------------------
+# forte the frozen ASIC top (hdl/forte_top.sv) behind its 32 pins, forte_emu_dut
+#       (docs/impl_plan_fpga_rtl_freeze.md).  The default on this branch.
 # soc   the soft core, amoeba_soc_wrapper, AHB exported directly (today's flow)
 # asic  the ASIC top (hdl/amoeba_top.sv) behind the FPGA end of the 16-bit
 #       link, amoeba_asic_wrapper.  Same ports, same scaffold, same block
 #       design; see docs/impl_plan_fpga_linux.md.  Use with CONFIG=asic.
-DUT ?= soc
-ifeq ($(DUT),soc)
+ifeq ($(DUT),forte)
+  DUT_ASIC := 0
+  CONFIG_DEFINES += ECE411_NO_FLOAT ECE411_LINUX
+else ifeq ($(DUT),soc)
   DUT_ASIC := 0
 else ifeq ($(DUT),asic)
   DUT_ASIC := 1
 else
-  $(error DUT=$(DUT) is not known -- use soc or asic)
+  $(error DUT=$(DUT) is not known -- use forte (soc and asic are feature/top_level only))
 endif
 # Link training length for DUT=asic.  The silicon default is 4096; the ASIC
 # holds the core in reset for ~2 x TRAIN_LEN cycles after CORE_RESET release.
@@ -79,7 +97,7 @@ ifeq ($(LINK_PINS),1)
   CONFIG_DEFINES += AMOEBA_LINK_PINS
 endif
 
-CONFIG_TAG := $(if $(CONFIG),$(CONFIG),full)$(if $(filter asic,$(DUT)),-asic)$(if $(filter 1,$(LINK_PINS)),-pins)
+CONFIG_TAG := $(if $(filter forte,$(DUT)),forte,$(if $(CONFIG),$(CONFIG),full))$(if $(filter asic,$(DUT)),-asic)$(if $(filter 1,$(LINK_PINS)),-pins)
 REPORT_TAG := $(CONFIG_TAG)$(if $(filter-out amoeba_soc_wrapper amoeba_asic_wrapper,$(TOP)),-$(TOP))
 
 # ---- sources ---------------------------------------------------------------
@@ -99,14 +117,17 @@ REPORT_TAG := $(CONFIG_TAG)$(if $(filter-out amoeba_soc_wrapper amoeba_asic_wrap
 # answers and only one of them goes to the ASIC.
 #   amoeba_asic_wrapper the ASIC top plus the link slave: what DUT=asic puts
 #                       in the fabric.  Gate it to see what the link costs.
-TOP        ?= $(if $(filter asic,$(DUT)),amoeba_asic_wrapper,amoeba_soc_wrapper)
+TOP        ?= $(if $(filter forte,$(DUT)),forte_emu_dut,$(if $(filter asic,$(DUT)),amoeba_asic_wrapper,amoeba_soc_wrapper))
 DESIGN_TOP := $(TOP)
 
 # The two tops name their clock and reset differently, and synth_ooc.tcl needs
 # to be told: create_clock on a nonexistent port is only a CRITICAL WARNING, so
 # getting this wrong yields a fully synthesized, entirely unconstrained design
 # that reports an empty WNS and exits 0.
-ifeq ($(TOP),amoeba_pynq_top)
+ifeq ($(TOP),forte_emu_dut)
+  CLK_PORT ?= core_clk
+  RST_PORT ?= rst_n
+else ifeq ($(TOP),amoeba_pynq_top)
   CLK_PORT ?= aclk
   RST_PORT ?= aresetn
 else
@@ -130,9 +151,26 @@ SHARED_SRCS := $(REPO)/hdl/ahb_to_memitf.sv \
                $(sort $(wildcard $(REPO)/hdl/amoeba_*.sv))
 FPGA_SRCS  := $(sort $(wildcard $(CURDIR)/rtl/*.sv) $(wildcard $(CURDIR)/rtl/*.v))
 
-ALL_SRCS   := $(PKG_SRCS) $(CORE_PKG) $(CORE_SRCS) $(SHARED_SRCS) $(FPGA_SRCS)
+# DUT=forte: the same files hvl/pin/pin.sh compiles for its `rtl` DUT, in the
+# same order, with the PDK pads and SRAM macros replaced by rtl/emu/.  No
+# hdl/amoeba_* and none of feature/top_level's rtl/amoeba_*.
+FORTE_HDL  := $(REPO)/hdl/forte_link_pkg.sv \
+              $(filter-out %/forte_link_pkg.sv,$(sort $(wildcard $(REPO)/hdl/forte_*.sv))) \
+              $(REPO)/hdl/prim_flop_2sync.sv $(REPO)/hdl/prim_fifo_async.sv
+FORTE_FPGA := $(sort $(wildcard $(CURDIR)/rtl/emu/*.sv)) \
+              $(sort $(wildcard $(REPO)/fpga/bringup/rtl/fbu_pkg.sv)) \
+              $(filter-out %/fbu_pkg.sv,$(sort $(wildcard $(REPO)/fpga/bringup/rtl/*.sv))) \
+              $(sort $(wildcard $(CURDIR)/rtl/forte_*.sv))
 
-INCDIRS    := $(REPO)/hdl/core $(REPO)/pkg $(REPO)/third_party/cvw/config/rv64gc
+ifeq ($(DUT),forte)
+  ALL_SRCS := $(PKG_SRCS) $(REPO)/hdl/forte_link_pkg.sv $(CORE_PKG) $(CORE_SRCS) \
+              $(filter-out %/forte_link_pkg.sv,$(FORTE_HDL)) $(FORTE_FPGA)
+else
+  ALL_SRCS := $(PKG_SRCS) $(CORE_PKG) $(CORE_SRCS) $(SHARED_SRCS) $(FPGA_SRCS)
+endif
+
+INCDIRS    := $(REPO)/hdl/core $(REPO)/pkg $(REPO)/third_party/cvw/config/rv64gc \
+              $(REPO)/hdl $(REPO)/hdl/core/ifu/bpred
 
 SRCS_F     := $(BUILD)/srcs_$(CONFIG_TAG).f
 
@@ -238,6 +276,7 @@ lint: $(SRCS_F)
 	verilator --lint-only -sv --top-module $(DESIGN_TOP) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
 	    $(addprefix +define+,$(CONFIG_DEFINES)) \
+	    $(if $(filter forte,$(DUT)),+define+SYNTHESIS +define+ECE411_VERILATOR) \
 	    $(if $(filter amoeba_pynq_top,$(DESIGN_TOP)),-GDUT_ASIC=1\'b$(DUT_ASIC) -GTRAIN_LEN=$(TRAIN_LEN)) \
 	    $(REPO)/sim/verilator_warn.vlt \
 	    -f $(SRCS_F)
@@ -249,7 +288,7 @@ lint: $(SRCS_F)
 # in about a second, so a typo does not surface an hour into a synthesis run on
 # the one machine that has a licence.  It cannot prove Vivado likes the options.
 dryrun: $(SRCS_F)
-	@tclsh $(CURDIR)/scripts/tcl_dryrun.tcl $(SRCS_F)
+	@tclsh $(CURDIR)/scripts/tcl_dryrun.tcl $(SRCS_F) $(DESIGN_TOP) "$(CONFIG_DEFINES)" "$(INCDIRS)" $(CLK_PORT) $(RST_PORT)
 	@bash $(CURDIR)/scripts/fit_report.sh $(BUILD)/dryrun_reports DRYRUN-STUBBED | tail -4
 	@echo "dryrun OK -- synth_ooc.tcl runs end to end"
 
@@ -439,6 +478,12 @@ deploy:
 
 # regs.py has no compile-time link to the RTL; this is the only thing that
 # notices when they diverge.  Runs on the development machine.
+# Vivado defines SYNTHESIS itself, so forte_top elaborates with the stand-ins in
+# rtl/emu/.  This keeps the frozen trees frozen and the stand-ins honest.
+.PHONY: check-frozen
+check-frozen:
+	@bash $(REPO)/fpga/scripts/check_frozen.sh
+
 .PHONY: check-regs
 check-regs:
 	@python3 $(CURDIR)/sw/check_regs.py
