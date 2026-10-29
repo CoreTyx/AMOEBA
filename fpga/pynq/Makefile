@@ -160,7 +160,9 @@ FORTE_HDL  := $(REPO)/hdl/forte_link_pkg.sv \
 FORTE_FPGA := $(sort $(wildcard $(CURDIR)/rtl/emu/*.sv)) \
               $(sort $(wildcard $(REPO)/fpga/bringup/rtl/fbu_pkg.sv)) \
               $(filter-out %/fbu_pkg.sv,$(sort $(wildcard $(REPO)/fpga/bringup/rtl/*.sv))) \
-              $(sort $(wildcard $(CURDIR)/rtl/forte_*.sv))
+              $(CURDIR)/rtl/fbu_mem_bram.sv \
+              $(sort $(wildcard $(CURDIR)/rtl/forte_*.sv)) \
+              $(CURDIR)/rtl/forte_pynq_top_v.v
 
 ifeq ($(DUT),forte)
   ALL_SRCS := $(PKG_SRCS) $(REPO)/hdl/forte_link_pkg.sv $(CORE_PKG) $(CORE_SRCS) \
@@ -275,17 +277,31 @@ test-top: $(SRCS_F)
 # fbu_link_slave against the pin bench (docs/impl_plan_fpga_rtl_freeze.md s8.1):
 # builds the gateware testbench; fpga/bringup/tb/fbu_vs_pin.sh runs it and the
 # bench on the same images and knobs and requires identical pin traces.
-FBU_TB_DIR := $(BUILD)/tb_fbu_vs_pin
-.PHONY: build-fbu test-fbu
-build-fbu: $(SRCS_F)
-	@mkdir -p $(FBU_TB_DIR)
+FBU_TB_DIR       := $(BUILD)/tb_fbu_vs_pin
+FBU_BOARD_TB_DIR := $(BUILD)/tb_fbu_vs_pin_board
+.PHONY: build-fbu build-fbu-board test-fbu test-fbu-board
+
+# $(1) build directory, $(2) extra defines
+define build_fbu_tb
+	@mkdir -p $(1)
 	verilator --binary -sv --top-module tb_fbu_vs_pin --timing \
-	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(FBU_TB_DIR) \
+	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(1) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
-	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR \
-	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_vs_pin.sv > $(FBU_TB_DIR)/build.log 2>&1 \
-	    || { grep -E '%Error' $(FBU_TB_DIR)/build.log | head -20; exit 1; }
-	@echo "built $(FBU_TB_DIR)/Vtb_fbu_vs_pin"
+	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR $(2) \
+	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_vs_pin.sv > $(1)/build.log 2>&1 \
+	    || { grep -E '%Error' $(1)/build.log | head -20; exit 1; }
+	@echo "built $(1)/Vtb_fbu_vs_pin"
+endef
+
+build-fbu: $(SRCS_F)
+	$(call build_fbu_tb,$(FBU_TB_DIR),)
+
+# The same testbench on the PYNQ PL top, memory in block RAM loaded over AXI.
+build-fbu-board: $(SRCS_F)
+	$(call build_fbu_tb,$(FBU_BOARD_TB_DIR),+define+BOARD_TOP)
+
+test-fbu-board: build-fbu-board
+	TB=$(FBU_BOARD_TB_DIR)/Vtb_fbu_vs_pin OUT=$(REPO)/sim/fbu_vs_pin_board bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
 
 test-fbu: build-fbu
 	bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
@@ -401,6 +417,29 @@ define run_build
 	             $(FCLK_MHZ) $(MEM_BACKEND) $(MEM_KB) $(TRACE) $(1) $(BOARD_REPO) \
 	             $(DUT_ASIC) $(TRAIN_LEN) $(LINK_PINS)
 endef
+
+.PHONY: bd-forte synth-forte bitstream-forte
+FORTE_BOARD_REPO ?= $(HOME)/Xilinx/Vivado/2024.1/data/boards/board_files/pynq-supported-board-file-master
+FORTE_BITDIR     := $(CURDIR)/bit/forte-BRAM
+
+define run_forte_build
+	@mkdir -p $(FORTE_BITDIR) $(BUILD)
+	cd $(BUILD) && $(VIVADO_ENV) vivado -mode batch -nojournal -notrace \
+	    -log $(FORTE_BITDIR)/vivado_$(1).log \
+	    -source $(CURDIR)/tcl/build_forte.tcl \
+	    -tclargs $(SRCS_F) $(XILINX_PART) $(BOARD) $(FORTE_BITDIR) \
+	             "$(CONFIG_DEFINES)" "$(INCDIRS)" $(FCLK_MHZ) $(1) $(FORTE_BOARD_REPO)
+endef
+
+bd-forte: $(SRCS_F) check-vivado $(TINFO_DEP)
+	$(call run_forte_build,bd)
+
+synth-forte: $(SRCS_F) check-vivado $(TINFO_DEP)
+	$(call run_forte_build,synth)
+
+bitstream-forte: $(SRCS_F) check-vivado $(TINFO_DEP)
+	$(call run_forte_build,bit)
+	@echo "bitstream: $(FORTE_BITDIR)/forte.bit + forte.hwh"
 
 .PHONY: bd synth-bd bitstream
 bd: TOP := amoeba_pynq_top

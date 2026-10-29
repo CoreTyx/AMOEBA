@@ -13,6 +13,11 @@
 // +FPGA_MEM +FPGA_WDOG +FPGA_MUTATE +TOHOST +TIMEOUT +MAX_ERRORS +UART_DIV.
 // Gateware-only: +NODET +MEM_LAT +TRACE +UART_LOG +BOOT_GATE
 // +BOOT_GATE_SELFTEST +BOOT_GATE_RETRIES.
+//
+// Built with BOARD_TOP, the design is the PYNQ PL top (forte_pynq_top: the
+// same fbu_top with the block-RAM memory) and the PS loads every image through
+// the memory's AXI4-Lite port, after filling its windows with the bench's
+// unwritten-memory pattern, as sw/forte does.
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 
@@ -46,9 +51,10 @@ module tb_fbu_vs_pin;
   bit          gate_selftest = 0;
   int          gate_retries  = 2;
 
-  // ---- AXI4-Lite, driven by the PS model ----
+  // ---- AXI4-Lite, driven by the PS model; bus_to_mem picks the memory port ----
   logic        arst_n  = 1'b0;
-  logic [11:0] awaddr  = '0;
+  bit          bus_to_mem = 0;
+  logic [19:0] awaddr  = '0;
   logic        awvalid = 1'b0;
   logic        awready;
   logic [31:0] wdata   = '0;
@@ -57,7 +63,7 @@ module tb_fbu_vs_pin;
   logic [1:0]  bresp;
   logic        bvalid;
   logic        bready  = 1'b0;
-  logic [11:0] araddr  = '0;
+  logic [19:0] araddr  = '0;
   logic        arvalid = 1'b0;
   logic        arready;
   logic [31:0] rdata;
@@ -73,6 +79,44 @@ module tb_fbu_vs_pin;
   logic              ready, rvalid_pin;
   logic              dir, req, wr, clk_out, uart_tx, status;
 
+`ifdef BOARD_TOP
+  logic        ctl_awready, ctl_wready, ctl_bvalid, ctl_arready, ctl_rvalid;
+  logic        mem_awready, mem_wready, mem_bvalid, mem_arready, mem_rvalid;
+  logic [1:0]  ctl_bresp, ctl_rresp, mem_bresp, mem_rresp;
+  logic [31:0] ctl_rdata, mem_rdata;
+  logic [3:0]  led;
+
+  assign awready = bus_to_mem ? mem_awready : ctl_awready;
+  assign wready  = bus_to_mem ? mem_wready  : ctl_wready;
+  assign bvalid  = bus_to_mem ? mem_bvalid  : ctl_bvalid;
+  assign bresp   = bus_to_mem ? mem_bresp   : ctl_bresp;
+  assign arready = bus_to_mem ? mem_arready : ctl_arready;
+  assign rvalid  = bus_to_mem ? mem_rvalid  : ctl_rvalid;
+  assign rdata   = bus_to_mem ? mem_rdata   : ctl_rdata;
+  assign rresp   = bus_to_mem ? mem_rresp   : ctl_rresp;
+
+  forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15)) board (
+    .aclk(clk), .aresetn(arst_n),
+    .s_axi_ctl_awaddr(awaddr[11:0]), .s_axi_ctl_awvalid(awvalid && !bus_to_mem), .s_axi_ctl_awready(ctl_awready),
+    .s_axi_ctl_wdata(wdata), .s_axi_ctl_wstrb(4'hF), .s_axi_ctl_wvalid(wvalid && !bus_to_mem),
+    .s_axi_ctl_wready(ctl_wready), .s_axi_ctl_bresp(ctl_bresp), .s_axi_ctl_bvalid(ctl_bvalid),
+    .s_axi_ctl_bready(bready && !bus_to_mem), .s_axi_ctl_araddr(araddr[11:0]),
+    .s_axi_ctl_arvalid(arvalid && !bus_to_mem), .s_axi_ctl_arready(ctl_arready),
+    .s_axi_ctl_rdata(ctl_rdata), .s_axi_ctl_rresp(ctl_rresp), .s_axi_ctl_rvalid(ctl_rvalid),
+    .s_axi_ctl_rready(rready && !bus_to_mem),
+    .s_axi_mem_awaddr(awaddr), .s_axi_mem_awvalid(awvalid && bus_to_mem), .s_axi_mem_awready(mem_awready),
+    .s_axi_mem_wdata(wdata), .s_axi_mem_wstrb(4'hF), .s_axi_mem_wvalid(wvalid && bus_to_mem),
+    .s_axi_mem_wready(mem_wready), .s_axi_mem_bresp(mem_bresp), .s_axi_mem_bvalid(mem_bvalid),
+    .s_axi_mem_bready(bready && bus_to_mem), .s_axi_mem_araddr(araddr),
+    .s_axi_mem_arvalid(arvalid && bus_to_mem), .s_axi_mem_arready(mem_arready),
+    .s_axi_mem_rdata(mem_rdata), .s_axi_mem_rresp(mem_rresp), .s_axi_mem_rvalid(mem_rvalid),
+    .s_axi_mem_rready(rready && bus_to_mem),
+    .led);
+
+  localparam int          WINDOWS       = 3;
+  localparam logic [31:0] WINDOW_BASE [WINDOWS] = '{32'h8000_0000, 32'h8080_0000, 32'h8FEF_C000};
+  localparam int          WINDOW_BYTES[WINDOWS] = '{128 * 1024, 4 * 1024, 16 * 1024};
+`else
   forte_emu_dut dut (
     .core_clk(clk), .rst_n,
     .fpga_io_o(io_o), .fpga_io_oe(io_oe), .fpga_io_i(io_i),
@@ -95,7 +139,10 @@ module tb_fbu_vs_pin;
     .io_o, .io_oe, .ready, .rvalid(rvalid_pin),
     .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
-    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0));
+    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0),
+    .link_error_seen(), .tohost_seen(), .boot_gate_gave_up());
+
+`endif
 
   // ---- behavioural line memory, as pin_link_agent's ----
   logic [63:0] mem [longint unsigned];
@@ -139,6 +186,7 @@ module tb_fbu_vs_pin;
     return n;
   endfunction
 
+`ifndef BOARD_TOP
   assign m_req_ready = 1'b1;
   logic [LINE_W-1:0] rsp_pipe [$];
   int                rsp_due  [$];
@@ -165,6 +213,7 @@ module tb_fbu_vs_pin;
       end
     end
   end
+`endif
 
   // ---- AXI4-Lite accesses ----
   // One process performs every bus handshake; the PS code posts a request and
@@ -174,7 +223,7 @@ module tb_fbu_vs_pin;
     #1;
   endtask
 
-  logic [11:0] bus_addr;
+  logic [19:0] bus_addr;
   logic [31:0] bus_wdata;
   logic [31:0] bus_rdata;
   bit          bus_write;
@@ -229,7 +278,8 @@ module tb_fbu_vs_pin;
   end
 
   task automatic reg_write(input logic [11:0] a, input logic [31:0] d);
-    bus_addr  = a;
+    bus_to_mem = 0;
+    bus_addr  = 20'(a);
     bus_wdata = d;
     bus_write = 1;
     bus_busy  = 1;
@@ -237,12 +287,48 @@ module tb_fbu_vs_pin;
   endtask
 
   task automatic reg_read(input logic [11:0] a, output logic [31:0] d);
-    bus_addr  = a;
+    bus_to_mem = 0;
+    bus_addr  = 20'(a);
     bus_write = 0;
     bus_busy  = 1;
     wait (!bus_busy);
     d = bus_rdata;
   endtask
+
+`ifdef BOARD_TOP
+  task automatic mem_port_write(input logic [19:0] a, input logic [31:0] d);
+    bus_to_mem = 1;
+    bus_addr   = a;
+    bus_wdata  = d;
+    bus_write  = 1;
+    bus_busy   = 1;
+    wait (!bus_busy);
+    bus_to_mem = 0;
+  endtask
+
+  task automatic mem_port_read(input logic [19:0] a, output logic [31:0] d);
+    bus_to_mem = 1;
+    bus_addr   = a;
+    bus_write  = 0;
+    bus_busy   = 1;
+    wait (!bus_busy);
+    d          = bus_rdata;
+    bus_to_mem = 0;
+  endtask
+
+  function automatic int window_of(input logic [63:0] a);
+    for (int w = 0; w < WINDOWS; w++)
+      if (a - 64'(WINDOW_BASE[w]) < 64'(WINDOW_BYTES[w]))
+        return w;
+    return -1;
+  endfunction
+
+  function automatic logic [19:0] port_b_offset(input logic [63:0] a);
+    int w;
+    w = window_of(a);
+    return 20'(w << 18) + 20'(a - 64'(WINDOW_BASE[w]));
+  endfunction
+`endif
 
   task automatic reg_read64(input logic [11:0] lo, output logic [63:0] d);
     logic [31:0] l;
@@ -498,6 +584,48 @@ module tb_fbu_vs_pin;
     return o;
   endfunction
 
+`ifdef BOARD_TOP
+  // Fill every window with what the bench's memory holds there (the image, and
+  // its unwritten-memory pattern elsewhere), then read the image back.
+  task automatic board_load();
+    logic [63:0] word;
+    logic [31:0] lo;
+    logic [31:0] hi;
+    int          outside = 0;
+    int          not_ext_mem = 0;
+    int          mismatched = 0;
+    foreach (mem[k]) begin
+      if ((64'(k) << 3) >> 28 != 64'h8)
+        not_ext_mem++;
+      else if (window_of(64'(k) << 3) < 0)
+        outside++;
+    end
+    if (not_ext_mem != 0)
+      $display("[FBU_TB] load_lst: %0d image words lie outside EXT_MEM and are not loaded", not_ext_mem);
+    if (outside != 0)
+      tb_err($sformatf("load_lst: %0d image words fall outside the memory windows", outside));
+    for (int w = 0; w < WINDOWS; w++) begin
+      for (int off = 0; off < WINDOW_BYTES[w]; off += 8) begin
+        word = mem_rd(64'(WINDOW_BASE[w]) + 64'(off));
+        mem_port_write(20'(w << 18) + 20'(off), word[31:0]);
+        mem_port_write(20'(w << 18) + 20'(off) + 20'd4, word[63:32]);
+      end
+    end
+    foreach (mem[k]) begin
+      if (window_of(64'(k) << 3) >= 0) begin
+        mem_port_read(port_b_offset(64'(k) << 3), lo);
+        mem_port_read(port_b_offset(64'(k) << 3) + 20'd4, hi);
+        if ({hi, lo} != mem[k])
+          mismatched++;
+      end
+    end
+    if (mismatched != 0)
+      tb_err($sformatf("load_lst: %0d image words read back wrong through the memory port", mismatched));
+    else
+      $display("[FBU_TB] memory windows filled and the image read back");
+  endtask
+`endif
+
   task automatic exec(input string raw, input int lineno);
     string       ln;
     string       cmd;
@@ -528,6 +656,9 @@ module tb_fbu_vs_pin;
           tb_err($sformatf("load_lst %s failed", a1));
         else
           $display("[FBU_TB] loaded %0d words from %s", n, a1);
+`ifdef BOARD_TOP
+        board_load();
+`endif
       end
       "reset": begin
         void'($sscanf(a1, "%d", t));
@@ -624,8 +755,21 @@ module tb_fbu_vs_pin;
         void'($sscanf(a1, "%h", base));
         void'($sscanf(a2, "%d", v));
         fd = $fopen(a3, "w");
-        for (longint i = 0; i < v; i += 8)
+        for (longint i = 0; i < v; i += 8) begin
+`ifdef BOARD_TOP
+          logic [31:0] lo;
+          logic [31:0] hi;
+          if (window_of(base + 64'(i)) < 0) begin
+            tb_err($sformatf("dump_mem: %h is outside the memory windows", base + 64'(i)));
+            break;
+          end
+          mem_port_read(port_b_offset(base + 64'(i)), lo);
+          mem_port_read(port_b_offset(base + 64'(i)) + 20'd4, hi);
+          $fdisplay(fd, "%016h %016h", base + 64'(i), {hi, lo});
+`else
           $fdisplay(fd, "%016h %016h", base + 64'(i), mem_rd(base + 64'(i)));
+`endif
+        end
         $fclose(fd);
       end
       "finish": verdict(1, "");

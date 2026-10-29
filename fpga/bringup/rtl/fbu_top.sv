@@ -53,7 +53,11 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   output logic [LINE_W-1:0] m_req_data,
   input  logic              m_rsp_valid,
   input  logic [LINE_W-1:0] m_rsp_data,
-  input  logic              m_rsp_err
+  input  logic              m_rsp_err,
+
+  output logic              link_error_seen,
+  output logic              tohost_seen,
+  output logic              boot_gate_gave_up
 );
 
   localparam int MATCH_BYTES = 32;
@@ -174,7 +178,6 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [63:0]       link_cyc;
   logic [31:0]       link_rd;
   logic [31:0]       link_wr;
-  logic              tohost_seen;
   logic [63:0]       tohost_val;
   logic [31:0]       err_now;
   logic [31:0]       err_sticky;
@@ -206,7 +209,8 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
     .rec_tohost, .rec_tohost_cyc(rec_end_cyc), .rec_tohost_val);
 
-  assign io_oe = {LINK_W{slave_io_oe}};
+  assign io_oe           = {LINK_W{slave_io_oe}};
+  assign link_error_seen = err_sticky != '0;
 
   // ---- control pins ----
   logic        uart_rx_from_uart;
@@ -228,6 +232,8 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .req, .wr, .io_i, .uart_rx_from_uart,
     .rst_n, .irq, .fault_inject, .test_mode, .scan_en, .uart_rx,
     .reset_count, .cycles_total, .gate_passes, .gate_fails, .gate_gave_up, .gate_last_header);
+
+  assign boot_gate_gave_up = gate_gave_up;
 
   // ---- console ----
   logic [8:0]  uart_rx_head;
