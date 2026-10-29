@@ -7,3 +7,5 @@ hdl/cvw/addins/
 sim/pin/
 hvl/pin/vm_paths.sh
 third_party/cascade/
+sim/fbu_vs_pin/
+sim/fbu_vs_pin*.out
