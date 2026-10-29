@@ -139,6 +139,23 @@ module tb_fbu_vs_pin;
     .cfg_match_len(match_len), .cfg_match_pattern(match_pattern),
     .match_clear, .match_hit, .match_pulse);
 
+  // ---- link trace ----
+  logic [319:0] trace_head;
+  logic         trace_valid;
+  logic         trace_pop;
+  logic [11:0]  trace_level;
+  logic [31:0]  trace_written, trace_dropped;
+  logic         trace_overflow;
+
+  fbu_link_trace #(.BEATS(BEATS)) trace (
+    .clk, .arst_n, .clear(1'b0),
+    .cfg_enable(1'b1), .cfg_stop_on_error(max_errors == 1),
+    .link_cyc(cyc), .chip_in_reset(!rst_n),
+    .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line, .rec_tohost,
+    .rec_end_cyc(rec_tohost_cyc), .rec_tohost_val, .err_now, .irq,
+    .head(trace_head), .head_valid(trace_valid), .pop(trace_pop), .level(trace_level),
+    .records_written(trace_written), .records_dropped(trace_dropped), .overflow(trace_overflow));
+
   // ---- behavioural line memory, as pin_link_agent's ----
   logic [63:0] mem [longint unsigned];
 
@@ -209,15 +226,15 @@ module tb_fbu_vs_pin;
   end
 
   // ---- errors, trace and console log ----
-  // The bench stops at its MAX_ERRORS-th error with that cycle's records
-  // written; nothing that finished later is written here either.
+  // Link errors stop the trace inside fbu_link_trace.  Errors only this
+  // testbench sees (console, exit code) stop it here, the same way.
   int     trace_fd;
   int     uart_fd;
   bit     finished    = 0;
   longint stop_cyc    = -1;
+  longint tb_stop_cyc = -1;
   int     link_errors = 0;
   int     tb_errors   = 0;
-  string  first_tb_error = "";
 
   function automatic int total_errors();
     return link_errors + tb_errors;
@@ -225,35 +242,61 @@ module tb_fbu_vs_pin;
 
   function automatic void tb_err(input string m);
     tb_errors++;
-    if (first_tb_error == "")
-      first_tb_error = m;
     $display("[FBU_TB] ERROR cyc %0d: %s", cyc, m);
-    if (total_errors() >= max_errors && stop_cyc < 0)
-      stop_cyc = longint'(cyc) + 1;
+    if (total_errors() >= max_errors && stop_cyc < 0) begin
+      stop_cyc    = longint'(cyc) + 1;
+      tb_stop_cyc = stop_cyc;
+    end
   endfunction
 
   always @(posedge clk) begin
-    if (!finished) begin
-      if (rec_valid && (stop_cyc < 0 || longint'(rec_tohost_cyc) <= stop_cyc)) begin
-        string s = "";
-        if (rec_tohost)
-          $fdisplay(trace_fd, "T %0d %016h", rec_tohost_cyc, rec_tohost_val);
+    if (!finished && err_now != '0 && stop_cyc < 0) begin
+      link_errors += $countones(err_now);
+      if (total_errors() >= max_errors)
+        stop_cyc = longint'(cyc) + 1;
+    end
+  end
+
+  function automatic void write_record(input logic [319:0] r);
+    logic [3:0]  kind;
+    logic [63:0] at;
+    logic [63:0] end_at;
+    string       s;
+    kind   = r[31:28];
+    at     = r[95:32];
+    end_at = r[319:256];
+    case (kind)
+      4'd1: begin
+        if (tb_stop_cyc >= 0 && longint'(end_at) > tb_stop_cyc)
+          return;
+        s = "";
         for (int b = 0; b < BEATS; b++)
-          s = {s, $sformatf(" %016h", rec_line[64 * b +: 64])};
-        $fdisplay(trace_fd, "L %0d %s %08h%s", rec_cyc, rec_wr ? "W" : "R", rec_addr, s);
+          s = {s, $sformatf(" %016h", r[128 + 64 * b +: 64])};
+        $fdisplay(trace_fd, "L %0d %s %08h%s", at, r[27] ? "W" : "R", r[127:96], s);
       end
-      if (err_now != '0 && stop_cyc < 0) begin
+      4'd2: begin
+        if (tb_stop_cyc >= 0 && longint'(at) > tb_stop_cyc)
+          return;
+        $fdisplay(trace_fd, "T %0d %016h", at, r[191:128]);
+      end
+      4'd3: begin
         for (int i = 1; i < 32; i++) begin
-          if (err_now[i]) begin
+          if (r[96 + i]) begin
             link_err_t e = link_err_t'(i);
-            $fdisplay(trace_fd, "E %0d %s", cyc + 1, e.name());
-            link_errors++;
+            $fdisplay(trace_fd, "E %0d %s", at, e.name());
           end
         end
-        if (total_errors() >= max_errors)
-          stop_cyc = longint'(cyc) + 1;
       end
-    end
+      4'd4: $fdisplay(trace_fd, "I %0d %0d %0d", at, r[25:24], r[23]);
+      default: $display("[FBU_TB] ERROR: trace record of unknown kind %0d", kind);
+    endcase
+  endfunction
+
+  assign trace_pop = trace_valid;
+
+  always @(posedge clk) begin
+    if (trace_valid && !finished)
+      write_record(trace_head);
   end
 
   assign rx_pop = rx_valid;
@@ -349,13 +392,16 @@ module tb_fbu_vs_pin;
     if (done)
       return;
     done = 1;
-    repeat (2) @(posedge clk);
+    repeat (4) @(posedge clk);
+    for (int i = 0; i < 100 && trace_valid; i++)
+      @(posedge clk);
     finished = 1;
     $fclose(trace_fd);
     $fclose(uart_fd);
     fe = link_err_t'(first_err);
     $display("[FBU_TB] cycles=%0d link_rd=%0d link_wr=%0d uart_rx=%0d uart_tx=%0d errors=%0d first=%s@%0d",
              cyc, n_rd, n_wr, n_uart_rx, n_uart_tx, total_errors(), fe.name(), first_err_cyc);
+    $display("[FBU_TB] trace written=%0d dropped=%0d overflow=%0d", trace_written, trace_dropped, trace_overflow);
     $display("[FBU_TB] gate passes=%0d fails=%0d gave_up=%0d last_header=%09h resets=%0d",
              gate_passes, gate_fails, gate_gave_up, gate_last_header, reset_count);
     if (pass && total_errors() == 0)
@@ -468,7 +514,6 @@ module tb_fbu_vs_pin;
         void'($sscanf(a1, "%d", v));
         void'($sscanf(a2, "%d", t));
         irq_level[v] <= t[0];
-        $fdisplay(trace_fd, "I %0d %0d %0d", cyc, v, t[0]);
         @(posedge clk);
       end
       "fault_inject": begin

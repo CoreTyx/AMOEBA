@@ -91,7 +91,7 @@ signature_bench() {
 
 signature_fbu() {
   local rdwr errs ex
-  rdwr=$(grep -o 'link_rd=[0-9]* link_wr=[0-9]*' "$1/run.log" | head -1)
+  rdwr="link_rd=$(grep -c '^L [0-9]* R' "$1/pin_trace.log" || true) link_wr=$(grep -c '^L [0-9]* W' "$1/pin_trace.log" || true)"
   errs=$(awk '$1=="E"{print $2}' "$1/pin_trace.log" | tr '\n' ' ')
   ex=$(grep -o 'exit code [0-9]*, expected' "$1/run.log" | head -1 | awk '{print $3}' | tr -d ,)
   grep -q 'timeout:' "$1/run.log" && ex=timeout
@@ -211,6 +211,7 @@ if [ $FULL = 1 ]; then
   mutation_test m1 "+FPGA_MUTATE=1 +TIMEOUT=200000"
   mutation_test m2 "+FPGA_MUTATE=2"
   mutation_test m3 "+FPGA_MUTATE=3 +FPGA_WDOG=200"
+  mutation_test early_stop "+FPGA_GAP_PCT=60 +FPGA_SEED=3 +FPGA_WDOG=20"
   natural_test
   for t in irq uart_echo uart_lsr; do
     script_test "$t"
