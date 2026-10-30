@@ -113,13 +113,11 @@ module ecc_tb;
     check("secded8 no-error ded",  !s8_ded);
 
     // single-bit errors: all codeword positions
-    // bit SECDED8_CB-1 = overall parity bit: syndrome==0 so sec_err_o not set, data intact
+    // bit SECDED8_CB-1 = overall parity bit: syndrome==0, parity wrong, still a single-bit error
     for (int b = 0; b < SECDED8_CW; b++) begin
       s8_codeword_err = cw ^ (SECDED8_CW'(1) << b); #1;
-      if (b != SECDED8_CB-1) begin  // skip overall-parity-only error
-        check($sformatf("secded8 SEC b%0d sec", b), s8_sec);
-        check($sformatf("secded8 SEC b%0d ded", b), !s8_ded);
-      end
+      check($sformatf("secded8 SEC b%0d sec", b), s8_sec);
+      check($sformatf("secded8 SEC b%0d ded", b), !s8_ded);
       // data must be preserved for every single-bit error (data bits corrected, check bits ignored)
       check($sformatf("secded8 SEC b%0d data-ok", b), s8_data_out == 8'hA5);
     end
@@ -173,25 +171,16 @@ module ecc_tb;
 
     for (int b = 0; b < SECDED64_CW; b++) begin
       s64_codeword_err = cw ^ (SECDED64_CW'(1) << b); #1;
-      if (b != SECDED64_CB-1) begin  // skip overall-parity-only error
-        check($sformatf("secded64 SEC b%0d sec", b), s64_sec && !s64_ded);
-      end
+      check($sformatf("secded64 SEC b%0d sec", b), s64_sec && !s64_ded);
       // data must be preserved for every single-bit error
       check($sformatf("secded64 SEC b%0d data-ok", b), s64_data_out == 64'hDEADBEEFCAFEBABE);
     end
 
-    // spot-check DED: pairs across check-bit and data-bit regions
-    for (int b0 = 0; b0 < 8; b0++) begin
-      for (int b1 = b0+1; b1 < 16 && b1 < SECDED64_CW; b1++) begin
+    // double-bit errors: all pairs (exhaustive for the 72-bit codeword)
+    for (int b0 = 0; b0 < SECDED64_CW-1; b0++) begin
+      for (int b1 = b0+1; b1 < SECDED64_CW; b1++) begin
         s64_codeword_err = cw ^ (SECDED64_CW'(1) << b0) ^ (SECDED64_CW'(1) << b1); #1;
         check($sformatf("secded64 DED (%0d,%0d)", b0, b1), s64_ded && !s64_sec);
-      end
-    end
-    // additional DED spot-check: pairs within upper data-bit region
-    for (int b0 = SECDED64_CB; b0 < SECDED64_CB+8; b0++) begin
-      for (int b1 = b0+8; b1 < SECDED64_CB+24 && b1 < SECDED64_CW; b1++) begin
-        s64_codeword_err = cw ^ (SECDED64_CW'(1) << b0) ^ (SECDED64_CW'(1) << b1); #1;
-        check($sformatf("secded64 DED data (%0d,%0d)", b0, b1), s64_ded && !s64_sec);
       end
     end
 
