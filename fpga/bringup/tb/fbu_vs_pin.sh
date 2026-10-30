@@ -289,6 +289,28 @@ cache_ded_tests() {
   report $ok "fe_cache_ded/fe_cache_ded" "$(verdict_of "$d/run.log"); $(grep -o 'DED T[0-9] [A-Z]* traps [0-9]*' "$d/uart.log" | paste -sd ';')"
 }
 
+# fe_fault_site.c (CTRL-22): the console handshake on both sides with the pin
+# low, then one site at a time with the whole unit armed.
+site_tests() {
+  local base="$OUT/fe_fault_site" d ok=1
+  rm -rf "$base"
+  bench_run "$base/bench" "$FPGA_TESTS/fe_fault_site.c" "$FPGA_TESTS/fe_fault_site_bench.cmd"
+  d="$base/handshake"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_fault_site_bench.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  same_console "$base/bench/uart.log" "$d/uart.log" || ok=0
+  [ "$(verdict_of "$base/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_fault_site/handshake" "bench=$(verdict_of "$base/bench/run.log") fbu=$(verdict_of "$d/run.log"), uart.log $(same_console "$base/bench/uart.log" "$d/uart.log" && echo identical || echo DIFFERS)"
+  ok=1
+  d="$base/fe_fault_site"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_fault_site.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_fault_site/fe_fault_site" "$(verdict_of "$d/run.log"); $(grep -c 'target_site unit' "$d/run.log") sites"
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -336,6 +358,7 @@ if [ $FULL = 1 ]; then
   fault_tests
   calibration_tests
   cache_ded_tests
+  site_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"
