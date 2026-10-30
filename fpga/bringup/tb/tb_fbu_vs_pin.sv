@@ -363,6 +363,7 @@ module tb_fbu_vs_pin;
   localparam int          FI_MODE_PULSE        = 3;
   localparam int          FI_MODE_BURST        = 4;
   localparam int          FI_MODE_PHASE        = 5;
+  localparam int          FI_MODE_SINGLE       = 6;
   localparam int          FI_RUNNING_BIT       = 16;
   localparam logic [31:0] FI_CTRL_CLEAR_COUNTS = 32'h400;
 
@@ -944,6 +945,36 @@ module tb_fbu_vs_pin;
           $display("[FBU_TB] calibrate_phase unit %0d: site at mask phase %03h, model %03h: delta %0d, FI_PHASE_OFS %0d -> %0d",
                    unit, hit_phase, unit_mask_phase(unit), phase_delta, ofs, (ofs + 32'(phase_delta)) & 32'h1FF);
         end
+      end
+      "fault_trial": begin
+        // fault_trial <phase> <release> <text...>: one fault_inject pulse at the
+        // chip phase, started when the console prints text; the program is told
+        // to begin with 'g' and released with the release bytes once it is over.
+        int          phase;
+        string       release_bytes;
+        logic [31:0] fired_before;
+        logic [31:0] fired_now;
+        logic [31:0] fi_ctrl;
+        void'($sscanf(a1, "%h", phase));
+        release_bytes = unescape(a2);
+        reg_write(REG_FI_CTRL, 32'(FI_MODE_SINGLE) | FI_CTRL_CLEAR_COUNTS);
+        for (int w = 0; w < 16; w++)
+          reg_write(REG_FI_PHASE_MASK + 12'(4 * w), w == phase / 32 ? 32'd1 << (phase % 32) : 32'd0);
+        set_match(1, unescape(rest_after(ln, 3)));
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER + 4), 32'd0);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER),
+                  trigger_ctrl(TRIG_SRC_MATCH1, TRIG_ACT_FAULT, 0, 0, 1) | TRIG_REPEAT);
+        reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_before);
+        send_entry(2'd0, 8'("g"));
+        do begin
+          service();
+          reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_now);
+          reg_read(REG_FI_CTRL, fi_ctrl);
+        end while (!stopped() && (fired_now == fired_before || fi_ctrl[FI_RUNNING_BIT]));
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER), TRIG_DISARM);
+        for (int i = 0; i < release_bytes.len(); i++)
+          send_entry(2'd0, release_bytes.getc(i));
+        $display("[FBU_TB] fault_trial: pulse at phase %03h done, released", phase);
       end
       "expect_phase_ofs": begin
         logic [31:0] ofs;

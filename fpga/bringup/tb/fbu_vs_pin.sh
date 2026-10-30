@@ -267,6 +267,28 @@ calibration_tests() {
   done
 }
 
+# fe_cache_ded.c (CTRL-21): the console handshake on both sides with the pin
+# low, then the gateware's one-cycle pulses at the cache phases.
+cache_ded_tests() {
+  local base="$OUT/fe_cache_ded" d ok=1
+  rm -rf "$base"
+  bench_run "$base/bench" "$FPGA_TESTS/fe_cache_ded.c" "$FPGA_TESTS/fe_cache_ded_bench.cmd"
+  d="$base/handshake"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_cache_ded_bench.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  same_console "$base/bench/uart.log" "$d/uart.log" || ok=0
+  [ "$(verdict_of "$base/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_cache_ded/handshake" "bench=$(verdict_of "$base/bench/run.log") fbu=$(verdict_of "$d/run.log"), uart.log $(same_console "$base/bench/uart.log" "$d/uart.log" && echo identical || echo DIFFERS)"
+  ok=1
+  d="$base/fe_cache_ded"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_cache_ded.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_cache_ded/fe_cache_ded" "$(verdict_of "$d/run.log"); $(grep -o 'DED T[0-9] [A-Z]* traps [0-9]*' "$d/uart.log" | paste -sd ';')"
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -313,6 +335,7 @@ if [ $FULL = 1 ]; then
   boot_gate_tests
   fault_tests
   calibration_tests
+  cache_ded_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"
