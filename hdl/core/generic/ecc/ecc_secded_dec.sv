@@ -80,7 +80,9 @@ module ecc_secded_dec #(
 
   // syndrome!=0 & parity_check==1: single-bit error -> SEC
   // syndrome!=0 & parity_check==0: double-bit error -> DED
-  assign sec_err_o = (syndrome != '0) &  parity_check;
+  // Odd parity is a single-bit error, including one in the parity bit alone
+  // (syndrome 0), which must still be counted and repaired.
+  assign sec_err_o = parity_check;
   assign ded_err_o = (syndrome != '0) & ~parity_check;
 
   // Parallel correction mask: data bit at codeword position p is in error
