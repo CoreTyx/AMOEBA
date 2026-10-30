@@ -212,6 +212,9 @@ class Run:
         elif cmd == "fault_trial":
             self.fault_trial(int(args[0], 16), unescape(args[1]).encode("latin-1"),
                              unescape(rest_after(line, 3)).encode("latin-1"))
+        elif cmd == "target_site":
+            self.target_site(int(args[0]), int(args[1], 16), int(args[2]),
+                             None if args[3] == "none" else int(args[3]))
         elif cmd == "expect_phase_ofs":
             if d.rd(R.REG_FI_PHASE_OFS) != int(args[0]):
                 self.error(f"FI_PHASE_OFS {d.rd(R.REG_FI_PHASE_OFS)}, expected {args[0]}")
@@ -331,6 +334,39 @@ class Run:
         d.disarm_trigger(self.FAULT_TRIGGER)
         d.uart_send(release)
         print(f"[FORTE] fault_trial: pulse at phase {phase:03x} done, released")
+
+    def target_site(self, unit: int, phase: int, periods: int, counter) -> None:
+        """One fe_fault_site.c round with the whole unit armed and the pin high
+        only at the phase: counter alone must rise (none: nothing moves) and
+        every kernel result must stay right."""
+        d = self.dev
+        d.fault_pattern(R.FI_PHASE, periods, phases=[phase], start=False)
+        d.set_match(1, b"SITE GO")
+        d.arm_trigger(self.FAULT_TRIGGER, R.TRIG_SRC_MATCH1, R.TRIG_FAULT, repeat=True)
+        fired = d.trigger_fired(self.FAULT_TRIGGER)
+        d.uart_send(str(unit).encode())
+        if not self.run_cycles(10_000_000, until=lambda: d.trigger_fired(self.FAULT_TRIGGER) != fired
+                               and not d.fault_running()):
+            self.error(f"target_site: the pattern at phase {phase:03x} never ran")
+            return
+        d.disarm_trigger(self.FAULT_TRIGGER)
+        d.uart_send(b"x")
+        line = self.next_console_line(b"SITE d ")
+        if line is None:
+            self.error(f"target_site: no SITE line for unit {unit} phase {phase:03x}")
+            return
+        fields = line.split()
+        deltas, wrong = [int(x) for x in fields[2:20]], int(fields[21])
+        rose = deltas[counter] if counter is not None else 0
+        moved = sum(n for i, n in enumerate(deltas) if i != counter)
+        print(f"[FORTE] target_site unit {unit} phase {phase:03x}: counter {counter} rose {rose}, "
+              f"others {moved}, wrong {wrong}")
+        if counter is not None and rose == 0:
+            self.error(f"target_site unit {unit} phase {phase:03x}: counter {counter} never rose")
+        if moved:
+            self.error(f"target_site unit {unit} phase {phase:03x}: other counters moved by {moved}")
+        if wrong:
+            self.error(f"target_site unit {unit} phase {phase:03x}: {wrong} wrong kernel results")
 
     def next_console_line(self, prefix: bytes, budget: int = 10_000_000):
         """The next whole console line starting with prefix, after console_cursor."""

@@ -138,6 +138,8 @@ static uint64_t __attribute__((noinline)) kernel_cache(int passes) {
     return sum;
 }
 
+// fe_fault_site.c takes the kernels above and runs its own rounds.
+#ifndef FI_KERNELS_ONLY
 static uint64_t run_kernel(int unit) {
     switch (unit) {
         case 0:  return kernel_alu(12000);
@@ -202,3 +204,4 @@ int main(void) {
     uart_puts("FI ALL DONE\n");
     sim_exit((uint64_t)failures);
 }
+#endif

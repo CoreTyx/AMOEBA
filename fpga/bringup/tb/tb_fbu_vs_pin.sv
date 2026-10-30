@@ -397,6 +397,7 @@ module tb_fbu_vs_pin;
   string  console_line    = "";
   string  fi_round_lines [$];
   string  cal_lines      [$];
+  string  site_lines     [$];
   int     phase_delta     = 0;
   bit     fail_reported   = 0;
   bit     done            = 0;
@@ -495,6 +496,8 @@ module tb_fbu_vs_pin;
       fi_round_lines.push_back(console_line);
     if (console_line.len() > 6 && console_line.substr(0, 5) == "CAL d ")
       cal_lines.push_back(console_line);
+    if (console_line.len() > 7 && console_line.substr(0, 6) == "SITE d ")
+      site_lines.push_back(console_line);
     console_line = "";
   endtask
 
@@ -975,6 +978,65 @@ module tb_fbu_vs_pin;
         for (int i = 0; i < release_bytes.len(); i++)
           send_entry(2'd0, release_bytes.getc(i));
         $display("[FBU_TB] fault_trial: pulse at phase %03h done, released", phase);
+      end
+      "target_site": begin
+        // target_site <unit> <phase> <periods> <counter|none>: one fe_fault_site.c
+        // round with the whole unit armed and the pin high only at the phase.
+        int          unit;
+        int          phase;
+        int          periods;
+        int          counter;
+        int          wrong;
+        int          moved;
+        int          deltas [18];
+        logic [31:0] fired_before;
+        logic [31:0] fired_now;
+        logic [31:0] fi_ctrl;
+        void'($sscanf(a1, "%d", unit));
+        void'($sscanf(a2, "%h", phase));
+        void'($sscanf(a3, "%d", periods));
+        if (rest_after(ln, 4) == "none")
+          counter = -1;
+        else
+          void'($sscanf(rest_after(ln, 4), "%d", counter));
+        reg_write(REG_FI_ARG0, 32'(periods));
+        reg_write(REG_FI_CTRL, 32'(FI_MODE_PHASE) | FI_CTRL_CLEAR_COUNTS);
+        for (int w = 0; w < 16; w++)
+          reg_write(REG_FI_PHASE_MASK + 12'(4 * w), w == phase / 32 ? 32'd1 << (phase % 32) : 32'd0);
+        set_match(1, "SITE GO");
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER + 4), 32'd0);
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER),
+                  trigger_ctrl(TRIG_SRC_MATCH1, TRIG_ACT_FAULT, 0, 0, 1) | TRIG_REPEAT);
+        reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_before);
+        site_lines.delete();
+        send_entry(2'd0, 8'("0") + 8'(unit));
+        do begin
+          service();
+          reg_read(REG_TRIG + 12'(16 * FAULT_TRIGGER + 12), fired_now);
+          reg_read(REG_FI_CTRL, fi_ctrl);
+        end while (!stopped() && (fired_now == fired_before || fi_ctrl[FI_RUNNING_BIT]));
+        reg_write(REG_TRIG + 12'(16 * FAULT_TRIGGER), TRIG_DISARM);
+        send_entry(2'd0, 8'("x"));
+        while (!stopped() && site_lines.size() == 0)
+          service();
+        if (stopped())
+          return;
+        void'($sscanf(site_lines.pop_front(), "SITE d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d w %d",
+                      deltas[0], deltas[1], deltas[2], deltas[3], deltas[4], deltas[5],
+                      deltas[6], deltas[7], deltas[8], deltas[9], deltas[10], deltas[11],
+                      deltas[12], deltas[13], deltas[14], deltas[15], deltas[16], deltas[17], wrong));
+        moved = 0;
+        foreach (deltas[i])
+          if (i != counter)
+            moved += deltas[i];
+        $display("[FBU_TB] target_site unit %0d phase %03h: counter %0d rose %0d, others %0d, wrong %0d",
+                 unit, phase, counter, counter >= 0 ? deltas[counter] : 0, moved, wrong);
+        if (counter >= 0 && deltas[counter] == 0)
+          tb_err($sformatf("target_site unit %0d phase %03h: counter %0d never rose", unit, phase, counter));
+        if (moved != 0)
+          tb_err($sformatf("target_site unit %0d phase %03h: other counters moved by %0d", unit, phase, moved));
+        if (wrong != 0)
+          tb_err($sformatf("target_site unit %0d phase %03h: %0d wrong kernel results", unit, phase, wrong));
       end
       "expect_phase_ofs": begin
         logic [31:0] ofs;
