@@ -209,6 +209,9 @@ class Run:
             d.wr(R.REG_FI_PHASE_OFS, int(args[0]) & 0x1FF)
         elif cmd == "calibrate_phase":
             self.calibrate_phase(int(args[0]), int(args[1]))
+        elif cmd == "fault_trial":
+            self.fault_trial(int(args[0], 16), unescape(args[1]).encode("latin-1"),
+                             unescape(rest_after(line, 3)).encode("latin-1"))
         elif cmd == "expect_phase_ofs":
             if d.rd(R.REG_FI_PHASE_OFS) != int(args[0]):
                 self.error(f"FI_PHASE_OFS {d.rd(R.REG_FI_PHASE_OFS)}, expected {args[0]}")
@@ -310,6 +313,24 @@ class Run:
         d.wr(R.REG_FI_PHASE_OFS, new_ofs)
         print(f"[FORTE] calibrate_phase unit {unit}: site at mask phase {hits[0]:03x}, model {model:03x}: "
               f"delta {self.phase_delta}, FI_PHASE_OFS {old_ofs} -> {new_ofs}")
+
+    def fault_trial(self, phase: int, release: bytes, text: bytes) -> None:
+        """One fault_inject pulse at the chip phase, started when the console
+        prints text; the program is told to begin with 'g' and released with
+        the release bytes once the pulse is over."""
+        d = self.dev
+        d.fault_pattern(R.FI_SINGLE, phases=[phase], start=False)
+        d.set_match(1, text)
+        d.arm_trigger(self.FAULT_TRIGGER, R.TRIG_SRC_MATCH1, R.TRIG_FAULT, repeat=True)
+        fired = d.trigger_fired(self.FAULT_TRIGGER)
+        d.uart_send(b"g")
+        if not self.run_cycles(10_000_000, until=lambda: d.trigger_fired(self.FAULT_TRIGGER) != fired
+                               and not d.fault_running()):
+            self.error(f"fault_trial: the pulse at phase {phase:03x} never ran")
+            return
+        d.disarm_trigger(self.FAULT_TRIGGER)
+        d.uart_send(release)
+        print(f"[FORTE] fault_trial: pulse at phase {phase:03x} done, released")
 
     def next_console_line(self, prefix: bytes, budget: int = 10_000_000):
         """The next whole console line starting with prefix, after console_cursor."""
