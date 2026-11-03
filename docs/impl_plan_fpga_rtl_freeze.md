@@ -603,17 +603,20 @@ release) and can be gated by a global window `FI_WIN_START`/`FI_WIN_STOP`:
      oracle.
 
   The same limit applies to silicon bring-up scripts, and is worth knowing now.
-- **To check in RTL sim before relying on it:** RF ECC (bit 4) and pipeline
-  ECC (bit 5) share phase `0x1FF`. `ft_fault_gen`'s comment says "sites with
-  different phases never fire in the same cycle", but these two share one. With
-  both armed, an RF-flipped operand can be captured into `RD1E`/`RD2E` in the
-  same cycle as the pipeline mask flips that register. Depending on how each
-  derives its bit index from the LFSR, that is either a double flip (DED →
-  cause 19, and the sticky `PrivModeUncorrectableFaultW`, which is wired to
-  reset/NMI) or a cancellation (silent loss of coverage). P1 runs
-  `baremetal_ecc` with `FI_CONTROL` = `0x10`, `0x20` and `0x30` in the RTL sim
-  and compares counters 0–3 to see which. This only affects how CTRL-20 is
-  armed. The RTL stays frozen either way.
+- **RF ECC (bit 4) and pipeline ECC (bit 5) armed together lose the RF's
+  faults.** Both act at phase `0x1FF`. Their flips never meet: the pipeline's
+  is in `RD1E`/`RD2E` at count 511, the RF's is in the read those registers
+  capture at the end of that cycle (a standalone testbench of the real modules,
+  `sim/verilator/ecc_cancel_tb/`, counts exactly the sum of the two). In the
+  chip, though, the pipeline's correctable error raises `EccStallE`
+  (`datapath.sv`), which holds `RD1E`/`RD2E` for the cycle the register
+  repairs itself, so the RF-flipped read is never captured, and at count 0
+  Decode reads again, clean. Measured (`fe_fault_rfpipe`, RTL bench, pin
+  high): counter 0 is 605 with `0x10`, 3866 with `0x20` (pipeline flips in
+  `RD1E`/`RD2E` count there) and 3870 with `0x30`. No wrong result and no
+  DED, only lost RF coverage. The pin separates them (the pipeline samples
+  it at `0x1FE`, the RF at `0x1FF`, CTRL-12b), and CTRL-20 arms `0x5F` and
+  `0x6F` in turn.
 
 ### 5.5 `fbu_scan.sv`: test-mode driver
 
@@ -1188,7 +1191,18 @@ Still open:
    intended silicon behaviour for long-running fault-tolerance demos? It cannot
    change now. The question is whether bring-up and demo software should plan
    on periodic resets.
-3. **Q9: cache scrubber disabled.** `cache.sv` defaults `SCRUBBER_ENABLED`
+3. **Q10: SECDED never reports a flip of the overall parity bit.**
+   `ecc_secded_dec.sv` (every `flopenrc_cw`/`flopenrc_ecc`: the register-file
+   read path and the pipeline registers) sets `sec_err_o` only when the
+   syndrome is non-zero; a flip of the parity bit alone (syndrome 0, parity
+   wrong) raises neither flag. The data is right, but the error is not counted
+   and the register does not repair itself, so the flip stays; a later
+   single upset in the same word then decodes as DED (trap) where standard
+   SECDED would have corrected both in turn. About 1 in 72 injected flips is
+   never counted (197 of 200 per site in the standalone testbench). The usual
+   fix is `sec_err_o = parity_check`; the RTL is frozen, so this goes to the
+   decoder's owner.
+4. **Q9: cache scrubber disabled.** `cache.sv` defaults `SCRUBBER_ENABLED`
    to 0, and neither the I$ nor the D$ instance overrides it, so the frozen
    RTL (and Vivado, §9.1) has no scrubber. Is that intended for tapeout? If
    so, a stored cache SEC flip in a line that is never read again stays
@@ -1205,6 +1219,69 @@ Still open:
 
 ---
 
+### 12.1 Findings in the frozen RTL
+
+What the FPGA tests found in the RTL as frozen (`8babc55`). The RTL does not
+change on this branch; each finding goes to its owner. F1 to F5 are defects;
+F6 and F7 are behaviour the tests and software must allow for.
+
+**F1. An I$ ECC repair can be written to the wrong set (silent wrong code).**
+`STATE_ECC_WRITEBACK` (`cachefsm.sv`) writes the corrected tag and line back
+into the hit way after a correctable error. In `cache.sv`, a `FlushStage`
+makes the I$ array address follow `NextSet` for the new PC:
+`AdrSelMuxSelData = {FlushCache, ((SelAdrData | SelHPTW) & ~((READ_ONLY_CACHE == 1) & FlushStage))}`
+(likewise for the tag). That override is Wally's and is safe for fills, but
+if a Decode flush (branch mispredict, trap, FT replay) lands in the cycle of
+the repair write, the repair goes to the new PC's set. The I$ then holds a
+line under the wrong address: a later fetch with the same tag in that set
+hits it and runs another function's code, with no fault reported.
+- Found by CTRL-20: `tc_pmp_deny` armed `0x5F` at gap setting `g10s4l7`
+  (`+FPGA_GAP_PCT=10 +FPGA_SEED=4 +FPGA_RD_LAT=7`) hangs on the RTL pin bench
+  and on the gateware alike. At cycle 523 266 a hit on `0x80001c14` (set 0x01,
+  way 1, injected SEC) is repaired while `FlushD`/`FlushE` redirect to
+  `0x8000133c`, and the repair lands in set 0x33, way 1. At cycle 757 938 the
+  fetch of `0x80001f30` (same tag `0x200007`, set 0x33) hits it and executes
+  `0x80001c10`'s instructions; decoding goes out of step at a compressed
+  instruction, traps as illegal at `0x80001f40`, leaves `ra` in zeroed padding,
+  and the test's handler then traps forever. Every unit armed alone passes;
+  the injection only supplies the correctable error and moves the timing.
+- In silicon a real upset does the same. Likely fix: no `FlushStage` override
+  of the array address while in `STATE_ECC_WRITEBACK`, or no repair write for
+  a flushed I$ access.
+
+**F2. SECDED never reports a flip of the overall parity bit** (Q10). Fix with
+a test on `debug/ecc-syndrome-fix` (pushed for review): `sec_err_o =
+parity_check`; the repo's ECC suite passes with it.
+
+**F3. A dirty D$ line with an uncorrectable error livelocks a demand miss**
+(CTRL-21). Evicting it raises cause 20 at once (`TrapM = ExceptionM &
+~CommittedF`); the trap's flush abandons the refill before the victim is
+replaced, the line stays valid, and the retried access picks the same victim
+and traps again. Only a D$ flush (`fence.i`, there is no Zicbom) drops it,
+trapping once more as it does (`mtval` = the line). Every cause-20 handler
+must recover with `fence.i`, never by touching other lines of the set.
+
+**F4. An uncorrectable tag on a clean line is never counted** (CTRL-21).
+`TagDedErr = TagDedErrWay & HitWay`, a way with a DED tag never hits, and a
+clean victim's tag is not checked. Harmless (the line misses and is
+refetched) but invisible: the I$ DED counter (5) cannot move from injection
+with the scrubber off (Q9), because a fill takes the tag and data flips
+together.
+
+**F5. RF and pipeline ECC armed together lose the RF's faults** (§5.4.2). The
+pipeline flip's `EccStallE` holds `RD1E`/`RD2E` in the cycle that would
+capture the RF-flipped read: 605 RF detections alone, +4 with both. No wrong
+result; lost coverage only.
+
+**F6. The fault counter starts 4 cycles after the link** (CTRL-12b): the
+chip's reset synchronisers. `FI_PHASE_OFS` resets to 4; calibration measures
+it.
+
+**F7. The divider's fault check sees only completing divides** (CTRL-10,
+CTRL-22). A periodic loop can complete every divide on the other parity from
+the injector's phase and detect nothing; tests jitter the loop. Coverage on
+real code is low.
+
 ## 13. Backlog (TODO, not scheduled)
 
 - **Real-pins ribbon loopback** (was P5a). `forte_top` pins out through PYNQ
@@ -1214,3 +1291,11 @@ Still open:
   10/25 MHz. Re-pins `feature/top_level`'s stage-C design for 32 signals.
 - **DFT tests** CTRL-14..18 on hardware (scripts only; gateware is in place).
 - Fix `docs/memory_map.md` (`FI_CONTROL` reset and width, fault counters).
+- **CTRL-22 shift-channel margin.** ALU replica 0's shift channel (`1de`)
+  detected only 2 times in 256 periods on the board (9 in sim); raise the
+  `1de` and `19e` rounds in `fe_fault_site.cmd` to 1024 periods.
+- **CTRL-22 RF/pipeline separation with both armed.** Let `target_site` take
+  an `FI_CONTROL` mask, arm `0x30`, and check that the pin high only at `1FE`
+  moves the pipeline counter alone and only at `1FF` the RF counter alone
+  (§5.4.2: with the pin high at both, the pipeline flip's stall drops the RF
+  flip).
