@@ -215,6 +215,8 @@ class Run:
         elif cmd == "target_site":
             self.target_site(int(args[0]), int(args[1], 16), int(args[2]),
                              None if args[3] == "none" else int(args[3]))
+        elif cmd == "check_chip_counters":
+            print("[FORTE] check_chip_counters: the chip's fault counters are not visible from the PS; skipped")
         elif cmd == "expect_phase_ofs":
             if d.rd(R.REG_FI_PHASE_OFS) != int(args[0]):
                 self.error(f"FI_PHASE_OFS {d.rd(R.REG_FI_PHASE_OFS)}, expected {args[0]}")

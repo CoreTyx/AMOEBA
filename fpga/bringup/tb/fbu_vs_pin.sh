@@ -38,6 +38,19 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
   done
 fi
 
+# tc_fault_control checks that FI_CONTROL is 0 after reset, which the prologue undoes.
+ALWAYS_ON_IMAGES=()
+for f in "$R"/testcode/isa_level_testing/tc_*.c "$R"/testcode/isa_level_testing/tcf_*.c "$R"/testcode/baremetal_ecc/tc_*.c; do
+  [ "$(basename "$f")" = tc_fault_control.c ] || ALWAYS_ON_IMAGES+=("$f")
+done
+# Known frozen-RTL failures (plan s12.1): these must keep failing the same way.
+ALWAYS_ON_KNOWN_HANGS=("tc_pmp_deny/0x5F-g10s4l7")   # F1: I$ ECC repair written to the flush target's set
+ALWAYS_ON_KNOBS=(
+  "g30s1|+FPGA_GAP_PCT=30 +FPGA_SEED=1"
+  "g60s3|+FPGA_GAP_PCT=60 +FPGA_SEED=3"
+  "g10s4l7|+FPGA_GAP_PCT=10 +FPGA_SEED=4 +FPGA_RD_LAT=7"
+)
+
 KNOBS=(
   "d|+FPGA_SEED=1"
   "g30s1|+FPGA_GAP_PCT=30 +FPGA_SEED=1"
@@ -212,6 +225,14 @@ upto_tohost() { awk '{print} $1=="T"{exit}' "$1" > "$2"; }
 # The bench stops at tohost before the console's last newline arrives.
 same_console() { diff -q <(sed -e '$a\' "$1") <(sed -e '$a\' "$2") > /dev/null; }
 
+# Runs that stop at tohost cut the console wherever the UART is; compare
+# what both have.
+same_console_prefix() {
+  local n
+  n=$(( $(stat -c%s "$1") < $(stat -c%s "$2") ? $(stat -c%s "$1") : $(stat -c%s "$2") ))
+  cmp -s -n "$n" "$1" "$2"
+}
+
 # fe_fault_burst.c (fe_fault_pin.c for a patterned pin).  Pin high on both
 # sides: the gateware must reproduce the bench's console and trace.  Then the
 # gateware alone: a 512-period burst per round, started by a PL trigger on the
@@ -311,6 +332,48 @@ site_tests() {
   report $ok "fe_fault_site/fe_fault_site" "$(verdict_of "$d/run.log"); $(grep -c 'target_site unit' "$d/run.log") sites"
 }
 
+# CTRL-20: fault_inject high from before release, FI_CONTROL armed by the
+# fi_arm_lst.py prologue.  RF ECC (0x5F) and pipeline ECC (0x6F) take turns:
+# armed together under a high pin, the pipeline flip's EccStallE drops the
+# read that carries the RF flip, so RF ECC goes unexercised (s5.4.2).  The
+# gateware must reproduce the bench's trace, and the console must be the
+# unarmed run's.
+always_on_tests() {
+  local image base off d arm k name args cmp ok
+  for image in "${ALWAYS_ON_IMAGES[@]}"; do
+    base="$(basename "${image%.*}")"
+    off="$OUT/fi_always/$base/off"
+    rm -rf "$OUT/fi_always/$base"
+    bench_run "$off" "$image" ""
+    for arm in 0x5F 0x6F; do
+      for k in "${ALWAYS_ON_KNOBS[@]}"; do
+        IFS='|' read -r name args <<<"$k"
+        ok=1
+        d="$OUT/fi_always/$base/$arm-$name"
+        mkdir -p "$d"
+        python3 "$FPGA_TESTS/fi_arm_lst.py" "$off/memory.lst" "$d/armed.lst" $arm > "$d/patch.log" 2>&1 || ok=0
+        # shellcheck disable=SC2086
+        bench_run "$d/bench" "$d/armed.lst" "$FPGA_TESTS/fe_fi_always_bench.cmd" $args
+        expand_script "$FPGA_TESTS/fe_fi_always.cmd" "$d/armed.lst" "$d/script.cmd"
+        # shellcheck disable=SC2086
+        fbu_run "$d/fbu" +CMD="$d/script.cmd" $args
+        if [[ " ${ALWAYS_ON_KNOWN_HANGS[*]} " == *" $base/$arm-$name "* ]]; then
+          grep -q 'no tohost write' "$d/bench/run.log" && grep -q 'no tohost write' "$d/fbu/run.log" || ok=0
+          report $ok "fi_always/$base/$arm-$name" "known RTL hang (plan s12.1 F1) on both sides"
+          continue
+        fi
+        strip_error_text "$d/bench/pin_trace.log" "$d/a.log"
+        strip_error_text "$d/fbu/pin_trace.log" "$d/b.log"
+        cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a.log" "$d/b.log" 2>&1 | head -1 || true)
+        [[ "$cmp" == MATCH* ]] || ok=0
+        [ "$(verdict_of "$d/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/fbu/run.log")" = PASS ] || ok=0
+        same_console_prefix "$off/uart.log" "$d/fbu/uart.log" || ok=0
+        report $ok "fi_always/$base/$arm-$name" "bench=$(verdict_of "$d/bench/run.log") fbu=$(verdict_of "$d/fbu/run.log") $cmp; counters$(grep -o 'counters:.*' "$d/fbu/run.log" | cut -d: -f2)"
+      done
+    done
+  done
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -359,6 +422,7 @@ if [ $FULL = 1 ]; then
   calibration_tests
   cache_ded_tests
   site_tests
+  always_on_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"

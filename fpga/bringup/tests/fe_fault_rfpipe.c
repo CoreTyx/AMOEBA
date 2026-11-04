@@ -3,8 +3,10 @@
 //
 // Both injectors fire at fault-counter phase 0x1FF, and the pipeline mask also
 // flips RD1E/RD2E, the registers that carry register-file operands into
-// Execute.  Armed together, one operand can take both flips in the same cycle:
-// a double error (DED, counters 1/3), or two flips of the same bit that cancel.
+// Execute.  The flips never meet: the pipeline's is in RD1E/RD2E at count
+// 511, the register file's is in the read RD1E/RD2E captures at the end of it.
+// But the pipeline's correctable error raises EccStallE for that cycle, so the
+// capture does not happen and the register file's flip is lost.
 // This runs the same kernel with FI_CONTROL = 0x10, 0x20 and 0x30 and prints
 // counters 0-3 for each:
 //   RFPIPE mask <m> <result ok|WRONG> d <c0> <c1> <c2> <c3>
