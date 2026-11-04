@@ -385,6 +385,13 @@ module tb_fbu_vs_pin;
   localparam int FI_DETECT_COUNTER    [FI_UNITS] = '{8, 10, 12, 14, 0, 2, 6};
   localparam int FI_COUNTS_PER_PERIOD [FI_UNITS] = '{6, 2, 1, 1, 2, 5, 3};
 
+  // The chip's fault counters (faultcount_apb), read hierarchically by check_chip_counters.
+`ifdef BOARD_TOP
+  `define CHIP_FAULT_COUNTERS board.chip.chip.chip.soc.uncore.faultcount.Count
+`else
+  `define CHIP_FAULT_COUNTERS dut.chip.chip.soc.uncore.faultcount.Count
+`endif
+
   // ---- PS state ----
   int     trace_fd;
   int     uart_fd;
@@ -1037,6 +1044,29 @@ module tb_fbu_vs_pin;
           tb_err($sformatf("target_site unit %0d phase %03h: other counters moved by %0d", unit, phase, moved));
         if (wrong != 0)
           tb_err($sformatf("target_site unit %0d phase %03h: %0d wrong kernel results", unit, phase, wrong));
+      end
+      "check_chip_counters": begin
+        // Simulation only (the PS cannot read them): the chip's fault counters
+        // after an armed run.  Detection counters must have moved, and the
+        // uncorrectable, unresolved and TMR-uncorrectable ones must not.
+        int    detected;
+        int    must_stay_zero [9];
+        string shown;
+        must_stay_zero = '{1, 3, 5, 7, 9, 11, 13, 15, 17};
+        detected = 0;
+        shown = "";
+        for (int i = 0; i < 18; i++) begin
+          shown = {shown, $sformatf(" %0d", `CHIP_FAULT_COUNTERS[i])};
+          if (!(i inside {must_stay_zero}))
+            detected += int'(`CHIP_FAULT_COUNTERS[i]);
+        end
+        $display("[FBU_TB] chip fault counters:%s", shown);
+        foreach (must_stay_zero[i])
+          if (`CHIP_FAULT_COUNTERS[must_stay_zero[i]] != 0)
+            tb_err($sformatf("chip fault counter %0d is %0d, expected 0",
+                             must_stay_zero[i], `CHIP_FAULT_COUNTERS[must_stay_zero[i]]));
+        if (detected == 0)
+          tb_err("chip fault counters: nothing detected; was anything armed?");
       end
       "expect_phase_ofs": begin
         logic [31:0] ofs;
