@@ -255,6 +255,40 @@ class Forte:
     def fault_events(self) -> dict:
         return {g: self.rd(R.REG_FI_EVENTS + 4 * i) for i, g in enumerate(R.FI_GROUPS)}
 
+    def scan_session(self, pattern, scan_en_from_pattern: bool = True) -> list:
+        """One test-mode session (fbu_scan): pattern entries are (io[7:0], scan_en);
+        returns io[15:8] as captured each cycle.  test_mode is raised for the
+        session and dropped after it."""
+        ctrl = 2 if scan_en_from_pattern else 0
+        self.wr(R.REG_SCAN_CTRL, ctrl)
+        self.wr(R.REG_SCAN_ADDR, 0)
+        for value, scan_en in pattern:
+            self.wr(R.REG_SCAN_PATTERN, (int(scan_en) << 8) | value)
+        self.wr(R.REG_SCAN_LEN, len(pattern))
+        pin_ctrl = self.rd(R.REG_PIN_CTRL)
+        self.wr(R.REG_PIN_CTRL, pin_ctrl | 0x4)
+        self.wr(R.REG_SCAN_CTRL, ctrl | 1)
+        while self.rd(R.REG_SCAN_CTRL) & 0x100:
+            pass
+        self.wr(R.REG_PIN_CTRL, pin_ctrl)
+        captured = []
+        for i in range(len(pattern)):
+            self.wr(R.REG_SCAN_ADDR, i)
+            captured.append(self.rd(R.REG_SCAN_CAPTURE) & 0xFF)
+        return captured
+
+    def status_clear(self) -> None:
+        self.wr(R.REG_STAT_CLASS, 0)
+
+    def status(self) -> dict:
+        """The status pin's statistics (fbu_status_mon): half-periods in cycles."""
+        cls = self.rd(R.REG_STAT_CLASS)
+        return {"class": R.STATUS_CLASSES[cls & 3], "level": (cls >> 8) & 1,
+                "last": self.rd(R.REG_STAT_LAST), "min": self.rd(R.REG_STAT_MIN),
+                "max": self.rd(R.REG_STAT_MAX), "edges": self.rd(R.REG_STAT_EDGES),
+                "glitches": self.rd(R.REG_STAT_GLITCH),
+                "clkout_edges": self.rd(R.REG_CLKOUT_EDGES), "clkout_window": self.rd(R.REG_CLKOUT_WINDOW)}
+
     # ---- status ----
     def link_errors(self) -> int:
         return self.rd(R.REG_LINK_ERR_COUNT)

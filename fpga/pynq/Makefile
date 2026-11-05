@@ -232,6 +232,19 @@ test-link:
 	@$(BUILD)/tb_link/Vtb_link_slave | grep -v '^-'
 	@$(BUILD)/tb_link/Vtb_link_slave | grep -q 'tb_link_slave PASS'
 
+# fbu_status_mon against a modelled status pin with shrunk rates: every class,
+# the odd half-periods a transition or a chip reset leaves, a clear, and
+# clk_out at 1x and 1.5x the clock.
+.PHONY: test-status-mon
+test-status-mon:
+	@mkdir -p $(BUILD)/tb_status_mon
+	verilator --binary -sv --top-module tb_fbu_status_mon --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Mdir $(BUILD)/tb_status_mon \
+	    $(REPO)/fpga/bringup/rtl/fbu_status_mon.sv \
+	    $(REPO)/fpga/bringup/tb/tb_fbu_status_mon.sv > $(BUILD)/tb_status_mon/build.log 2>&1
+	@$(BUILD)/tb_status_mon/Vtb_fbu_status_mon | grep -v '^-'
+	@$(BUILD)/tb_status_mon/Vtb_fbu_status_mon | grep -q 'tb_fbu_status_mon PASS'
+
 # The whole PL top in Verilator, driven through the ctl registers the way the
 # PS drives it, running one FreeRTOS image from images/ (built for TARGET=pynq,
 # 128 KiB block RAM).  DUT=asic puts the ASIC top behind the link; DUT=soc is

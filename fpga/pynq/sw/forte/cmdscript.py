@@ -8,6 +8,8 @@ Console waits search the text received since the previous wait was satisfied,
 as the bench's do.  Arming the PL matcher when the command starts would miss
 text the chip printed while Python was still on its way there."""
 
+import random
+
 from . import regs as R
 from .device import Forte, record_lines
 
@@ -215,6 +217,26 @@ class Run:
         elif cmd == "target_site":
             self.target_site(int(args[0]), int(args[1], 16), int(args[2]),
                              None if args[3] == "none" else int(args[3]))
+        elif cmd == "scan_session":
+            self.scan_session(int(args[0]), int(args[1]))
+        elif cmd == "status_clear":
+            d.status_clear()
+        elif cmd == "wait_status":
+            # wait_status <none|stalled|active|quiet> <cycles>: until the status
+            # pin's last two half-periods are equal and of that class
+            want = args[0]
+            if want not in R.STATUS_CLASSES:
+                self.error(f"wait_status: unknown class {want}")
+            elif not self.run_cycles(int(args[1]), until=lambda: d.status()["class"] == want):
+                self.error(f"wait_status: status never {want} in {args[1]} cycles: {d.status()}")
+            else:
+                print(f"[FORTE] status {want}: {d.status()}")
+        elif cmd == "expect_clkout":
+            s = d.status()
+            if s["clkout_edges"] != s["clkout_window"]:
+                self.error(f"clk_out: {s['clkout_edges']} edges in a {s['clkout_window']}-cycle window")
+            else:
+                print(f"[FORTE] clk_out: {s['clkout_edges']} edges in {s['clkout_window']} cycles")
         elif cmd == "check_chip_counters":
             print("[FORTE] check_chip_counters: the chip's fault counters are not visible from the PS; skipped")
         elif cmd == "expect_phase_ofs":
@@ -369,6 +391,36 @@ class Run:
             self.error(f"target_site unit {unit} phase {phase:03x}: other counters moved by {moved}")
         if wrong:
             self.error(f"target_site unit {unit} phase {phase:03x}: {wrong} wrong kernel results")
+
+    # The latencies scan_session tries, from fbu_scan driving io[7:0] to it
+    # capturing the chip's scan_q on io[15:8].
+    SCAN_LATENCIES = range(1, 7)
+
+    def scan_session(self, length: int, seed: int) -> None:
+        """scan_session <len> <seed>: one test-mode session with a seeded random
+        pattern, scan_en high three cycles in four.  The chip's stub loads
+        scan_q from io[7:0] while scan_en is high and drives it on io[15:8], so
+        the capture must be the pattern some fixed latency late, held while
+        scan_en was low; exactly one latency may fit."""
+        rng = random.Random(seed)
+        pattern = [(rng.randrange(256), rng.randrange(4) != 0) for _ in range(length)]
+        captured = self.dev.scan_session(pattern)
+
+        def expected(latency):
+            q = None
+            out = []
+            for j in range(length):
+                if j >= latency and pattern[j - latency][1]:
+                    q = pattern[j - latency][0]
+                out.append(q)
+            return out
+
+        fits = [l for l in self.SCAN_LATENCIES
+                if all(e is None or e == c for e, c in zip(expected(l), captured))]
+        if len(fits) != 1:
+            self.error(f"scan_session: capture fits latencies {fits}; first entries {captured[:12]}")
+            return
+        print(f"[FORTE] scan_session: {length} cycles, capture matches at latency {fits[0]}")
 
     def next_console_line(self, prefix: bytes, budget: int = 10_000_000):
         """The next whole console line starting with prefix, after console_cursor."""

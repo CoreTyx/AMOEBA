@@ -622,8 +622,10 @@ release) and can be gated by a global window `FI_WIN_START`/`FI_WIN_STOP`:
 
 **Built and simulated, not exercised on hardware yet** (DFT testing is
 deferred, §7.1). It is in every bitstream, so the deferred tests need no
-rebuild. P1's `tb_forte_emu` runs one scan session against the frozen RTL to
-prove the block works.
+rebuild. `tb_fbu_vs_pin` runs `fe_scan.cmd` (`scan_session`, also on the PS)
+against the frozen RTL with the core held in reset, to prove the block works.
+Registers `SCAN_*` (§6); the PS writes the pattern and reads the capture one
+entry at a time.
 
 
 - When `test_mode=1`, the slave's `io` driver is disabled. `fbu_scan` drives
@@ -674,9 +676,13 @@ bus-shadow divisor (no bus on silicon).
   periods **exactly** `2^23` (stalled), `2^25` (active) and `2^27` (quiet) link
   cycles while the condition is steady, so the check is equality, not a tolerance.
 - **Phase alignment caveat.** `tick` is free-running from link reset, and the
-  selector switches taps combinationally. A transition produces one odd-length
-  half-period. The classifier reports the *last two equal* half-periods, and
-  `STAT_GLITCH` counts the transitions.
+  selector switches taps combinationally. A transition leaves one or two
+  odd-length half-periods: the one the switch cuts short and, if the pin
+  flips at the switch, the one from there to the new tap's next edge (a chip
+  reset does the same). The classifier reports the *last two equal*
+  half-periods, and `STAT_GLITCH` counts half-periods of none of the three
+  lengths. `make -C fpga/pynq test-status-mon` checks all of this with the
+  rates shrunk; the real rates are checked on the board (`fe_status.cmd`).
 - At 25 MHz a quiet half-period is 5.4 s, so a quiet-classification test takes
   ~11 s. Stalled (0.34 s) and active (1.34 s) are quick.
 - `clk_out`: count rising edges over a 2^20-cycle `core_clk` window. They
@@ -797,12 +803,24 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x438 | UART_CLEAR | W | |
 | 0x440–0x45C | UART_MATCH0[8] | RW | pattern, last byte in byte 0 |
 | 0x460–0x47C | UART_MATCH1[8] | RW | |
+| 0x500 | STAT_LAST | RO | last whole `status` half-period, in clk cycles |
+| 0x504 / 0x508 | STAT_MIN / STAT_MAX | RO | since the last clear |
+| 0x50C | STAT_EDGES | RO | edges since the last clear |
+| 0x510 | STAT_CLASS | RW | R [1:0] none/stalled/active/quiet (the last two equal half-periods), [8] pin now; W clears the statistics |
+| 0x514 | STAT_GLITCH | RO | half-periods of none of the three lengths |
+| 0x518 | CLKOUT_EDGES | RO | `clk_out` rising edges in the last whole window |
+| 0x51C | CLKOUT_WINDOW | RO | the window, 2^20 clk cycles |
+| 0x600 | SCAN_CTRL | RW | W [0] start; RW [1] `scan_en` from the pattern (else PIN_CTRL[3]); R [8] running, [9] done |
+| 0x604 | SCAN_LEN | RW | session length, 0..1024 cycles |
+| 0x608 | SCAN_ADDR | RW | the pattern/capture entry the PS accesses |
+| 0x60C | SCAN_PATTERN | W | [7:0] `io[7:0]`, [8] `scan_en`; then SCAN_ADDR + 1 |
+| 0x610 | SCAN_CAPTURE | RO | `io[15:8]` captured at SCAN_ADDR |
 
 **Reserved for later stages** (offsets kept free): `0x0F0–0x0FC` split
 clock; `0x110–0x11C` RST_TRIG; `0x130–0x14C` IRQ_TRIG and latency;
 `0x150–0x1FC` fault-inject generator (§5.4.1); `0x240–0x27C` lane coverage,
 histograms, ready policy and stalls; `0x2A0–0x2FC` mailbox; `0x500–0x51C`
-status monitor; `0x600–0xEFF` scan; `0xF00` EMU_TAPS.
+status monitor (now used); `0x600–0xEFF` scan (`0x600–0x610` used); `0xF00` EMU_TAPS.
 
 **Trace depth on the board.** Draining one record over AXI-Lite takes 11
 accesses. A busy link can produce one every 14 cycles, faster than the PS

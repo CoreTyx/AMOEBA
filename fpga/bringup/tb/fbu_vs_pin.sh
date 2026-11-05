@@ -32,7 +32,7 @@ IMAGES=("$@")
 FULL=0
 if [ ${#IMAGES[@]} -eq 0 ]; then
   FULL=1
-  IMAGES=("$TESTS/smoke.c")
+  IMAGES=("$TESTS/smoke.c" "$R/testcode/baremetal/sorting_algo.c")
   for f in "$R"/testcode/isa_level_testing/tc_*.c "$R"/testcode/isa_level_testing/tcf_*.c; do
     IMAGES+=("$f")
   done
@@ -169,14 +169,16 @@ expand_script() {   # script memory.lst out [sed-expression]
   fi
 }
 
-script_test() {   # test [gateware script, default the bench's own]
-  local t="$1" fbu_script="${2:-$TESTS/$1.cmd}" d bv fv cmp ok=1
-  d="$OUT/$t/script${2:+_$(basename "${2%.cmd}")}"
+script_test() {   # test [gateware script, default the bench's own] [knob name] [knob plusargs]
+  local t="$1" fbu_script="${2:-$TESTS/$1.cmd}" knob="${3:-}" args="${4:-}" d bv fv cmp ok=1
+  d="$OUT/$t/script${2:+_$(basename "${2%.cmd}")}${knob:+_$knob}"
   rm -rf "$d"
-  bench_run "$d/bench" "$TESTS/$t.c" "$TESTS/$t.cmd"
+  # shellcheck disable=SC2086
+  bench_run "$d/bench" "$TESTS/$t.c" "$TESTS/$t.cmd" $args
   mkdir -p "$d/fbu"
   expand_script "$fbu_script" "$d/bench/memory.lst" "$d/fbu/script.cmd"
-  fbu_run "$d/fbu" +CMD="$d/fbu/script.cmd"
+  # shellcheck disable=SC2086
+  fbu_run "$d/fbu" +CMD="$d/fbu/script.cmd" $args
   # The PS polls, so a console-triggered irq lands some cycles after the
   # bench's and may fall on the other side of a line fill: transactions and
   # irq changes are compared as two sequences.
@@ -374,6 +376,44 @@ always_on_tests() {
   done
 }
 
+# fe_status.c (STAT-06, fbu_status_mon): the console handshake on both sides,
+# then clk_out measured over a whole window.  The status classes take
+# 2^25-cycle half-periods: they are the unit test's (shrunk rates) and the
+# board's (fe_status.cmd).
+status_tests() {
+  local base="$OUT/fe_status" d ok=1 unit
+  rm -rf "$base"
+  bench_run "$base/bench" "$FPGA_TESTS/fe_status.c" "$FPGA_TESTS/fe_status_bench.cmd"
+  d="$base/handshake"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_status_bench.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  same_console "$base/bench/uart.log" "$d/uart.log" || ok=0
+  [ "$(verdict_of "$base/bench/run.log")" = PASS ] && [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_status/handshake" "bench=$(verdict_of "$base/bench/run.log") fbu=$(verdict_of "$d/run.log"), uart.log $(same_console "$base/bench/uart.log" "$d/uart.log" && echo identical || echo DIFFERS)"
+  ok=1
+  d="$base/clkout"
+  mkdir -p "$d"
+  expand_script "$FPGA_TESTS/fe_status_clkout.cmd" "$base/bench/memory.lst" "$d/script.cmd"
+  fbu_run "$d" +CMD="$d/script.cmd"
+  [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_status/clkout" "$(verdict_of "$d/run.log"); $(grep -o 'clk_out: .*' "$d/run.log" | head -1)"
+  ok=1
+  unit=$(make -s -C "$R/fpga/pynq" test-status-mon 2>&1 | grep -o 'tb_fbu_status_mon [A-Z]*.*' | head -1 || true)
+  [[ "$unit" == "tb_fbu_status_mon PASS"* ]] || ok=0
+  report $ok "fe_status/unit" "${unit:-no result}"
+}
+
+# fe_scan.cmd (P1, CTRL-14): test-mode sessions against the chip's scan stub,
+# core held in reset.
+scan_tests() {
+  local d="$OUT/fe_scan" ok=1
+  rm -rf "$d"
+  fbu_run "$d" +CMD="$FPGA_TESTS/fe_scan.cmd"
+  [ "$(verdict_of "$d/run.log")" = PASS ] || ok=0
+  report $ok "fe_scan/sessions" "$(verdict_of "$d/run.log"); $(grep -o 'capture matches at latency [0-9]*' "$d/run.log" | paste -sd ';')"
+}
+
 boot_gate_tests() {
   local d="$OUT/smoke/boot_gate" cmp ok=1
   rm -rf "$d"
@@ -413,6 +453,13 @@ if [ $FULL = 1 ]; then
   for t in irq uart_echo uart_lsr; do
     script_test "$t"
   done
+  # P1: the scripted programs under the seeded link settings too.
+  for t in irq uart_echo; do
+    for k in "${KNOBS[@]:1}"; do
+      IFS='|' read -r name args <<<"$k"
+      script_test "$t" "$TESTS/$t.cmd" "$name" "$args"
+    done
+  done
   script_test irq "$R/fpga/bringup/tests/irq_trig.cmd"
   planted_script_fault uart_lsr clean_byte 's/^uart_send_ferr 55/uart_send U/' 'exit code 1, expected 0'
   planted_script_fault uart_echo wrong_div 's/^uart_div 1/uart_div 2/' 'framing error'
@@ -423,6 +470,8 @@ if [ $FULL = 1 ]; then
   cache_ded_tests
   site_tests
   always_on_tests
+  status_tests
+  scan_tests
 fi
 
 echo "fbu_vs_pin: $pass passed, $fail failed  (runs in $OUT)"

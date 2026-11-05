@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////////
 // fbu_pin_ctl.sv -- the chip's control inputs: rst_n, irq[1:0], fault_inject,
-// test_mode, scan_en, and the uart_rx override.
+// test_mode, and the uart_rx override (scan_en is fbu_scan's).
 //
 // Boot gate (forte_link_pkg, "no link training"): after every release of rst_n
 // the first transaction must be a read of the reset vector.  The gate watches
@@ -21,7 +21,6 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
   input  logic [1:0]        cfg_irq,
   input  logic              cfg_fault_inject,
   input  logic              cfg_test_mode,
-  input  logic              cfg_scan_en,
   input  logic              cfg_rx_force_en,
   input  logic              cfg_rx_force_val,
 
@@ -42,7 +41,6 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
   output logic [1:0]        irq,
   output logic              fault_inject,
   output logic              test_mode,
-  output logic              scan_en,
   output logic              uart_rx,
 
   output logic [31:0]       reset_count,
@@ -89,14 +87,12 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
       irq          <= '0;
       fault_inject <= 1'b0;
       test_mode    <= 1'b0;
-      scan_en      <= 1'b0;
       uart_rx      <= 1'b1;
     end else begin
       rst_n        <= rst_n_d;
       irq          <= cfg_irq;
       fault_inject <= cfg_fault_inject;
       test_mode    <= cfg_test_mode;
-      scan_en      <= cfg_scan_en;
       uart_rx      <= cfg_rx_force_en ? cfg_rx_force_val : uart_rx_from_uart;
     end
   end
