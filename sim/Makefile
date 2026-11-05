@@ -688,8 +688,8 @@ ecc_baremetal_regression: verilator/$(ECC_INJECT_DIR)/Vtop_tb
 	[ $$fail -eq 0 ] || exit 1
 
 # ── ECC test suite (add sub-targets here as new ECC modules are added) ────────
-.PHONY: ecc_test ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_harden_test ecc_baremetal_regression
-ecc_test: ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_harden_test ecc_baremetal_regression
+.PHONY: ecc_test ecc_secded_dected_test cache_ecc_unit_test cache_integration_test icache_ecc_flush_test csr_harden_test ecc_baremetal_regression
+ecc_test: ecc_secded_dected_test cache_ecc_unit_test cache_integration_test icache_ecc_flush_test csr_harden_test ecc_baremetal_regression
 
 ecc_secded_dected_test:
 	mkdir -p verilator/ecc_tb
@@ -739,6 +739,29 @@ cache_integration_test:
 	    -Mdir verilator/cache_integration_tb --Wall -Wno-fatal -CFLAGS "-std=c++20" \
 	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/cache_integration_tb/compile.log
 	verilator/cache_integration_tb/Vcache_integration_tb
+
+# An I$ ECC repair flushed in its write cycle must not land in the flush target's set (the I$
+# array address follows NextSet on a flush).  Same build as cache_integration_test.
+icache_ecc_flush_test:
+	mkdir -p verilator/icache_ecc_flush_tb
+	verilator --binary -O2 --top-module icache_ecc_flush_tb \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    $(wildcard $(CURDIR)/../pkg/*.sv) \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(wildcard $(CURDIR)/../hdl/core/cache/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(wildcard $(CURDIR)/../hdl/core/generic/flop/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x128.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x44.sv \
+	    $(CURDIR)/../hdl/core/generic/mem/ram1p1rwbe_64x22.sv \
+	    $(CURDIR)/../hvl/common/getenvval_stub.cpp \
+	    $(CURDIR)/../hvl/cache/icache_ecc_flush_tb.sv \
+	    -Mdir verilator/icache_ecc_flush_tb --Wall -Wno-fatal -CFLAGS "-std=c++20" \
+	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/icache_ecc_flush_tb/compile.log
+	verilator/icache_ecc_flush_tb/Vicache_ecc_flush_tb | tee verilator/icache_ecc_flush_tb/run.log
+	grep -q 'ALL TESTS PASSED' verilator/icache_ecc_flush_tb/run.log
 
 # Demand-path edge cases with the scrubber disabled (as the real D$ is instantiated), against a bus
 # model that records writebacks, plus a seeded random run with injected errors (SEED=n).
