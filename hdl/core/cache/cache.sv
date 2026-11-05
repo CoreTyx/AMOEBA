@@ -495,8 +495,13 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic SelCorrectTagDemand, SelCorrectDataDemand;
   logic                          EccDedDirtyFaultDemand;
   logic [PA_BITS-1:0]             ScrubFaultAdr;
-  assign SelCorrectTag = SelCorrectTagDemand | ScrubCorrectTag;
-  assign SelCorrectData = SelCorrectDataDemand | ScrubCorrectData;
+  logic                          DemandAdrRedirected;
+  // A flushed I$ access has its array address moved to NextSet (AdrSelMuxSel* above), so a repair
+  // written in that cycle would land in the new PC's set.  Like a flushed fill, it writes nothing;
+  // the error stays correctable and the next read corrects it again.
+  assign DemandAdrRedirected = (READ_ONLY_CACHE == 1) & FlushStage;
+  assign SelCorrectTag = (SelCorrectTagDemand & ~DemandAdrRedirected) | ScrubCorrectTag;
+  assign SelCorrectData = (SelCorrectDataDemand & ~DemandAdrRedirected) | ScrubCorrectData;
   assign CorrectedTagIn = Tag; // the corrected tag of the row the arrays hold: the selected way's (demand hit way, or scrub target)
 
   /////////////////////////////////////////////////////////////////////////////////////////////
