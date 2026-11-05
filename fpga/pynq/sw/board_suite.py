@@ -23,6 +23,9 @@ KNOBS = [
     ("g10s4l7", ["--gap", "10", "--seed", "4", "--lat", "7"]),
 ]
 SCRIPTED = ["irq", "uart_echo", "uart_lsr"]
+# fpga/bringup/tests programs wait on their own fbu scripts (run_cmd.py with
+# ../scripts/<name>.cmd); without one they would never reach tohost.
+OWN_SCRIPT_PREFIX = "fe_"
 
 
 def run(here, image, script, out, extra, bitstream):
@@ -53,6 +56,8 @@ def main():
     rows = []
     for image in sorted(glob.glob(os.path.join(a.images, "*.lst"))):
         name = os.path.splitext(os.path.basename(image))[0]
+        if name.startswith(OWN_SCRIPT_PREFIX):
+            continue
         if name in SCRIPTED:
             out = os.path.join("runs", name, "script")
             os.makedirs(out, exist_ok=True)

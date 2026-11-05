@@ -163,8 +163,23 @@ package fbu_pkg;
   localparam logic [11:0] REG_UART_MATCH0      = 12'h440;   // 8 words
   localparam logic [11:0] REG_UART_MATCH1      = 12'h460;   // 8 words
 
+  localparam logic [11:0] REG_STAT_LAST        = 12'h500;   // status half-periods, in clk cycles
+  localparam logic [11:0] REG_STAT_MIN         = 12'h504;
+  localparam logic [11:0] REG_STAT_MAX         = 12'h508;
+  localparam logic [11:0] REG_STAT_EDGES       = 12'h50C;
+  localparam logic [11:0] REG_STAT_CLASS       = 12'h510;   // R [1:0] none/stalled/active/quiet, [8] pin; W clears the statistics
+  localparam logic [11:0] REG_STAT_GLITCH      = 12'h514;
+  localparam logic [11:0] REG_CLKOUT_EDGES     = 12'h518;   // clk_out rising edges in the last window
+  localparam logic [11:0] REG_CLKOUT_WINDOW    = 12'h51C;   // the window, in clk cycles
+
   localparam logic [11:0] REG_TRIG             = 12'h580;   // 4 triggers x 4 words: CTRL, ARG0, ARG1, FIRED
   //   CTRL [3:0] source, [7:4] action, [8] repeat, [9] line, [31:16] length;
   //        W [10] arm, [11] disarm; R [12] armed
+
+  localparam logic [11:0] REG_SCAN_CTRL        = 12'h600;   // W [0] start; RW [1] scan_en from the pattern; R [8] running, [9] done
+  localparam logic [11:0] REG_SCAN_LEN         = 12'h604;   // cycles, 0..1024
+  localparam logic [11:0] REG_SCAN_ADDR        = 12'h608;   // the pattern/capture entry the PS accesses
+  localparam logic [11:0] REG_SCAN_PATTERN     = 12'h60C;   // W [7:0] io[7:0], [8] scan_en; then ADDR + 1
+  localparam logic [11:0] REG_SCAN_CAPTURE     = 12'h610;   // R io[15:8] captured at ADDR
 
 endpackage

@@ -160,6 +160,9 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [31:0]  trig_ctrl [TRIGGERS];
   logic [31:0]  trig_arg0 [TRIGGERS];
   logic [31:0]  trig_arg1 [TRIGGERS];
+  logic         scan_pattern_scan_en;
+  logic [10:0]  scan_len;
+  logic [9:0]   scan_addr;
 
   assign fi_ctrl_written = merged({27'd0, fi_start_on_release, fi_mode});
 
@@ -192,6 +195,9 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       trig_ctrl           <= '{default: '0};
       trig_arg0           <= '{default: '0};
       trig_arg1           <= '{default: '0};
+      scan_pattern_scan_en <= 1'b0;
+      scan_len             <= '0;
+      scan_addr            <= '0;
     end else begin
       if (reg_write) begin
       case (reg_waddr)
@@ -219,6 +225,10 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
         REG_FI_SEED:        fi_seed      <= merged(fi_seed);
         REG_FI_LATENCY:     fi_latency   <= 4'(merged(32'(fi_latency)));
         REG_FI_PHASE_OFS:   fi_phase_ofs <= 9'(merged(32'(fi_phase_ofs)));
+        REG_SCAN_CTRL:      scan_pattern_scan_en <= merged({30'd0, scan_pattern_scan_en, 1'b0})[1];
+        REG_SCAN_LEN:       scan_len             <= 11'(merged(32'(scan_len)));
+        REG_SCAN_ADDR:      scan_addr            <= 10'(merged(32'(scan_addr)));
+        REG_SCAN_PATTERN:   scan_addr            <= scan_addr + 1'b1;
         REG_UART_MATCH_LEN: begin
           match_len[0] <= MATCH_LEN_W'(merged(32'(match_len[0])));
           match_len[1] <= MATCH_LEN_W'(merged(32'(match_len[1]) << 8) >> 8);
@@ -268,6 +278,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic              rec_tohost;
   logic [63:0]       rec_end_cyc;
   logic [63:0]       rec_tohost_val;
+  logic [LINK_W-1:0] slave_io_o;
   logic              slave_io_oe;
   logic [2:0]        link_state;
 
@@ -278,7 +289,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .cfg_mem_base(mem_base), .cfg_mem_limit(mem_limit), .cfg_reset_vec(reset_vec),
     .cfg_tohost_addr(tohost_addr),
     .prng_load(written(REG_PRNG_LOAD)), .prng_init,
-    .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o, .io_oe(slave_io_oe), .ready, .rvalid,
+    .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o(slave_io_o), .io_oe(slave_io_oe), .ready, .rvalid,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err,
     .cyc(link_cyc), .state_now(link_state), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val, .tohost_cyc,
@@ -286,7 +297,22 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
     .rec_tohost, .rec_tohost_cyc(rec_end_cyc), .rec_tohost_val);
 
-  assign io_oe           = {LINK_W{slave_io_oe}};
+  // ---- test mode: fbu_scan has io instead of the link slave ----
+  logic [7:0] scan_in;
+  logic [7:0] scan_capture;
+  logic       scan_running;
+  logic       scan_done;
+
+  fbu_scan scan (
+    .clk, .arst_n(blocks_rst_n),
+    .start(written(REG_SCAN_CTRL) && reg_wdata[0]), .cfg_len(scan_len),
+    .cfg_pattern_scan_en(scan_pattern_scan_en), .cfg_scan_en(pin_ctrl[3]),
+    .addr(scan_addr), .pattern_write(written(REG_SCAN_PATTERN)), .pattern_data(reg_wdata[8:0]),
+    .capture_data(scan_capture),
+    .scan_out(io_i[15:8]), .scan_in, .scan_en, .running(scan_running), .done(scan_done));
+
+  assign io_o            = test_mode ? {8'h00, scan_in} : slave_io_o;
+  assign io_oe           = test_mode ? {8'h00, 8'hFF} : {LINK_W{slave_io_oe}};
   assign link_error_seen = err_sticky != '0;
 
   // ---- control pins ----
@@ -309,14 +335,14 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   fbu_pin_ctl pins (
     .clk, .arst_n(blocks_rst_n),
     .cfg_release(pin_ctrl[0]), .cfg_fault_inject(fault_inject_d),
-    .cfg_test_mode(pin_ctrl[2]), .cfg_scan_en(pin_ctrl[3]), .cfg_irq(pin_ctrl[5:4] | trigger_irq_pulse),
+    .cfg_test_mode(pin_ctrl[2]), .cfg_irq(pin_ctrl[5:4] | trigger_irq_pulse),
     .cfg_rx_force_en(pin_ctrl[6]), .cfg_rx_force_val(pin_ctrl[7]),
     .reset_pulse_start(written(REG_RST_PULSE) || trigger_reset),
     .reset_pulse_cycles(trigger_reset ? trigger_reset_cycles : reg_wdata),
     .cfg_gate_enable(bootgate[0]), .cfg_gate_selftest(bootgate[1]),
     .cfg_gate_retries(bootgate[7:4]), .cfg_gate_timeout(bootgate[31:16]),
     .req, .wr, .io_i, .uart_rx_from_uart,
-    .rst_n, .irq, .fault_inject, .test_mode, .scan_en, .uart_rx,
+    .rst_n, .irq, .fault_inject, .test_mode, .uart_rx,
     .reset_count, .cycles_total, .gate_passes, .gate_fails, .gate_gave_up, .gate_last_header);
 
   assign boot_gate_gave_up = gate_gave_up;
@@ -383,6 +409,23 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .chip_in_reset(!rst_n), .link_cyc_low(link_cyc[8:0]),
     .fault_inject_d, .running(fi_running), .chip_phase_now(fi_phase_now),
     .high_cycles(fi_high_cycles), .edges(fi_edges), .events(fi_events));
+
+  // ---- status and clk_out ----
+  localparam int CLKOUT_WINDOW_LOG2 = 20;
+
+  logic [31:0] stat_last;
+  logic [31:0] stat_min;
+  logic [31:0] stat_max;
+  logic [31:0] stat_edges;
+  logic [1:0]  stat_class;
+  logic        stat_level;
+  logic [31:0] stat_glitches;
+  logic [31:0] clkout_edges;
+
+  fbu_status_mon #(.CLKOUT_WINDOW_LOG2(CLKOUT_WINDOW_LOG2)) status_mon (
+    .clk, .arst_n(blocks_rst_n), .status, .clk_out, .clear(written(REG_STAT_CLASS)),
+    .last(stat_last), .min(stat_min), .max(stat_max), .edges(stat_edges),
+    .status_class(stat_class), .level(stat_level), .glitches(stat_glitches), .clkout_edges);
 
   // ---- triggers ----
   logic [3:0]  trig_source [TRIGGERS];
@@ -514,6 +557,18 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_FI_LATENCY:       reg_rdata = 32'(fi_latency);
       REG_FI_PHASE_OFS:     reg_rdata = 32'(fi_phase_ofs);
       REG_FI_PHASE_NOW:     reg_rdata = 32'(fi_phase_now);
+      REG_SCAN_CTRL:        reg_rdata = {22'd0, scan_done, scan_running, 6'd0, scan_pattern_scan_en, 1'b0};
+      REG_SCAN_LEN:         reg_rdata = 32'(scan_len);
+      REG_SCAN_ADDR:        reg_rdata = 32'(scan_addr);
+      REG_SCAN_CAPTURE:     reg_rdata = {24'd0, scan_capture};
+      REG_STAT_LAST:        reg_rdata = stat_last;
+      REG_STAT_MIN:         reg_rdata = stat_min;
+      REG_STAT_MAX:         reg_rdata = stat_max;
+      REG_STAT_EDGES:       reg_rdata = stat_edges;
+      REG_STAT_CLASS:       reg_rdata = {23'd0, stat_level, 6'd0, stat_class};
+      REG_STAT_GLITCH:      reg_rdata = stat_glitches;
+      REG_CLKOUT_EDGES:     reg_rdata = clkout_edges;
+      REG_CLKOUT_WINDOW:    reg_rdata = 32'd1 << CLKOUT_WINDOW_LOG2;
       default: begin
         for (int w = 0; w < 10; w++)
           if (reg_raddr == REG_TRACE_HEAD + 12'(4 * w))

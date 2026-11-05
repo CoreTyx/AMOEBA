@@ -392,6 +392,8 @@ module tb_fbu_vs_pin;
   `define CHIP_FAULT_COUNTERS dut.chip.chip.soc.uncore.faultcount.Count
 `endif
 
+  localparam string STATUS_CLASSES [4] = '{"none", "stalled", "active", "quiet"};
+
   // ---- PS state ----
   int     trace_fd;
   int     uart_fd;
@@ -1044,6 +1046,115 @@ module tb_fbu_vs_pin;
           tb_err($sformatf("target_site unit %0d phase %03h: other counters moved by %0d", unit, phase, moved));
         if (wrong != 0)
           tb_err($sformatf("target_site unit %0d phase %03h: %0d wrong kernel results", unit, phase, wrong));
+      end
+      "scan_session": begin
+        // scan_session <len> <seed>: one test-mode session with a seeded
+        // random pattern, scan_en high three cycles in four.  The chip's stub
+        // loads scan_q from io[7:0] while scan_en is high and drives it on
+        // io[15:8], so the capture must be the pattern some fixed latency
+        // late, held while scan_en was low; exactly one latency may fit.
+        int          len;
+        int          seed;
+        int          fits;
+        int          fit_latency;
+        logic [7:0]  pattern  [1024];
+        logic        pat_en   [1024];
+        logic [7:0]  captured [1024];
+        logic [31:0] pin_ctrl_before;
+        logic [31:0] ctrl;
+        logic [31:0] word;
+        void'($sscanf(a1, "%d", len));
+        void'($sscanf(a2, "%d", seed));
+        void'($urandom(seed));
+        reg_write(REG_SCAN_CTRL, 32'd2);
+        reg_write(REG_SCAN_ADDR, 32'd0);
+        for (int i = 0; i < len; i++) begin
+          pattern[i] = 8'($urandom_range(255));
+          pat_en[i]  = $urandom_range(3) != 0;
+          reg_write(REG_SCAN_PATTERN, {23'd0, pat_en[i], pattern[i]});
+        end
+        reg_write(REG_SCAN_LEN, 32'(len));
+        reg_read(REG_PIN_CTRL, pin_ctrl_before);
+        reg_write(REG_PIN_CTRL, pin_ctrl_before | 32'h4);
+        reg_write(REG_SCAN_CTRL, 32'd3);
+        do
+          reg_read(REG_SCAN_CTRL, ctrl);
+        while (ctrl[8]);
+        reg_write(REG_PIN_CTRL, pin_ctrl_before);
+        for (int i = 0; i < len; i++) begin
+          reg_write(REG_SCAN_ADDR, 32'(i));
+          reg_read(REG_SCAN_CAPTURE, word);
+          captured[i] = word[7:0];
+        end
+        fits = 0;
+        fit_latency = -1;
+        for (int latency = 1; latency <= 6; latency++) begin
+          bit         ok;
+          bit         known;
+          logic [7:0] q;
+          ok    = 1;
+          known = 0;
+          for (int j = 0; j < len; j++) begin
+            if (j >= latency && pat_en[j - latency]) begin
+              q     = pattern[j - latency];
+              known = 1;
+            end
+            if (known && captured[j] !== q)
+              ok = 0;
+          end
+          if (ok) begin
+            fits++;
+            fit_latency = latency;
+          end
+        end
+        if (fits != 1)
+          tb_err($sformatf("scan_session: capture fits %0d latencies; first entries %h %h %h %h", fits,
+                           captured[0], captured[1], captured[2], captured[3]));
+        else
+          $display("[FBU_TB] scan_session: %0d cycles, capture matches at latency %0d", len, fit_latency);
+      end
+      "status_clear": begin
+        reg_write(REG_STAT_CLASS, 32'd0);
+      end
+      "wait_status": begin
+        // wait_status <none|stalled|active|quiet> <cycles>: until the status
+        // pin's last two half-periods are equal and of that class
+        int          want;
+        logic [31:0] cls;
+        logic [31:0] last;
+        logic [31:0] glitches;
+        want = -1;
+        foreach (STATUS_CLASSES[c])
+          if (STATUS_CLASSES[c] == a1)
+            want = c;
+        void'($sscanf(a2, "%d", t));
+        if (want < 0)
+          tb_err($sformatf("wait_status: unknown class %s", a1));
+        reg_read64(REG_CYC_TOTAL_LO, start);
+        do begin
+          service();
+          if (stopped())
+            return;
+          reg_read(REG_STAT_CLASS, cls);
+          reg_read64(REG_CYC_TOTAL_LO, now_cyc);
+        end while (int'(cls[1:0]) != want && now_cyc - start < 64'(t));
+        reg_read(REG_STAT_LAST, last);
+        reg_read(REG_STAT_GLITCH, glitches);
+        if (int'(cls[1:0]) != want)
+          tb_err($sformatf("wait_status: status never %s in %0d cycles (class %s, last half-period %0d)",
+                           a1, t, STATUS_CLASSES[cls[1:0]], last));
+        else
+          $display("[FBU_TB] status %s: half-period %0d, glitches %0d", a1, last, glitches);
+      end
+      "expect_clkout": begin
+        logic [31:0] edges;
+        logic [31:0] window;
+        reg_read(REG_CLKOUT_EDGES, edges);
+        reg_read(REG_CLKOUT_WINDOW, window);
+        if (edges != window)
+          tb_err($sformatf("clk_out: %0d edges in a %0d-cycle window", edges, window));
+        else
+          $display("[FBU_TB] clk_out: %0d edges in %0d cycles", edges, window);
       end
       "check_chip_counters": begin
         // Simulation only (the PS cannot read them): the chip's fault counters
