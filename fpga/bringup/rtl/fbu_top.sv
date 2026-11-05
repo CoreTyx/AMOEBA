@@ -157,6 +157,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [8:0]   fi_phase_ofs;
   logic [511:0] fi_phase_mask;
   logic [31:0]  fi_ctrl_written;
+  logic [31:0]  scan_ctrl_written;
   logic [31:0]  trig_ctrl [TRIGGERS];
   logic [31:0]  trig_arg0 [TRIGGERS];
   logic [31:0]  trig_arg1 [TRIGGERS];
@@ -165,6 +166,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [9:0]   scan_addr;
 
   assign fi_ctrl_written = merged({27'd0, fi_start_on_release, fi_mode});
+  assign scan_ctrl_written = merged({30'd0, scan_pattern_scan_en, 1'b0});
 
   always_ff @(posedge clk or negedge arst_n) begin
     if (!arst_n) begin
@@ -225,7 +227,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
         REG_FI_SEED:        fi_seed      <= merged(fi_seed);
         REG_FI_LATENCY:     fi_latency   <= 4'(merged(32'(fi_latency)));
         REG_FI_PHASE_OFS:   fi_phase_ofs <= 9'(merged(32'(fi_phase_ofs)));
-        REG_SCAN_CTRL:      scan_pattern_scan_en <= merged({30'd0, scan_pattern_scan_en, 1'b0})[1];
+        REG_SCAN_CTRL:      scan_pattern_scan_en <= scan_ctrl_written[1];
         REG_SCAN_LEN:       scan_len             <= 11'(merged(32'(scan_len)));
         REG_SCAN_ADDR:      scan_addr            <= 10'(merged(32'(scan_addr)));
         REG_SCAN_PATTERN:   scan_addr            <= scan_addr + 1'b1;
