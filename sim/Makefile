@@ -13,20 +13,23 @@ CORE_SV   := $(CURDIR)/../hdl/core/cvw.sv
 # cvw.sv listed explicitly first in VER/VCS_SRCS (package must precede modules); exclude from CORE_SRCS.
 CORE_SRCS := $(filter-out $(CORE_SV), $(shell find $(CURDIR)/../hdl/core -name '*.sv' -o -name '*.v' 2>/dev/null))
 # Exclude hdl/cvw/ and hdl/core/ from generic hdl find; CORE_SV + CORE_SRCS handle hdl/core/.
-HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/% $(LINK_PKG), $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
+PRIM_HDR  := $(CURDIR)/../hdl/prim_assert.sv
+HDL_SRCS  := $(filter-out $(CURDIR)/../hdl/cvw/% $(CURDIR)/../hdl/core/% $(LINK_PKG) $(PRIM_HDR), $(shell find $(CURDIR)/../hdl -name '*.sv')) $(CORE_SRCS)
 COMM_HVL  := $(shell find $(CURDIR)/../hvl/common                -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VCS_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/vcs       -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so')
 VER_HVL   := $(COMM_HVL) $(shell find $(CURDIR)/../hvl/verilator -name '*.sv' -o -name '*.v' -o -name '*.o' -o -name '*.so' -o -name '*.cpp')
 SRAM_SRCS := $(shell find $(CURDIR)/../sram/output -name '*.v')
 # Vendored OpenTitan primitives for the link's clock-domain crossing
-# (third_party/opentitan/README.md).  prim_assert.sv is a macro header, included
-# by prim_fifo_async rather than compiled, so it is an incdir and not a source.
-PRIM_SRCS := $(CURDIR)/../third_party/opentitan/prim_flop_2sync.sv $(CURDIR)/../third_party/opentitan/prim_fifo_async.sv
-PRIM_INC  := +incdir+$(CURDIR)/../third_party/opentitan
+# (third_party/opentitan/README.md).  The copies in hdl/ are the ones compiled:
+# prim_flop_2sync.sv and prim_fifo_async.sv come in through the hdl/ glob above,
+# so the third_party/ originals must not be listed as well or every module is
+# declared twice.  prim_assert.sv is a macro header, included by prim_fifo_async
+# rather than compiled, so it is filtered out of HDL_SRCS and is an incdir.
+PRIM_INC  := +incdir+$(CURDIR)/../hdl
 HDRS      := $(shell find $(CURDIR)/../hvl -name '*.svh') $(CURDIR)/../hvl/common/rvfi_reference.json
 DW_IP     := $(shell python3 $(CURDIR)/../bin/get_options.py dw_ip)
-VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
-VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(PRIM_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
+VCS_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VCS_HVL) $(SRAM_SRCS) $(DW_IP)
+VER_SRCS  := $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(VER_HVL) $(SRAM_SRCS) $(DW_IP)
 
 # ── Waveform tracing for the baremetal / ISA / FreeRTOS tiers ─────────────────
 # Off by default.  Verilator's trace hooks cost roughly 50x in wall time -- the
@@ -482,7 +485,7 @@ RVFIMON_ISA          ?= rv64imafdc_zb
 # Local fixes on top of the generated monitor, applied in order.  Applied by
 # generated-files and re-applied by check-generated, so regenerating cannot
 # silently drop them.
-RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch $(CURDIR)/../patches/rvfimon-w-low32.patch
 
 .PHONY: generate-rtl
 generate-rtl:
@@ -648,6 +651,7 @@ ft_shadow_test:
 	    $(CURDIR)/../pkg/types.sv \
 	    $(CURDIR)/../hdl/core/cvw.sv \
 	    $(wildcard $(CURDIR)/../hdl/core/generic/*.sv) \
+	    $(CURDIR)/../hdl/core/generic/flop/flop.sv \
 	    $(CURDIR)/../hdl/core/generic/flop/flopenrc.sv \
 	    $(CURDIR)/../hdl/core/generic/flop/flopen.sv \
 	    $(CURDIR)/../hdl/core/ieu/shifter.sv \
@@ -689,8 +693,8 @@ ecc_test: ecc_secded_dected_test cache_ecc_unit_test cache_integration_test csr_
 
 ecc_secded_dected_test:
 	mkdir -p verilator/ecc_tb
-	$(UNIT_TB_VERILATOR) --binary -O2 --top-module ecc_tb \
-	    $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
+	$(UNIT_TB_VERILATOR) --binary -O2 --top-module ecc_tb $(CURDIR)/verilator_warn.vlt $(CVW_INCDIRS) \
+	    $(CORE_SV) $(wildcard $(CURDIR)/../hdl/core/generic/ecc/*.sv) \
 	    $(CURDIR)/../hvl/ecc/ecc_tb.sv \
 	    -Mdir verilator/ecc_tb --Wall --timescale 1ps/1ps 2>&1 | tee verilator/ecc_tb/compile.log
 	verilator/ecc_tb/Vecc_tb
@@ -792,7 +796,7 @@ ft_core_test:
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_core_fault_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_core_fault_tb.sv \
-	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    +incdir+$(CURDIR)/verilator/ft_core_tb $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(PRIM_INC) +define+ECE411_VERILATOR $(ECE411_NO_FLOAT) \
 	    -Mdir verilator/ft_core_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_core_tb/compile.log
 	verilator/ft_core_tb/Vft_core_fault_tb
@@ -804,7 +808,7 @@ ft_control_test:
 	$(UNIT_TB_VERILATOR) --binary --timing -j 4 -O2 --top-module ft_control_tb $(CURDIR)/verilator_warn.vlt \
 	    $(PKG_SRCS) $(CORE_SV) $(HDL_SRCS) $(SRAM_SRCS) \
 	    $(CURDIR)/../hvl/ft_shadow/ft_control_tb.sv \
-	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(ECE411_NO_FLOAT) \
+	    $(CVW_INCDIRS) +incdir+$(CURDIR)/../hvl/common $(PRIM_INC) +define+ECE411_VERILATOR $(ECE411_NO_FLOAT) \
 	    -Mdir verilator/ft_control_tb -Wall --timescale 1ps/1ps \
 	    2>&1 | tee verilator/ft_control_tb/compile.log
 	verilator/ft_control_tb/Vft_control_tb

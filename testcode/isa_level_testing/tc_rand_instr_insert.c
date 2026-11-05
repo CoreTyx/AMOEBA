@@ -64,6 +64,9 @@ static int report(char id, int ok) {
 
 static void __attribute__((noreturn)) sim_exit(uint64_t code) {
     TOHOST = (code << 1) | 1;
+    /* fence.i writes the D$ back (FenceI -> FlushDCache) so the store reaches
+     * the link; without it only a probe on the retiring store sees the exit. */
+    __asm__ volatile ("fence.i" ::: "memory");
     /* Monitor halt encoding (slti x0, x0, -256), same as bin/startup.s uses. */
     for (;;) __asm__ volatile ("slti x0, x0, -256");
 }

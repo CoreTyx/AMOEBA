@@ -43,11 +43,11 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   input  logic                 HMASTLOCK,
   input  logic [P.AHBW-1:0]    HRDATAEXT,
   input  logic                 HREADYEXT, HRESPEXT,
-  input  logic [31:0]          RegfileSecCount, ICacheSecCount, DCacheSecCount,
+  input  fault_events_t        FaultEvents,               // registered fault flags from the core
   output logic [P.AHBW-1:0]    HRDATA,
   output logic                 HREADY, HRESP,
   output logic                 HSELEXT,
-  output logic [5:0]           FaultInjectMask, // software unit enables; external pin gates these in the core
+  output logic [FI_UNITS-1:0]  FaultInjectMask, // software unit enables; external pin gates these in the core
   // peripheral pins
   output logic                 MTimerInt, MSwInt,         // Timer and software interrupts from CLINT
   output logic                 MExtInt, SExtInt,          // External interrupts from PLIC
@@ -89,7 +89,6 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   logic [7:0][P.XLEN-1:0]      PRDATA;
   /* verilator lint_on UNDRIVEN */
   logic [P.XLEN-1:0]           HREADBRIDGE;
-  logic [31:0]                 EccCounterReadData;
   logic                        HRESPBRIDGE, HREADYBRIDGE, HSELBRIDGE, HSELBRIDGED;
   /* SDC Interrupt (SPI Controller) */
   logic                        SDCIntr;
@@ -188,19 +187,9 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
     assign PRDATA[5] = '0; assign PREADY[5] = 1'b1;
   end
 
-  // Read-only ECC correction counters at ECC_COUNTER_BASE + {0, 4, 8}.
-  assign PREADY[6] = 1'b1;
-  always_comb begin
-    EccCounterReadData = '0;
-    case (PADDR[3:2])
-      2'd0: EccCounterReadData = RegfileSecCount;
-      2'd1: EccCounterReadData = ICacheSecCount;
-      2'd2: EccCounterReadData = DCacheSecCount;
-      default: ;
-    endcase
-    if (P.XLEN == 64) PRDATA[6] = {EccCounterReadData, EccCounterReadData};
-    else              PRDATA[6] = EccCounterReadData;
-  end
+  // Read-only fault counters at ECC_COUNTER_BASE (faultcount_apb.sv).
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .PADDR(PADDR[6:2]),
+    .PRDATA(PRDATA[6]), .PREADY(PREADY[6]), .FaultEvents);
 
 
   // AHB Read Multiplexer

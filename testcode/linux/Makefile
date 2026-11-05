@@ -29,6 +29,18 @@ OPENSBI_ADDR := 0x80200000
 # see dts/amoeba.dts.
 TIMEBASE_HZ ?= 100000000
 
+# Console.  The on-chip uartPC16550D's baud clock is the core clock divided by
+# 2^UART_PRESCALE (pkg/config.vh: 1), so its "clock-frequency" is half the core
+# clock, and a baud of UART_HZ/16 is divisor 1: 32 core clocks per bit.  At the
+# 115200 a terminal would use, the console alone costs ~10^8 simulated cycles.
+# OpenSBI takes the speed from current-speed; the kernel's ttyS0 takes it only
+# from console=, and falls back to 9600 (divisor 325) without it.  The pin
+# bench's UART agent runs at a fixed divisor and fails on a framing error, so
+# these three must agree -- hence derived here, in one place.
+UART_HZ    ?= $(shell echo $$(( $(TIMEBASE_HZ) / 2 )))
+UART_BAUD  ?= $(shell echo $$(( $(UART_HZ) / 16 )))
+BOOTARGS   ?= console=ttyS0,$(UART_BAUD) earlycon=uart8250,mmio,0x10000000 no5lvl no4lvl loglevel=7 rdinit=/init
+
 NPROC ?= $(shell nproc)
 
 TOP        := $(CURDIR)
@@ -129,6 +141,7 @@ $(BUILD)/initramfs.spec: initramfs/initramfs.spec $(BUILD)/init
 $(BUILD)/amoeba.dtb: dts/amoeba.dts
 	mkdir -p $(BUILD)
 	cpp -nostdinc -undef -D__DTS__ -DAMOEBA_TIMEBASE_HZ=$(TIMEBASE_HZ) \
+	    -DAMOEBA_UART_HZ=$(UART_HZ) -DAMOEBA_UART_BAUD=$(UART_BAUD) -D'AMOEBA_BOOTARGS="$(BOOTARGS)"' \
 	    -x assembler-with-cpp $< -o $(BUILD)/amoeba.dts.pre
 	dtc -I dts -O dtb -o $@ $(BUILD)/amoeba.dts.pre
 

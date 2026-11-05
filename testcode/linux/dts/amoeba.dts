@@ -33,6 +33,17 @@
 #ifndef AMOEBA_TIMEBASE_HZ
 #define AMOEBA_TIMEBASE_HZ 1000000
 #endif
+/* UART clock, baud and bootargs come from testcode/linux/Makefile, which
+ * derives all three from TIMEBASE_HZ; see the comment on UART_HZ there. */
+#ifndef AMOEBA_UART_HZ
+#define AMOEBA_UART_HZ 50000000
+#endif
+#ifndef AMOEBA_UART_BAUD
+#define AMOEBA_UART_BAUD 3125000
+#endif
+#ifndef AMOEBA_BOOTARGS
+#define AMOEBA_BOOTARGS "console=ttyS0,3125000 earlycon=uart8250,mmio,0x10000000 no5lvl no4lvl loglevel=7 rdinit=/init"
+#endif
 
 / {
   #address-cells = <0x02>;
@@ -41,7 +52,7 @@
   model = "amoeba-cvw-sim";
 
   chosen {
-    bootargs = "console=ttyS0 earlycon=uart8250,mmio,0x10000000 no5lvl no4lvl loglevel=7 rdinit=/init";
+    bootargs = AMOEBA_BOOTARGS;
     stdout-path = "/soc/uart@10000000";
     /* Seeds the kernel RNG immediately.  Without it the boot gathers
      * entropy the slow way.  A fixed seed is correct here and nowhere
@@ -98,7 +109,8 @@
     ranges;
 
     uart@10000000 {
-      clock-frequency = <0x384000>;
+      clock-frequency = <AMOEBA_UART_HZ>;
+      current-speed = <AMOEBA_UART_BAUD>;
       reg = <0x00 0x10000000 0x00 0x100>;
       compatible = "ns16550a";
     };

@@ -30,7 +30,9 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module pmpchecker import cvw::*;  #(parameter cvw_t P) (
+module pmpchecker import cvw::*;  #(parameter cvw_t P,
+                                    parameter MATCH_REG = 0) ( // 1: the faults are for the address of the cycle before
+  input  logic                     clk, reset,
   input  logic [P.PA_BITS-1:0]     PhysicalAddress,
   input  logic [1:0]               EffectivePrivilegeModeW,
   // ModelSim has a switch -svinputport which controls whether input ports
@@ -52,7 +54,8 @@ module pmpchecker import cvw::*;  #(parameter cvw_t P) (
 
   // Bit i is high when the address falls in PMP region i
   logic                            EnforcePMP; // should PMP be checked in this privilege level
-  logic [P.PMP_ENTRIES-1:0]        Match;      // physical address matches one of the pmp ranges
+  logic [P.PMP_ENTRIES-1:0]        MatchLive;  // physical address matches one of the pmp ranges
+  logic [P.PMP_ENTRIES-1:0]        Match;      // ... as used below: MatchLive, or MatchLive a cycle ago (MATCH_REG)
   logic [P.PMP_ENTRIES-1:0]        FirstMatch; // onehot encoding for the first pmpaddr to match the current address.
   logic [P.PMP_ENTRIES-1:0]        L, X, W, R; // PMP matches and has flag set
   logic [P.PMP_ENTRIES-1:0]        PAgePMPAdr; // for TOR PMP matching, PhysicalAddress > PMPAdr[i]
@@ -70,7 +73,18 @@ module pmpchecker import cvw::*;  #(parameter cvw_t P) (
       .FirstMatch,
       .PAgePMPAdrIn({PAgePMPAdr[P.PMP_ENTRIES-2:0], 1'b1}),
       .PAgePMPAdrOut(PAgePMPAdr),
-      .Match, .L, .X, .W, .R);
+      .Match(MatchLive), .L, .X, .W, .R);
+  end
+
+  // Comparing the address against every region and then finding the first match, its
+  // permissions and the fault is too long for one cycle behind a TLB lookup.  With MATCH_REG
+  // the per-region matches are registered and the rest is done in the next cycle, so the faults
+  // are those of the address presented one cycle earlier.  The instruction MMU is built this
+  // way: a fetch does not look at its fault until the cycle after its address was checked.
+  if (MATCH_REG) begin : matchreg
+    flopr #(P.PMP_ENTRIES) matchreg(clk, reset, MatchLive, Match);
+  end else begin : matchreg
+    assign Match = MatchLive;
   end
 
   priorityonehot #(P.PMP_ENTRIES) pmppriority(.a(Match), .y(FirstMatch)); // combine the match signal from all the address decoders to find the first one that matches.

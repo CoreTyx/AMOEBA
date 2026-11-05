@@ -40,6 +40,23 @@
     logic fault_inject = 1'b0;
 `endif
 
+`ifdef ECE411_SIM_INJECT
+    // The unit mask resets to 0 on silicon; built with ECE411_SIM_INJECT it resets with the six
+    // core units armed (fault_inject_apb.sv).  The ECC programs pass whether or not anything was
+    // injected, so make sure it was armed.
+  `ifdef ECE411_DUT_FORTE
+    `define FICONTROL dut.top.chip.soc.uncore.faultcontrol
+  `else
+    `define FICONTROL dut.soc.uncoregen.uncore.faultcontrol
+  `endif
+    logic [1:0] fi_out_of_reset = '1;  // only a real reset (PRESETn low, then high) is checked
+    always @(posedge clk) begin
+      fi_out_of_reset <= {fi_out_of_reset[0], `FICONTROL.PRESETn};
+      if (fi_out_of_reset == 2'b01 && `FICONTROL.FaultInjectMask != 8'h3f)
+        $fatal(1, "fault-injection units not armed out of reset: mask %h", `FICONTROL.FaultInjectMask);
+    end
+`endif
+
 `ifdef ECE411_DUT_FORTE
     forte_dut_wrap dut (
 `else
@@ -134,6 +151,16 @@
 `else
     assign mon_itf.mem_misaligned[0] = 1'b0;
 `endif
+
+    // ---- access/page-fault flag for the RVFI waiver -------------------------
+    // The trap cause is not part of the RVFI taps, so it is carried from Memory
+    // to Writeback here, next to the wrapper's TrapW.  Causes 1, 5, 7 are the
+    // instruction, load and store access faults; 12, 13, 15 the page faults.
+    logic [4:0] TrapCauseW;
+    always_ff @(posedge clk)
+        if (!`RT_TAP.StallW) TrapCauseW <= `RT_CORE.priv.priv.CauseM;
+    assign mon_itf.mmu_fault[0] = mon_itf.valid[0] && `RT_TAP.TrapW &&
+                                  (TrapCauseW inside {5'd1, 5'd5, 5'd7, 5'd12, 5'd13, 5'd15});
 
     // ---- UART transmit tap -------------------------------------------------
     // syscalls_amoeba.c reaches printf() -- and therefore configASSERT() -- by

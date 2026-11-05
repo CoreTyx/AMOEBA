@@ -31,7 +31,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
    // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
    input  logic                  fault_inject, // external master enable
-   input  logic [5:0]            FaultInjectMask, // APB unit enables: ALU/CMP/MUL/DIV/regfile ECC/pipeline ECC
+   input  logic [FI_UNITS-1:0]   FaultInjectMask, // APB unit enables: ALU/CMP/MUL/DIV/regfile ECC/pipeline ECC/cache SEC/cache DED
    // Privileged
    input  logic                  MTimerInt, MExtInt, SExtInt, MSwInt,
    input  logic [63:0]           MTIME_CLINT,
@@ -48,7 +48,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    output logic [3:0]            HPROT,
    output logic [1:0]            HTRANS,
    output logic                  HMASTLOCK,
-   output logic [31:0]           RegfileSecCount, ICacheSecCount, DCacheSecCount,
+   output fault_events_t         FaultEvents,  // registered fault flags, counted in the uncore (faultcount_apb)
    input  logic                  ExternalStall,
    output logic                  PrivModeUncorrectableFaultW  // TMR uncorrectable privilege mode fault — wire to reset/NMI
 );
@@ -98,18 +98,35 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // the MDU's E->M register. FTStall holds the pipeline; unresolved status
   // reaches M for a precise trap, and PE indicators feed sticky CSR status.
   logic                          FTStallE, FTStallM, FTStall;
+  logic                          EccStallE;                       // Execute read a pipeline register with a single-bit error
   logic                          FTUnresolvedE, FTUnresolvedM, FTUnresolvedEReg, MDUUnresolvedM;
   logic                          ALU_PE_p, ALU_PE_r, CMP_PE_p, CMP_PE_r, MUL_PE_p, MUL_PE_r, DIV_PE_p, DIV_PE_r;
-  logic [5:0]                    FaultInjectUnits;
+  logic [FI_UNITS-1:0]           FaultInjectUnits;
   // Software can select units without changing the pin. Protection stays active
   // when injection is disabled; only artificial corruption is gated here.
-  assign FaultInjectUnits = {6{fault_inject}} & FaultInjectMask;
+  // Registered: the enables fan out to an injector on every protected datapath,
+  // so they must leave a flop rather than arrive with the pin's (or the APB
+  // register's) delay. A change on the pin or the mask takes effect one cycle
+  // later. No reset: the injectors gate themselves off during reset, and the
+  // value is resampled every cycle.
+  flop #(FI_UNITS) faultinjectreg(clk, {FI_UNITS{fault_inject}} & FaultInjectMask, FaultInjectUnits);
+  // One random source for every injection site; each site fires at its own phase
+  // and corrupts only while its own unit is enabled.
+  logic [15:0]                   FaultLfsr;
+  logic [FI_COUNT_BITS-1:0]      FaultCount;
+  ft_fault_gen faultgen(.clk, .reset, .lfsr(FaultLfsr), .count(FaultCount));
+  // Fault flags for the fault counters, from the units that detect them (faultcount_apb)
+  logic [1:0]                    RegfileSec, RegfileDed, FTDetect, FTUnresolved, ResidueDetect, ResidueUnresolved;
+  logic [4:0]                    PipeSec, PipeDed;
+  logic [2:0]                    ICacheSec, DCacheSec;
+  logic                          ICacheDed, DCacheDed, PrivModeSecFaultW;
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 
   // AMOEBA random instruction insertion
   logic [31:0]                   RAND_INSTR_INSERT_FREQ_REGW;     // rand_instr_insert_freq CSR
   logic [31:0]                   DummyInstrD;                     // dummy instruction to inject
+  logic                          InjectReqD;                      // Decode presents the dummy this cycle
   logic                          InjectD;                         // inject a dummy this cycle
   logic                          DummySelD;                       // shadow register the dummy writes
   logic                          DummyW;                          // Writeback holds a dummy instruction
@@ -224,13 +241,15 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // instruction fetch unit: PC, branch prediction, instruction cache
   ifu #(P) ifu(.clk, .reset,
+    .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
+    .FaultLfsr, .FaultCount,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
     .InstrValidE, .InstrValidD,
     .BranchD, .BranchE, .JumpD, .JumpE, .ICacheStallF, .InjectD,
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
-    .ICacheAccess, .ICacheMiss, .ICacheSecCount,
+    .ICacheAccess, .ICacheMiss, .ICacheSec, .ICacheDed,
     // Execute
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
@@ -242,20 +261,22 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     // mmu management
     .PrivilegeModeW, .PTE, .PageType, .SATP_REGW, .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV,
     .STATUS_MPP, .ENVCFG_PBMTE, .ENVCFG_ADUE, .ITLBWriteF, .sfencevmaM, .ITLBMissOrUpdateAF,
+    .HPTWInstrAccessFaultF, .HPTWInstrPageFaultF,
     // pmp/pma (inside mmu) signals.
     .PMPCFG_ARRAY_REGW,  .PMPADDR_ARRAY_REGW, .InstrAccessFaultF);
 
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
-     .RegfileSecCount,
+     .RegfileSec, .RegfileDed, .PipeSec, .PipeDed, .FTDetect, .FTUnresolved,
      .FTUnresolvedM,
      .fault_inject_alu(FaultInjectUnits[FI_ALU]), .fault_inject_cmp(FaultInjectUnits[FI_CMP]),
      .fault_inject_regfile(FaultInjectUnits[FI_REGFILE]), .fault_inject_pipeline(FaultInjectUnits[FI_PIPELINE]),
+     .FaultLfsr, .FaultCount,
      .RegEccSecErrW, .RegEccDedErrW, .RegEccDedErrPipeW,
      // Decode Stage interface
      .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
-     .PCE, .PCLinkE, .FTStallM, .FWriteIntE, .FCvtIntE, .FTStallE, .FTUnresolvedE,
+     .PCE, .PCLinkE, .FTStallM, .FWriteIntE, .FCvtIntE, .FTStallE, .FTUnresolvedE, .EccStallE,
      .ALU_PE_p, .ALU_PE_r, .CMP_PE_p, .CMP_PE_r, .IEUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
      // Memory stage interface
@@ -275,8 +296,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
      .StructuralStallD, .LoadStallD, .StoreStallD, .PCSrcE,
      .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM,
-     // random instruction insertion
-     .InjectD, .DummyInstrD, .DummySelD, .DummyW);
+     // random instruction insertion.  The IEU decodes the dummy on the request;
+     // the hazard unit, the IFU and the monitors act on the insertion itself.
+     .InjectD(InjectReqD), .DummyInstrD, .DummySelD, .DummyW);
 
   ///////////////////////////////////////////
   // AMOEBA: random instruction insertion
@@ -293,10 +315,13 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   dummygen dummygen(.clk, .reset,
     .FreqW(RAND_INSTR_INSERT_FREQ_REGW),
     .InstrD, .InstrValidD, .InsertOkD,
-    .InjectD, .DummyInstrD, .DummySelD);
+    .InjectReqD, .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
-    .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
+    .clk, .reset,
+    .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
+    .FaultLfsr, .FaultCount,
+    .StallM, .FlushM, .StallW, .FlushW,
     // CPU interface
     .MemRWE, .MemRWM, .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
@@ -329,7 +354,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .StoreAmoMisalignedFaultM,    // connects to privilege
     .StoreAmoAccessFaultM,        // connects to privilege
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
-    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheSecCount);
+    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheSec, .DCacheDed);
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections
@@ -353,7 +378,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // exactly once to become a precise trap.
   flopenrc #(1) FTUnresolvedERegPipe(clk, reset, FlushM, ~StallM, FTUnresolvedE, FTUnresolvedEReg);
   assign FTUnresolvedM = FTUnresolvedEReg | MDUUnresolvedM;
-  assign FTStall = FTStallE | FTStallM;
+  // An ECC stall is the same situation as a shadow mismatch -- what Execute
+  // computed this cycle cannot be trusted -- and takes the same path: hold the
+  // pipeline and suppress the redirect.  It lasts one cycle and is not a fault.
+  assign FTStall = FTStallE | FTStallM | EccStallE;
 
   // MFTSTATUS (0x7C2), reset-sticky ft_* status:
   // [0] ALU isolated, [1] CMP isolated, [2] MUL isolated, [3] DIV isolated,
@@ -411,14 +439,15 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
       .DCacheEccDedFaultM, .DCacheEccDedFaultEPCM, .DCacheEccDedFaultMtvalM, .DCacheEccDedTrapTakenM,
       .DCacheEccDedDirtyFaultM,
-      .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv));
+      .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv), .PrivModeSecFaultW);
   end else begin
     assign {CSRReadValW, PrivilegeModeW,
             SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
             EPCM, TrapVectorM, RetM, TrapM,
-            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, DCacheEccDedTrapTakenM, PrivModeUncorrectableFaultW_priv} = '0;
+            sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, DCacheEccDedTrapTakenM, PrivModeUncorrectableFaultW_priv,
+            PrivModeSecFaultW} = '0;
     // Without a CSR to program it, dummy instruction insertion stays disabled.
     assign RAND_INSTR_INSERT_FREQ_REGW = '0;
   end
@@ -472,12 +501,13 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
-    mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+    mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .HoldE(EccStallE), .FlushE, .FlushM, .FlushW,
       .fault_inject_mul(FaultInjectUnits[FI_MUL]), .fault_inject_div(FaultInjectUnits[FI_DIV]),
+      .FaultLfsr, .FaultCount,
       .ForwardedSrcAE, .ForwardedSrcBE,
       .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
       .MDUResultW, .DivBusyE, .FTStallM, .FTUnresolvedM(MDUUnresolvedM),
-      .MUL_PE_p, .MUL_PE_r, .DIV_PE_p, .DIV_PE_r);
+      .MUL_PE_p, .MUL_PE_r, .DIV_PE_p, .DIV_PE_r, .ResidueDetect, .ResidueUnresolved);
   end else begin // no M instructions supported
     assign MDUResultW = '0;
     assign DivBusyE   = 1'b0;
@@ -487,7 +517,19 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     assign MUL_PE_r = 1'b0;
     assign DIV_PE_p = 1'b0;
     assign DIV_PE_r = 1'b0;
+    assign ResidueDetect = '0;
+    assign ResidueUnresolved = '0;
   end
+
+  // Fault flags, registered once here so that counting them in the uncore adds nothing to the
+  // paths they come from
+  always_ff @(posedge clk)
+    if (reset) FaultEvents <= '0;
+    else       FaultEvents <= '{RegfileSec: RegfileSec, RegfileDed: RegfileDed, PipeSec: PipeSec, PipeDed: PipeDed,
+                                ICacheSec: ICacheSec, ICacheDed: ICacheDed, DCacheSec: DCacheSec, DCacheDed: DCacheDed,
+                                FTDetect: FTDetect, FTUnresolved: FTUnresolved,
+                                ResidueDetect: ResidueDetect, ResidueUnresolved: ResidueUnresolved,
+                                TmrCorrected: PrivModeSecFaultW, TmrUncorrectable: PrivModeUncorrectableFaultW_priv};
 
   // floating point unit
   if (P.F_SUPPORTED) begin : fpu

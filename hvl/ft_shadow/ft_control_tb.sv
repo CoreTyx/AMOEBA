@@ -15,9 +15,10 @@ module ft_control_tb;
   logic [1:0] trans = 0;
   logic [2:0] ready, resp, external_select;
   logic [63:0] rdata[3];
-  logic [5:0] mask[3];
+  logic [FI_UNITS-1:0] mask[3];
   logic external_ready = 1;
   int checks = 0;
+  fault_events_t events = '0;  // fault flags into every uncore's counters
 
   // The same AHB requests exercise legacy and both ASIC peripheral placements.
   /* verilator lint_off PINMISSING */
@@ -25,7 +26,7 @@ module ft_control_tb;
     .HCLK(clk), .HRESETn(reset_n), .TIMECLK(1'b0), .HADDR(addr), .HWDATA(wdata), .HWSTRB(strb),
     .HWRITE(write), .HSIZE(size), .HBURST(3'b0), .HPROT(4'b0011), .HTRANS(trans), .HMASTLOCK(1'b0),
     .HRDATAEXT(64'b0), .HREADYEXT(external_ready), .HRESPEXT(1'b0),
-    .HRDATA(rdata[0]), .HREADY(ready[0]), .HRESP(resp[0]), .HSELEXT(external_select[0]), .FaultInjectMask(mask[0]),
+    .HRDATA(rdata[0]), .HREADY(ready[0]), .HRESP(resp[0]), .HSELEXT(external_select[0]), .FaultInjectMask(mask[0]), .FaultEvents(events),
     .GPIOIN(32'b0), .UARTSin(1'b1), .SPIIn(1'b0), .SDCIn(1'b0));
   for (genvar i = 0; i < 2; i++) begin : asic
     forte_uncore #(.P(P), .PERIPH_ONCHIP(i == 0)) dut(
@@ -33,7 +34,7 @@ module ft_control_tb;
       .HWRITE(write), .HSIZE(size), .HTRANS(trans),
       .HRDATAEXT(64'b0), .HREADYEXT(external_ready), .HRESPEXT(1'b0),
       .HRDATA(rdata[i+1]), .HREADY(ready[i+1]), .HRESP(resp[i+1]), .HSELEXT(external_select[i+1]),
-      .FaultInjectMask(mask[i+1]), .UARTSin(1'b1), .ExtIrq(2'b0), .MExtIntIn(1'b0), .SExtIntIn(1'b0));
+      .FaultInjectMask(mask[i+1]), .FaultEvents(events), .UARTSin(1'b1), .ExtIrq(2'b0), .MExtIntIn(1'b0), .SExtIntIn(1'b0));
   end
   /* verilator lint_on PINMISSING */
 
@@ -48,11 +49,11 @@ module ft_control_tb;
     checks++;
     if (condition !== 1'b1) $fatal(1, "%s at %0t", message, $time);
   endtask
-  task automatic check_mask(input logic [5:0] expected);
+  task automatic check_mask(input logic [FI_UNITS-1:0] expected);
     foreach (mask[i]) check(mask[i] == expected, "unit mask in every SoC");
   endtask
   task automatic transfer(input logic wr, input logic [63:0] data, input logic [7:0] strobes,
-                          input logic [5:0] expected_before);
+                          input logic [FI_UNITS-1:0] expected_before);
     @(negedge clk);
     addr = P.PA_BITS'(FI_CONTROL_ADDR);
     write = wr;
@@ -76,24 +77,43 @@ module ft_control_tb;
     #1;
   endtask
 
+  // 32-bit AHB read of fault counter i in every SoC
+  task automatic read_counter(input int i, input logic [15:0] expected, input string message);
+    @(negedge clk);
+    addr = P.PA_BITS'(ECC_COUNTER_BASE + 64'(4*i));
+    write = 0;
+    size = 2;
+    trans = 2'b10;
+    #1;
+    check(!load_fault, "fault counters are readable words");
+    @(posedge clk);
+    @(negedge clk);
+    trans = 0;
+    while (ready != 3'b111) @(negedge clk);
+    #1;
+    foreach (rdata[k]) check(resp[k] == 0 && rdata[k][31:0] == {16'b0, expected} && rdata[k][63:32] == rdata[k][31:0],
+                             $sformatf("%s (counter %0d, SoC %0d: %h)", message, i, k, rdata[k]));
+    size = 0;
+  endtask
+
   initial begin
     repeat (3) @(negedge clk);
     reset_n = 1;
-    check_mask(6'h3f);
-    transfer(0, 0, 0, 6'h3f);
-    transfer(1, 0, 8'h08, 6'h3f);
+    check_mask(8'h00); // every unit resets off
+    transfer(0, 0, 0, 8'h00);
+    transfer(1, 0, 8'h08, 8'h00);
     check_mask(0);
-    for (int bit_index = 0; bit_index < 6; bit_index++) begin
-      transfer(1, 64'(1 << bit_index) << 24, 8'h08, bit_index == 0 ? 6'b0 : 6'(1 << (bit_index-1)));
-      check_mask(6'(1 << bit_index));
-      transfer(0, 0, 0, 6'(1 << bit_index));
+    for (int bit_index = 0; bit_index < FI_UNITS; bit_index++) begin
+      transfer(1, 64'(1 << bit_index) << 24, 8'h08, bit_index == 0 ? 8'b0 : 8'(1 << (bit_index-1)));
+      check_mask(8'(1 << bit_index));
+      transfer(0, 0, 0, 8'(1 << bit_index));
     end
-    transfer(1, '1, 8'h08, 6'h20);
-    check_mask(6'h3f); // reserved bits discarded
-    transfer(1, 0, 8'hf7, 6'h3f);
-    check_mask(6'h3f); // every byte strobe except the register's lane
-    transfer(1, 64'h000000002a000015, 8'h08, 6'h3f);
-    check_mask(6'h2a); // lane 3, not lane 0, supplies data
+    transfer(1, '1, 8'h08, 8'h80);
+    check_mask(8'hff); // every bit of the byte is a unit
+    transfer(1, 0, 8'hf7, 8'hff);
+    check_mask(8'hff); // every byte strobe except the register's lane
+    transfer(1, 64'h000000002a000015, 8'h08, 8'hff);
+    check_mask(8'h2a); // lane 3, not lane 0, supplies data
 
     // IDLE/BUSY transactions must not reach the APB register.
     @(negedge clk);
@@ -102,7 +122,7 @@ module ft_control_tb;
     for (int idle_kind = 0; idle_kind < 2; idle_kind++) begin
       trans = 2'(idle_kind);
       repeat (4) @(negedge clk);
-      check_mask(6'h2a);
+      check_mask(8'h2a);
     end
     trans = 0;
 
@@ -120,13 +140,13 @@ module ft_control_tb;
     repeat (3) begin
       @(negedge clk);
       check(ready == 0, "external wait state holds all buses");
-      check_mask(6'h2a);
+      check_mask(8'h2a);
     end
     // Withdraw the unaccepted address before releasing the external transfer.
     trans = 0;
     external_ready = 1;
     @(negedge clk);
-    transfer(0, 0, 0, 6'h2a);
+    transfer(0, 0, 0, 8'h2a);
 
     // PMA permits only byte reads/writes at the exact address. Ordinary PMP
     // and virtual-memory permissions still apply outside this checker.
@@ -160,15 +180,43 @@ module ft_control_tb;
     addr = P.PA_BITS'(FI_CONTROL_ADDR + 1);
     #1;
     check(load_fault, "following byte is not an alias");
+    // Fault counters: every error counts, levels count once per rising edge, counts saturate.
+    for (int i = 0; i < FAULT_COUNTERS; i++) read_counter(i, 0, "counters reset to zero");
+    @(negedge clk);
+    events.RegfileSec = 2'b11;                     // two errors in one cycle
+    events.PipeSec = 5'b10101;                     // three
+    events.FTUnresolved = 2'b01;                   // a level, held below
+    events.TmrCorrected = 1'b1;
+    @(negedge clk);
+    events.RegfileSec = 2'b00;
+    events.PipeSec = 5'b0;
+    repeat (3) @(negedge clk);
+    events.FTUnresolved = 2'b00;
+    events.TmrCorrected = 1'b0;
+    @(negedge clk);
+    events.FTUnresolved = 2'b01;                   // a second occurrence
+    @(negedge clk);
+    events.FTUnresolved = 2'b00;
+    events.ICacheSec = 3'b111;                     // three a cycle: run counter 4 past its top
+    repeat (21850) @(negedge clk);
+    events.ICacheSec = 3'b000;
+    read_counter(0, 2, "two errors in one cycle count two");
+    read_counter(2, 3, "pipeline errors are counted per register");
+    read_counter(9, 2, "an unresolved level counts once per occurrence");
+    read_counter(16, 1, "a held TMR fault counts once");
+    read_counter(4, 16'hffff, "counters saturate");
+    read_counter(1, 0, "untouched counters stay zero");
+    read_counter(FAULT_COUNTERS, 0, "unused words read zero");
+
     @(negedge clk);
     reset_n = 0;
     repeat (2) @(negedge clk);
-    check_mask(6'h3f);
+    check_mask(8'h00);
     $display("PASS ft_control_tb checks=%0d", checks);
     $finish;
   end
   initial begin
-    #10000;
+    #1000000;                                      // hang guard; the counter run takes ~22k cycles
     $fatal(1, "fault-control test timeout");
   end
 endmodule

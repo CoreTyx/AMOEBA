@@ -55,7 +55,8 @@ module align import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0]       IEUAdrxTvalM, // IEUAdrM or spilled and aligned to next page
   output logic                    SelSpillE, // During the transition between the two spill operations, the IFU should stall the pipeline
   output logic [P.LLEN-1:0]       DCacheReadDataWordSpillM, // The final 32 bit instruction after merging the two spilled fetches into 1 instruction
-  output logic                    SpillStallM);
+  output logic                    SpillStallM,
+  output logic                    SpillStartM); // the first access is done and the second starts next cycle
 
   localparam LLENINBYTES = P.LLEN/8;
   localparam OFFSET_BIT_POS =  $clog2(P.DCACHE_LINELENINBITS/8);
@@ -143,6 +144,7 @@ module align import cvw::*;  #(parameter cvw_t P) (
   assign SelSpillE = (CurrState == STATE_READY & ValidSpillM) | (CurrState == STATE_SPILL & CacheBusHPWTStall);
   assign SpillSaveM = (CurrState == STATE_READY) & ValidSpillM & ~FlushM;
   assign SpillStallM = SelSpillE;
+  assign SpillStartM = (CurrState == STATE_READY) & ValidSpillM;
 
   ////////////////////////////////////////////////////////////////////////////////////////////////////
   // Merge spilled data

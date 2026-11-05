@@ -69,6 +69,7 @@ module rvfi_tap (
     input  logic [63:0] GPRValue,
     input  logic [4:0]  Rs1D, Rs2D,
     input  logic [63:0] ForwardedSrcAE, ForwardedSrcBE,
+    input  logic        EccStallE,      // ForwardedSrcAE/BE are uncorrected this cycle
     // memory
     input  logic [1:0]  MemRWM,
     input  logic [2:0]  Funct3M,
@@ -229,10 +230,12 @@ module rvfi_tap (
             end else if (FlushE) begin
                 // E-stage instruction killed; clear stash.
                 E_stash_valid <= 1'b0;
-            end else if (!E_stash_valid) begin
+            end else if (!E_stash_valid & ~EccStallE) begin
                 // First cycle of E-stage stall (MDU busy): ForwardedSrcAE/BE are
                 // correct here because R1E/R2E were loaded last cycle and the
                 // previous instruction is still in M/W providing forwarded values.
+                // Not in an ECC stall cycle: Execute's operands are uncorrected
+                // then, and the pipeline is holding them for the next cycle.
                 Rs1DataE_stash <= ForwardedSrcAE;
                 Rs2DataE_stash <= ForwardedSrcBE;
                 E_stash_valid  <= 1'b1;

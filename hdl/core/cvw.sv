@@ -37,7 +37,33 @@ package cvw;
   // AMOEBA byte-addressed fault-injection control and unit-mask positions.
   localparam logic [63:0] FI_CONTROL_ADDR = 64'h1007_000b;
   localparam int FI_ALU = 0, FI_CMP = 1, FI_MUL = 2, FI_DIV = 3,
-                 FI_REGFILE = 4, FI_PIPELINE = 5;
+                 FI_REGFILE = 4, FI_PIPELINE = 5, FI_CACHE_SEC = 6, FI_CACHE_DED = 7;
+  localparam int FI_UNITS = 8;
+  // Shared fault-injection generator (ft_fault_gen): a 16-bit Galois LFSR, x^16+x^14+x^13+x^11+1,
+  // and an event counter that every injection site compares against its own phase.
+  localparam int          FI_COUNT_BITS = 9;            // one event per site every 512 cycles
+  localparam logic [15:0] FI_LFSR_SEED  = 16'hFFFF;
+  function automatic logic [15:0] fi_lfsr_next(input logic [15:0] state);
+    return {1'b0, state[15:1]} ^ (state[0] ? 16'hB400 : 16'h0000);
+  endfunction
+
+  // Fault events, one flag per detecting register/lane, registered once in the core and
+  // counted by faultcount_apb at ECC_COUNTER_BASE.  *Unresolved and Tmr* are levels
+  // (counted on their rising edge); every other flag is a one-cycle pulse.
+  typedef struct packed {
+    logic [1:0] RegfileSec, RegfileDed;  // register-file read operands (RD1E, RD2E)
+    logic [4:0] PipeSec, PipeDed;        // ECC pipeline registers (ImmExtE, SrcAM, IEUResultM, WriteDataM, IFResultW)
+    logic [2:0] ICacheSec;               // tag, line, store-repaired line corrections
+    logic       ICacheDed;               // uncorrectable line dropped or reported
+    logic [2:0] DCacheSec;
+    logic       DCacheDed;
+    logic [1:0] FTDetect;                // {CMP, ALU} replica mismatch
+    logic [1:0] FTUnresolved;
+    logic [1:0] ResidueDetect;           // {DIV, MUL} residue mismatch
+    logic [1:0] ResidueUnresolved;
+    logic       TmrCorrected, TmrUncorrectable; // privilege-mode TMR
+  } fault_events_t;
+  localparam int FAULT_COUNTERS = 18;
 
   //`include "../../pkg/BranchPredictorType.vh"
 

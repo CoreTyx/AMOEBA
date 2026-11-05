@@ -35,6 +35,7 @@ module ft_recompute_fault_tb #(
   localparam int CH_CMP = 3;
 
   logic clk = 0, reset, flush, valid, advance;
+  logic load;
   logic [N-1:0] a, b, ca, cb, result, sum;
   logic signed_cmp, w64, uw64, sub, bmu;
   logic [2:0] select_op, funct3, balu;
@@ -50,46 +51,50 @@ module ft_recompute_fault_tb #(
   logic mul_active, mul_flush, mul_fi_enable, mul_stall, mul_unresolved;
   logic [N-1:0] mul_a, mul_b;
   logic [2:0] mul_funct3;
-  logic [2*N-1:0] mul_prod;
-  logic [1:0] mul_target, mul_kind;
+  logic [N-1:0] mul_prod;
+  logic [1:0] mul_kind;
   logic [$clog2(2*N)-1:0] mul_bit;
-  logic mul_pe_primary, mul_pe_shadow;
   logic div_active, div_signed, div_w64, div_fi_enable, div_stall, div_unresolved, div_busy;
-  logic [N-1:0] div_a, div_b, div_quot, div_rem;
-  logic [1:0] div_target, div_kind;
+  logic [N-1:0] div_a, div_b, div_result;
+  logic [1:0] div_kind;
   logic [$clog2(N)-1:0] div_bit;
-  logic div_channel, div_pe_primary, div_pe_shadow;
+  logic div_channel;                    // the instruction: 0 quotient, 1 remainder
   // The testbench clock deliberately uses a blocking assignment.
   /* verilator lint_off BLKSEQ */
   always #5 clk = ~clk;
   /* verilator lint_on BLKSEQ */
 
+  // The core's shared injection generator, driving every injector here.
+  logic [15:0] fault_lfsr;
+  logic [FI_COUNT_BITS-1:0] fault_count;
+  ft_fault_gen gen(.clk, .reset, .lfsr(fault_lfsr), .count(fault_count));
+
   // These injectors run without forces to check the production stimulus source.
   logic random_enable = 0;
   logic [N+1:0] random_input = '1, random_out0, random_out1;
-    ft_fault_inject #(.WIDTH(N+2), .SEED(16'hA001)) random_fi0(
-    .clk, .reset, .fi_enable(random_enable), .data_i(random_input), .data_o(random_out0));
-    ft_fault_inject #(.WIDTH(N+2), .SEED(16'hA041)) random_fi1(
-    .clk, .reset, .fi_enable(random_enable), .data_i(random_input), .data_o(random_out1));
+    ft_fault_inject #(.WIDTH(N+2), .PHASE(9'h1FE)) random_fi0(
+    .reset, .lfsr(fault_lfsr), .count(fault_count), .fi_enable(random_enable), .data_i(random_input), .data_o(random_out0));
+    ft_fault_inject #(.WIDTH(N+2), .PHASE(9'h1BE)) random_fi1(
+    .reset, .lfsr(fault_lfsr), .count(fault_count), .fi_enable(random_enable), .data_i(random_input), .data_o(random_out1));
 
     ft_alu #(.P(TP), .TE_THRESHOLD(THRESHOLD)) dut(
     .clk, .reset, .flush, .valid,
-    .advance, .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
+    .advance, .load, .hold(1'b0), .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
     .W64(w64), .UW64(uw64), .SubArith(sub), .ALUSelect(select_op), .BSelect(bselect),
     .ZBBSelect(zbbselect), .Funct3(funct3), .BALUControl(balu), .Funct7(7'b0), .Rs2E(5'b0),
-    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .ALUResult(result), .Sum(sum), .flags,
+    .BMUActive(bmu), .CZero(2'b0), .fi_enable, .cmp_fi_enable(fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
+    .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
-    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
+    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .HoldE(1'b0), .ForwardedSrcAE(mul_a),
     .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .MulActiveE(mul_active),
-    .fi_enable(mul_fi_enable),
-    .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved),
-    .pe_primary(mul_pe_primary), .pe_shadow(mul_pe_shadow));
+    .fi_enable(mul_fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
+    .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved));
     ft_div #(.P(TP), .TE_THRESHOLD(THRESHOLD)) div_dut(
     .clk, .reset, .StallM(div_stall), .FlushE(flush), .FlushM(flush), .IntDivE(div_active), .DivSignedE(div_signed),
-    .W64E(div_w64), .ForwardedSrcAE(div_a), .ForwardedSrcBE(div_b), .fi_enable(div_fi_enable),
-    .DivBusyE(div_busy), .QuotM(div_quot), .RemM(div_rem), .stall_req(div_stall),
-    .unresolved(div_unresolved), .pe_primary(div_pe_primary), .pe_shadow(div_pe_shadow));
+    .RemE(div_channel), .W64E(div_w64), .ForwardedSrcAE(div_a), .ForwardedSrcBE(div_b), .fi_enable(div_fi_enable),
+    .fi_lfsr(fault_lfsr), .fi_count(fault_count),
+    .DivBusyE(div_busy), .DivResultM(div_result), .stall_req(div_stall), .unresolved(div_unresolved));
 
   // Directed recovery tests override only private injector selections/events.
   // Production RTL exposes a shared enable and generates these values locally.
@@ -118,24 +123,12 @@ module ft_recompute_fault_tb #(
     force dut.replica[1].cmp_fi.inject_now = fi_enable & target[1] & (channel == 2'd3);
     force dut.replica[1].cmp_fi.fi_bit = $clog2(N + 1)'(bit_index);
     force dut.replica[1].cmp_fi.fi_kind = kind;
-    force mul_dut.primary_fi.inject_now = mul_fi_enable & mul_target[0];
-    force mul_dut.primary_fi.fi_bit = mul_bit;
-    force mul_dut.primary_fi.fi_kind = mul_kind;
-    force mul_dut.shadow_fi.inject_now = mul_fi_enable & mul_target[1];
-    force mul_dut.shadow_fi.fi_bit = mul_bit;
-    force mul_dut.shadow_fi.fi_kind = mul_kind;
-    force div_dut.primary_quot_fi.inject_now = div_fi_enable & div_target[0] & (div_channel == 1'b0);
-    force div_dut.primary_quot_fi.fi_bit = div_bit;
-    force div_dut.primary_quot_fi.fi_kind = div_kind;
-    force div_dut.primary_rem_fi.inject_now = div_fi_enable & div_target[0] & (div_channel == 1'b1);
-    force div_dut.primary_rem_fi.fi_bit = div_bit;
-    force div_dut.primary_rem_fi.fi_kind = div_kind;
-    force div_dut.shadow_quot_fi.inject_now = div_fi_enable & div_target[1] & (div_channel == 1'b0);
-    force div_dut.shadow_quot_fi.fi_bit = div_bit;
-    force div_dut.shadow_quot_fi.fi_kind = div_kind;
-    force div_dut.shadow_rem_fi.inject_now = div_fi_enable & div_target[1] & (div_channel == 1'b1);
-    force div_dut.shadow_rem_fi.fi_bit = div_bit;
-    force div_dut.shadow_rem_fi.fi_kind = div_kind;
+    force mul_dut.result_fi.inject_now = mul_fi_enable;
+    force mul_dut.result_fi.fi_bit = mul_bit;
+    force mul_dut.result_fi.fi_kind = mul_kind;
+    force div_dut.result_fi.inject_now = div_fi_enable;
+    force div_dut.result_fi.fi_bit = div_bit;
+    force div_dut.result_fi.fi_kind = div_kind;
   end
 
   task automatic check(input logic condition, input string label_text);
@@ -182,6 +175,7 @@ module ft_recompute_fault_tb #(
   endfunction
   task automatic drive_defaults;
     flush = 0;
+    load = 0;
     valid = 0;
     advance = 1;
     a = 0;
@@ -210,7 +204,6 @@ module ft_recompute_fault_tb #(
     mul_a = 0;
     mul_b = 0;
     mul_funct3 = 0;
-    mul_target = 0;
     mul_kind = 0;
     mul_bit = 0;
     div_active = 0;
@@ -219,7 +212,6 @@ module ft_recompute_fault_tb #(
     div_fi_enable = 0;
     div_a = 0;
     div_b = 0;
-    div_target = 0;
     div_kind = 0;
     div_bit = 0;
     div_channel = 0;
@@ -235,6 +227,26 @@ module ft_recompute_fault_tb #(
   task automatic clock_edge;
     @(posedge clk);
     #1;
+  endtask
+  // The ALU wrapper evaluates an operation over two clock edges: COMPUTE captures
+  // the replicas' channels, COMPARE checks them and steps the controllers.  It
+  // then either presents the result (stall low) or is back in COMPUTE to run the
+  // operation again (stall high).  The fault cases below step by evaluations.
+  task automatic alu_eval;
+    repeat (2) clock_edge();
+  endtask
+  // Present the inputs as they now stand as a new instruction: the wrapper
+  // restarts in COMPUTE.  Needed once a result has been presented, because the
+  // wrapper does not look at its inputs again until the next instruction.
+  task automatic alu_load;
+    load = 1;
+    clock_edge();
+    load = 0;
+  endtask
+  // A new instruction, evaluated once.
+  task automatic alu_run;
+    alu_load();
+    alu_eval();
   endtask
   task automatic random_injector_test;
     logic transparent, single_bit, staggered, skipped_invalid;
@@ -282,8 +294,8 @@ module ft_recompute_fault_tb #(
     @(negedge clk);
     reset = 1;
     clock_edge();
-    check(random_out0 == random_input && random_fi0.lfsr == 16'hA001 && random_fi1.lfsr == 16'hA041,
-          "reset suppresses injection and restores seeds");
+    check(random_out0 == random_input && fault_lfsr == FI_LFSR_SEED && fault_count == '0,
+          "reset suppresses injection and restores the generator");
     random_enable = 0;
   endtask
   task automatic set_operation(input int op);
@@ -368,7 +380,7 @@ module ft_recompute_fault_tb #(
     logic [N:0] saved_arithmetic, saved_compare;
     reset_case();
     set_operation(op);
-    #1;
+    alu_eval();  // without the fault: the reference outputs
     expected_result = result;
     expected_sum = sum;
     expected_flags = flags;
@@ -383,19 +395,22 @@ module ft_recompute_fault_tb #(
     endcase
     kind = initial_bit ? 1 : 2;
     fi_enable = 1;
-    #1;
-    check(stall && result == '0 && sum == '0 && flags == '0, "mismatch masks all outputs");
+    alu_load();   // the same operation again, now with the fault
+    clock_edge();
+    // COMPARE: the mismatch is in front of the controllers, the result is withheld.
+    check(stall && result == '0 && sum == '0 && flags == '0, "mismatch stalls and nothing is presented");
     clock_edge();
     saved_arithmetic = dut.normal_arith[0];
     saved_compare = dut.normal_cmp[0];
     check(!dut.alu_capture_normal && !dut.cmp_capture_normal, "capture is a first-edge pulse");
     repeat (THRESHOLD - 1) begin
-      clock_edge();
+      alu_eval();
       check(dut.normal_arith[0] == saved_arithmetic && dut.normal_cmp[0] == saved_compare, "retry preserves snapshots");
     end
     if (expect_isolation) begin
       check(stall && !unresolved, "diagnostic cycle holds transaction");
-      clock_edge();
+      alu_eval();  // the diagnosis
+      alu_eval();  // the operation again, on the replica it selected
       check(!stall && !unresolved && result == expected_result && sum == expected_sum && flags == expected_flags,
             "isolation selects original healthy outputs");
       if (selected_channel == CH_CMP)
@@ -409,11 +424,13 @@ module ft_recompute_fault_tb #(
       b  = b + N'(1);
       ca = ca + N'(5);
       cb = cb + N'(5);
-      #1;
+      alu_run();
       check(!stall && !unresolved, "subsequent operation retains selected replica");
-    end else
+    end else begin
+      alu_eval();  // the evaluation that ends in the unresolved state is released
       check(unresolved && !stall && result == '0 && sum == '0 && flags == '0,
             "unsupported operation releases only masked fault");
+    end
     $display("PASS persistent op=%0d channel=%0d bit=%0d replica=%s kind=%s result=%h flags=%b", op, selected_channel,
              physical_bit, target_name(target), kind_name(kind), expected_result, expected_flags);
   endtask
@@ -426,12 +443,12 @@ module ft_recompute_fault_tb #(
     bit_index = 0;
     kind = FI_XOR;
     fi_enable = 1;
-    #1;
-    check(stall, "runtime enable activates mismatch");
+    clock_edge();
+    check(stall && (dut.alu_mismatch || dut.cmp_mismatch), "runtime enable activates mismatch");
     clock_edge();
     @(negedge clk);
     fi_enable = 0;
-    repeat (THRESHOLD + 2) clock_edge();
+    repeat (THRESHOLD + 2) alu_eval();
     check(!stall && !unresolved && flags == 2'b01, "transient recovers");
     check(result == (selected_channel == CH_SHIFT ? shift_ref(a, int'(b), 1, 0, 0) : a + b),
           "transient returns independent oracle result");
@@ -445,12 +462,13 @@ module ft_recompute_fault_tb #(
     kind = 2;
     bit_index = 0;
     fi_enable = 1;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
     check(cmp_first ? cmp_pe_primary : pe_primary, "first lane isolates");
     @(negedge clk);
     channel = 2'(cmp_first ? CH_RESULT : CH_CMP);
     target  = FI_SHADOW;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
+    alu_eval();  // the operation again, on the replicas now selected
     check((cmp_first ? (cmp_pe_primary && pe_shadow) : (pe_primary && cmp_pe_shadow)) && !stall && !unresolved,
           "other lane recovers with different replica selection");
     check(result == a + b && flags == compare_ref(ca, cb, signed_cmp), "independent selected outputs are correct");
@@ -484,15 +502,16 @@ module ft_recompute_fault_tb #(
               sub = (mode == 2);
               expected = shift_ref(a, amount, mode, w64, 0);
               fault_bit = (boundary != 0) ? ((word_op != 0) ? 31 : N - 1) : 0;
-              #1;
               channel = 2'(CH_SHIFT);
               target = 2'(replica_id);
               bit_index = $clog2(N + 2)'(fault_bit);
               kind = expected[fault_bit] ? 1 : 2;
               fi_enable = 1;
-              #1;
-              check(stall, "physical shift fault detected at every amount");
-              repeat (THRESHOLD + 1) clock_edge();
+              clock_edge();
+              check(stall && dut.alu_mismatch, "physical shift fault detected at every amount");
+              clock_edge();
+              repeat (THRESHOLD) alu_eval();
+              alu_eval();  // the operation again, on the replica the diagnosis selected
               check(!stall && !unresolved && result == expected,
                     "physical shift recovery matches independent reference");
               check(pe_primary == (replica_id == 1) && pe_shadow == (replica_id == 2),
@@ -514,76 +533,80 @@ module ft_recompute_fault_tb #(
       bit_index = 0;
       kind = expected[0] ? 1 : 2;
       fi_enable = 1;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
+      alu_eval();  // the operation again, on the replica the diagnosis selected
       check(pe_primary && !unresolved && result == expected, "SLLI.UW physical recovery at every amount");
     end
   endtask
 
-  task automatic launch_mul(input logic [1:0] replica_target, input logic [1:0] fault_kind);
+  task automatic launch_mul(input logic [1:0] fault_kind);
     begin
       mul_active = 1'b1;
       mul_a = N'(13);
       mul_b = N'(11);
       mul_funct3 = 3'b000;
       mul_fi_enable = 1'b1;
-      mul_target = replica_target;
       mul_kind = fault_kind;
       mul_bit = 0;
     end
   endtask
 
-  task automatic mul_transient(input logic [1:0] replica_target, input string test_id);
+  // The multiplier wrapper evaluates a product over two clock edges (SUM, then
+  // COMPARE), and after a failed check takes two more to reload its partial products
+  // (REPLAY, LOAD) before evaluating again.
+  task automatic mul_eval;
+    repeat (2) clock_edge();
+  endtask
+  task automatic mul_retry;
+    repeat (4) clock_edge();
+  endtask
+
+  task automatic mul_transient(input string test_id);
     begin
       reset_case();
-      launch_mul(replica_target, FI_XOR);
-      $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
-               mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
+      launch_mul(FI_XOR);
+      $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
+               mul_funct3, kind_name(mul_kind), mul_bit);
       // First edge fills the M-stage partial-product registers.  Keep the
-      // fault through the next edge so the controller actually enters RETRY.
-      @(posedge clk);
-      #1;
-      @(posedge clk);
-      #1;
+      // fault through the evaluation so the controller actually enters RETRY.
+      repeat (3) clock_edge();  // operand register, half products, partial-product registers
+      mul_eval();
       if (THRESHOLD == 1) begin
+        mul_retry();  // the evaluation that ends in the unresolved state is released
         check(mul_unresolved && !mul_stall && mul_prod == '0, {
-              test_id, ": threshold-one sampled transient traps without diagnosis"});
-        $display("PASS %s threshold=1 (no MUL isolation relation)", test_id);
+              test_id, ": threshold-one sampled transient traps"});
+        $display("PASS %s threshold=1", test_id);
         return;
       end
-      check(mul_stall, {test_id, ": mismatch stalls"});
-      $display("  injected: primary raw/product=%0h/%0h shadow raw/product=%0h/%0h; arch product=%0h stall=%b",
-               mul_dut.primary_prod_raw, mul_dut.primary_prod, mul_dut.shadow_prod_raw, mul_dut.shadow_prod, mul_prod,
-               mul_stall);
+      check(mul_stall, {test_id, ": failed check stalls"});
+      $display("  injected: raw/product=%0h/%0h; arch product=%0h stall=%b",
+               mul_dut.prod_raw, mul_dut.prod, mul_prod, mul_stall);
       @(negedge clk);
       mul_fi_enable = 1'b0;
-      @(posedge clk);
-      #1;
-      check(!mul_stall && !mul_unresolved && mul_prod == (2*N)'(143), {test_id, ": replay restores product"});
+      mul_retry();
+      check(!mul_stall && !mul_unresolved && mul_prod == N'(143), {test_id, ": replay restores product"});
       $display("  recovered: fault disabled; product=%0h stall=%b unresolved=%b", mul_prod, mul_stall, mul_unresolved);
       $display("PASS %s", test_id);
     end
   endtask
 
-  task automatic mul_persistent(input logic [1:0] replica_target, input string test_id);
+  task automatic mul_persistent(input string test_id);
     begin
       reset_case();
-      launch_mul(replica_target, FI_STUCK1);
+      launch_mul(FI_STUCK1);
       // 13 * 11 is 0x8f; bit 4 is known zero, so stuck-at-1 differs.
       mul_bit = 4;
-      $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT target=%s kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
-               mul_funct3, target_name(replica_target), kind_name(mul_kind), mul_bit);
-      @(posedge clk);
-      #1;
-      @(posedge clk);
-      #1;
-      check(mul_stall || (THRESHOLD == 1 && mul_unresolved), {test_id, ": initial mismatch contained"});
-      $display("  injected: primary raw/product=%0h/%0h shadow raw/product=%0h/%0h; arch product=%0h stall=%b",
-               mul_dut.primary_prod_raw, mul_dut.primary_prod, mul_dut.shadow_prod_raw, mul_dut.shadow_prod, mul_prod,
-               mul_stall);
-      repeat (THRESHOLD - 1) clock_edge();
+      $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
+               mul_funct3, kind_name(mul_kind), mul_bit);
+      repeat (3) clock_edge();  // operand register, half products, partial-product registers
+      mul_eval();
+      check(mul_stall && mul_prod == '0, {test_id, ": initial failed check contained"});
+      $display("  injected: raw/product=%0h/%0h; arch product=%0h stall=%b",
+               mul_dut.prod_raw, mul_dut.prod, mul_prod, mul_stall);
+      repeat (THRESHOLD - 1) mul_retry();
+      mul_retry();  // the evaluation that ends in the unresolved state is released
       check(mul_unresolved && !mul_stall && mul_prod == '0, {test_id, ": persistent fault traps"});
-      check(!mul_pe_primary && !mul_pe_shadow, {test_id, ": no unsupported isolation"});
-      $display("  outcome: product=%0h unresolved=%b (MUL has no isolation relation)", mul_prod, mul_unresolved);
+      $display("  outcome: product=%0h unresolved=%b", mul_prod, mul_unresolved);
       $display("PASS %s", test_id);
     end
   endtask
@@ -598,7 +621,7 @@ module ft_recompute_fault_tb #(
     end
   endtask
 
-  task automatic launch_div(input logic [1:0] replica_target, input logic fault_channel, input logic [1:0] fault_kind);
+  task automatic launch_div(input logic remainder, input logic [1:0] fault_kind);
     begin
       div_active = 1'b1;
       div_signed = 1'b0;
@@ -606,19 +629,18 @@ module ft_recompute_fault_tb #(
       div_a = N'(100);
       div_b = N'(7);
       div_fi_enable = 1'b1;
-      div_target = replica_target;
-      div_channel = fault_channel;
+      div_channel = remainder;
       div_kind = fault_kind;
       div_bit = 0;
     end
   endtask
 
-  task automatic div_transient(input logic [1:0] replica_target, input logic fault_channel, input string test_id);
+  task automatic div_transient(input logic remainder, input string test_id);
     begin
       reset_case();
-      launch_div(replica_target, fault_channel, FI_XOR);
-      $display("[%0t] %s INPUT dividend=%0h divisor=%0h signed=%b; INJECT target=%s channel=%s kind=%s bit=%0d", $time,
-               test_id, div_a, div_b, div_signed, target_name(replica_target), fault_channel ? "remainder" : "quotient", kind_name(div_kind), div_bit);
+      launch_div(remainder, FI_XOR);
+      $display("[%0t] %s INPUT dividend=%0h divisor=%0h signed=%b %s; INJECT kind=%s bit=%0d", $time,
+               test_id, div_a, div_b, div_signed, remainder ? "remainder" : "quotient", kind_name(div_kind), div_bit);
       clock_edge();
       @(negedge clk);
       div_a = 0;
@@ -626,50 +648,43 @@ module ft_recompute_fault_tb #(
       wait_div_complete();
       if (THRESHOLD == 1) begin
         while (!div_unresolved) clock_edge();
-        check(!div_stall && div_quot == '0 && div_rem == '0, {
-              test_id, ": threshold-one sampled transient traps without diagnosis"});
-        $display("PASS %s threshold=1 (no DIV isolation relation)", test_id);
+        check(!div_stall && div_result == '0, {test_id, ": threshold-one sampled transient traps"});
+        $display("PASS %s threshold=1", test_id);
         return;
       end
-      check(div_stall, {test_id, ": completed mismatch stalls"});
-      $display(
-          "  injected: primary raw q/r=%0h/%0h injected=%0h/%0h shadow raw q/r=%0h/%0h injected=%0h/%0h; arch q/r=%0h/%0h",
-          div_dut.primary_quot_raw, div_dut.primary_rem_raw, div_dut.primary_quot, div_dut.primary_rem,
-          div_dut.shadow_quot_raw, div_dut.shadow_rem_raw, div_dut.shadow_quot, div_dut.shadow_rem, div_quot, div_rem);
+      // The completed result has been captured, fault included; the wrapper
+      // checks the captured copy on the next edge.
+      check(div_stall, {test_id, ": completed failed check stalls"});
+      $display("  injected: raw/result=%0h/%0h; arch result=%0h", div_dut.result_raw, div_dut.result, div_result);
       @(negedge clk);
       div_fi_enable = 1'b0;
       wait_div_complete();
+      clock_edge();  // the captured retry result is checked
       clock_edge();  // accept the checked E-stage result into the M-stage output
-      check(!div_stall && !div_unresolved && div_quot == N'(14) && div_rem == N'(2), {
-            test_id, ": retry restores quotient and remainder"});
-      $display("  recovered: fault disabled; quotient/remainder=%0h/%0h stall=%b unresolved=%b", div_quot, div_rem,
-               div_stall, div_unresolved);
+      check(!div_stall && !div_unresolved && div_result == (remainder ? N'(2) : N'(14)), {
+            test_id, ": retry restores the result"});
+      $display("  recovered: fault disabled; result=%0h stall=%b unresolved=%b", div_result, div_stall, div_unresolved);
       $display("PASS %s", test_id);
     end
   endtask
 
-  task automatic div_persistent(input logic [1:0] replica_target, input logic fault_channel, input string test_id);
+  task automatic div_persistent(input logic remainder, input string test_id);
     begin
       reset_case();
-      launch_div(replica_target, fault_channel, FI_STUCK1);
+      launch_div(remainder, FI_STUCK1);
       // 100/7 gives q=0xe and r=0x2, so bit 0 differs when forced high.
-      $display("[%0t] %s INPUT dividend=%0h divisor=%0h signed=%b; INJECT target=%s channel=%s kind=%s bit=%0d", $time,
-               test_id, div_a, div_b, div_signed, target_name(replica_target), fault_channel ? "remainder" : "quotient", kind_name(div_kind), div_bit);
+      $display("[%0t] %s INPUT dividend=%0h divisor=%0h signed=%b %s; INJECT kind=%s bit=%0d", $time,
+               test_id, div_a, div_b, div_signed, remainder ? "remainder" : "quotient", kind_name(div_kind), div_bit);
       clock_edge();
       @(negedge clk);
       div_a = 0;
       div_b = 0;
       wait_div_complete();
-      check(div_stall || div_unresolved, {test_id, ": initial completed mismatch contained"});
-      $display(
-          "  injected: primary raw q/r=%0h/%0h injected=%0h/%0h shadow raw q/r=%0h/%0h injected=%0h/%0h; arch q/r=%0h/%0h",
-          div_dut.primary_quot_raw, div_dut.primary_rem_raw, div_dut.primary_quot, div_dut.primary_rem,
-          div_dut.shadow_quot_raw, div_dut.shadow_rem_raw, div_dut.shadow_quot, div_dut.shadow_rem, div_quot, div_rem);
+      check(div_stall || div_unresolved, {test_id, ": initial completed failed check contained"});
+      $display("  injected: raw/result=%0h/%0h; arch result=%0h", div_dut.result_raw, div_dut.result, div_result);
       while (!div_unresolved) clock_edge();
-      check(div_unresolved && !div_stall && div_quot == '0 && div_rem == '0, {test_id, ": persistent fault traps"});
-      check(!div_pe_primary && !div_pe_shadow, {test_id, ": no unsupported isolation"});
-      $display("  outcome: quotient/remainder=%0h/%0h unresolved=%b (DIV has no isolation relation)", div_quot,
-               div_rem, div_unresolved);
+      check(div_unresolved && !div_stall && div_result == '0, {test_id, ": persistent fault traps"});
+      $display("  outcome: result=%0h unresolved=%b", div_result, div_unresolved);
       $display("PASS %s", test_id);
     end
   endtask
@@ -702,16 +717,16 @@ module ft_recompute_fault_tb #(
         signed_cmp = 1'(sg);
         sub = 1;
         select_op = (sg != 0) ? 2 : 3;
-        #1;
+        alu_run();
         check(flags == compare_ref(ca, cb, signed_cmp), "extended comparison reference");
         check(result == (signed_cmp ? N'($signed(a) < $signed(b)) : N'(a < b)), "SLT/SLTU reference");
       end
       select_op = 0;
       sub = 0;
-      #1;
+      alu_run();
       check(result == a + b && sum == a + b, "ADD reference");
       sub = 1;
-      #1;
+      alu_run();
       check(result == a - b && sum == a - b, "SUB reference");
       bmu = 1;
       bselect = 2;
@@ -719,7 +734,7 @@ module ft_recompute_fault_tb #(
       for (int maximum = 0; maximum < 2; maximum++) begin
         funct3 = (sg != 0) ? 4 : 5;
         zbbselect = 4'(3 + 4 * maximum);
-        #1;
+        alu_run();
         check(result == ((((sg != 0) ? ($signed(a) < $signed(b)) : (a < b)) ^ (maximum != 0)) ? a : b),
               "signed/unsigned min/max reference");
       end
@@ -739,15 +754,15 @@ module ft_recompute_fault_tb #(
       select_op = 1;
       funct3 = (mode == 0) ? 1 : 5;
       sub = (mode == 2);
-      #1;
+      alu_run();
       check(result == shift_ref(a, amount, mode, w64, 0), "shift architectural reference");
       // The healthy diagnostic relation must hold at each legal amount.
-      check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0), "wide normal slice reference");
+      check(shift_ref(a, amount, mode, w64, 0) == dut.shift_result(dut.shift_raw[0], 0, w64), "wide normal slice reference");
       force dut.alu_recompute = 1;
       #1;
       // Selecting diagnostic arithmetic alone does not enter controller recovery.
       // Output masking is checked separately by the injected-fault cases.
-      check(dut.shift_result(dut.shift_raw[0], 1) == shift_ref(a, amount, mode, w64, 0),
+      check(dut.shift_result(dut.shift_raw[0], 1, w64) == shift_ref(a, amount, mode, w64, 0),
             "wide shifted diagnostic relation");
       release dut.alu_recompute;
     end
@@ -762,7 +777,7 @@ module ft_recompute_fault_tb #(
       sub = 0;
       uw64 = 1;
       bselect = 1;
-      #1;
+      alu_run();
       check(result == shift_ref(a, amount, 0, 0, 1), "SLLI.UW zero extension reference");
     end
     uw64 = 0;
@@ -775,10 +790,10 @@ module ft_recompute_fault_tb #(
       b = N'(amount);
       sub = 0;
       funct3 = 5;
-      #1;
+      alu_run();
       check(result == ((a >> amount) | (a << ((N - amount) % N))), "ROR ring reference");
       funct3 = 1;
-      #1;
+      alu_run();
       check(result == ((a << amount) | (a >> ((N - amount) % N))), "ROL ring reference");
     end
     w64 = 1;
@@ -788,11 +803,11 @@ module ft_recompute_fault_tb #(
       b = N'(amount);
       rotated_word = (a[31:0] >> (amount & 31)) | (a[31:0] << ((32 - (amount & 31)) % 32));
       funct3 = 5;
-      #1;
+      alu_run();
       check(result == N'($signed(rotated_word)), "RORW masked ring reference");
       rotated_word = (a[31:0] << (amount & 31)) | (a[31:0] >> ((32 - (amount & 31)) % 32));
       funct3 = 1;
-      #1;
+      alu_run();
       check(result == N'($signed(rotated_word)), "ROLW masked ring reference");
     end
     w64 = 0;
@@ -829,7 +844,7 @@ module ft_recompute_fault_tb #(
       kind = FI_XOR;
       channel = 2'(ch);
       bit_index = 0;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
       if (ch == CH_SHIFT) check(pe_primary && !unresolved, "physical shift XOR diagnosed");
       else check(unresolved && !pe_primary && !cmp_pe_primary, "both-pass diagnosis traps");
     end
@@ -843,7 +858,7 @@ module ft_recompute_fault_tb #(
     bit_index = 0;
     fi_enable = 1;
     second_result_fault = 1;
-    repeat (THRESHOLD + 1) clock_edge();
+    repeat (THRESHOLD + 1) alu_eval();
     check(unresolved && !pe_primary && !pe_shadow, "both-fail diagnosis is unresolved");
     second_result_fault = 0;
     // A changing persistent fault must not replace the first mismatch snapshot.
@@ -854,14 +869,15 @@ module ft_recompute_fault_tb #(
     kind = 2;
     bit_index = 0;
     fi_enable = 1;
-    #1;
+    clock_edge();
     check(dut.alu_capture_normal && !dut.cmp_capture_normal, "independent first ALU capture pulse");
     clock_edge();
     @(negedge clk);
     bit_index = 3;
-    repeat (THRESHOLD - 1) clock_edge();
+    repeat (THRESHOLD - 1) alu_eval();
     check(dut.normal_arith[0] == {1'b0, (a + b) | N'(1)}, "first snapshot survives changed retry fault");
-    clock_edge();
+    alu_eval();  // the diagnosis
+    alu_eval();  // the operation again, on the replica it selected
     check(pe_primary && !unresolved && result == a + b, "changed retry fault still selects healthy replica");
     // Flush cancels an in-flight comparison diagnosis as well as isolation.
     reset_case();
@@ -871,12 +887,16 @@ module ft_recompute_fault_tb #(
     kind = 0;
     bit_index = 0;
     fi_enable = 1;
-    clock_edge();
+    alu_eval();
     @(negedge clk);
     flush = 1;
     fi_enable = 0;
     clock_edge();
-    check(!stall && !unresolved && dut.normal_cmp[0] == '0, "flush cancels in-flight diagnosis and snapshots");
+    check(!unresolved && dut.normal_cmp[0] == '0, "flush cancels in-flight diagnosis and snapshots");
+    @(negedge clk);
+    flush = 0;
+    alu_eval();
+    check(!stall && !unresolved && result == a + b, "operation completes cleanly after the flush");
     // Range checks and reserved encodings are no-ops, including narrower channels.
     reset_case();
     set_operation(OP_ADD);
@@ -886,12 +906,12 @@ module ft_recompute_fault_tb #(
       channel = 2'(ch);
       kind = 3;
       bit_index = 0;
-      #1;
+      alu_run();
       check(!stall && result == a + b, "reserved kind no-op");
       if (ch != CH_RESULT) begin  // All result-channel indices are valid for power-of-two XLEN.
         kind = 0;
         bit_index = $clog2(N + 2)'((ch == CH_SHIFT) ? N + 2 : N + 1);
-        #1;
+        alu_run();
         check(!stall && result == a + b, "invalid index does not alias");
       end
     end
@@ -903,10 +923,12 @@ module ft_recompute_fault_tb #(
     target = 1;
     channel = 2'(CH_CMP);
     kind = 2;
-    #1;
+    clock_edge();
     check(!stall && !dut.cmp_capture_normal, "invalid execute instruction cannot capture");
+    clock_edge();
     valid = 1;
-    #1;
+    alu_load();
+    clock_edge();
     check(dut.cmp_capture_normal && !dut.alu_capture_normal, "independent first CMP capture pulse");
     clock_edge();
     @(negedge clk);
@@ -924,7 +946,7 @@ module ft_recompute_fault_tb #(
       kind = FI_XOR;
       bit_index = 0;
       fi_enable = 1;
-      repeat (THRESHOLD + 1) clock_edge();
+      repeat (THRESHOLD + 1) alu_eval();
       check(unresolved, "ambiguous diagnosis reaches terminal fault");
       @(negedge clk);
       fi_enable = 0;
@@ -939,14 +961,12 @@ module ft_recompute_fault_tb #(
       check(!unresolved, "terminal fault clears after acceptance");
     end
     shift_fault_sweep();
-    mul_transient(FI_PRIMARY, "MUL transient primary");
-    mul_transient(FI_SHADOW, "MUL transient shadow");
-    mul_persistent(FI_PRIMARY, "MUL persistent primary");
-    mul_persistent(FI_SHADOW, "MUL persistent shadow");
-    div_transient(FI_PRIMARY, 0, "DIV quotient transient primary");
-    div_transient(FI_SHADOW, 1, "DIV remainder transient shadow");
-    div_persistent(FI_PRIMARY, 0, "DIV quotient persistent primary");
-    div_persistent(FI_SHADOW, 1, "DIV remainder persistent shadow");
+    mul_transient("MUL transient");
+    mul_persistent("MUL persistent");
+    div_transient(0, "DIV quotient transient");
+    div_transient(1, "DIV remainder transient");
+    div_persistent(0, "DIV quotient persistent");
+    div_persistent(1, "DIV remainder persistent");
     $display("PASS ft_recompute_fault_tb XLEN=%0d threshold=%0d checks=%0d", N, THRESHOLD, checks);
     $finish;
   end

@@ -73,8 +73,9 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // test
   input  logic              test_mode,
   input  logic              scan_en,
-  // Fault-injection master enable from the pad. The core applies the per-unit
-  // software mask at MMIO 0x1007_000b before driving ECC and FT injectors.
+  // Fault-injection master enable from the pad, synchronised below. The core
+  // applies the per-unit software mask at MMIO 0x1007_000b and registers the
+  // result before driving ECC and FT injectors.
   input  logic              fault_inject,
   // status
   output logic              status
@@ -118,16 +119,21 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   logic [1:0]        HTRANS;
   logic [1:0]        irq_s;
   logic              uart_rx_s;
+  logic              fault_inject_s;
 
   assign reset_ext = ~rst_n_s;
 
   synchronizer irq0sync(.clk(core_clk), .d(irq[0]),  .q(irq_s[0]));
   synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
   synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
+  // fault_inject is a board-level strap with no timing relationship to
+  // core_clk, and it gates logic on every protected datapath in the core.
+  synchronizer fisync  (.clk(core_clk), .d(fault_inject), .q(fault_inject_s));
 
   logic dft_unlocked;
   forte_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
-    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0), .fault_inject,
+    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0),
+    .fault_inject(fault_inject_s),
     .dft_unlocked,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
     .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HREADY,

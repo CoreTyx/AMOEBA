@@ -48,13 +48,13 @@ verilator --binary -j "$(nproc)" --timing --timescale 1ns/1ps \
   -Wno-fatal \
   +define+ECE411_VERILATOR +define+ECE411_NO_FLOAT +define+ECE411_NO_SPIKE_DPI \
   +incdir+"$R/pkg" +incdir+"$R/hdl/core" +incdir+"$R/hdl/core/ifu/bpred" \
-  +incdir+"$R/third_party/cvw/config/rv64gc" +incdir+"$R/third_party/opentitan" \
+  +incdir+"$R/third_party/cvw/config/rv64gc" +incdir+"$R/hdl" \
   +incdir+"$R/hvl/common" \
   "$R/pkg/types.sv" "$R/hdl/forte_link_pkg.sv" "$CORE_SV" "${CORE_SRCS[@]}" \
   ${SRAM_SRCS[0]+"${SRAM_SRCS[@]}"} \
   "${FORTE_SRCS[@]}" \
-  "$R/third_party/opentitan/prim_flop_2sync.sv" \
-  "$R/third_party/opentitan/prim_fifo_async.sv" \
+  "$R/hdl/prim_flop_2sync.sv" \
+  "$R/hdl/prim_fifo_async.sv" \
   "$R/hvl/common/mem_itf.sv" "$R/hvl/common/masked_memory.sv" \
   "$R/hvl/common/forte_link_model.sv" "$R/hvl/cdc/forte_cdc_tb.sv" \
   --top-module forte_cdc_tb -o cdctb

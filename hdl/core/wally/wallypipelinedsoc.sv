@@ -73,10 +73,10 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   logic                       HRESP;            // response from AHB
   logic                       MTimerInt, MSwInt;// timer and software interrupts from CLINT
   logic [63:0]                MTIME_CLINT;      // from CLINT to CSRs
-  logic [31:0]                RegfileSecCount, ICacheSecCount, DCacheSecCount;
+  fault_events_t              FaultEvents;      // registered fault flags, counted by the uncore
   logic                       MExtInt,SExtInt;  // from PLIC
 
-  logic [5:0] FaultInjectMask; // APB register selects units; core applies fault_inject master gate
+  logic [FI_UNITS-1:0] FaultInjectMask; // APB register selects units; core applies fault_inject master gate
 
   // synchronize reset to SOC clock domain
   synchronizer resetsync(.clk, .d(reset_ext), .q(reset));
@@ -87,7 +87,7 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
-    .PrivModeUncorrectableFaultW, .RegfileSecCount, .ICacheSecCount, .DCacheSecCount
+    .PrivModeUncorrectableFaultW, .FaultEvents
    );
 
   // instantiate uncore if a bus interface exists
@@ -95,11 +95,11 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
     uncore #(P) uncore(.HCLK, .HRESETn, .TIMECLK, .FaultInjectMask,
       .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .HRDATAEXT,
       .HREADYEXT, .HRESPEXT, .HRDATA, .HREADY, .HRESP, .HSELEXT,
-      .RegfileSecCount, .ICacheSecCount, .DCacheSecCount,
+      .FaultEvents,
       .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .GPIOIN, .GPIOOUT, .GPIOEN, .UARTSin,
       .UARTSout, .MTIME_CLINT, .SPIIn, .SPIOut, .SPICS, .SPICLK, .SDCIn, .SDCCmd, .SDCCS, .SDCCLK);
   end else begin
-    assign FaultInjectMask = 6'h3f;
+    assign FaultInjectMask = 8'h3f;  // no control register to arm units with: the pin alone gates the core units
     assign {HRDATA, HREADY, HRESP, HSELEXT, MTimerInt, MSwInt, MExtInt, SExtInt,
             MTIME_CLINT, GPIOOUT, GPIOEN, UARTSout, SPIOut, SPICS, SPICLK, SDCCmd, SDCCS, SDCCLK} = '0;
   end

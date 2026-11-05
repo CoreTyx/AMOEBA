@@ -649,13 +649,18 @@ module monitor #(
         // so it cannot be tied to one cycle from out here.  A genuine error
         // raised within MISALIGN_WAIVER_DEPTH cycles of a misaligned access is
         // masked too; keep the depth as small as still clears a boot.
+        //
+        // The same waiver covers an instruction that traps on an access fault or
+        // a page fault (itf.mmu_fault): the models have no MMU and no PMP, so
+        // they expect the instruction to complete -- or, for a faulting fetch,
+        // judge whatever stale bits sit in the instruction register.
         localparam int MISALIGN_WAIVER_DEPTH = 16;
 
         logic [MISALIGN_WAIVER_DEPTH-1:0] misaligned_hist;
         always @(posedge itf.clk) begin
             if (itf.rst) misaligned_hist <= '0;
             else misaligned_hist <= {misaligned_hist[MISALIGN_WAIVER_DEPTH-2:0],
-                                     itf.mem_misaligned[0]};
+                                     itf.mem_misaligned[0] | itf.mmu_fault[0]};
         end
 
         longint unsigned rvfi_waived_count = '0;
@@ -672,7 +677,7 @@ module monitor #(
 
         final begin
             if (rvfi_waived_count != 0)
-                $display("Monitor: %0d RVFI verdict(s) waived near a misaligned access (riscv-formal cannot model Zicclsm)",
+                $display("Monitor: %0d RVFI verdict(s) waived near a misaligned access or an access/page fault (riscv-formal models neither)",
                          rvfi_waived_count);
         end
 

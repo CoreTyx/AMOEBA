@@ -14,7 +14,7 @@ uncached, non-idempotent, non-executable, and do not support atomics.
 | `0x0c00_0000–0x0fff_ffff` | PLIC | Simulation SoC; ASIC on-chip with `PERIPH_ONCHIP=1`, external with `=0` |
 | `0x1000_0000–0x1000_0007` | UART | Same placement as PLIC |
 | `0x1007_000b` | FI_CONTROL | Both SoCs, always on-chip |
-| `0x1008_0000–0x1008_0fff` | ECC SEC counters: read-only, 32-bit reads at `+0` register file, `+4` I$, `+8` D$ | Simulation SoC; not routed on the ASIC |
+| `0x1008_0000–0x1008_0fff` | ECC SEC counters: read-only, 32-bit reads at `+0` register operands (register file reads and the two Execute operand registers), `+4` I$, `+8` D$ | Simulation SoC; not routed on the ASIC |
 | `0x8000_0000–0x8fff_ffff` | External memory, 256 MiB | Both SoCs |
 
 Reset PC: `0x8000_0000`. Simulation completion address `0x8080_0000` is ordinary
@@ -35,8 +35,10 @@ Wider accesses and neighboring addresses are rejected; neighboring bytes are not
 | 5 | Pipeline ECC: `RD1EReg`, `RD2EReg`, `ImmExtEReg`, `SrcAMReg`, `IEUResultMReg`, `WriteDataMReg`, `IFResultWReg` |
 | 7:6 | Reserved: read zero, writes ignored |
 
-Each injector enable is `fault_inject & FI_CONTROL[bit]`. Readback returns the
-stored mask regardless of the master pin. Writing `0x04` selects MUL only;
+Each injector enable is `fault_inject & FI_CONTROL[bit]`, registered in the core:
+a change to the mask or the pin reaches the injectors one cycle later (the pin
+additionally passes a two-flop synchroniser in `forte_chip`). Readback returns
+the stored mask regardless of the master pin. Writing `0x04` selects MUL only;
 writing zero disables all injection. The DFT lock does not gate injection.
 
 The mask controls artificial corruption only. Detection, recovery, trapping,
@@ -47,7 +49,7 @@ replica, fault bit, or fault kind.
 
 ```text
 AHB decode -> APB bridge -> fault_inject_apb.FaultInjectMask
-  -> wallypipelinedsoc / forte_soc -> wallypipelinedcore: AND with fault_inject
+  -> wallypipelinedsoc / forte_soc -> wallypipelinedcore: AND with fault_inject, then a flop
        bits 0,1,4,5 -> IEU -> datapath -> ALU, CMP, register-file ECC, pipeline ECC
        bits 2,3     -> MDU -> MUL, DIV
 ```

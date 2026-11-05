@@ -128,6 +128,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
         .Rs2D           (top.chip.soc.core.ieu.dp.regf.a2),
         .ForwardedSrcAE (top.chip.soc.core.ieu.ForwardedSrcAE),
         .ForwardedSrcBE (top.chip.soc.core.ieu.ForwardedSrcBE),
+        .EccStallE      (top.chip.soc.core.EccStallE),
         .MemRWM         (top.chip.soc.core.MemRWM),
         .Funct3M        (top.chip.soc.core.Funct3M),
         .IEUAdrM        (top.chip.soc.core.IEUAdrM),

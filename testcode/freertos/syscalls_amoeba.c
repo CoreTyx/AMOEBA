@@ -43,12 +43,12 @@ void __attribute__((noreturn)) tohost_exit(uintptr_t code)
 {
     tohost = (code << 1) | 1;
     /* CVW's D-cache is write-back; the SD above stays dirty in cache and
-     * never reaches the AHB bus unless explicitly evicted.  cbo.flush
-     * (Zicbom, imm=2) writes the dirty cache line back to AHB so the
-     * testbench can observe the write on mem_itf.  Using .insn bypasses
-     * assembler ISA-extension checks. */
-    asm volatile (".insn i 0xF, 2, zero, %0, 2"
-                  : : "r" ((uintptr_t)&tohost) : "memory");
+     * never reaches the link unless written back.  fence.i flushes the whole
+     * D$ (Wally: FenceI -> FlushDCache).  This used cbo.flush, which is
+     * Zicbom -- not implemented in this core (ZICBOM_SUPPORTED = 0), so it
+     * trapped as an illegal instruction straight after the store; only a
+     * testbench that sees the store retire (RVFI) noticed the exit at all. */
+    asm volatile ("fence.i" ::: "memory");
     while (1);
 }
 
