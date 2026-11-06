@@ -133,3 +133,96 @@ How to read it:
 - The **whole-chip total is noise**, not a cost. `compile_ultra` re-optimises the unchanged core differently on each run: the `mul` group went from −0.367 ns to −0.072 ns and `dcache` from −0.086 to 0.000 with no RTL change there. ±0.2 % of 194k µm² (±400 µm²) swamps a ~100 µm² saving. The saving is real but small.
 - The biggest savings are not in this report. Pad cells are black boxes (area 0) here. In silicon, 16 bidirectional `io_tri` cells become 8 input + 8 output cells, which are normally smaller and need no per-pad enable routing, and one pad site is freed.
 - `link_io` (−0.20 ns) is a one-gate path dominated by the pad model and the I/O delay constraints, so it was never going to move with this change.
+
+## Follow-up: clock-crossing verification and the duplex question
+
+Done after `1f6ed9d`, in scratch worktrees (`../AMOEBA-cdc-chk`, `../AMOEBA-cdcfix`, both deleted afterwards). None of the bench instrumentation below is committed: the RTL passed it, so it is recorded here rather than kept. Logs in `sim/verilator/io_split/cdc_chk/` and `.../cdcfix/` (gitignored).
+
+### What was checked by reading the RTL
+
+- The only core↔link crossings are the two `prim_fifo_async`s. Their pointers are Gray-coded, come straight from flops, and go through `prim_flop_2sync`. Data crosses only through FIFO storage.
+- Each domain has its own reset synchroniser (`forte_rst_sync`), and each FIFO side is reset by its own domain.
+- The occupancy `forte_link_phy` reads (`rdepth_o`) is computed from the synchronised write pointer, so it can only lag the true value. A write therefore cannot start with a beat missing.
+- The only other cross-domain path is the test-mode `io_out` mux (`scan_q` is core clock, functional `io_o` is link clock), and `test_mode` is static during functional use.
+- The 8+8 split added no crossing: `hcnt`, `beat_r`, `sub` are all link-domain. It removed one cross-domain mux (the test-mode `io_oe` override).
+
+### Why the existing bench could not prove it
+
+`make cdc` / `cdc_sweep` drift the two clocks through every phase, but an RTL flop always captures the value from before the edge, so a synchroniser never resolves anything marginal. The FIFO's own Gray assertions (`prim_assert.sv` `ASSERT`) compile to nothing under `ECE411_VERILATOR`. And the bench's flit balance counts transactions, not words.
+
+### Stress matrix (scratch instrumentation)
+
+A metastability model in `prim_flop_2sync` (a bit that changed < 0.5 ns before the edge resolves old or new at random), a word scoreboard and pointer checks on both FIFOs, and a `LINK_PHASE` knob. Run over 31 configurations: link 4× faster to 4× slower than core, 0.99 and 1.01 drift, 1:1 at fixed skews 0.05–9.95 ns (the silicon case), with and without random FPGA-side gaps. The slowest link clocks ran with a longer reset in the scratch bench (see the limitation below).
+
+| Result | |
+|---|---|
+| 31 configurations | **all PASS**; every word through both FIFOs exactly once, in order, unchanged |
+| 1:1 skew cases | every pointer change lands in the window (~73k samples per run, ~36k resolved to the old value) |
+| Binary pointers swapped in by hand, `+CDC_META` | caught immediately (Gray check, or pointer going backwards) |
+| Same, without `+CDC_META` | **passes the whole bench**: the committed bench alone cannot tell a Gray-safe crossing from a broken one |
+| Gap | at exactly 2:1 and 4:1 slow-link no edge happened to land in the window; the 0.68 and 0.99 drift runs cover the slow-link side |
+
+**Bench limitation found (left as is):** `hvl/cdc/forte_cdc_tb.sv` holds reset for a fixed 37.3 ns, and `masked_memory.sv` loads its image only on a clock edge in reset, on the link clock. With `LINK_HALF` above ~18 ns, or `LINK_PHASE` large enough that the first link edge comes after 37.3 ns, memory stays empty: the core fetches zeros, traps to 0 and the run times out, which looks like a link failure and is not one (shown with `LINK_HALF=40`). Every configured run (`make cdc`, `cdc_sweep`) has a link edge inside reset and is unaffected, so the bench is not changed; a slower or later link clock needs a longer reset first.
+
+### Follow-up commit
+
+`forte_link_phy`: every write-beat pop must find a beat (with this log update). Without it, a pop that found the FIFO empty would put the previous beat on the wire silently. Written as `if (...) $fatal` (see the open item below). Checked that it bites: a phy hacked to start a write before its beats are buffered fails on it at once.
+
+Not committed: the metastability model, the FIFO checker, the `LINK_PHASE` knob and a `make cdc_meta` target were built as a permanent option and then dropped, since the RTL passed them. Their last run: 8/8 configurations, 323,881 synchroniser samples inside the window (every pointer change in the 1:1 cases); binary pointers swapped into the FIFO by hand failed within 0.4-1.2 µs with the model and passed without it.
+
+Not in this set: the stale SRAM black boxes in `gen_blackbox_libs.py` ("Pre-existing breakage" item 2) are left to be fixed later.
+
+### Open: Verilator never runs `assert`
+
+No Verilator flow in the repo passes `--assert`, and Verilator drops immediate assertions without it. Every `assert (...) else $fatal` in the RTL has therefore never run in a Verilator regression: in `forte_link_phy` the beat-count, buffered-before-start and inbound-overflow checks, and in `forte_link_core` the HADDR/HBURST/HSIZE checks. Shown directly: the hacked phy above reached the state the buffered-before-start `assert` guards, and it stayed silent. They do run under VCS (`-assert svaext`, including the pin bench). The `if (...) $fatal` checks run everywhere. Adding `--assert` to the Verilator flows may surface failures in assertions that have never been exercised; that decision is left open.
+
+## io_in / io_out independence (duplex): measured, not implemented
+
+Both buses are in the link domain, so letting them run independently adds no clock crossing. The question is whether it pays.
+
+**Traffic.** Wally is AHB-Lite: one transaction at a time, in order. A dirty miss does writeback then fill. The bridge completes the write on AHB once its beats are in the FIFO, so the fill is accepted about 2 cycles later and queues behind the write on `io_out`.
+
+**Measured** (scratch counters in `forte_dut_wrap`, Linux boot, cycles 0–150M):
+
+| | |
+|---|---|
+| Writes / fill reads queued behind a write | 1,347,567 / 1,347,343 (essentially every writeback) |
+| Wait per queued read | **22.0 cycles** (2.0 with the write still waiting to be buffered, 20 with it on the pins) |
+| Cycles spent waiting | 29.6M = **19.8 %** of the window (30.6 % in the write-heavy 60–70M stretch) |
+| Writes queued behind a read | 0 (as AHB-Lite predicts) |
+| `io_out` / `io_in` busy | 21.0 % / 23.5 %, never in the same cycle |
+
+Projected over the full boot (2.6M writes): ~57M of 616M cycles, **≈ 9 %**. About 20 of the 22 cycles are recoverable, **≈ 8 %**: more than the narrower link cost.
+
+**What it would take.** The read has to overtake the write on `io_out`. Done right:
+- Keep one FIFO per direction across the crossing. Two async FIFOs do not preserve relative order, so a read could pass a write to the same line with no check able to see both.
+- Reorder in the link domain, after the crossing. The phy pulls the whole write out at once (a second 64-bit beat register), sees the read command behind it, sends the read header first if the line differs, then the write header and data while the read data returns on `io_in`. Same line: keep the order. No read within ~4 cycles: send the write.
+- Split the phy into an `io_out` FSM and an `io_in` FSM, at most one read outstanding. FIFO sizes and the `ready` guard band are unchanged.
+- Cost: ~450 GE (~0.2 % of the chip). The FPGA slave must accept a new header while still returning read data; framing is otherwise unchanged.
+
+**Decision (2026-11-06): not now.** Recorded here so it can be picked up later.
+
+## Rebased onto `main` (2026-11-06)
+
+`area_io_opt` was branched from `postsynth_verif` at `517f7f2`. That branch then moved on and was merged into `main` (PR #47, `c47f809`, 8 commits, including the one-array-per-cache SRAM rework). Both commits here were rebased onto `c47f809` so the branch merges cleanly.
+
+- **Conflicts:** `hvl/pin/vm_paths.example.sh` (a comment; both edits kept) and `docs/top_level_plan.md`. On `main`, §3 had been rewritten as the admitted pinout for test, describing the 16-bit bus; its §3.1–3.4, §3.7 and §3.8 were rewritten for the 8+8 link in that structure, and §4's protocol block and "Why two one-way buses" were restored.
+- **Auto-merged:** `hvl/pin/pin.sh`, `hvl/pin/selftest/run.sh`, `synth/timing/probes.tcl`. `hvl/cdc/run.sh` came out identical to `main`, which made the same prim-path fix in `7396afa`.
+- **Unchanged by the rebase:** the link RTL, and the cache line length (so BEATS = 2). No commit on `main` references the old `io`/`dir` ports.
+
+Gates on the rebased tree (`a13923d`; the final commits differ from it only in this log):
+
+| Gate | Result |
+|---|---|
+| ISA regression, forte DUT | 16/16 |
+| `make link_abort DUT=forte` | PASS, 8737 aborted and drained |
+| ISA, random `ready`/`rvalid` gaps (`+LINK_GAPS=1 +LINK_SEED=7`) | 16/16 |
+| FreeRTOS, forte DUT | 5/5 (first attempt could not build: the scratch worktree had no FreeRTOS-Kernel submodule; rerun with the same pinned commit, `ce221a8`) |
+| Baremetal, forte DUT | 3/3 |
+| Legacy DUT spot check (`tc_mul_div`) | PASS |
+| `make cdc` / `make cdc_sweep` | PASS (24,449 transactions) / 6/6 ratios |
+| Pin bench selftest, Verilator / VCS | 25 / 0 / 4 skipped; 30 / 0 / 1 skipped |
+| SpyGlass lint, forte_top | 0 fatals, 0 errors, the same 15 warnings |
+| Linux boot, forte DUT | **PASS**: `AMOEBA_LINUX_BOOT_OK` at cycle 677,978,564; 10,890,355 link transactions, flits balanced, 0 aborts |
+
+The boot took 10 % more cycles than before the rebase (616.4M). The link code is identical in both, so the difference comes from what the rebase brought in from `main`; the cache rework is the likely cause, but it was not measured separately.

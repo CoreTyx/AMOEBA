@@ -250,6 +250,16 @@ module forte_link_phy import forte_link_pkg::*; #(
     $fatal(1, "link phy: data flit at the head of the outbound FIFO while idle");
   always @(posedge link_clk) if (armed & st == LM_WDATA & ocmd_ready & ocmd_valid & ocmd_data[64])
     $fatal(1, "link phy: command flit where a write beat was expected");
+  // Every write-beat pop must find a beat.  ocmd_ready is not qualified by
+  // ocmd_valid, and wdat_r loads only on a valid pop, so a pop that found the
+  // FIFO empty would leave the previous beat in wdat_r and put it on the wire
+  // with nothing to say so.  The whole-transaction-buffered rule above is what
+  // makes this impossible; this is the check that it holds, through the CDC.
+  // Written as if/$fatal, not `assert`: Verilator drops immediate assertions
+  // unless built with --assert, which no Verilator flow in this repo passes.
+  always @(posedge link_clk) if (armed & ocmd_ready & st != LM_IDLE & ~(ocmd_valid & ~ocmd_data[64]))
+    $fatal(1, "link phy: write-beat pop in state %0d found valid=%b is_cmd=%b",
+           st, ocmd_valid, ocmd_data[64]);
   // The inbound FIFO is sized to BEATS+2 against at most BEATS beats in flight
   // with the core draining, so it can never refuse a push.  If it ever does, a
   // beat is lost.
