@@ -135,7 +135,7 @@ preflight() {
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done
     # The ports the bench connects.
-    for p in core_clk rst_n io dir req clk_out wr ready rvalid irq uart_tx uart_rx test_mode scan_en fault_inject status; do
+    for p in core_clk rst_n io_in io_out req clk_out wr ready rvalid irq uart_tx uart_rx test_mode scan_en fault_inject status; do
       grep -qw "$p" <<<"$hdr" || { echo "  forte_top in NETLIST has no port $p"; bad=1; }
     done
   fi

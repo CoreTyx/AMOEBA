@@ -4,7 +4,7 @@
 #
 #   1. pin_selftest_tb, legal traffic           -> PASS
 #   2. pin_selftest_tb, +VIOLATE=1..13          -> each violation detected
-#      (6, 11, 12 are X/Z checks: skipped, and reported as skipped, under Verilator)
+#      (6, 8, 11, 12 are X/Z checks: skipped, and reported as skipped, under Verilator)
 #   3. pin_tb on the RTL with the directed tests -> PASS
 #   4. pin_tb with +FPGA_MUTATE=1..3, on a build whose plain smoke test passed
 #      -> FAIL (a corrupted fetch, a wrong exit code, a dropped word: the bench

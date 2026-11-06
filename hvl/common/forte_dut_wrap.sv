@@ -64,8 +64,8 @@ module forte_dut_wrap import forte_link_pkg::*; (
 );
 
     // ---- the pads -----------------------------------------------------------
-    wire [LINK_W-1:0] io;
-    logic dir, req, wr, clk_out, ready, rvalid, status, uart_tx;
+    logic [LINK_W-1:0] io_in, io_out;
+    logic req, wr, clk_out, ready, rvalid, status, uart_tx;
 
     forte_top top (
         // No link_clk here: forte_top has only the core_clk PAD and ties
@@ -73,7 +73,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
         // means instantiating forte_chip directly -- which is exactly what the
         // two-clock testbench in docs/impl_plan_link_clocking.md s9a is for.
         .core_clk(clk), .rst_n(~rst), .fault_inject,
-        .io, .dir, .req, .wr, .clk_out, .ready, .rvalid,
+        .io_in, .io_out, .req, .wr, .clk_out, .ready, .rvalid,
         .irq(2'b00), .uart_tx, .uart_rx(1'b1), .test_mode(1'b0), .scan_en(1'b0), .status);
 
     // BEATS must be the DUT's.  forte_chip derives it as DCACHE_LINELENINBITS /
@@ -82,7 +82,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
     // is what made a 512 -> 128 bit line change hang the regression with no
     // diagnostic at all.
     forte_link_model #(.BEATS(DCACHE_LINELENINBITS / AHBW)) model (
-        .clk, .rst, .io, .dir, .req, .wr, .ready, .rvalid,
+        .clk, .rst, .io_out, .io_in, .req, .wr, .ready, .rvalid,
         .mem_addr, .mem_rmask, .mem_wmask, .mem_wdata, .mem_rdata, .mem_resp);
 
     // ---- RVFI taps, same wiring as rv64_core_wrapper ------------------------
@@ -200,7 +200,7 @@ module forte_dut_wrap import forte_link_pkg::*; (
     // cycles where the master shows IDLE mid-burst (what the bridge keys on).
     longint unsigned n_flush_rd = 0, n_idle_midburst = 0;
     always @(posedge clk) begin
-        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.phy.st inside {LM_RD_TA, LM_RD_DATA, LM_RD_TA2})) n_flush_rd <= n_flush_rd + 1;
+        if (top.chip.soc.core.FlushD & top.chip.soc.core.ebu.ebu.IFUSelect & (top.chip.phy.st == LM_RD_DATA)) n_flush_rd <= n_flush_rd + 1;
         if ((top.chip.phy.st == LM_RD_DATA) & (top.chip.linkcore.HTRANS == 2'b00) & ~top.chip.linkcore.last_beat)
             n_idle_midburst <= n_idle_midburst + 1;
     end
@@ -262,17 +262,14 @@ module forte_dut_wrap import forte_link_pkg::*; (
         if (!pins_armed && top.chip.linkcore.accept
                         && (!pins_wr_only || top.chip.linkcore.HWRITE)) begin
             pins_armed <= 1'b1;
-            $display("# cyc PHYst      io    dir req rvld drv   | COREst   bcnt abt ok htq hro note");
+            $display("# cyc PHYst      out in req wr rvld | COREst   bcnt abt ok htq hro note");
         end
         if (pins_armed && pins_cnt < pins_n) begin
             pins_cnt <= pins_cnt + 1;
-            $display("P %4d %-10s %4h   %b   %b   %b  %-5s | %-9s %0d   %b   %b  %2b  %b  %s",
+            $display("P %4d %-10s %2h  %2h %b   %b  %b    | %-9s %0d   %b   %b  %2b  %b  %s",
                 pins_cnt,
                 top.chip.phy.st.name(),
-                io, dir, req, rvalid,
-                (top.chip.io_oe[0] && !model.io_oe) ? "ASIC" :
-                (!top.chip.io_oe[0] && model.io_oe) ? "fpga" :
-                (!top.chip.io_oe[0] && !model.io_oe) ? "--"   : "BOTH!",
+                io_out, io_in, req, wr, rvalid,
                 top.chip.linkcore.st.name(),
                 top.chip.linkcore.bcnt,
                 top.chip.linkcore.aborted,
@@ -294,14 +291,12 @@ module forte_dut_wrap import forte_link_pkg::*; (
                 $display("[LINK %0t] accept  addr=%h wr=%b burst=%b st=%0d pending=%b",
                          $time, top.chip.linkcore.HADDR[31:0], top.chip.linkcore.HWRITE, top.chip.linkcore.HBURST,
                          top.chip.phy.st, top.chip.linkcore.pending);
-            if (top.chip.phy.req & ~top.chip.phy.dir)
-                $display("[LINK %0t] req while dir=0", $time);
             if (top.chip.linkcore.HREADYOUT & top.chip.phy.st != LM_IDLE)
                 $display("[LINK %0t] beat    st=%0d wcnt=%0d hrdata=%h", $time,
                          top.chip.phy.st, top.chip.phy.wcnt, top.chip.linkcore.HRDATA);
-            if (model.lst == LS_HDR1)
-                $display("[LINK %0t] model   header hi=%h lo=%h wr=%b", $time,
-                         model.hdr_hi, model.io_i, model.wr);
+            if (model.lst == LS_HDR && model.hcnt == $bits(model.hcnt)'(ADDR_WORDS - 1))
+                $display("[LINK %0t] model   header addr=%h wr=%b", $time,
+                         {model.hdr_hi, model.io_i}, model.wr);
             if (model.mem_busy & model.mem_resp)
                 $display("[LINK %0t] model   mem %s addr=%h data=%h", $time,
                          model.mem_rmask != 0 ? "rd" : "wr", model.mem_addr,

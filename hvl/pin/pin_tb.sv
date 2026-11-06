@@ -17,8 +17,8 @@
 //
 // 4-STATE.  Everything earlier ran 2-state (Verilator).  Here nothing is
 // initialised that the board would not initialise: the DUT's flops start X,
-// unwritten memory can read back X (mem_policy x), the bus floats Z whenever
-// the protocol says nobody drives it, and every pin the agents sample is
+// unwritten memory can read back X (mem_policy x), io_in can carry X between
+// read words (+FPGA_IO_IDLE=x), and every pin the agents sample is
 // checked with $isunknown.  Under Verilator all of this collapses to 2-state,
 // so a Verilator pass proves the bench and the flow, not X-cleanliness.
 //
@@ -67,8 +67,8 @@ module pin_tb;
   end
 
   // ---- pins -----------------------------------------------------------------
-  wire  [LINK_W-1:0] io;
-  wire               dir, req, wr, clk_out, uart_tx, status;
+  wire  [LINK_W-1:0] io_in, io_out;
+  wire               req, wr, clk_out, uart_tx, status;
   logic              ready, rvalid, uart_rx;
   // rst_n starts X and FALLS to 0 at 0.5 ns, before the first clock edge.  A
   // declaration initialiser (`= 1'b0`) is applied before any process starts
@@ -82,11 +82,11 @@ module pin_tb;
   logic              test_mode = 1'b0, scan_en = 1'b0, fault_inject = 1'b0;
 
   forte_top dut (
-    .core_clk, .rst_n, .io, .dir, .req, .clk_out, .wr, .ready, .rvalid,
+    .core_clk, .rst_n, .io_in, .io_out, .req, .clk_out, .wr, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .fault_inject, .status);
 
   pin_link_agent #(.BEATS(BEATS)) link (
-    .core_clk, .clk_out, .rst_n, .io, .dir, .req, .wr, .ready, .rvalid);
+    .core_clk, .clk_out, .rst_n, .io_out, .io_in, .req, .wr, .ready, .rvalid);
 
   pin_uart_agent uart (.core_clk, .rst_n, .uart_tx, .uart_rx);
 

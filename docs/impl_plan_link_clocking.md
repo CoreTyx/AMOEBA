@@ -539,22 +539,26 @@ Also still owed: a non-integer-ratio sweep in CI, per §4.2 point 3.
 | **Non-integer clock-ratio regression** | **Done -- `hvl/cdc/`, `make cdc_sweep`. See §9a. Still owed: wiring it into CI.** |
 | Pad budget | 44 used (42 + `link_clk` + `clk_out`), 8 spare. Power/ground placeholder more likely to grow with non-standard packaging |
 | **SDC carries no package term** | `constraints.sdc` input/output delays are PLACEHOLDER and do not name pad or package delay at all. With packaging as the stated risk, the budget must break out package explicitly |
-| **DFT/debug vs `io[15:0]`** | `io` currently doubles as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |
+| **DFT/debug vs the link pads** | `io_in`/`io_out` (formerly `io[15:0]`) double as the scan port. Settles both the loopback mode encoding and whether scan moves off the bus (§11) |
 | Who runs CTS, and can they express a skew group | Reduced by Option 3 but not eliminated — `clk_out`'s tap still needs it |
 
-## 11. `io[15:0]` as the scan port: 8 chains in, 8 chains out
+## 11. The link pads as the scan port: 8 chains in, 8 chains out
 
-**Status: decided 2026-10-04. Scan stays on the link bus. Loopback is ruled
+**Status: decided 2026-10-04. Scan stays on the link pads. Loopback is ruled
 out (§7.2), which closes the mode-collision question this section used to
 carry.**
 
-`io[7:0]` are `scan_in[7:0]` and `io[15:8]` are `scan_out[7:0]` when
+**Updated 2026-11-05: the link is now `io_in[7:0]` + `io_out[7:0]`, one-way
+pads, instead of the bidirectional `io[15:0]`** (`docs/worklog_io_split.md`).
+The scan mapping is unchanged in substance -- eight in, eight out -- but needs
+no direction control any more. 11.2 items 1 and 2 below are kept as history.
+
+`io_in[7:0]` are `scan_in[7:0]` and `io_out[7:0]` are `scan_out[7:0]` when
 `test_mode=1` — eight parallel chains each way, which is what `forte_chip.sv`
-already muxes:
+muxes:
 
 ```systemverilog
-  assign io_o  = test_mode ? {scan_q, 8'h00} : lm_io_o;
-  assign io_oe = test_mode ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
+  assign io_o = test_mode_dft ? scan_q : lm_io_o;
 ```
 
 The eight one-flop `scan_q` stubs reserve the structure; DFT insertion replaces
@@ -569,8 +573,8 @@ the default stitching produces.
 ### 11.1 The shift clock is `core_clk`, not a pin
 
 Standard scan shifts on the functional clock. The tester drives `core_clk`
-through its own pad, so a dedicated scan clock buys nothing and costs two of the
-sixteen bus pins, leaving seven chains each way instead of eight — a 14 % longer
+through its own pad, so a dedicated scan clock buys nothing and costs a link
+pin, leaving seven chains one way instead of eight — a 14 % longer
 shift for no gain. It would also put the chains in a second clock domain whose
 relationship to the functional one has to be constrained and verified.
 
@@ -589,7 +593,9 @@ owns:
 
 ### 11.2 Consequences that are now mandatory
 
-Keeping scan on the bus makes three things required rather than optional:
+Keeping scan on the bus made three things required rather than optional (1
+and 2 no longer apply: there are no output enables and no `dir` since the 8+8
+split):
 
 1. **Per-bit output enables in the behavioural pad.** `forte_top.sv` drives all
    sixteen pads from `io_oe[0]`, and test mode sets `io_oe = {8'hFF, 8'h00}` —
