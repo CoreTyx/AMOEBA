@@ -63,8 +63,8 @@ proc timing_define_groups {} {
       if {$dir eq "both"} { group_path -name $name -from $cells }
    }
    group_path -name fault_inject -from [get_ports fault_inject]
-   group_path -name link_io -from [get_ports {io[*] ready rvalid}]
-   group_path -name link_io -to   [get_ports {io[*] dir req wr uart_tx status}]
+   group_path -name link_io -from [get_ports {io_in[*] ready rvalid}]
+   group_path -name link_io -to   [get_ports {io_out[*] req wr uart_tx status}]
 }
 
 proc timing_keep_hierarchy {} {

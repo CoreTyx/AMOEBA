@@ -5,13 +5,23 @@
 // the testbench slave model (hvl/common/forte_link_model) and the FPGA slave
 // all elaborate against these, so a protocol change is one edit.
 //
-// The link is a 16-bit bidirectional bus that carries only addresses,
-// attributes and data.  Transaction type is on dedicated pins, held for the
-// whole transaction, so nothing on the bus is decoded by either side:
+// The link is two dedicated 8-bit buses, one each way, that carry only
+// addresses, attributes and data.  Neither ever changes direction, so there is
+// no bus ownership to arbitrate: no dir pin, no tristate enables and no
+// turnaround cycles.  Transaction type is on dedicated pins, held for the whole
+// transaction, so nothing on either bus is decoded by either side:
 //
-//   req=1, cycle 0   io = HADDR[31:16]   the full address; no bits are stolen
-//   req=1, cycle 1   io = HADDR[15:0]
-//   otherwise        io = data word      64-bit beat as 4 words, LSW first
+//   io_out  ASIC -> FPGA
+//     req=1, cycles 0..3   io_out = HADDR[31:24], [23:16], [15:8], [7:0]
+//     write data           io_out = data byte, a 64-bit beat as 8 bytes, LSB first
+//   io_in   FPGA -> ASIC
+//     read data            io_in  = data byte when rvalid=1, same packing
+//
+// The two buses used to be one 16-bit bidirectional bus on io_tri pads, each
+// with its own tristate enable, plus a dir pin and two TA idle cycles on every
+// change of direction.  Splitting it costs half the bandwidth each way and buys
+// back all of that control logic, one pad, and the 2*TA idle cycles every read
+// used to pay.
 //
 // ONE BURST LENGTH PER BUILD.  Every transfer is BEATS aligned 64-bit beats
 // with all eight lanes live, so the link carries no size and no byte strobes.
@@ -37,7 +47,7 @@
 // transactions, zero singles -- with PERIPH_ONCHIP=1 the only off-chip region is
 // EXT_MEM, which the PMA marks cacheable, so every access is a line fill or a
 // writeback.  That is a property of the PMA, not of the line length, so it
-// survives the resize.  A single transfer would cost a third header word
+// survives the resize.  A single transfer would cost an extra header word
 // carrying {HWSTRB, HSIZE}; that path existed for a configuration nothing
 // exercises, and untested logic does not go to silicon.  BEATS >= 2 is checked:
 // a one-beat line would make a line fill indistinguishable on the wire from an
@@ -46,15 +56,14 @@
 // a pad to carry no information, and that pad went to clk_out instead.
 //   wr               held from req until the last word
 //   ready            see "the ready guard band" below
-//   rvalid           read data word on io this cycle; gaps allowed
-//   dir              1 = ASIC drives io, 0 = ASIC has released it; the single
-//                    source of truth for bus ownership.  TA idle cycles are
-//                    guaranteed by the ASIC on every change.
+//   rvalid           read data byte on io_in this cycle; gaps allowed.  The
+//                    first may come as soon as the slave has seen the last
+//                    header byte: there is no turnaround to wait out.
 //
 // NO LINK TRAINING.  The ASIC used to drive an LFSR pattern and check an echo
 // before releasing the core (docs/impl_plan_link_clocking.md s7).  It does not
 // any more: the first fetch is fully determined (RESET_VECTOR = 0x8000_0000, so
-// the first read's header words are 0x8000, 0x0000 with wr=0) and `rst_n` is
+// the first read's header bytes are 80 00 00 00 with wr=0) and `rst_n` is
 // an FPGA output, so the FPGA releases the core, checks that header, and
 // re-asserts reset within microseconds if it is wrong.  The gate moved to the
 // side with a CPU, Python and an ILA instead of a one-bit status pin.
@@ -72,17 +81,16 @@
 ///////////////////////////////////////////////////////////////////////////////
 package forte_link_pkg;
 
-  localparam LINK_W          = 16;      // io[LINK_W-1:0]
-  localparam ADDR_WORDS      = 2;       // address words on the 16-wide bus
-  localparam WORDS_PER_BEAT  = 64 / LINK_W;              // 4
+  localparam LINK_W          = 8;       // io_in[LINK_W-1:0], io_out[LINK_W-1:0]
+  localparam ADDR_WORDS      = 32 / LINK_W;              // 4 header bytes on io_out
+  localparam WORDS_PER_BEAT  = 64 / LINK_W;              // 8
   // Beats per transaction is a per-build PARAMETER, not a constant -- see "ONE
   // BURST LENGTH PER BUILD" above.  MAX_BEATS only bounds the widths that have
   // to be fixed at package scope.
   localparam MAX_BEATS       = 16;      // INCR16, the largest AHB burst
-  localparam TA              = 2;       // turnaround idle cycles per dir change
 
   // Cycles after a slave deasserts ready in which it must still accept a req:
-  // the ASIC's two inbound capture registers plus the START -> HDR0 edge.
+  // the ASIC's two inbound capture registers plus the START -> HDR edge.
   localparam GUARD = 3;
 
   // The two FSMs' state encodings live here, not inside their modules, so the
@@ -91,9 +99,8 @@ package forte_link_pkg;
   // state silently repointed every one of them at its neighbour, and the abort
   // injection stopped firing with no error anywhere.
   // forte_link_phy, the link domain.
-  typedef enum logic [3:0] {
-    LM_IDLE, LM_START, LM_HDR0, LM_HDR1,
-    LM_WDATA, LM_RD_TA, LM_RD_DATA, LM_RD_TA2
+  typedef enum logic [2:0] {
+    LM_IDLE, LM_START, LM_HDR, LM_WDATA, LM_RD_DATA
   } link_st_t;
 
   // forte_link_core, the core domain.
@@ -106,7 +113,7 @@ package forte_link_pkg;
   //   command flit  [64] is_cmd=1 | [63] wr | [62:32] reserved | [31:0] addr
   //   data flit     [64] is_cmd=0 | [63:0] one 64-bit beat
   //
-  // The crossing deals in transactions and beats, never in 16-bit link words:
+  // The crossing deals in transactions and beats, never in 8-bit link words:
   // serialization is a link-domain implementation detail.
   localparam FLIT_W   = 65;
 
@@ -143,8 +150,8 @@ package forte_link_pkg;
     return {1'b0, beat};
   endfunction
 
-  typedef enum logic [3:0] {
-    LS_IDLE, LS_HDR1, LS_WDATA, LS_RD_TA, LS_RD
+  typedef enum logic [1:0] {
+    LS_IDLE, LS_HDR, LS_WDATA, LS_RD
   } link_slave_st_t;
 
   // The HBURST encoding a BEATS-beat cache transaction arrives with.  This is a

@@ -31,8 +31,8 @@ if {$TECH(FI_SYNCHRONISED)} {
 
 # Link.  The FPGA launches on the rising edge and the phy captures on the
 # falling one, so the inbound paths are half-cycle checks.
-set link_in  [get_ports {io[*] ready rvalid}]
-set link_out [get_ports {io[*] dir req wr}]
+set link_in  [get_ports {io_in[*] ready rvalid}]
+set link_out [get_ports {io_out[*] req wr}]
 set_input_delay  -clock my_clk -max [expr {$TECH(LINK_IN_DELAY_FRAC)  * $period}] $link_in
 set_output_delay -clock my_clk -max [expr {$TECH(LINK_OUT_DELAY_FRAC) * $period}] $link_out
 

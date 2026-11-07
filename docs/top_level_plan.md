@@ -1,11 +1,13 @@
 # AMOEBA Top-Level Wrapper: Pad Ring and Off-Chip Link
 
-**Rev 1.1 · 2026-10-24 · §3 rewritten as the admitted pinout, for test (supersedes the pad list, §2's Option B and the training sequence). Rev 1.0 · 2026-09-15 · Partition decided: on-chip PLIC + UART (Option A) is the primary config; implemented on `feature/top_level`, Linux boots over the link in simulation (see `docs/impl_plan_onchip_periph.md` §0)**
+**Rev 1.2 · 2026-11-05 · link split into one-way `io_in[7:0]` / `io_out[7:0]` (§3, §4). Rev 1.1 · 2026-10-24 · §3 rewritten as the admitted pinout, for test (supersedes the pad list, §2's Option B and the training sequence). Rev 1.0 · 2026-09-15 · Partition decided: on-chip PLIC + UART (Option A) is the primary config; implemented on `feature/top_level`, Linux boots over the link in simulation (see `docs/impl_plan_onchip_periph.md` §0)**
 
 The ASIC (65 nm, ~1 mm²) is `wallypipelinedcore` in the `pkg/config_asic.vh`
 configuration (RV64IMAC, soft-float, Sv39, 8 KiB I$/D$) plus CLINT, a link
-bridge and a pad ring. A **16-bit** multiplexed address/data bus to a VCU118
-is the only functional path off-chip. The FPGA is memory and everything else.
+bridge and a pad ring. A link of **two one-way 8-bit buses** (`io_out[7:0]`
+ASIC→FPGA, carrying addresses and write data; `io_in[7:0]` FPGA→ASIC, carrying
+read data) to a VCU118 is the only functional path off-chip. Until 2026-11-05 it
+was one 16-bit bidirectional bus with a `dir` pin; see §4 for why it was split. The FPGA is memory and everything else.
 Companion: `fpga/asic/BRINGUP.md` (branch `fpga/linux_boot`) — this plan
 agrees with its settled decisions and closes its open item 1 (the protocol).
 
@@ -18,9 +20,9 @@ agrees with its settled decisions and closes its open item 1 (the protocol).
 | No on-chip memory (`UNCORE_RAM`, `DTIM`, `IROM` all 0) | `pkg/config.vh` | Every L1 miss crosses the link; the link *is* the memory system |
 | `RESET_VECTOR = 0x8000_0000` = `EXT_MEM_BASE` | `pkg/config.vh` | First instruction fetch is off-chip; the FPGA holds `rst_n` until it is ready to serve it |
 | Line = 128 b, `AHBW = 64`, `BURST_EN = 1` | `pkg/config.vh`, `buscachefsm.sv:147` | Off-chip traffic is ~100 % **full-line bursts from a line-aligned base** (no wrap, no critical-word-first). **The beat count is 2, not 8** — see "the burst length is a parameter" below |
-| All regions < 4 GB, bits 30:29 zero | `pkg/config.vh` | Address is two 16-bit words; the address goes over whole |
+| All regions < 4 GB, bits 30:29 zero | `pkg/config.vh` | Address is four 8-bit words on `io_out`; the address goes over whole |
 | Linux is a silicon deliverable | — | Miss penalty is the chip's performance; every spare pad wants to be bus width |
-| 52 pads **total** incl. 11 power/ground | `fpga/asic/BRINGUP.md` §2 | 32-bit bus does not fit; 16-bit bidir with scan muxed onto it |
+| 52 pads **total** incl. 11 power/ground | `fpga/asic/BRINGUP.md` §2 | 32-bit bus does not fit; 8 in + 8 out, with scan muxed onto them (was 16-bit bidir) |
 | CVW aborts bursts on `FlushD` | `ebu`, prior FPGA debug | Bridge must never abort an off-chip transfer (§5) |
 
 **The burst length is a parameter, not 8.** `buscachefsm` derives `HBURST` from
@@ -43,11 +45,11 @@ would be indistinguishable from an uncached single, and a single is the one case
 that needs the `{HWSTRB, HSIZE}` header word the link does not carry.
 
 The *cost* of the shorter line is on the link, not in the link's logic: the
-fixed per-transaction overhead is 2 header cycles + 2·`TA`, which at 2 beats is
-6 cycles of overhead against 8 of payload. Per byte moved the 128-bit line is
-about 32 % worse than the 512-bit one (1.14 vs 1.68 B/cycle at `TA=2`). That is
-a consequence of the area decision, not a defect, but it belongs next to the
-miss-penalty numbers in §4.
+fixed per-transaction overhead is the 4 header cycles, which at 2 beats is 4
+cycles of overhead against 16 of payload (0.8 B/cycle per line read). With the
+old 16-bit bidirectional bus it was 2 header cycles + 2·`TA` against 8 of
+payload (1.14 B/cycle). That is a consequence of the area decisions, not a
+defect, but it belongs next to the miss-penalty numbers in §4.
 | `ZICNTR=0`, `SSTC=0` in the ASIC config | `pkg/config_asic.vh` | Core never consumes `MTIME_CLINT`; CLINT stays on-die anyway (~2 k GE, `mtime` = core cycles, BRINGUP.md §2) |
 | `USE_SRAM` = `ifdef AMOEBA_USE_SRAM` | `pkg/config_asic.vh` | Sim/netlist mismatch risk; regress with macros before freeze |
 
@@ -112,8 +114,8 @@ wait states are inherited for free (there is no error path; `HRESPEXT` is tied l
 ## 3. Pinout, as admitted
 
 **This section is the current description of the chip's pins (2026-10-24,
-`postsynth_verif` @ `517f7f2`), and it is written for someone extending how the
-chip is tested.** Where §2, §4, §6 or §10 disagree with it, they describe
+`postsynth_verif` @ `517f7f2`; the link updated to two one-way 8-bit buses
+2026-11-05), and it is written for someone extending how the chip is tested.** Where §2, §4, §6 or §10 disagree with it, they describe
 earlier plans and this section wins. Its sources are the RTL itself
 (`hdl/forte_top.sv`, `hdl/forte_chip.sv`, `hdl/forte_link_phy.sv`,
 `hdl/forte_link_pkg.sv`, `hdl/forte_dft_lock.sv`) and the pin-level bench that
@@ -125,34 +127,33 @@ of §2, not the B that §2 recommends). Clock target 100 MHz.
 
 ### 3.1 Summary
 
-32 signal pads, plus power and ground. The budget is 52; with the 11-pad
-power/ground placeholder, 43 are used and 9 are spare.
+31 signal pads, plus power and ground. The budget is 52; with the 11-pad
+power/ground placeholder, 42 are used and 10 are spare.
 
 | Pin | Dir | Group | One line |
 |---|---|---|---|
 | `core_clk` | in | clock | The only clock. Runs the core, and (tied on the die) the link domain. |
 | `rst_n` | in | reset | Asynchronous assert, synchronous release; the FPGA owns it. |
-| `io[15:0]` | bidir | link | Address, then data, 16 bits at a time. Scan in/out in test mode. |
-| `dir` | out | link | 1 = the chip drives `io`, 0 = the chip has released it. |
-| `req` | out | link | `io` carries the address this cycle (two cycles per transaction). |
+| `io_out[7:0]` | out | link | Address bytes, then write data bytes. Scan out in test mode. |
+| `io_in[7:0]` | in | link | Read data bytes from the FPGA. Scan in in test mode. |
+| `req` | out | link | `io_out` carries the address this cycle (four cycles per transaction). |
 | `wr` | out | link | 1 = write, held for the whole transaction. |
 | `clk_out` | out | link | The link clock, forwarded; the FPGA samples chip outputs with it. |
 | `ready` | in | link | FPGA: room for a whole transaction plus one in reserve. |
-| `rvalid` | in | link | FPGA: `io` carries a read data word this cycle. |
+| `rvalid` | in | link | FPGA: `io_in` carries a read data byte this cycle. |
 | `irq[1:0]` | in | interrupts | Level interrupts into the on-die PLIC (sources 3 and 6). |
 | `uart_tx` | out | console | 16550 UART transmit. |
 | `uart_rx` | in | console | 16550 UART receive. |
-| `test_mode` | in | test | Static: remaps `io` to eight scan chains each way. |
+| `test_mode` | in | test | Static: maps `io_in`/`io_out` to eight scan chains each way. |
 | `scan_en` | in | test | Per cycle: shift (1) or capture (0). |
 | `fault_inject` | in | test | Master enable for the on-die fault injectors. |
 | `status` | out | debug | LED heartbeat at three rates: stalled, active, quiet. |
 
-Pad cells (`forte_top`, under `SYNTHESIS`): `io_in` for every input, `io_out`
-for every output, and one `io_tri` per `io` lane, each lane with its **own**
-tristate control (test mode drives the two halves in opposite directions, so a
-shared enable would make scan unobservable). The `io_tri` `t` pin is
-**active-high tristate**: `t = 0` drives, `t = 1` releases; it is derived in one
-place as `t = ~io_oe`.
+Pad cells (`forte_top`, under `SYNTHESIS`): `io_in` for every input and
+`io_out` for every output, the 16 link lanes included. There are no tristate
+pads: every link pin has one direction in every mode. (The top-level ports
+`io_in[7:0]`/`io_out[7:0]` share their names with those pad-cell modules;
+SystemVerilog keeps the two namespaces apart.)
 
 **What the pad ring does not have, which matters for test.** No pull-ups or
 pull-downs (the `io_in` cell has no pull terminal), so `test_mode`, `scan_en`
@@ -177,37 +178,36 @@ bus pins.
 releasing it goes through a two-flop synchronizer per domain
 (`forte_rst_sync`), so the domains leave reset on their own clock edges and the
 FIFO pointers on both sides of the crossing come up consistent. While
-`rst_n = 0`, the link parks immediately (asynchronously): `dir = 1`, `req = 0`,
-`wr = 0`, and the chip **drives `io` to 0**. There is no link training: the
-first transaction after release is always a line read of `0x8000_0000`
-(`RESET_VECTOR`), so the FPGA can check the first header (`0x8000`, `0x0000`,
-`wr = 0`) and pull reset again if it is wrong. The FPGA holds `rst_n` low until
+`rst_n = 0`, the link parks immediately (asynchronously): `req = 0`, `wr = 0`
+and `io_out = 0`. There is no link training: the first transaction after
+release is always a line read of `0x8000_0000` (`RESET_VECTOR`), so the FPGA can
+check the first header (bytes `80 00 00 00`, `wr = 0`) and pull reset again if
+it is wrong. The FPGA holds `rst_n` low until
 memory is loaded. Reset also re-enables DFT (§3.10).
 
-**`io[15:0]` (bidir).** The only data path off the chip. It carries nothing but
+**`io_out[7:0]` (out) and `io_in[7:0]` (in).** The only data path off the chip:
+two one-way 8-bit buses, `io_out` from the chip to the FPGA (address and write
+data) and `io_in` from the FPGA to the chip (read data). They carry nothing but
 addresses and data; what a transaction *is* (read or write, where the address
-is) is on the dedicated pins below, so neither side decodes the bus. Sixteen
-bits is what fits the pad budget (§4). Who drives it in each mode is in §3.3.
+is) is on the dedicated pins below, so neither side decodes a bus. Neither bus
+ever changes direction, so there is no ownership to arbitrate: no direction
+pin, no tristate enables, no turnaround cycles. They replaced a 16-bit
+bidirectional bus (§4, "Why two one-way buses"). What each carries in each mode
+is in §3.3.
 
-**`dir` (out).** The single source of truth for who owns `io` in functional
-mode: `1` = the chip drives it, `0` = the chip has released it. The chip
-guarantees `TA` (= 2) idle cycles on every change of owner, and the FPGA may
-drive `io` only while `dir = 0`, after those cycles, and only with `rvalid`. In
-**test mode `dir` does not describe the bus** (§3.3): it comes from a scanned
-flop and toggles during shift.
-
-**`req` (out).** High for exactly two consecutive cycles at the start of every
-transaction, while `io` carries the address: `A[31:16]`, then `A[15:0]`. Never
-high with `dir = 0`, never mid-transaction.
+**`req` (out).** High for exactly four consecutive cycles at the start of every
+transaction, while `io_out` carries the address, most significant byte first:
+`A[31:24]`, `A[23:16]`, `A[15:8]`, `A[7:0]`. Never high mid-transaction.
 
 **`wr` (out).** `1` for a write, `0` for a read, valid with the first `req`
-cycle and held until the transaction's last word. It is a pin rather than a bus
+cycle and held until the transaction's last data byte. It is a pin rather than a bus
 field so the transaction type is readable on a scope and costs no bus cycle.
 
 **`clk_out` (out).** The link clock driven back out. The FPGA samples the chip's
-outputs (`io`, `dir`, `req`, `wr`) relative to it, so the chip's own pad and
+outputs (`io_out`, `req`, `wr`) relative to it, so the chip's own pad and
 clock-insertion delay cancel on the chip-to-FPGA path. It must be tapped off the
-link tree at the same depth as the `io` output flops (a CTS constraint, not RTL).
+link tree at the same depth as the `io_out` output flops (a CTS constraint, not
+RTL).
 It is also the first thing to scope at bring-up: a toggling `clk_out` proves the
 die is receiving and distributing a clock. It replaced a `burst` pin that was
 always 1.
@@ -219,8 +219,9 @@ registers and starts a transaction a cycle later, so a `req` can arrive up to
 still has room for one more transaction**, never when it is actually full.
 Once a transaction starts there is no flow control in either direction.
 
-**`rvalid` (in).** The FPGA's "`io` carries a read data word this cycle". Gaps
-are allowed: words do not have to be back to back.
+**`rvalid` (in).** The FPGA's "`io_in` carries a read data byte this cycle".
+Gaps are allowed: bytes do not have to be back to back. The first may come the
+cycle after the FPGA has seen the last address byte.
 
 **`irq[1:0]` (in).** Level-sensitive interrupts, each through a two-flop
 synchronizer, into the on-die PLIC: `irq[0]` is PLIC source 3, `irq[1]` source 6
@@ -238,9 +239,10 @@ die). The console exists on the die so it can be read with a scope or a
 USB-serial cable even when the link or the FPGA's decode is broken.
 
 **`test_mode` (in).** **Static for a whole test session**, not toggled per
-pattern. When 1 (and the part is unlocked, §3.10) it remaps the bus to eight
-scan chains each way and forces the `io` pad directions from the scan mapping
-instead of from `dir`. Details in §3.3 and §3.7.
+pattern. When 1 (and the part is unlocked, §3.10) it maps the link buses to
+eight scan chains each way: `io_in[7:0]` are `scan_in[7:0]` and `io_out[7:0]`
+are `scan_out[7:0]`. The pads already point the right way, so test mode only
+selects what drives `io_out`. Details in §3.3 and §3.7.
 
 **`scan_en` (in).** **Per cycle**: 1 = shift, 0 = capture. It is qualified with
 `test_mode` (and the lock), so a glitch on it in functional mode cannot shift a
@@ -260,46 +262,45 @@ says what the link is doing, so it never freezes: ~6 Hz stalled, ~1.5 Hz
 active, ~0.4 Hz quiet. Details in §3.9. Only a dead clock freezes it, and
 `clk_out` is the instrument for that.
 
-### 3.3 The bidirectional pins: who drives `io` in each mode
+### 3.3 The link buses: what each carries in each mode
 
-`io` has three owners over time: the chip, the FPGA, and (in test mode) both,
-one half each. The per-lane enable inside the chip is `io_oe`; the pad sees
-`t = ~io_oe`.
+Every link pin has one direction in every mode: the chip always drives
+`io_out`, `req` and `wr`, and the FPGA always drives `io_in`, `ready` and
+`rvalid`. So the only question is what each bus carries.
 
-| Mode | `test_mode` | `io[15:8]` | `io[7:0]` | `dir` pin | FPGA may drive |
-|---|---|---|---|---|---|
-| Reset (`rst_n = 0`) | 0 | chip drives 0 | chip drives 0 | 1 | nothing |
-| Functional idle | 0 | chip drives 0 | chip drives 0 | 1 | nothing |
-| Header, write data | 0 | chip drives | chip drives | 1 | nothing |
-| Read turnaround (`TA` cycles each side) | 0 | released | released | 0 | nothing yet |
-| Read data | 0 | released | released | 0 | all 16, only with `rvalid` |
-| Test mode, part unlocked | 1 | **chip drives** (scan out) | **released** (scan in) | meaningless | `io[7:0]` only |
-| Test mode, part locked | 1 | as functional | as functional | as functional | as functional |
+| Mode | `test_mode` | `io_out[7:0]` (chip drives) | `io_in[7:0]` (FPGA drives) |
+|---|---|---|---|
+| Reset (`rst_n = 0`) | 0 | 0 | ignored |
+| Functional idle | 0 | 0 | ignored |
+| Header (`req = 1`) | 0 | address byte | ignored |
+| Write data | 0 | data byte, every cycle | ignored |
+| Read data | 0 | 0 | data byte when `rvalid = 1` |
+| Test mode, part unlocked | 1 | `scan_out[7:0]` | `scan_in[7:0]` |
+| Test mode, part locked | 1 | as functional | as functional |
 
 Three consequences for anyone building the tester or the FPGA side:
 
-1. **In functional mode the bus is never floating except during a read.** The
-   chip drives zeros whenever it is idle, so the FPGA's `io` buffers must be
-   inputs whenever `dir = 1`. The bench checks that it never drives while
-   `dir = 1`, and treats any X on `io` while the chip owns it as an error.
-2. **In test mode, `dir` is not the direction.** Only `io_oe` is overridden.
-   `dir`, `req` and `wr` still come from their functional flops, which are in
-   the scan chains, so they toggle pseudo-randomly while shifting. The FPGA or
-   tester must set its own `io` buffer directions **from `test_mode`, which it
-   drives**, not from `dir`: `io[7:0]` outputs from the tester, `io[15:8]`
-   inputs to it.
-3. **A locked part ignores `test_mode`.** The pads stay functional, so a tester
+1. **No bus contention is possible, and there is no ownership to track.** The
+   chip reads `io_in` only as read data with `rvalid`. The FPGA should still
+   drive `io_in` to a known value when it is not returning data; the bench
+   drives 0 by default and can drive X there (`+FPGA_IO_IDLE=x`) to show the
+   chip ignores it. The bench treats any X on `io_out` as an error.
+2. **In test mode, `req` and `wr` mean nothing.** They still come from their
+   functional flops, which are in the scan chains, so they toggle
+   pseudo-randomly while shifting. The tester follows `test_mode`, which it
+   drives, and ignores them.
+3. **A locked part ignores `test_mode`.** The link stays functional, so a tester
    that raises `test_mode` on a locked part sees the link, not scan.
 
 ### 3.4 Talking to the chip: the link protocol
 
 All timing is in link-clock cycles (= `core_clk` cycles). `BEATS` is the number
 of 64-bit beats in a cache line, `128 / 64 = 2`, so a transaction carries
-`W = 4 x BEATS = 8` data words. `TA = 2`.
+`W = 8 x BEATS = 16` data bytes.
 
 **Who launches and who samples.**
 
-- The FPGA launches `io`, `ready` and `rvalid` on the `core_clk` rising edge.
+- The FPGA launches `io_in`, `ready` and `rvalid` on the `core_clk` rising edge.
   The chip captures them on the **falling** edge and re-registers them on the
   rising edge, so the FPGA's clock-to-out plus board delay must stay under half
   a period (5 ns at 100 MHz). The bench uses 2 ns.
@@ -313,41 +314,41 @@ burst at a line-aligned address in `0x8000_0000`–`0x8FFF_FFFF`: a line fill
 no byte strobes, and no burst length; the FPGA increments the address by 8
 bytes per beat.
 
-**Write (10 cycles):**
+**Write (20 cycles):**
 
 ```
-cycle   0         1         2    3    4    5    6    7    8    9    10
-req     1         1         0    0    0    0    0    0    0    0    0
-wr      1         1         1    1    1    1    1    1    1    1    0
-dir     1         1         1    1    1    1    1    1    1    1    1
-io      A[31:16]  A[15:0]   b0w0 b0w1 b0w2 b0w3 b1w0 b1w1 b1w2 b1w3 0
+cycle   0         1         2         3        4     5     ...  19    20
+req     1         1         1         1        0     0          0     0
+wr      1         1         1         1        1     1          1     0
+io_out  A[31:24]  A[23:16]  A[15:8]   A[7:0]   b0B0  b0B1  ...  b1B7  0
 ```
 
-Each 64-bit beat goes as four words, least significant first (`b0w0` =
-`beat0[15:0]`). The chip starts a write only once all of it is buffered on the
-die, so the words are back to back and the FPGA must take one every cycle.
+Each 64-bit beat goes as eight bytes, least significant first (`b0B0` =
+`beat0[7:0]`). The chip starts a write only once all of it is buffered on the
+die, so the bytes are back to back and the FPGA must take one every cycle.
 
-**Read (14 cycles plus any FPGA latency):**
+**Read (20 cycles plus any FPGA latency):**
 
 ```
-cycle   0         1         2   3   4..        last+1  last+2   then
-req     1         1         0   0   0          0       0        0
-wr      0         0         0   0   0          0       0        0
-dir     1         1         0   0   0          0       0        1
-io      A[31:16]  A[15:0]   --  --  FPGA words (rvalid=1)  --  --  chip drives
+cycle   0         1         2         3        4 ...
+req     1         1         1         1        0
+wr      0         0         0         0        0
+io_out  A[31:24]  A[23:16]  A[15:8]   A[7:0]   0
+io_in   --        --        --        --       FPGA bytes b0B0 .. b1B7, each with rvalid=1
 ```
 
-After the two address words the chip drops `dir` and releases the bus. The FPGA
-counts `TA` cycles in which it has seen `dir = 0`, then drives the 8 words, least
-significant first, each with `rvalid = 1`. Gaps (`rvalid = 0`) may come anywhere,
-which is how memory latency is expressed. After the last word the FPGA releases
-`io`; the chip waits `TA` cycles and raises `dir`. With no gaps a read is
-`2 + 8 + 2 x TA = 14` cycles.
+After the four address bytes the chip goes straight to collecting data: nothing
+changes direction, so there is no turnaround. The FPGA drives the 16 bytes,
+least significant first, each with `rvalid = 1`, starting as early as the cycle
+after the last address byte. Gaps (`rvalid = 0`) may come anywhere, which is how
+memory latency is expressed. The next transaction may start the cycle after the
+last byte. With no gaps a read is `4 + 16 = 20` cycles.
 
 **Rules the FPGA must keep:**
 
-- Never drive `io` while `dir = 1`, or before `TA` cycles of `dir = 0`.
-- Exactly `W` words per read, never more, each with `rvalid`.
+- Take a write byte every cycle from the end of the header to the last byte.
+- Exactly `W` = 16 bytes per read, never more, each with `rvalid`; no `rvalid`
+  outside a read.
 - Accept a `req` up to `GUARD` = 3 cycles after dropping `ready`.
 - Never abort or shorten a transaction: neither side can.
 
@@ -386,14 +387,14 @@ What the RTL implements (`forte_chip`):
 
 - `test_mode_dft = test_mode & dft_unlocked` and `scan_en_dft = scan_en &
   dft_unlocked`.
-- With `test_mode_dft = 1`: `io[7:0]` are `scan_in[7:0]` (released, `t = 1`) and
-  `io[15:8]` are `scan_out[7:0]` (driven, `t = 0`): eight chains each way, shifted
-  on `core_clk`.
+- With `test_mode_dft = 1`: `io_in[7:0]` are `scan_in[7:0]` and `io_out[7:0]`
+  are `scan_out[7:0]`: eight chains each way, shifted on `core_clk`. Only the
+  source of `io_out` changes; no pad changes direction.
 - **The chains are stubs.** Each "chain" is one flop (`scan_q`) that loads
-  `io[7:0]` when `scan_en` is high and drives `io[15:8]`. They reserve the
-  structure and let the bench check the pad directions. DFT insertion replaces
-  them. Today `scan_out[k]` is `scan_in[k]` delayed by one cycle, which is a
-  usable loopback test of the 16 pads in their test directions and nothing more.
+  `io_in[7:0]` when `scan_en` is high and drives `io_out[7:0]`. They reserve the
+  structure and let the bench check the test-mode mapping. DFT insertion
+  replaces them. Today `scan_out[k]` is `scan_in[k]` delayed by one cycle, which
+  is a usable loopback test of the 16 link pads and nothing more.
 - Intended chain allocation: CSRs on chain 0, the rest balanced across 1–7
   (shift time is set by the longest chain).
 
@@ -408,36 +409,37 @@ What DFT insertion still has to add, whichever interface is used (§3.8):
 3. **Clock-gate test enables.** Synthesis inserted roughly a thousand clock-gating
    cells (`SNPS_CLOCK_GATE_*`). Their test-enable pins must be tied to the
    qualified `scan_en` (or `test_mode`), or the flops behind them cannot shift.
-4. **Falling-edge flops.** The link's inbound capture registers (`io`, `ready`,
-   `rvalid`: 18 flops) clock on the falling edge. They need their own chain
+4. **Falling-edge flops.** The link's inbound capture registers (`io_in`,
+   `ready`, `rvalid`: 10 flops) clock on the falling edge. They need their own chain
    segment or lock-up latches at the edge boundaries.
 5. **SRAM macros** (`rf_sp_*` for the caches) are not scannable. Their contents
    and the logic around them need either memory BIST or functional march tests
    run over the link (the current path, through the bench), and ATPG must treat
    the macros as black boxes with bypass or shadow logic.
-6. **Pads in test mode.** `io[7:0]` are input-only and `io[15:8]` output-only, so
-   scan never exercises the other direction of any `io` pad. The functional link
-   tests do.
+6. **Pads in test mode.** Each link pad has one direction, and scan uses it the
+   same way the link does, so no pad has a second direction left for the
+   functional tests to cover.
 
-### 3.8 Alternative: a dedicated 5-pin scan interface, `io` out of test entirely
+### 3.8 Alternative: a dedicated 5-pin scan interface, the link out of test entirely
 
 The comparison here is with the common minimal interface: `test_mode`,
 `scan_en`, `scan_in`, `scan_out`, and a scan clock, with no scan function on
-`io`. Since `test_mode` and `scan_en` already exist, this costs **3 more pads**
+the link buses. Since `test_mode` and `scan_en` already exist, this costs **3 more pads**
 (2 if shift stays on `core_clk` and the fifth pin becomes a test reset instead).
-`io` would then be a purely functional bus with no test-mode override.
+`io_in`/`io_out` would then be purely functional, with no test-mode mux on
+`io_out`.
 
-| | Current: 8+8 chains on `io` | Dedicated 5-pin |
+| | Current: 8+8 chains on `io_in`/`io_out` | Dedicated 5-pin |
 |---|---|---|
 | Pads for test | 2 (`test_mode`, `scan_en`) + 16 shared | 5, none shared |
-| Spare pads after | 9 | 6 (power/ground claims spares first) |
+| Spare pads after | 10 | 7 (power/ground claims spares first) |
 | Chains | 8 in, 8 out | 1 in, 1 out (more with compression) |
 | Shift cycles per pattern, N scan flops | about N / 8 | about N (8x longer), or N / k with on-chip compression into k internal chains |
-| `io` pad logic | per-lane direction override; the two halves go opposite ways | none: `io_oe` is always from `dir` |
-| Tester or FPGA side | must flip half of `io` and ignore `dir`/`req`/`wr` in test mode | 4 static or slow pins plus 1 data pin each way; no bus |
-| Depends on the `io` pads working | yes: a broken `io` lane loses a chain | no: scan works with the link dead |
+| Link logic for test | a 2:1 mux (scan or link) on each `io_out` lane | none |
+| Tester or FPGA side | drives `io_in`, reads `io_out`, ignores `req`/`wr` in test mode | 4 static or slow pins plus 1 data pin each way; no bus |
+| Depends on the link pads working | yes: a broken link lane loses a chain | no: scan works with the link dead |
 | Scan while the link is in use | impossible (same pins) | possible in principle, but still needs test mode |
-| What can test the `io` pads | scan (one direction each) plus functional link | functional link only |
+| What can test the link pads | scan plus functional link | functional link only |
 | DFT lock | gates `test_mode` and `scan_en` | the same two gates; `scan_in`/`scan_out` are inert without them |
 | Standard ATE / DFT flow | custom pin map | the default the tools expect |
 
@@ -447,13 +449,13 @@ already routes to the FPGA, so the bring-up FPGA can be the tester.
 
 **Arguments for the dedicated interface.**
 
-- **Test is independent of the link.** If a pad's tristate is wrong, or the
-  per-lane override is wrong (it has been once, in the behavioural model:
-  a bus-wide enable made scan unobservable), or the board's bus routing has a
-  fault, scan still works and can be used to diagnose the link. Today a link
-  fault and a scan fault share pins and cannot be separated.
-- **Simpler `io` logic.** The override on `io_oe`, and the rule that `dir` lies
-  in test mode, disappear. Every test-mode subtlety in §3.3 goes away.
+- **Test is independent of the link.** If a link pad or the board's bus routing
+  has a fault, scan still works and can be used to diagnose the link. Today a
+  link fault and a scan fault share pins and cannot be separated.
+- **Slightly simpler link logic.** The test-mode mux on `io_out` disappears, and
+  so does the rule that `req` and `wr` mean nothing in test mode. Most of this
+  argument went away with the split into one-way buses, which removed the
+  per-lane direction override that scan used to need.
 - **Standard flow.** One chain in, one out is what ATPG, compression (for example
   DFTMAX or EDT) and production testers expect. With compression, test time can
   match or beat 8 raw chains: k internal chains behind 1 scan-in and 1 scan-out
@@ -462,13 +464,13 @@ already routes to the FPGA, so the bring-up FPGA can be the tester.
 **The costs.** Three pads from a spare pool that power and ground may need
 first. Either 8x the shift time or a compression IP to buy it back. And a
 second, slower path to the chip for the bring-up FPGA, which already drives
-`io`.
+`io_in`.
 
 **What would change in the RTL.** In `forte_top`: add three pad cells. In
-`forte_chip`: drop `scan_q` and the `test_mode_dft` terms on `io_o` and
-`io_oe`, and route the new pins to the inserted chains. The DFT lock and all of
+`forte_chip`: drop `scan_q` and the `test_mode_dft` mux on `io_o`, and route
+the new pins to the inserted chains. The DFT lock and all of
 §3.7's insertion work stay the same. The pin-level bench needs only its test-mode
-check moved from `io` to the new pins.
+check moved from `io_in`/`io_out` to the new pins.
 
 **Recommendation for someone extending test.** The items in §3.7 (real chains,
 reset and clock-gate control, the falling-edge flops, memory test) are needed
@@ -560,12 +562,23 @@ beat replaced by the `wr` pin: one cycle shorter and readable on a
 scope.
 
 ```
-req=1, cycle 0   io[15:0] = HADDR[31:16]   the whole address; no bits are stolen
-req=1, cycle 1   io[15:0] = HADDR[15:0]
-req=1, cycle 2   io[15:0] = {HWSTRB[7:0], 5'b0, HSIZE[2:0]}   SINGLES ONLY (burst=0)
-otherwise        io[15:0] = data word       64-bit beat as 4 words, least significant first
-wr               held from req until the last word
+io_out, ASIC -> FPGA
+  req=1, cycles 0..3   io_out[7:0] = HADDR[31:24], [23:16], [15:8], [7:0]   the whole address
+  write data           io_out[7:0] = data byte, 64-bit beat as 8 bytes, least significant first
+  otherwise            io_out[7:0] = 0
+io_in, FPGA -> ASIC
+  rvalid=1             io_in[7:0]  = read data byte, same packing; gaps allowed
+wr                     held from req until the last word
 ```
+
+**Why two one-way buses (2026-11-05).** The link used to be one 16-bit
+bidirectional bus on `io_tri` pads, each with its own tristate enable, a `dir`
+pin as the single source of truth for ownership, and `TA` idle cycles on every
+change of direction. Splitting it into `io_in[7:0]` and `io_out[7:0]` removes
+all of that: the `dir` pad, sixteen per-lane output enables, the phy's two
+turnaround states and their counter, and the test-mode override that kept scan
+shifting from reversing the pads. The cost is half the bandwidth each way
+(table below). See `docs/worklog_io_split.md`.
 
 **The attribute word.** A burst is `BEATS` aligned 64-bit beats with every lane
 live, so it needs neither size nor strobes and skips the third header word —
@@ -597,36 +610,24 @@ beats); the FPGA increments.
 `HADDR[55:32]` is never nonzero on the bus because the PMA faults undefined
 regions first (sim assertion).
 
-**Turnaround.** `TA` is a parameter (default 2) sized to the pad library's
-specified output-enable switching time. Only the ASIC counts.
+**No turnaround.** Neither bus ever changes direction, so there is no `TA`
+and no `dir`. The FPGA may put the first read byte on `io_in` as soon as it has
+seen the last header byte; the ASIC may start the next transaction the cycle
+after the last read byte. (The training paragraph that used to sit here, about
+holding `dir=0` for a whole `TRAIN_LEN` on a retry, went with the training FSM
+and then with `dir` itself.)
 
-```
-ASIC drives io   <=>  dir = 1
-FPGA drives io   <=>  dir = 0  and  rvalid = 1  and  a read is in flight
-ASIC guarantees >= TA idle cycles after dir falls before the FPGA may drive,
-and >= TA idle cycles after the last rvalid before it raises dir and drives.
-```
+`W = 8·BEATS` is the word (byte) count on each bus; at the current 128-bit line
+`BEATS = 2` and `W = 16`.
 
-**Training is not exempt.** A retry is the one moment the ASIC wants the bus
-back while the FPGA is still using it — the FPGA sweeps its output phase blind
-and its only feedback is that the pattern restarted, so it cannot know to stop
-echoing. `forte_link_train` therefore holds `dir=0` for a whole `TRAIN_LEN`
-after a mismatch (state `RETRY_TA`) before taking the bus; the longest echo
-still in flight is `TRAIN_LEN - k` words. `+LINK_TRAIN_ERR=n` in the testbench
-corrupts word *n* of the first echo so this path is exercised, and the model's
-"driving io while dir=1" check is what proves there is no overlap.
+| Transaction | Sequence | Cycles | @ 128 b line | was (16-bit bidir, TA=2) |
+|---|---|---|---|---|
+| Line read | `req`×4 on `io_out` · *W* × `rvalid` bytes on `io_in` | 4 + *W* | 20 | 14 |
+| Line write | `req`×4 · *W* bytes on `io_out` | 4 + *W* | 20 | 10 |
 
-`W = 4·BEATS` is the word count on the wire; at the current 128-bit line
-`BEATS = 2` and `W = 8`.
-
-| Transaction | Sequence | Cycles | @ 128 b line, TA=2 |
-|---|---|---|---|
-| Line read | `req`×2 · `dir`↓ · TA · *W* × `rvalid` words · TA · `dir`↑ | 2 + *W* + 2·TA | 14 |
-| Line write | `req`×2 · *W* words | 2 + *W* | 10 |
-| Single read | `req`×3 · TA · 4 words · TA | 7 + 2·TA | — (no single path) |
-| Single write | `req`×3 · 4 words | 7 | — (no single path) |
-
-Plus FPGA memory latency as `rvalid` gaps. At the 512-bit line this was 38 link
+Plus FPGA memory latency as `rvalid` gaps. (The paragraphs below predate the
+8+8 split and are kept for the reasoning; the numbers are for the 16-bit bus.)
+At the 512-bit line this was 38 link
 cycles, giving a ~50–70 cycle miss at 1:1 clocks — the same range as a DRAM miss
 on a commodity part (BRINGUP.md §2 reaches the same conclusion at 35). At 128 b
 the transaction is 14 cycles but moves a quarter as much, so the miss *rate*
@@ -634,9 +635,10 @@ rises and the per-byte cost rises with it; the FPGA-side L2 (BRINGUP.md §3) is
 what keeps the crossing the only cost.
 
 Width, per line: 16 b muxed is what the pad budget allows; 32 b muxed would be
-roughly half the data cycles but needs 56 pads; 8+8 split is twice as many; 16 b
-DDR was rejected as a bring-up risk. 16 b bidirectional is the only one that
-fits. Note that the fixed 2 + 2·TA overhead does not shrink with the line, so
+roughly half the data cycles but needs 56 pads; 8+8 split is twice as many data
+cycles; 16 b DDR was rejected as a bring-up risk. 16 b bidirectional was chosen
+on that basis, and replaced by the 8+8 split on 2026-11-05 to trade bandwidth
+for the bus-direction control logic and one pad (§4, "Why two one-way buses"). Note that the fixed 2 + 2·TA overhead does not shrink with the line, so
 the narrower the line the more of the link's time is header and turnaround —
 the 512-bit line amortised that over 32 data cycles, the 128-bit one over 8.
 
@@ -662,8 +664,8 @@ into a bit bucket and return to IDLE.**
 - Write: drive `HWDATA` as four words, least significant first; pulse `HREADYEXT` on the fourth. AHB holds the beat.
 - Read: assemble four words into a 64-bit beat register; pulse `HREADYEXT`. No FIFO — an AHB-Lite master cannot back-pressure read data.
 - Ignore `HADDR` after the first beat (the ebu re-presents it per beat; the FPGA increments).
-- Contents: 36-FF address/attribute latch ×2 (working + pending), 48-FF beat register (the last word goes straight to `HRDATA`), 5-bit word counter, TA counter, 8-state FSM, output enable = `dir`. Implemented: `hdl/forte_link_master.sv`.
-- All inbound pins (`io` while `dir=0`, `ready`, `rvalid`) captured on negedge, re-registered on posedge (§6).
+- Contents: 36-FF address/attribute latch ×2 (working + pending), 48-FF beat register (the last word goes straight to `HRDATA`), 5-bit word counter, TA counter, 8-state FSM, output enable = `dir`. Implemented: `hdl/forte_link_master.sv`. *(Superseded: the bridge is now `forte_link_core` + `forte_link_phy` across a CDC, and since the 8+8 split the phy has a 56-FF beat register, a header counter, no TA counter and no output enable.)*
+- All inbound pins (`io_in`, `ready`, `rvalid`) captured on negedge, re-registered on posedge (§6).
 - No error path. `HRESPEXT = 0` always.
 
 ## 6. Clocking and bring-up
@@ -675,8 +677,8 @@ The ASIC's flops see `clk` late by pad + clock-tree insertion (*ins*, ~1-2 ns,
 +-30-50 % over PVT). That creates one hazard and one nuisance:
 
 - **FPGA -> ASIC hold.** If FPGA Tco + trace < *ins*, a posedge capture on
-  the ASIC samples the new word. Fix: **capture all inbound pins (`io` when
-  `dir=0`, `ready`, `rvalid`) on the falling edge**, then re-register on
+  the ASIC samples the new word. Fix: **capture all inbound pins (`io_in`,
+  `ready`, `rvalid`) on the falling edge**, then re-register on
   posedge. Hold margin = T/2 + *ins* - Tco - trace; setup needs
   T/2 > *ins* + Tco + trace + Tsu ~ 6 ns, i.e. link <= ~80 MHz.
 - **ASIC -> FPGA setup.** Needs T > *ins* + Tco + trace + Tsu ~ 5-6 ns.
@@ -749,16 +751,16 @@ Cost: a 12-bit counter and a 32-bit LFSR.
 
 ```
 forte_top                      ASIC top, pads only. DESIGN_TOP for synth/lint.
-├─ pad cells                    io[15:0] bidir (OE = dir), inputs with pulls
+├─ pad cells                    io_in / io_out only: io_in[7:0], io_out[7:0] one-way (no io_tri since 2026-11-05)
 └─ forte_chip                  pad-less; what scan insertion and gate-level sim see
    ├─ forte_rst_sync           async assert, 2-FF release; core reset held until trained
    ├─ forte_link_train         LFSR + counter + status FSM; releases core reset
    ├─ forte_soc                replaces wallypipelinedsoc
    │  ├─ wallypipelinedcore #(P)   unmodified CVW
    │  └─ forte_uncore             adrdecs, CLINT, UART (C), ahbapbbridge, ext port, muxes
-   ├─ forte_link_master        AHB-Lite slave on the ext port -> 16-bit address/data words; drop-in for ahb_to_memitf
+   ├─ forte_link_master        AHB-Lite slave on the ext port -> link words (now forte_link_core + forte_link_phy, 8-bit each way)
    ├─ irq_sync                  meip/seip 2-FF
-   └─ scan_mux                  test_mode: io[7:0] -> scan_in, scan_out -> io[15:8]
+   └─ scan_mux                  test_mode: io_in[7:0] -> scan_in, scan_out -> io_out[7:0]
 
 hdl/forte_link_pkg.sv          TA, word counts, size-in-address encoding: one source of
                                 truth for the bridge, the TB link model, and the VCU118 link_slave
@@ -781,8 +783,8 @@ bridge goes in.
 ## 11. Verification plan
 
 - **Two DUTs in CI.** `DUT ?= rv64_core_wrapper` in `sim/Makefile`; `forte_top` is a second matrix entry. Legacy path is the reference until tapeout.
-- **`link_model` checks, not just transacts.** One link transaction per AHB burst (bound monitor on the ext port compares address/data/length); never X on `io` while `dir=1`; never drives while `dir=1` or inside a TA window; word-count integrity. Randomised `ready` back-pressure and `rvalid` gaps from a plusarg seed.
-- **SVA in the bridge** (`ifndef SYNTHESIS`): never IDLE mid-transfer; `HREADYEXT` only with a complete beat; `dir` and `rvalid` mutually exclusive; `HADDR[55:32]==0` and `HADDR[30:29]==0` on every `req`; TA respected on every `dir` edge.
+- **`link_model` checks, not just transacts.** One link transaction per AHB burst (bound monitor on the ext port compares address/data/length); never X on `io_out`; `req` for exactly the four header bytes; word-count integrity. (Before the 8+8 split: also never drives while `dir=1` or inside a TA window.) Randomised `ready` back-pressure and `rvalid` gaps from a plusarg seed.
+- **SVA in the bridge** (`ifndef SYNTHESIS`): never IDLE mid-transfer; `HREADYEXT` only with a complete beat; `HADDR[55:32]==0` and `HADDR[30:29]==0` on every `req`. (The `dir`/`rvalid` exclusion and TA checks went with `dir`.)
 - **Abort torture** (directed asm): mispredicted branches across line boundaries; `fence.i` storms; timer interrupts with tiny `mtimecmp` deltas during `tc_mem_stress` writebacks. Coverage counter "transfer completed after core went IDLE" must be nonzero.
 - **Cross-mode equivalence.** Same test with `LINK=0` and `LINK=1`; Spike checks each, so a divergence is localised to the bridge.
 - **IPC budget** via `sim/get_ipc.sh`: link-mode IPC >= agreed fraction of direct-mode, per test; a latency regression fails CI.
