@@ -212,6 +212,16 @@ test-mem:
 	@$(BUILD)/tb/Vtb_mem_axi | grep -v '^-'
 	@$(BUILD)/tb/Vtb_mem_axi | grep -q 'tb_mem_axi PASS'
 
+.PHONY: test-mem-axi-hp
+test-mem-axi-hp:
+	@mkdir -p $(BUILD)/tb_mem_axi_hp
+	verilator --binary -sv --top-module tb_fbu_mem_axi_hp --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Mdir $(BUILD)/tb_mem_axi_hp \
+	    $(REPO)/fpga/pynq/tb/tb_fbu_mem_axi_hp.sv \
+	    $(REPO)/fpga/pynq/rtl/fbu_mem_axi_hp.sv > $(BUILD)/tb_mem_axi_hp/build.log 2>&1
+	$(BUILD)/tb_mem_axi_hp/Vtb_fbu_mem_axi_hp | grep -v '^-' | tee $(BUILD)/tb_mem_axi_hp/run.log
+	@grep -q 'tb_fbu_mem_axi_hp PASS' $(BUILD)/tb_mem_axi_hp/run.log
+
 # The link slave against the real ASIC bridge: singles, INCR8, pipelined
 # accepts, a mid-burst abort.  The monitor inside asserts that every line op
 # leaves the slave as exactly one complete INCR8, which is what the DDR path
