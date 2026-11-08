@@ -454,6 +454,43 @@ bitstream-forte: $(SRCS_F) check-vivado $(TINFO_DEP)
 	$(call run_forte_build,bit)
 	@echo "bitstream: $(FORTE_BITDIR)/forte.bit + forte.hwh"
 
+# fe_scan's sessions (CTRL-14) on the PL top alone, through the ctl port.
+# test-scan-rtl runs the RTL in Verilator.  test-scan-netlist runs the DUT the
+# last bitstream-forte synthesized, as a funcsim netlist in xsim: optimisation
+# that changes behaviour shows up here, not first on the board.
+.PHONY: test-scan-rtl test-scan-netlist
+SCAN_RTL_DIR     := $(BUILD)/tb_scan_rtl
+SCAN_NETLIST_DIR := $(BUILD)/tb_scan_netlist
+FORTE_DUT_DCP    := $(FORTE_BITDIR)/proj/forte.runs/forte_dut_0_synth_1/forte_dut_0.dcp
+
+test-scan-rtl: $(SRCS_F)
+	@mkdir -p $(SCAN_RTL_DIR)
+	verilator --binary -sv --top-module tb_fbu_scan_top --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(SCAN_RTL_DIR) \
+	    $(addprefix +incdir+,$(INCDIRS)) \
+	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR \
+	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_scan_top.sv > $(SCAN_RTL_DIR)/build.log 2>&1 \
+	    || { grep -E '%Error' $(SCAN_RTL_DIR)/build.log | head -20; exit 1; }
+	@$(SCAN_RTL_DIR)/Vtb_fbu_scan_top | tee $(SCAN_RTL_DIR)/run.log | grep -E 'SCAN_TB|tb_fbu_scan_top'
+	@grep -q 'tb_fbu_scan_top PASS' $(SCAN_RTL_DIR)/run.log
+
+test-scan-netlist: check-vivado $(TINFO_DEP)
+	@test -f $(FORTE_DUT_DCP) || { echo "no $(FORTE_DUT_DCP): make bitstream-forte"; exit 1; }
+	@mkdir -p $(SCAN_NETLIST_DIR)
+	cd $(SCAN_NETLIST_DIR) && $(VIVADO_ENV) vivado -mode batch -nojournal -notrace -log write_funcsim.log \
+	    -source $(CURDIR)/tcl/write_funcsim.tcl -tclargs $(FORTE_DUT_DCP) forte_dut_0_funcsim.v > /dev/null
+	cd $(SCAN_NETLIST_DIR) && { \
+	    $(VIVADO_ENV) xvlog $$(dirname $$(command -v vivado))/../data/verilog/src/glbl.v && \
+	    $(VIVADO_ENV) xvlog forte_dut_0_funcsim.v && \
+	    $(VIVADO_ENV) xvlog -sv -d SCAN_TB_TOP=forte_dut_0 $(REPO)/hdl/forte_link_pkg.sv \
+	        $(REPO)/fpga/bringup/rtl/fbu_pkg.sv $(REPO)/fpga/bringup/tb/tb_fbu_scan_top.sv && \
+	    $(VIVADO_ENV) xelab -debug off -timescale 1ns/1ps -L unisims_ver -L secureip \
+	        tb_fbu_scan_top glbl -s tb_scan_netlist; } > build.log 2>&1 \
+	    || { grep -E 'ERROR' $(SCAN_NETLIST_DIR)/build.log | head -20; exit 1; }
+	@cd $(SCAN_NETLIST_DIR) && $(VIVADO_ENV) xsim tb_scan_netlist -R > run.log 2>&1; \
+	    grep -E 'SCAN_TB|tb_fbu_scan_top' $(SCAN_NETLIST_DIR)/run.log
+	@grep -q 'tb_fbu_scan_top PASS' $(SCAN_NETLIST_DIR)/run.log
+
 .PHONY: bd synth-bd bitstream
 bd: TOP := amoeba_pynq_top
 bd: $(SRCS_F) check-vivado $(TINFO_DEP)

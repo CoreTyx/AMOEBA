@@ -10,7 +10,13 @@
 // number of cycles late while scan_en is high, held while it is low; the PS
 // checks that exactly.  The PS writes the pattern and reads the capture one
 // entry at a time at `addr`.
+//
+// keep_hierarchy: Vivado 2024.1's cross-boundary optimisation of the whole
+// PL top removes the capture memory (silently; the gateware synthesized alone
+// keeps it), and every capture then reads 0.  make test-scan-netlist checks
+// the synthesized result.
 ///////////////////////////////////////////////////////////////////////////////
+(* keep_hierarchy = "yes" *)
 module fbu_scan #(
   parameter int DEPTH_LOG2 = 10
 )(
