@@ -59,9 +59,16 @@ def main():
             break
     result = run.verdict(result or "PASS")
 
-    line = f"PIN_TB_RESULT: {result}"
     print(f"[FORTE] link_rd={dev.rd(R.REG_LINK_RD)} link_wr={dev.rd(R.REG_LINK_WR)} errors={run.total_errors()} "
           f"trace_dropped={dev.rd(R.REG_TRACE_DROPPED)}")
+    if dev.is_ddr:
+        m = dev.mem_status()
+        print(f"[FORTE] ddr reads={m['reads']} writes={m['writes']} dropped={m['dropped']} "
+              f"lat_max={m['lat_max']} lat_mean={m['lat_mean']:.1f} err={m['err']}")
+        if m["err"] and result == "PASS":
+            print(f"[FORTE] ERROR: HP0 response {m['err_resp']} on line 0x{m['err_addr']:08x}")
+            result = "FAIL"
+    line = f"PIN_TB_RESULT: {result}"
     print(line)
     with open(os.path.join(out, "RESULT"), "w") as fh:
         fh.write(line + "\n")

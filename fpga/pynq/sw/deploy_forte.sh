@@ -2,6 +2,7 @@
 # deploy_forte.sh -- copy the DUT=forte bitstream, sw/ and test images to the board.
 #
 #   fpga/pynq/sw/deploy_forte.sh [user@host] [run-dir-or-image ...]
+#   MEM_BACKEND=AXI fpga/pynq/sw/deploy_forte.sh ...      (the DDR build)
 #
 # Images are .lst files (bin/generate_memory_file.py -8), or pin-bench run
 # directories, from which memory.lst is taken under the run's name.  Scripts in
@@ -11,7 +12,7 @@ BOARD=${1:-xilinx@192.168.2.99}
 shift || true
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
-BITDIR=${BITDIR:-$HERE/../bit/forte-BRAM}
+BITDIR=${BITDIR:-$HERE/../bit/forte-${MEM_BACKEND:-BRAM}}
 DEST=${DEST:-forte}
 
 [[ -f $BITDIR/forte.bit && -f $BITDIR/forte.hwh ]] || { echo "no $BITDIR/forte.bit/.hwh: make -C fpga/pynq bitstream-forte"; exit 1; }

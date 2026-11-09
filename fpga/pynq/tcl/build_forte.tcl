@@ -12,7 +12,8 @@ if {[llength $argv] < 9} {
     puts "ERROR: expected 9 tclargs, got [llength $argv]"
     exit 1
 }
-lassign $argv srcs_f part board out_dir defines incdirs fclk_mhz stage board_repo
+lassign $argv srcs_f part board out_dir defines incdirs fclk_mhz stage board_repo mem_backend
+if {$mem_backend eq ""} { set mem_backend BRAM }
 
 if {$board eq "none" && $stage eq "bit"} {
     puts "ERROR: board=none has no PYNQ-Z2 DDR/MIO preset; it cannot make a usable bitstream."
@@ -53,7 +54,7 @@ set_property verilog_define $defines [get_filesets sources_1]
 update_compile_order -fileset sources_1
 
 source [file join $script_dir bd_forte.tcl]
-if {![forte_build_bd board $board fclk_mhz $fclk_mhz]} {
+if {![forte_build_bd board $board fclk_mhz $fclk_mhz mem_backend $mem_backend]} {
     puts "ERROR: block design could not be built"
     exit 1
 }

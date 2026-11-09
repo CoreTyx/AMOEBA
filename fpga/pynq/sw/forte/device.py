@@ -2,6 +2,7 @@
 drives it in simulation (fpga/bringup/tb/tb_fbu_vs_pin.sv, BOARD_TOP)."""
 
 import os
+import struct
 import sys
 import time
 
@@ -47,15 +48,37 @@ def read_lst(path: str) -> dict:
     return words
 
 
+def contiguous_runs(image: dict):
+    """(first word index, [words]) for each run of consecutive word indices."""
+    run_start = None
+    run = []
+    for k in sorted(image):
+        if run and k != run_start + len(run):
+            yield run_start, run
+            run = []
+        if not run:
+            run_start = k
+        run.append(image[k])
+    if run:
+        yield run_start, run
+
+
 class Forte:
     def __init__(self, bitstream: str = None, fclk_mhz: float = 25.0):
         if bitstream:
             pl.program(bitstream, fclk_mhz=fclk_mhz)
         self.ctl = Mmio(R.CTL_BASE, R.CTL_SPAN)
-        self.mem = Mmio(R.MEM_BASE, R.MEM_SPAN)
         found = self.ctl.read(R.REG_ID)
         if found != R.FBU_ID:
             raise RuntimeError(f"ID reads 0x{found:08X}, expected 0x{R.FBU_ID:08X}: wrong bitstream?")
+        self.is_ddr = bool(self.ctl.read(R.REG_CAPS) & R.CAPS_MEM_AXI)
+        # O_SYNC (Mmio) maps the carve-out uncached: HP0 is not coherent with
+        # the A9's caches, so a cached write could sit in L2 while the chip
+        # reads stale DDR.
+        if self.is_ddr:
+            self.mem = Mmio(R.DDR_CARVEOUT, R.DDR_SPAN, wordwise=False)
+        else:
+            self.mem = Mmio(R.MEM_BASE, R.MEM_SPAN)
 
     # ---- registers ----
     def rd(self, reg: int) -> int:
@@ -107,12 +130,25 @@ class Forte:
         w = Forte.window_of(addr)
         return (w << 18) + addr - R.MEM_WINDOWS[w][0]
 
-    def load_lst(self, path: str, policy: str = "rand") -> dict:
+    def unwritten_word(self, k: int, policy: str) -> int:
+        """The pin bench's memory where nothing was loaded (word index k)."""
+        return 0 if policy == "zero" else mix64(k ^ (self.seed << 40))
+
+    def load_lst(self, path: str, policy: str = "rand", fill: bool = True) -> dict:
         """Fill every window with what the pin bench's memory would hold there,
-        then read the image back.  Refuses while the chip is released."""
+        then load the image and read it back.  Refuses while the chip is
+        released.  In DDR builds the image may lie anywhere in EXT_MEM, and
+        fill=False skips the windows' pattern (a Linux image needs none)."""
         if self.rd(R.REG_PIN_CTRL) & 1:
             raise RuntimeError("load while the chip is released")
         image = read_lst(path)
+        if self.is_ddr:
+            self._load_ddr(image, policy, fill)
+        else:
+            self._load_bram(image, policy)
+        return image
+
+    def _load_bram(self, image: dict, policy: str) -> None:
         outside = [k for k in image if EXT_MEM_BASE <= k * 8 < EXT_MEM_END and self.window_of(k * 8) is None]
         if outside:
             raise RuntimeError(f"{len(outside)} image words fall outside the memory windows, "
@@ -121,12 +157,7 @@ class Forte:
             self.mem.write(R.MEM_REG_WINDOW_BASE + 4 * w, base)
             for off in range(0, size, 8):
                 k = (base + off) >> 3
-                if k in image:
-                    word = image[k]
-                elif policy == "zero":
-                    word = 0
-                else:
-                    word = mix64(k ^ (self.seed << 40))
+                word = image[k] if k in image else self.unwritten_word(k, policy)
                 self.mem.write((w << 18) + off, word & 0xFFFF_FFFF)
                 self.mem.write((w << 18) + off + 4, word >> 32)
         bad = 0
@@ -138,11 +169,42 @@ class Forte:
                 bad += 1
         if bad:
             raise RuntimeError(f"{bad} image words read back wrong")
-        return image
+
+    def _load_ddr(self, image: dict, policy: str, fill: bool) -> None:
+        outside = [k for k in image if not EXT_MEM_BASE <= k * 8 < EXT_MEM_END]
+        if outside:
+            raise RuntimeError(f"{len(outside)} image words fall outside EXT_MEM, "
+                               f"first at 0x{outside[0] * 8:08X}")
+        if fill:
+            for base, size in R.MEM_WINDOWS:
+                blob = bytearray(size)
+                for off in range(0, size, 8):
+                    k = (base + off) >> 3
+                    struct.pack_into("<Q", blob, off, image[k] if k in image else self.unwritten_word(k, policy))
+                self.mem.write_bytes(base - EXT_MEM_BASE, bytes(blob))
+        for start, words in contiguous_runs(image):
+            self.mem.write_bytes(start * 8 - EXT_MEM_BASE, struct.pack(f"<{len(words)}Q", *words))
+        bad = 0
+        for start, words in contiguous_runs(image):
+            back = self.mem.read_bytes(start * 8 - EXT_MEM_BASE, 8 * len(words))
+            bad += sum(a != b for a, b in zip(struct.unpack(f"<{len(words)}Q", back), words))
+        if bad:
+            raise RuntimeError(f"{bad} image words read back wrong")
 
     def read_mem64(self, addr: int) -> int:
+        if self.is_ddr:
+            return struct.unpack("<Q", self.mem.read_bytes(addr - EXT_MEM_BASE, 8))[0]
         o = self.port_b_offset(addr)
         return self.mem.read(o) | (self.mem.read(o + 4) << 32)
+
+    def mem_status(self) -> dict:
+        """fbu_mem_axi_hp's counters (all zero in BRAM builds)."""
+        stat = self.rd(R.REG_MEM_STAT)
+        reads = self.rd(R.REG_MEM_READS)
+        lat_sum = self.rd64(R.REG_MEM_LAT_SUM_LO)
+        return {"err": stat & 1, "err_resp": (stat >> 8) & 3, "err_addr": self.rd(R.REG_MEM_ERR_ADDR),
+                "reads": reads, "writes": self.rd(R.REG_MEM_WRITES), "dropped": self.rd(R.REG_MEM_DROPPED),
+                "lat_max": self.rd(R.REG_MEM_LAT_MAX), "lat_mean": lat_sum / reads if reads else 0.0}
 
     # ---- pins ----
     def set_pins(self, **fields) -> None:

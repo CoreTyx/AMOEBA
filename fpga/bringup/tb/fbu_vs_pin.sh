@@ -77,13 +77,26 @@ report() {   # ok(0/1) name detail
   fi
 }
 
+# FORCE_RD_LAT replaces every run's +FPGA_RD_LAT on both sides: the DDR
+# backend's latency must fit inside the DET-mode read latency (test-fbu-ddr).
+RUN_ARGS=()
+run_args() {
+  local a
+  RUN_ARGS=()
+  for a in "$@"; do
+    [[ -n "${FORCE_RD_LAT:-}" && $a == +FPGA_RD_LAT=* ]] || RUN_ARGS+=("$a")
+  done
+  [ -z "${FORCE_RD_LAT:-}" ] || RUN_ARGS+=("+FPGA_RD_LAT=$FORCE_RD_LAT")
+}
+
 bench_run() {   # dir image [script] -- plusargs
   local dir="$1" image="$2" script="$3" base
   shift 3
   base="$(basename "${image%.*}")"
   mkdir -p "$dir"
+  run_args "$@"
   # shellcheck disable=SC2086
-  "$R/hvl/pin/pin.sh" run "$image" ${script:+"$script"} "$@" > "$dir/run.log" 2>&1 || true
+  "$R/hvl/pin/pin.sh" run "$image" ${script:+"$script"} "${RUN_ARGS[@]}" > "$dir/run.log" 2>&1 || true
   cp "$BENCH_RUNS/$base"/{pin_trace.log,memory.lst,sim.log,uart.log} "$dir/" 2>/dev/null || true
 }
 
@@ -91,7 +104,8 @@ fbu_run() {   # dir -- plusargs
   local dir="$1"
   shift
   mkdir -p "$dir"
-  ( cd "$dir" && timeout 3600 "$TB" "$@" > run.log 2>&1 ) || true
+  run_args "$@"
+  ( cd "$dir" && timeout 3600 "$TB" "${RUN_ARGS[@]}" > run.log 2>&1 ) || true
 }
 
 signature_bench() {
@@ -169,6 +183,11 @@ expand_script() {   # script memory.lst out [sed-expression]
   fi
 }
 
+# The same link transactions (direction, address, data), in any order.
+same_link_set() {
+  diff -q <(cut -d' ' -f3- "$1" | sort) <(cut -d' ' -f3- "$2" | sort) > /dev/null
+}
+
 script_test() {   # test [gateware script, default the bench's own] [knob name] [knob plusargs]
   local t="$1" fbu_script="${2:-$TESTS/$1.cmd}" knob="${3:-}" args="${4:-}" d bv fv cmp ok=1
   d="$OUT/$t/script${2:+_$(basename "${2%.cmd}")}${knob:+_$knob}"
@@ -181,13 +200,17 @@ script_test() {   # test [gateware script, default the bench's own] [knob name] 
   fbu_run "$d/fbu" +CMD="$d/fbu/script.cmd" $args
   # The PS polls, so a console-triggered irq lands some cycles after the
   # bench's and may fall on the other side of a line fill: transactions and
-  # irq changes are compared as two sequences.
+  # irq changes are compared as two sequences, and the transactions, if not
+  # in the same order, as the same set (a fill moved across the irq).
   strip_error_text "$d/bench/pin_trace.log" "$d/a.log"
   grep -v '^I ' "$d/a.log" > "$d/a_link.log" || true
   grep -v '^I ' "$d/fbu/pin_trace.log" > "$d/b_link.log" || true
   grep '^I ' "$d/a.log" > "$d/a_irq.log" || true
   grep '^I ' "$d/fbu/pin_trace.log" > "$d/b_irq.log" || true
   cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a_link.log" "$d/b_link.log" --no-cycles 2>&1 | head -1 || true)
+  if [[ "$cmp" != MATCH* ]] && same_link_set "$d/a_link.log" "$d/b_link.log"; then
+    cmp="MATCH as a set: $(grep -c . "$d/a_link.log") records, ${cmp%% (*}"
+  fi
   local irq_cmp
   irq_cmp=$(python3 "$R/bin/pin_trace_cmp.py" "$d/a_irq.log" "$d/b_irq.log" --no-cycles 2>&1 | head -1 || true)
   [[ "$irq_cmp" == MATCH* ]] || ok=0
@@ -195,9 +218,9 @@ script_test() {   # test [gateware script, default the bench's own] [knob name] 
   bv=$(verdict_of "$d/bench/run.log")
   fv=$(verdict_of "$d/fbu/run.log")
   [[ "$cmp" == "link MATCH"* ]] || ok=0
-  cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" || ok=0
+  same_console "$d/bench/uart.log" "$d/fbu/uart.log" || ok=0
   [ "$bv" = PASS ] && [ "$fv" = PASS ] || ok=0
-  report $ok "$t/$(basename "$d")" "bench=$bv fbu=$fv $cmp, uart.log $(cmp -s "$d/bench/uart.log" "$d/fbu/uart.log" && echo identical || echo DIFFERS)"
+  report $ok "$t/$(basename "$d")" "bench=$bv fbu=$fv $cmp, uart.log $(same_console "$d/bench/uart.log" "$d/fbu/uart.log" && echo identical || echo DIFFERS)"
 }
 
 planted_script_fault() {   # test name sed-expression expected-text

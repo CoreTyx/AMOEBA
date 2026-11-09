@@ -727,17 +727,47 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
   B is an AXI4-Lite slave at `0x4400_0000` for PS load and dump. The address
   wraps with the window. Port B uses `aresetn`. The PS writes only while
   `rst_n=0`, because the ports are not arbitrated (inherited rule).
-- **`fbu_mem_axi_hp.sv`** is a native AXI3 master on `S_AXI_HP0`. It does one
-  AR/R or AW/W/B per line, `LEN=1` (2 × 64-bit), `SIZE=3`, `AxPROT` non-secure
-  = 0 (the TrustZone lesson), and maps to the carve-out with
-  `0x1000_0000 | (addr & 0x0FFF_FFFF)`. This **replaces** `ahblite_axi_bridge` +
+- **`fbu_mem_axi_hp.sv`** (`MEM_BACKEND=AXI`) is a native AXI3 master on
+  `S_AXI_HP0`, connected directly (both AXI3, 64-bit). It does one AR/R or
+  AW/W/B per line: `LEN=1` (2 × 64-bit), `SIZE=3`, `INCR`, ID 0, and
+  `AxPROT = 000`, i.e. **secure**: the board's `TZ_DDR_RAM` leaves every DDR
+  segment secure-only and a non-secure access returns DECERR while the PS
+  reads the same memory fine (the TrustZone lesson, `bd_pynq.tcl`). EXT_MEM maps
+  to the carve-out as `0x1000_0000 | (addr & 0x0FFF_FFFF)`; the board boots
+  with `mem=256M`, and the block design clamps the master's address window to
+  the carve-out as well. This **replaces** `ahblite_axi_bridge` +
   `axi_protocol_converter`:
   - The slave is the master now, and it never aborts, so the bridge's abort
     and sticky-HRESP wedges (`fpga/linux_boot` lessons, project memory) can no
     longer happen.
   - It removes ~1 k LUT.
-  - `RRESP`/`BRESP` ≠ OKAY sets a sticky `MEM_ERR`, and the line is still
-    served (poison for reads).
+  - **Ordering.** Writes are posted, up to 4 waiting for B: in DET mode the
+    slave keeps `ready` high whatever its two-line queue holds, so a writeback
+    burst must not wait for DDR. A read waits for every outstanding B (AXI
+    orders nothing between the read and write channels); one read is
+    outstanding at a time (the link is serial).
+  - **Chip reset.** A read accepted or outstanding while `rst_n` is low gets
+    no response: the slave would take a late one as the next read's line. The
+    burst still completes on AXI. Writes complete as issued, as on the bench.
+  - **Outside EXT_MEM** nothing reaches AXI: reads return poison with
+    `rsp_err`, writes are counted and dropped.
+  - `RRESP`/`BRESP` ≠ OKAY sets a sticky `MEM_ERR` with the first error's line
+    and response, and the line is still served (poison for reads).
+  - **Status:** read/write/dropped counts and read latency (request to
+    response) max and sum, `MEM_*` registers (§6). The maximum sets the
+    DET-mode `rd_latency`; `sw/run_cmd.py` prints them and fails a run on
+    `MEM_ERR`.
+  - **PS side.** `Forte` reads `CAPS.MEM_AXI` and maps the carve-out through
+    `/dev/mem` with `O_SYNC` (uncached: HP0 is not coherent with the A9's
+    caches). Trace runs fill the same three windows as the BRAM build with the
+    bench's unwritten pattern; `load_lst(fill=False)` loads an image alone.
+  - **Verification.** `make test-mem-axi-hp`: the backend against an AXI3
+    model that applies a write only when it sends B (so a read issued early
+    reads stale data), with random ready and latency, SLVERR lines and chip
+    resets. `make test-fbu-ddr`: the full `fbu_vs_pin` gate on the PL top with
+    `MEM_AXI`, an HP0/DDR model holding the bench's memory, and
+    `FORCE_RD_LAT=64` on both sides (DET mode needs `rd_latency` ≥ the
+    backend's worst case).
 
 ---
 
@@ -755,7 +785,7 @@ side effect: FIFOs pop through their own `*_POP` register.
 |---|---|---|---|
 | 0x000 | ID | RO | `0x46425530` "FBU0" |
 | 0x004 | VERSION | RO | `0x0001_0000` |
-| 0x008 | CAPS | RO | [3:0] BEATS, [15:8] log2 trace depth |
+| 0x008 | CAPS | RO | [3:0] BEATS, [4] MEM_AXI (DDR backend), [15:8] log2 trace depth |
 | 0x00C | SCRATCH | RW | |
 | 0x010 | SOFT_RESET | W | resets the gateware below the register file (the chip is held in reset meanwhile) |
 | 0x100 | PIN_CTRL | RW | [0] RELEASE (rst_n, resets 0), [1] FAULT_INJECT, [2] TEST_MODE, [3] SCAN_EN, [5:4] IRQ, [6] RX_FORCE_EN, [7] RX_FORCE_VAL |
@@ -779,6 +809,12 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x228 | FIRST_ERR | RO | `link_err_t` |
 | 0x22C/230 | FIRST_ERR_CYC_LO/HI | RO | |
 | 0x234/238 | LINK_RD / LINK_WR | RO | finished transactions |
+| 0x240 | MEM_STAT | RO | [0] memory error seen (sticky), [9:8] its RRESP/BRESP; zero in BRAM builds |
+| 0x244 | MEM_ERR_ADDR | RO | line of the first memory error |
+| 0x248/24C | MEM_READS / MEM_WRITES | RO | lines sent to the backend |
+| 0x250 | MEM_DROPPED | RO | writes outside EXT_MEM |
+| 0x254 | MEM_LAT_MAX | RO | longest read, request to response, in clk cycles |
+| 0x258/25C | MEM_LAT_SUM_LO/HI | RO | sum of read latencies (48 bits) |
 | 0x280 | TOHOST_ADDR | RW | default `0x8080_0000` |
 | 0x284 | TOHOST_STAT | RO | [0] seen (cleared while rst_n is low) |
 | 0x288/28C | TOHOST_VAL_LO/HI | RO | |
@@ -1302,6 +1338,16 @@ real code is low.
 
 ## 13. Backlog (TODO, not scheduled)
 
+- **Review the `irq.c` wait-loop fix with the bench owners** (changed on
+  `fpga/rtl_freeze` only). `while (!(seen3 && seen6)) wfi;` ran with MIE on:
+  IRQ6 taken between the `seen6` load and `wfi` returned into `wfi` and the
+  chip slept for good. Not an RTL bug: the reference pin bench hangs the
+  same way with the FBU's irq edge times. At rd_latency 0 the window is never
+  hit; at 56-128 with gaps it is (the DDR gate's `irq/script_irq_g30s1` and
+  `g60s3`). An IRQ6 edge swept on the bench (g30s1, rd_latency 64) hangs for
+  exactly 11 cycles (8844-8854); with the check made under MIE off, `wfi`
+  then MIE on, all 137 edge times tried (8600-9600) pass. Decide whether
+  `postsynth_verif` takes the fix.
 - **Real-pins ribbon loopback** (was P5a). `forte_top` pins out through PYNQ
   headers and looped by ribbon to the `fbu_top` pins. That is about 64 header
   pins (RPi + Arduino + 2 PMOD give roughly that many). Capture on the returned

@@ -11,15 +11,26 @@
 //
 // Plusargs as the bench: +MEMLST +CMD +FPGA_SEED +FPGA_GAP_PCT +FPGA_RD_LAT
 // +FPGA_MEM +FPGA_WDOG +FPGA_MUTATE +TOHOST +TIMEOUT +MAX_ERRORS +UART_DIV.
-// Gateware-only: +NODET +MEM_LAT +TRACE +UART_LOG +BOOT_GATE
+// Gateware-only: +NODET +MEM_LAT +DDR_LAT +TRACE +UART_LOG +BOOT_GATE
 // +BOOT_GATE_SELFTEST +BOOT_GATE_RETRIES.
 //
 // Built with BOARD_TOP, the design is the PYNQ PL top (forte_pynq_top: the
 // same fbu_top with the block-RAM memory) and the PS loads every image through
 // the memory's AXI4-Lite port, after filling its windows with the bench's
 // unwritten-memory pattern, as sw/forte does.
+//
+// With BOARD_DDR as well, the top is built with MEM_AXI and fbu_mem_axi_hp
+// talks to an AXI3 model of HP0 and the DDR carve-out that holds this bench's
+// memory: the PS writes DDR directly, so loading is the bench's own.  The
+// model's latency is random up to +DDR_LAT (cycles before a burst's first
+// beat or its B), with random ready and beat gaps.
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
+`ifdef BOARD_TOP
+  `ifndef BOARD_DDR
+    `define BOARD_BRAM
+  `endif
+`endif
 
 module tb_fbu_vs_pin;
   import forte_link_pkg::*;
@@ -40,6 +51,7 @@ module tb_fbu_vs_pin;
   int          wdog        = 1000;
   int          mutate      = 0;
   int          mem_lat     = 1;
+  int          ddr_lat     = 20;
   int          max_errors  = 1;
   longint      timeout     = 10_000_000;
   logic [63:0] tohost_addr = 64'h8080_0000;
@@ -96,7 +108,25 @@ module tb_fbu_vs_pin;
   assign rdata   = bus_to_mem ? mem_rdata   : ctl_rdata;
   assign rresp   = bus_to_mem ? mem_rresp   : ctl_rresp;
 
-  forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15)) board (
+`ifdef BOARD_DDR
+  localparam bit MEM_AXI = 1'b1;
+`else
+  localparam bit MEM_AXI = 1'b0;
+`endif
+  localparam logic [31:0] DDR_CARVEOUT = 32'h1000_0000;
+
+  logic [31:0] hp_awaddr, hp_araddr;
+  logic [3:0]  hp_awlen, hp_arlen;
+  logic [2:0]  hp_awsize, hp_arsize, hp_awprot, hp_arprot;
+  logic [1:0]  hp_awburst, hp_arburst;
+  logic        hp_awvalid, hp_awready, hp_arvalid, hp_arready;
+  logic [63:0] hp_wdata, hp_rdata;
+  logic [7:0]  hp_wstrb;
+  logic        hp_wlast, hp_wvalid, hp_wready;
+  logic [1:0]  hp_bresp, hp_rresp;
+  logic        hp_bvalid, hp_bready, hp_rlast, hp_rvalid, hp_rready;
+
+  forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15), .MEM_AXI(MEM_AXI), .DDR_CARVEOUT(DDR_CARVEOUT)) board (
     .aclk(clk), .aresetn(arst_n),
     .s_axi_ctl_awaddr(awaddr[11:0]), .s_axi_ctl_awvalid(awvalid && !bus_to_mem), .s_axi_ctl_awready(ctl_awready),
     .s_axi_ctl_wdata(wdata), .s_axi_ctl_wstrb(wstrb), .s_axi_ctl_wvalid(wvalid && !bus_to_mem),
@@ -112,6 +142,17 @@ module tb_fbu_vs_pin;
     .s_axi_mem_arvalid(arvalid && bus_to_mem), .s_axi_mem_arready(mem_arready),
     .s_axi_mem_rdata(mem_rdata), .s_axi_mem_rresp(mem_rresp), .s_axi_mem_rvalid(mem_rvalid),
     .s_axi_mem_rready(rready && bus_to_mem),
+    .m_axi_hp_awid(), .m_axi_hp_awaddr(hp_awaddr), .m_axi_hp_awlen(hp_awlen), .m_axi_hp_awsize(hp_awsize),
+    .m_axi_hp_awburst(hp_awburst), .m_axi_hp_awlock(), .m_axi_hp_awcache(), .m_axi_hp_awprot(hp_awprot),
+    .m_axi_hp_awqos(), .m_axi_hp_awvalid(hp_awvalid), .m_axi_hp_awready(hp_awready),
+    .m_axi_hp_wid(), .m_axi_hp_wdata(hp_wdata), .m_axi_hp_wstrb(hp_wstrb), .m_axi_hp_wlast(hp_wlast),
+    .m_axi_hp_wvalid(hp_wvalid), .m_axi_hp_wready(hp_wready),
+    .m_axi_hp_bid(6'd0), .m_axi_hp_bresp(hp_bresp), .m_axi_hp_bvalid(hp_bvalid), .m_axi_hp_bready(hp_bready),
+    .m_axi_hp_arid(), .m_axi_hp_araddr(hp_araddr), .m_axi_hp_arlen(hp_arlen), .m_axi_hp_arsize(hp_arsize),
+    .m_axi_hp_arburst(hp_arburst), .m_axi_hp_arlock(), .m_axi_hp_arcache(), .m_axi_hp_arprot(hp_arprot),
+    .m_axi_hp_arqos(), .m_axi_hp_arvalid(hp_arvalid), .m_axi_hp_arready(hp_arready),
+    .m_axi_hp_rid(6'd0), .m_axi_hp_rdata(hp_rdata), .m_axi_hp_rresp(hp_rresp), .m_axi_hp_rlast(hp_rlast),
+    .m_axi_hp_rvalid(hp_rvalid), .m_axi_hp_rready(hp_rready),
     .led);
 
   localparam int          WINDOWS       = 3;
@@ -140,7 +181,7 @@ module tb_fbu_vs_pin;
     .io_o, .io_oe, .ready, .rvalid(rvalid_pin),
     .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
-    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0),
+    .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0), .mem_stat('0),
     .link_error_seen(), .tohost_seen(), .boot_gate_gave_up());
 
 `endif
@@ -214,6 +255,110 @@ module tb_fbu_vs_pin;
       end
     end
   end
+`endif
+
+`ifdef BOARD_DDR
+  // ---- HP0 and the DDR carve-out, holding this bench's memory ----
+  // A write reaches mem when its B goes out, so a read the backend issues
+  // before that B reads the old line and the trace comparison fails.
+  typedef struct { logic [63:0] ext_addr; logic [63:0] data [BEATS]; int due; } ddr_write_t;
+  logic [63:0] ddr_aw_queue [$];
+  logic [63:0] ddr_w_beats  [$];
+  ddr_write_t  ddr_b_queue  [$];
+  logic [63:0] ddr_ar_queue [$];
+  int          ddr_now = 0;
+
+  function automatic logic [63:0] ddr_to_ext(input logic [31:0] a);
+    if (a - DDR_CARVEOUT >= 32'h1000_0000)
+      model_err($sformatf("HP0 access %h outside the carve-out", a));
+    return 64'h8000_0000 | 64'(a & 32'h0FFF_FFFF);
+  endfunction
+
+  always @(posedge clk) begin
+    ddr_now++;
+    hp_awready <= ($urandom % 4) != 0;
+    hp_wready  <= ($urandom % 4) != 0;
+    hp_arready <= ($urandom % 3) != 0;
+  end
+
+  always @(posedge clk) begin
+    if (hp_awvalid && hp_awready) begin
+      ddr_aw_queue.push_back(ddr_to_ext(hp_awaddr));
+      if (hp_awprot !== 3'b000 || hp_awlen !== 4'(BEATS - 1) || hp_awsize !== 3'd3 || hp_awburst !== 2'b01)
+        model_err($sformatf("HP0 AW fields prot %b len %0d size %0d burst %b", hp_awprot, hp_awlen, hp_awsize, hp_awburst));
+    end
+    if (hp_wvalid && hp_wready) begin
+      ddr_w_beats.push_back(hp_wdata);
+      if (hp_wstrb !== 8'hFF || hp_wlast !== (ddr_w_beats.size() % BEATS == 0))
+        model_err("HP0 W strobe or last");
+    end
+    if (ddr_aw_queue.size() > 0 && ddr_w_beats.size() >= BEATS) begin
+      ddr_write_t w;
+      w.ext_addr = ddr_aw_queue.pop_front();
+      for (int b = 0; b < BEATS; b++)
+        w.data[b] = ddr_w_beats.pop_front();
+      w.due = ddr_now + 1 + int'($urandom % ddr_lat);
+      ddr_b_queue.push_back(w);
+    end
+    if (hp_arvalid && hp_arready) begin
+      ddr_ar_queue.push_back(ddr_to_ext(hp_araddr));
+      if (hp_arprot !== 3'b000 || hp_arlen !== 4'(BEATS - 1) || hp_arsize !== 3'd3 || hp_arburst !== 2'b01)
+        model_err($sformatf("HP0 AR fields prot %b len %0d size %0d burst %b", hp_arprot, hp_arlen, hp_arsize, hp_arburst));
+    end
+  end
+
+  initial begin
+    ddr_write_t w;
+    hp_bvalid = 1'b0;
+    hp_bresp  = 2'b00;
+    forever begin
+      @(negedge clk);
+      if (ddr_b_queue.size() == 0 || ddr_b_queue[0].due > ddr_now)
+        continue;
+      w = ddr_b_queue.pop_front();
+      for (int b = 0; b < BEATS; b++)
+        mem[(w.ext_addr >> 3) + 64'(b)] = w.data[b];
+      hp_bvalid = 1'b1;
+      do @(posedge clk); while (!hp_bready);
+      @(negedge clk);
+      hp_bvalid = 1'b0;
+    end
+  end
+
+  initial begin
+    logic [63:0] a;
+    hp_rvalid = 1'b0;
+    hp_rlast  = 1'b0;
+    hp_rresp  = 2'b00;
+    hp_rdata  = '0;
+    forever begin
+      @(negedge clk);
+      if (ddr_ar_queue.size() == 0)
+        continue;
+      a = ddr_ar_queue.pop_front();
+      repeat ($urandom % ddr_lat) @(negedge clk);
+      for (int b = 0; b < BEATS; b++) begin
+        repeat ($urandom % 3) @(negedge clk);
+        hp_rdata  = mem_rd(a + 64'(8 * b));
+        hp_rlast  = b == BEATS - 1;
+        hp_rvalid = 1'b1;
+        do @(posedge clk); while (!hp_rready);
+        @(negedge clk);
+        hp_rvalid = 1'b0;
+        hp_rlast  = 1'b0;
+      end
+    end
+  end
+`elsif BOARD_TOP
+  assign hp_awready = 1'b0;
+  assign hp_wready  = 1'b0;
+  assign hp_bresp   = 2'b00;
+  assign hp_bvalid  = 1'b0;
+  assign hp_arready = 1'b0;
+  assign hp_rdata   = '0;
+  assign hp_rresp   = 2'b00;
+  assign hp_rlast   = 1'b0;
+  assign hp_rvalid  = 1'b0;
 `endif
 
   // ---- AXI4-Lite accesses ----
@@ -304,7 +449,7 @@ module tb_fbu_vs_pin;
     d = bus_rdata;
   endtask
 
-`ifdef BOARD_TOP
+`ifdef BOARD_BRAM
   task automatic mem_port_write(input logic [19:0] a, input logic [31:0] d);
     bus_to_mem = 1;
     bus_addr   = a;
@@ -424,6 +569,12 @@ module tb_fbu_vs_pin;
     if (total_errors() >= max_errors && tb_stop_cyc < 0)
       tb_stop_cyc = longint'(c) + 1;
   endtask
+
+  // tb_err for the HP0 model, which cannot wait for a register read.
+  function automatic void model_err(input string m);
+    tb_errors++;
+    $display("[FBU_TB] ERROR %0t: %s", $time, m);
+  endfunction
 
   function automatic bit after_stop(input logic [63:0] at);
     if (tb_stop_cyc >= 0 && longint'(at) > tb_stop_cyc)
@@ -569,6 +720,15 @@ module tb_fbu_vs_pin;
              v[0], v[1], v[2], v[3], total_errors());
     $display("[FBU_TB] trace written=%0d dropped=%0d", v[4], v[5]);
     $display("[FBU_TB] gate passes=%0d fails=%0d gave_up=%0d", v[7][15:0], v[6][15:0], v[6][16]);
+`ifdef BOARD_DDR
+    reg_read(REG_MEM_STAT, v[0]);
+    reg_read(REG_MEM_READS, v[1]);
+    reg_read(REG_MEM_WRITES, v[2]);
+    reg_read(REG_MEM_LAT_MAX, v[3]);
+    $display("[FBU_TB] ddr reads=%0d writes=%0d lat_max=%0d err=%0d", v[1], v[2], v[3], v[0][0]);
+    if (v[0][0])
+      model_err("MEM_ERR set");
+`endif
     if (pass && total_errors() == 0)
       $display("PIN_TB_RESULT: PASS");
     else if (!pass)
@@ -662,7 +822,7 @@ module tb_fbu_vs_pin;
     return o;
   endfunction
 
-`ifdef BOARD_TOP
+`ifdef BOARD_BRAM
   // Fill every window with what the bench's memory holds there (the image, and
   // its unwritten-memory pattern elsewhere), then read the image back.
   task automatic board_load();
@@ -734,7 +894,7 @@ module tb_fbu_vs_pin;
           tb_err($sformatf("load_lst %s failed", a1));
         else
           $display("[FBU_TB] loaded %0d words from %s", n, a1);
-`ifdef BOARD_TOP
+`ifdef BOARD_BRAM
         board_load();
 `endif
       end
@@ -838,7 +998,7 @@ module tb_fbu_vs_pin;
         void'($sscanf(a2, "%d", v));
         fd = $fopen(a3, "w");
         for (longint i = 0; i < v; i += 8) begin
-`ifdef BOARD_TOP
+`ifdef BOARD_BRAM
           logic [31:0] lo;
           logic [31:0] hi;
           if (window_of(base + 64'(i)) < 0) begin
@@ -1396,6 +1556,7 @@ module tb_fbu_vs_pin;
     if ($value$plusargs("FPGA_MUTATE=%d", v))  mutate = v;
     if ($value$plusargs("FPGA_MEM=%s", s))     mem_policy = s;
     if ($value$plusargs("MEM_LAT=%d", v))      mem_lat = v;
+    if ($value$plusargs("DDR_LAT=%d", v))      ddr_lat = v;
     if ($value$plusargs("MAX_ERRORS=%d", v))   max_errors = v;
     if ($value$plusargs("TOHOST=%h", tohost_addr)) ;
     if ($value$plusargs("TIMEOUT=%d", timeout)) ;

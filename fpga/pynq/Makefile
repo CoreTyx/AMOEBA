@@ -161,6 +161,7 @@ FORTE_FPGA := $(sort $(wildcard $(CURDIR)/rtl/emu/*.sv)) \
               $(sort $(wildcard $(REPO)/fpga/bringup/rtl/fbu_pkg.sv)) \
               $(filter-out %/fbu_pkg.sv,$(sort $(wildcard $(REPO)/fpga/bringup/rtl/*.sv))) \
               $(CURDIR)/rtl/fbu_mem_bram.sv \
+              $(CURDIR)/rtl/fbu_mem_axi_hp.sv \
               $(sort $(wildcard $(CURDIR)/rtl/forte_*.sv)) \
               $(CURDIR)/rtl/forte_pynq_top_v.v
 
@@ -302,7 +303,8 @@ test-top: $(SRCS_F)
 # bench on the same images and knobs and requires identical pin traces.
 FBU_TB_DIR       := $(BUILD)/tb_fbu_vs_pin
 FBU_BOARD_TB_DIR := $(BUILD)/tb_fbu_vs_pin_board
-.PHONY: build-fbu build-fbu-board test-fbu test-fbu-board
+FBU_DDR_TB_DIR   := $(BUILD)/tb_fbu_vs_pin_ddr
+.PHONY: build-fbu build-fbu-board build-fbu-ddr test-fbu test-fbu-board test-fbu-ddr
 
 # $(1) build directory, $(2) extra defines
 define build_fbu_tb
@@ -325,6 +327,15 @@ build-fbu-board: $(SRCS_F)
 
 test-fbu-board: build-fbu-board
 	TB=$(FBU_BOARD_TB_DIR)/Vtb_fbu_vs_pin OUT=$(REPO)/sim/fbu_vs_pin_board bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
+
+# The PYNQ PL top with MEM_AXI: fbu_mem_axi_hp against an AXI3 model of HP0 and
+# DDR.  DET mode needs rd_latency to cover the backend, so both sides run at
+# FORCE_RD_LAT.
+build-fbu-ddr: $(SRCS_F)
+	$(call build_fbu_tb,$(FBU_DDR_TB_DIR),+define+BOARD_TOP +define+BOARD_DDR)
+
+test-fbu-ddr: build-fbu-ddr
+	TB=$(FBU_DDR_TB_DIR)/Vtb_fbu_vs_pin OUT=$(REPO)/sim/fbu_vs_pin_ddr FORCE_RD_LAT=64 bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
 
 test-fbu: build-fbu
 	bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
@@ -443,7 +454,7 @@ endef
 
 .PHONY: bd-forte synth-forte bitstream-forte
 FORTE_BOARD_REPO ?= $(HOME)/Xilinx/Vivado/2024.1/data/boards/board_files/pynq-supported-board-file-master
-FORTE_BITDIR     := $(CURDIR)/bit/forte-BRAM
+FORTE_BITDIR     := $(CURDIR)/bit/forte-$(MEM_BACKEND)
 
 define run_forte_build
 	@mkdir -p $(FORTE_BITDIR) $(BUILD)
@@ -451,7 +462,7 @@ define run_forte_build
 	    -log $(FORTE_BITDIR)/vivado_$(1).log \
 	    -source $(CURDIR)/tcl/build_forte.tcl \
 	    -tclargs $(SRCS_F) $(XILINX_PART) $(BOARD) $(FORTE_BITDIR) \
-	             "$(CONFIG_DEFINES)" "$(INCDIRS)" $(FCLK_MHZ) $(1) $(FORTE_BOARD_REPO)
+	             "$(CONFIG_DEFINES)" "$(INCDIRS)" $(FCLK_MHZ) $(1) $(FORTE_BOARD_REPO) $(MEM_BACKEND)
 endef
 
 bd-forte: $(SRCS_F) check-vivado $(TINFO_DEP)

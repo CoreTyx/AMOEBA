@@ -47,6 +47,7 @@ static void hold_quiet(void) {
 }
 
 int main(void) {
+    UART[2] = 0x07;   // FIFOs on and cleared: the PS sends 'x' and the next mode back to back
     uart_puts("ST READY\n");
     for (;;) {
         char c = get_byte();

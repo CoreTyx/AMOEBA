@@ -2,7 +2,8 @@
 # bd_forte.tcl -- the PYNQ-Z2 block design for DUT=forte.
 #
 #   PS7 GP0 -> interconnect -> forte_pynq_top_v/s_axi_ctl  (4 KiB at ctl_base)
-#                           -> forte_pynq_top_v/s_axi_mem  (1 MiB at mem_base)
+#                           -> forte_pynq_top_v/s_axi_mem  (1 MiB at mem_base, BRAM builds)
+#   forte_pynq_top_v/m_axi_hp -> PS7 S_AXI_HP0 -> DDR carve-out (AXI builds)
 #   FCLK_CLK0 -> everything; proc_sys_reset -> aresetn; led[3:0] -> pins
 #
 # Sourced by build_forte.tcl with the project open.  Reuses
@@ -20,8 +21,15 @@ proc forte_build_bd {args} {
         trace_depth_log2 11
         ctl_base         0x43C00000
         mem_base         0x44000000
+        mem_backend      BRAM
+        ddr_carveout     0x10000000
+        ddr_size         256M
     }
     array set opt $args
+    if {$opt(mem_backend) ni {BRAM AXI}} {
+        error "mem_backend must be BRAM or AXI, not '$opt(mem_backend)'"
+    }
+    set axi [expr {$opt(mem_backend) eq "AXI"}]
 
     if {![amoeba_bd_require_board $opt(board)]} { return 0 }
     if {$opt(board) ne "none"} {
@@ -38,7 +46,8 @@ proc forte_build_bd {args} {
                       Master "Disable" Slave "Disable"] $ps
     set_property -dict [list \
         CONFIG.PCW_USE_M_AXI_GP0             {1} \
-        CONFIG.PCW_USE_S_AXI_HP0             {0} \
+        CONFIG.PCW_USE_S_AXI_HP0             $axi \
+        CONFIG.PCW_S_AXI_HP0_DATA_WIDTH      {64} \
         CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ  $opt(fclk_mhz) \
         CONFIG.PCW_EN_CLK0_PORT              {1} \
         CONFIG.PCW_EN_RST0_PORT              {1} \
@@ -49,22 +58,50 @@ proc forte_build_bd {args} {
     connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins rst_ps7/ext_reset_in]
 
     set dut [create_bd_cell -type module -reference $opt(top) dut]
-    set_property CONFIG.TRACE_DEPTH_LOG2 $opt(trace_depth_log2) $dut
+    set_property -dict [list \
+        CONFIG.TRACE_DEPTH_LOG2 $opt(trace_depth_log2) \
+        CONFIG.MEM_AXI          $axi \
+        CONFIG.DDR_CARVEOUT     [expr {$opt(ddr_carveout)}] \
+    ] $dut
     connect_bd_net [get_bd_pins ps7/FCLK_CLK0]                [get_bd_pins dut/aclk]
     connect_bd_net [get_bd_pins rst_ps7/peripheral_aresetn]   [get_bd_pins dut/aresetn]
     connect_bd_net [get_bd_pins ps7/FCLK_CLK0]                [get_bd_pins ps7/M_AXI_GP0_ACLK]
 
-    foreach slave {dut/s_axi_ctl dut/s_axi_mem} {
+    set gp0_slaves [expr {$axi ? {dut/s_axi_ctl} : {dut/s_axi_ctl dut/s_axi_mem}}]
+    foreach slave $gp0_slaves {
         apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
             -config [list Master {/ps7/M_AXI_GP0} Clk "Auto"] \
             [get_bd_intf_pins $slave]
+    }
+
+    # fbu_mem_axi_hp speaks AXI3 at 64 bits, as HP0 does, so it connects
+    # directly: no converter, no interconnect.  If IPI ever infers the port as
+    # anything else, stop here rather than let it insert something silently.
+    if {$axi} {
+        set hp [get_bd_intf_pins dut/m_axi_hp]
+        set protocol [get_property CONFIG.PROTOCOL $hp]
+        if {$protocol ne "AXI3"} {
+            error "dut/m_axi_hp is inferred as '$protocol', expected AXI3"
+        }
+        connect_bd_net [get_bd_pins ps7/FCLK_CLK0] [get_bd_pins ps7/S_AXI_HP0_ACLK]
+        connect_bd_intf_net $hp [get_bd_intf_pins ps7/S_AXI_HP0]
+        puts "  hp0        : dut/m_axi_hp -> ps7/S_AXI_HP0"
     }
 
     make_bd_pins_external [get_bd_pins dut/led]
     set_property NAME led [get_bd_ports led_0]
 
     amoeba_assign dut/s_axi_ctl/reg0 $opt(ctl_base) 4K
-    amoeba_assign dut/s_axi_mem/reg0 $opt(mem_base) 1M
+    if {$axi} {
+        # The master sees only the carve-out: fbu_mem_axi_hp already maps
+        # EXT_MEM into it, and this clamp keeps anything else out of Linux's
+        # memory by construction.
+        amoeba_assign_master dut/m_axi_hp ps7/S_AXI_HP0/HP0_DDR_LOWOCM \
+            $opt(ddr_carveout) $opt(ddr_size)
+    } else {
+        amoeba_assign dut/s_axi_mem/reg0 $opt(mem_base) 1M
+    }
+    assign_bd_address -quiet
 
     validate_bd_design
     save_bd_design

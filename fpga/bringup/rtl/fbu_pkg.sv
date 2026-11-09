@@ -129,6 +129,16 @@ package fbu_pkg;
   localparam logic [11:0] REG_LINK_RD          = 12'h234;
   localparam logic [11:0] REG_LINK_WR          = 12'h238;
 
+  // The memory backend's status (fbu_mem_axi_hp; zero for fbu_mem_bram).
+  localparam logic [11:0] REG_MEM_STAT         = 12'h240;   // [0] error seen, [9:8] its RRESP/BRESP
+  localparam logic [11:0] REG_MEM_ERR_ADDR     = 12'h244;   // line of the first error
+  localparam logic [11:0] REG_MEM_READS        = 12'h248;
+  localparam logic [11:0] REG_MEM_WRITES       = 12'h24C;
+  localparam logic [11:0] REG_MEM_DROPPED      = 12'h250;   // writes outside EXT_MEM
+  localparam logic [11:0] REG_MEM_LAT_MAX      = 12'h254;   // read: request to response, in clk cycles
+  localparam logic [11:0] REG_MEM_LAT_SUM_LO   = 12'h258;
+  localparam logic [11:0] REG_MEM_LAT_SUM_HI   = 12'h25C;
+
   localparam logic [11:0] REG_TOHOST_ADDR      = 12'h280;
   localparam logic [11:0] REG_TOHOST_STAT      = 12'h284;
   localparam logic [11:0] REG_TOHOST_VAL_LO    = 12'h288;
@@ -181,5 +191,16 @@ package fbu_pkg;
   localparam logic [11:0] REG_SCAN_ADDR        = 12'h608;   // the pattern/capture entry the PS accesses
   localparam logic [11:0] REG_SCAN_PATTERN     = 12'h60C;   // W [7:0] io[7:0], [8] scan_en; then ADDR + 1
   localparam logic [11:0] REG_SCAN_CAPTURE     = 12'h610;   // R io[15:8] captured at ADDR
+
+  typedef struct packed {
+    logic        err;
+    logic [1:0]  first_err_resp;
+    logic [31:0] first_err_addr;
+    logic [31:0] reads;
+    logic [31:0] writes;
+    logic [31:0] dropped_writes;
+    logic [15:0] read_latency_max;
+    logic [47:0] read_latency_sum;
+  } mem_stat_t;
 
 endpackage

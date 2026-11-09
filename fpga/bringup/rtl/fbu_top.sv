@@ -5,6 +5,7 @@
 module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   parameter int BEATS            = 2,
   parameter int TRACE_DEPTH_LOG2 = 11,
+  parameter bit MEM_AXI          = 1'b0,
   localparam int LINE_W          = 64 * BEATS
 )(
   input  logic              clk,
@@ -54,6 +55,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   input  logic              m_rsp_valid,
   input  logic [LINE_W-1:0] m_rsp_data,
   input  logic              m_rsp_err,
+  input  mem_stat_t         mem_stat,
 
   output logic              link_error_seen,
   output logic              tohost_seen,
@@ -498,7 +500,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     case (reg_raddr)
       REG_ID:               reg_rdata = FBU_ID;
       REG_VERSION:          reg_rdata = FBU_VERSION;
-      REG_CAPS:             reg_rdata = {16'd0, 8'(TRACE_DEPTH_LOG2), 4'd0, 4'(BEATS)};
+      REG_CAPS:             reg_rdata = {16'd0, 8'(TRACE_DEPTH_LOG2), 3'd0, MEM_AXI, 4'(BEATS)};
       REG_SCRATCH:          reg_rdata = scratch;
       REG_PARTIAL_WRITES:   reg_rdata = partial_writes;
       REG_PIN_CTRL:         reg_rdata = {24'd0, pin_ctrl};
@@ -526,6 +528,14 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_FIRST_ERR_CYC_HI: reg_rdata = first_err_cyc[63:32];
       REG_LINK_RD:          reg_rdata = link_rd;
       REG_LINK_WR:          reg_rdata = link_wr;
+      REG_MEM_STAT:         reg_rdata = {22'd0, mem_stat.first_err_resp, 7'd0, mem_stat.err};
+      REG_MEM_ERR_ADDR:     reg_rdata = mem_stat.first_err_addr;
+      REG_MEM_READS:        reg_rdata = mem_stat.reads;
+      REG_MEM_WRITES:       reg_rdata = mem_stat.writes;
+      REG_MEM_DROPPED:      reg_rdata = mem_stat.dropped_writes;
+      REG_MEM_LAT_MAX:      reg_rdata = {16'd0, mem_stat.read_latency_max};
+      REG_MEM_LAT_SUM_LO:   reg_rdata = mem_stat.read_latency_sum[31:0];
+      REG_MEM_LAT_SUM_HI:   reg_rdata = {16'd0, mem_stat.read_latency_sum[47:32]};
       REG_TOHOST_ADDR:      reg_rdata = tohost_addr;
       REG_TOHOST_STAT:      reg_rdata = {31'd0, tohost_seen};
       REG_TOHOST_VAL_LO:    reg_rdata = tohost_val[31:0];
