@@ -28,6 +28,22 @@ SCRIPTED = ["irq", "uart_echo", "uart_lsr"]
 OWN_SCRIPT_PREFIX = "fe_"
 
 
+def force_lat(extra, rd_lat):
+    """extra with any --lat replaced by rd_lat (None leaves it alone)."""
+    if rd_lat is None:
+        return extra
+    kept = []
+    skip = False
+    for arg in extra:
+        if skip:
+            skip = False
+        elif arg == "--lat":
+            skip = True
+        else:
+            kept.append(arg)
+    return kept + ["--lat", str(rd_lat)]
+
+
 def run(here, image, script, out, extra, bitstream):
     cmd = [sys.executable, os.path.join(here, "run_cmd.py"), image]
     if script:
@@ -50,6 +66,9 @@ def main():
     ap.add_argument("--images", default=os.path.join(here, "..", "images"))
     ap.add_argument("--scripts", default=os.path.join(here, "..", "scripts"))
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--rd-lat", type=int,
+                    help="one rd_latency for every run, in place of the knobs' (the DDR build "
+                         "needs one above its worst read latency, as FORCE_RD_LAT in the gate)")
     a = ap.parse_args()
 
     bitstream = a.bitstream
@@ -61,13 +80,14 @@ def main():
         if name in SCRIPTED:
             out = os.path.join("runs", name, "script")
             os.makedirs(out, exist_ok=True)
-            rows.append((name, "script") + run(here, image, os.path.join(a.scripts, name + ".cmd"), out, [], bitstream))
+            rows.append((name, "script") + run(here, image, os.path.join(a.scripts, name + ".cmd"), out,
+                                               force_lat([], a.rd_lat), bitstream))
             bitstream = None
             continue
         for knob, extra in (KNOBS[:1] if a.quick else KNOBS):
             out = os.path.join("runs", name, knob)
             os.makedirs(out, exist_ok=True)
-            rows.append((name, knob) + run(here, image, None, out, extra, bitstream))
+            rows.append((name, knob) + run(here, image, None, out, force_lat(extra, a.rd_lat), bitstream))
             bitstream = None
         print(f"  {name} done", flush=True)
 
