@@ -11,6 +11,7 @@ script: load, reset 16, run to tohost, expect exit code 0."""
 
 import argparse
 import os
+import signal
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -41,10 +42,15 @@ def main():
     out = a.out or os.path.join("runs", name)
     os.makedirs(out, exist_ok=True)
 
+    # A timeout's SIGTERM must still reach dev.hold() below.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     dev = Forte(a.bitstream, a.fclk)
     dev.configure(seed=a.seed, gap_pct=a.gap, rd_lat=a.lat, wdog=a.wdog, mutate=a.mutate,
                   det=not a.nodet, stop_on_error=a.max_errors == 1, boot_gate=a.boot_gate)
     run = Run(dev, os.path.join(out, "pin_trace.log"), os.path.join(out, "uart.log"), a.max_errors)
+    # The bitstream is loaded once per boot, so this run's DDR traffic is the
+    # difference from here.
+    mem_before = dev.mem_status() if dev.is_ddr else None
 
     if a.script:
         image = os.path.abspath(a.image)
@@ -53,19 +59,28 @@ def main():
         lines = [f"load_lst {a.image}", "reset 16", f"run_until_tohost {a.timeout}", "expect_tohost 0"]
 
     result = ""
-    for n, line in enumerate(lines, 1):
-        result = run.execute(line, n)
-        if result:
-            break
-    result = run.verdict(result or "PASS")
+    try:
+        for n, line in enumerate(lines, 1):
+            result = run.execute(line, n)
+            if result:
+                break
+        result = run.verdict(result or "PASS")
+    finally:
+        dev.hold()
 
     print(f"[FORTE] link_rd={dev.rd(R.REG_LINK_RD)} link_wr={dev.rd(R.REG_LINK_WR)} errors={run.total_errors()} "
           f"trace_dropped={dev.rd(R.REG_TRACE_DROPPED)}")
     if dev.is_ddr:
         m = dev.mem_status()
-        print(f"[FORTE] ddr reads={m['reads']} writes={m['writes']} dropped={m['dropped']} "
-              f"lat_max={m['lat_max']} lat_mean={m['lat_mean']:.1f} err={m['err']}")
-        if m["err"] and result == "PASS":
+        reads = m["reads"] - mem_before["reads"]
+        lat_mean = (m["lat_sum"] - mem_before["lat_sum"]) / reads if reads else 0.0
+        print(f"[FORTE] ddr reads={reads} writes={m['writes'] - mem_before['writes']} "
+              f"dropped={m['dropped'] - mem_before['dropped']} lat_mean={lat_mean:.1f} "
+              f"lat_max_since_load={m['lat_max']} err={m['err']}")
+        if mem_before["err"]:
+            print(f"[FORTE] note: HP0 error flag was already set before this run "
+                  f"(response {m['err_resp']} on line 0x{m['err_addr']:08x}); reload the bitstream to clear it")
+        elif m["err"] and result == "PASS":
             print(f"[FORTE] ERROR: HP0 response {m['err_resp']} on line 0x{m['err_addr']:08x}")
             result = "FAIL"
     line = f"PIN_TB_RESULT: {result}"

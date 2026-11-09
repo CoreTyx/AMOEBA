@@ -1,6 +1,7 @@
 """The bring-up gateware on the PYNQ-Z2, driven the way tb_fbu_vs_pin's PS model
 drives it in simulation (fpga/bringup/tb/tb_fbu_vs_pin.sv, BOARD_TOP)."""
 
+import hashlib
 import os
 import struct
 import sys
@@ -63,10 +64,36 @@ def contiguous_runs(image: dict):
         yield run_start, run
 
 
+# What this boot last loaded (/run is cleared at boot).  Reloading the DDR
+# build wedges the PS after a few loads (the configuration DMA's DDR reads
+# time out), so a bitstream already in the PL is not loaded again.
+LOADED_MARK = "/run/forte_loaded"
+
+
+def file_md5(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.md5(fh.read()).hexdigest()
+
+
+def program_once(bitstream: str, fclk_mhz: float) -> None:
+    digest = file_md5(bitstream)
+    try:
+        with open(LOADED_MARK) as fh:
+            loaded = fh.read().strip()
+    except OSError:
+        loaded = ""
+    if loaded == digest and pl._fpga_state() == "operating":
+        print(f"# {os.path.basename(bitstream)} already loaded; FCLK0 -> {pl.set_fclk0_mhz(fclk_mhz):.3f} MHz")
+        return
+    pl.program(bitstream, fclk_mhz=fclk_mhz)
+    with open(LOADED_MARK, "w") as fh:
+        fh.write(digest + "\n")
+
+
 class Forte:
     def __init__(self, bitstream: str = None, fclk_mhz: float = 25.0):
         if bitstream:
-            pl.program(bitstream, fclk_mhz=fclk_mhz)
+            program_once(bitstream, fclk_mhz)
         self.ctl = Mmio(R.CTL_BASE, R.CTL_SPAN)
         found = self.ctl.read(R.REG_ID)
         if found != R.FBU_ID:
@@ -171,10 +198,9 @@ class Forte:
             raise RuntimeError(f"{bad} image words read back wrong")
 
     def _load_ddr(self, image: dict, policy: str, fill: bool) -> None:
-        outside = [k for k in image if not EXT_MEM_BASE <= k * 8 < EXT_MEM_END]
-        if outside:
-            raise RuntimeError(f"{len(outside)} image words fall outside EXT_MEM, "
-                               f"first at 0x{outside[0] * 8:08X}")
+        # Words outside EXT_MEM (generate_memory_file.py's UART LSR word for the
+        # sim models) are the chip's own registers, as in _load_bram.
+        image = {k: w for k, w in image.items() if EXT_MEM_BASE <= k * 8 < EXT_MEM_END}
         if fill:
             for base, size in R.MEM_WINDOWS:
                 blob = bytearray(size)
@@ -198,13 +224,16 @@ class Forte:
         return self.mem.read(o) | (self.mem.read(o + 4) << 32)
 
     def mem_status(self) -> dict:
-        """fbu_mem_axi_hp's counters (all zero in BRAM builds)."""
+        """fbu_mem_axi_hp's counters (all zero in BRAM builds).  They count from
+        the PL's load, not the run: the error flag is sticky and lat_max is the
+        worst since the load."""
         stat = self.rd(R.REG_MEM_STAT)
         reads = self.rd(R.REG_MEM_READS)
         lat_sum = self.rd64(R.REG_MEM_LAT_SUM_LO)
         return {"err": stat & 1, "err_resp": (stat >> 8) & 3, "err_addr": self.rd(R.REG_MEM_ERR_ADDR),
                 "reads": reads, "writes": self.rd(R.REG_MEM_WRITES), "dropped": self.rd(R.REG_MEM_DROPPED),
-                "lat_max": self.rd(R.REG_MEM_LAT_MAX), "lat_mean": lat_sum / reads if reads else 0.0}
+                "lat_max": self.rd(R.REG_MEM_LAT_MAX), "lat_sum": lat_sum,
+                "lat_mean": lat_sum / reads if reads else 0.0}
 
     # ---- pins ----
     def set_pins(self, **fields) -> None:
@@ -218,6 +247,14 @@ class Forte:
     def reset(self, cycles: int) -> None:
         self.wr(R.REG_RST_PULSE, cycles + 1)
         self.set_pins(release=1)
+
+    def hold(self) -> None:
+        """Hold the chip in reset and let the memory backend finish what it
+        started.  Every run ends here: a chip left running keeps HP0 busy, and
+        reprogramming the PL under an HP0 transaction wedges the PS (the next
+        load's DMA fails, then the PS locks up)."""
+        self.set_pins(release=0)
+        time.sleep(0.01)
 
     def irq(self, line: int, level: int) -> None:
         irq = R.unpack(R.REG_PIN_CTRL, self.rd(R.REG_PIN_CTRL), "irq")

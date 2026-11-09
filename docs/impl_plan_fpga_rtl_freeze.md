@@ -761,6 +761,23 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
     `/dev/mem` with `O_SYNC` (uncached: HP0 is not coherent with the A9's
     caches). Trace runs fill the same three windows as the BRAM build with the
     bench's unwritten pattern; `load_lst(fill=False)` loads an image alone.
+    Words outside EXT_MEM (the sim models' UART LSR word) are skipped, as in
+    the BRAM build.
+  - **Load the bitstream once per boot.** Reloading any HP0 design wedges the
+    PS within 4-5 loads: the configuration DMA's DDR reads time out
+    (`INT_STS 0x220000`), `fpga_manager` stays in `write init error`, and a
+    soft reboot halts (power cycle needed). `forte-AXI` failed on load 4 and
+    AMOEBA's `baremetal_linux-AXI` on load 5, both with the chip never
+    released; BRAM builds reload freely. `Forte` therefore loads only when
+    `/run/forte_loaded` (cleared at boot, voided by any `pl.program`) names a
+    different bitstream. Every run ends with the chip held in reset
+    (`Forte.hold`, also on SIGTERM), so HP0 is idle whenever the PS acts. The
+    `MEM_*` counters then count from the load: `run_cmd.py` prints per-run
+    differences, and a sticky `MEM_ERR` from an earlier run is reported, not
+    charged to the current one.
+  - **Board results (rd_latency 64, 25 MHz).** smoke and sorting_algo, 30
+    runs from one load: all PASS, traces match the bench cycle for cycle,
+    read latency mean 14 and max 24 cycles, no HP0 errors.
   - **Verification.** `make test-mem-axi-hp`: the backend against an AXI3
     model that applies a write only when it sends B (so a read issued early
     reads stale data), with random ready and latency, SLVERR lines and chip
@@ -1338,6 +1355,11 @@ real code is low.
 
 ## 13. Backlog (TODO, not scheduled)
 
+- **Root-cause the HP0 reload wedge** (§5.10). Candidates: AFI/HP0 state
+  the PL teardown leaves behind, or the boot design's PS7 settings for HP0
+  that `fpga_manager` loads do not apply. Sample the AFI registers
+  (`psmon.py`) before and after loads; try a reload with HP0 clock-gated.
+  Until then, one load per boot.
 - **Review the `irq.c` wait-loop fix with the bench owners** (changed on
   `fpga/rtl_freeze` only). `while (!(seen3 && seen6)) wfi;` ran with MIE on:
   IRQ6 taken between the `seen6` load and `wfi` returned into `wfi` and the

@@ -287,6 +287,11 @@ def program(path: str, fclk_mhz: Optional[float] = 25.0,
     """
     if not os.path.exists(path):
         raise FileNotFoundError(path)
+    # forte.device.program_once's record of what is loaded is void from here.
+    try:
+        os.remove("/run/forte_loaded")
+    except OSError:
+        pass
 
     t0 = time.monotonic()
     part = bit_part(path)
