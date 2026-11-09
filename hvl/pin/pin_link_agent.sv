@@ -7,10 +7,10 @@
 // source drives the RTL forte_top and the synthesized netlist.
 //
 // TIMING.  Behavioural, on two clocks, the way the board sees them:
-//   launch   FPGA outputs (io, ready, rvalid) change TCO after the core_clk
+//   launch   FPGA outputs (io_in, ready, rvalid) change TCO after the core_clk
 //            posedge.  The chip captures inbound pins on the link_clk NEGEDGE
 //            (forte_link_phy), so TCO must stay below half a period.
-//   capture  chip outputs (dir, req, wr, io) are sampled SAMPLE after the
+//   capture  chip outputs (req, wr, io_out) are sampled SAMPLE after the
 //            clk_out posedge.  clk_out is the forwarded link clock, so in an
 //            SDF run this tracks the chip's own insertion delay, as on the board.
 // Sampling mid-cycle and launching after the edge is race-free in RTL, in a
@@ -25,12 +25,15 @@
 // back per mem_policy: "x" (4-state stress -- garbage on the bus is X, not a
 // value that happens to work), "zero", or "rand" (seeded; what DRAM looks like).
 //
-// CHECKS (pin level only).  No X/Z on dir/req/wr; no X/Z on io while the chip
-// owns it inside a transaction; req only with dir=1, exactly ADDR_WORDS cycles,
-// never mid-transaction; wr held; no contention (the agent never drives while
-// dir=1); TA honoured after the last rvalid; every address inside EXT_MEM and
-// line-aligned; the first transaction after reset is a read of RESET_VECTOR;
-// a req arriving more than GUARD cycles after ready fell is a protocol error.
+// CHECKS (pin level only).  No X/Z on req/wr, ever; no X/Z on io_out, ever --
+// the chip drives it continuously, and parks it at 0 between transactions;
+// req for exactly ADDR_WORDS cycles, never mid-transaction; wr held; every
+// address inside EXT_MEM and line-aligned; the first transaction after reset
+// is a read of RESET_VECTOR; a req arriving more than GUARD cycles after ready
+// fell is a protocol error.
+//
+// The link is two one-way buses (io_out from the chip, io_in to it), so there
+// is no bus ownership to check: no dir, no contention, no turnaround.
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 
@@ -43,15 +46,16 @@ module pin_link_agent import forte_link_pkg::*; #(
   input  logic              core_clk,
   input  logic              clk_out,
   input  logic              rst_n,           // the pin the agent itself drives (via the tb)
-  inout  wire  [LINK_W-1:0] io,
-  input  wire               dir,
+  input  wire  [LINK_W-1:0] io_out,          // chip -> FPGA
+  output logic [LINK_W-1:0] io_in,           // FPGA -> chip
   input  wire               req,
   input  wire               wr,
   output logic              ready,
   output logic              rvalid
 );
 
-  localparam int WORDS     = 4 * BEATS;      // 16-bit words per transaction
+  localparam int WPB       = WORDS_PER_BEAT; // link words per 64-bit beat
+  localparam int WORDS     = WPB * BEATS;    // link words per transaction
   localparam int LINE_B    = 8 * BEATS;      // bytes per line
   localparam int GUARD     = 3;              // see "the ready guard band", forte_link_pkg
 
@@ -60,7 +64,7 @@ module pin_link_agent import forte_link_pkg::*; #(
   real         sample_ns  = 5.0;             // +FPGA_SAMPLE_PS
   int          rd_latency = 0;               // extra cycles before the first word
   int          gap_pct    = 0;               // % of cycles ready/rvalid withheld
-  string       idle_drive = "z";             // io when not validly driving: z|x
+  string       idle_drive = "0";             // io_in when no read word is on it: 0|x|z
   string       mem_policy = "rand";
   int unsigned seed       = 1;
   logic [63:0] tohost_addr = 64'h8080_0000;
@@ -180,12 +184,12 @@ module pin_link_agent import forte_link_pkg::*; #(
   // ---- pin drivers ---------------------------------------------------------
   logic [LINK_W-1:0] io_val;
   logic              io_en;
-  logic              idle_x = 1'b0;        // idle_drive == "x", as a plain bit for the assign
-  // FPGA_IO_IDLE=x drives X only while the chip has RELEASED the bus (dir=0)
-  // and no read word is being returned -- garbage on a floating bus.  While
-  // dir=1 the chip owns io and the FPGA must not drive it at all; driving X
-  // there would be contention, not a model of anything on the board.
-  assign io = io_en ? io_val : ((idle_x && dir === 1'b0) ? {LINK_W{1'bx}} : {LINK_W{1'bz}});
+  logic [LINK_W-1:0] io_idle = '0;         // idle_drive, as a value for the assign
+  // io_in is the FPGA's alone, so between read words it can hold anything.
+  // FPGA_IO_IDLE picks what: 0 (the default, what the FPGA slave does), x
+  // (garbage -- proves the chip only looks at io_in under rvalid) or z (FPGA
+  // pins not yet driven, as before configuration).
+  assign io_in = io_en ? io_val : io_idle;
 
   initial begin
     int v;
@@ -196,7 +200,8 @@ module pin_link_agent import forte_link_pkg::*; #(
     if ($value$plusargs("FPGA_GAP_PCT=%d", v))    gap_pct   = v;
     if ($value$plusargs("FPGA_SEED=%d", v))       seed      = v;
     if ($value$plusargs("FPGA_IO_IDLE=%s", s))    idle_drive = s;
-    idle_x = (idle_drive == "x");
+    io_idle = (idle_drive == "x") ? {LINK_W{1'bx}} :
+              (idle_drive == "z") ? {LINK_W{1'bz}} : {LINK_W{1'b0}};
     if ($value$plusargs("FPGA_MEM=%s", s))        mem_policy = s;
     if ($value$plusargs("FPGA_TRACE=%s", s))      trace_path = s;
     if ($value$plusargs("FPGA_MUTATE=%d", v))     mutate    = v;
@@ -214,12 +219,11 @@ module pin_link_agent import forte_link_pkg::*; #(
   // Each sampler iteration is one link cycle: sample what the chip launched on
   // this clk_out edge and decide; the launcher drives the decision TCO after
   // the next core_clk edge.
-  typedef enum {A_IDLE, A_HDR, A_WDATA, A_RD_TA, A_RD_LAT, A_RD_DATA, A_RD_REL} st_t;
+  typedef enum {A_IDLE, A_HDR, A_WDATA, A_RD_LAT, A_RD_DATA} st_t;
   st_t         st;
-  int          hdr_n, wcnt, ta_cnt, lat_cnt, rel_cnt, notready_cnt;
+  int          hdr_n, wcnt, lat_cnt, notready_cnt;
   logic [31:0] addr;
   logic        twr;
-  logic [15:0] hdr_hi;
   logic [63:0] line_w[];               // beats of the current transaction
   bit          first_xact;
   longint      xact_start;
@@ -227,12 +231,12 @@ module pin_link_agent import forte_link_pkg::*; #(
 
   function automatic bit unk(input logic [LINK_W-1:0] v); return $isunknown(v); endfunction
 
-  // Who owns io right now, for an X on the bus: the chip's dir and when it
-  // last changed, and the agent's own drive.  Works without a waveform.
-  realtime dir_t = 0;
-  always @(dir) dir_t = $realtime;
+  // Where the chip is, for an X on io_out: when req last changed, and what the
+  // pins show now.  Works without a waveform.
+  realtime req_t = 0;
+  always @(req) req_t = $realtime;
   function automatic string bus_state();
-    return $sformatf("dir=%b since %0t, agent io_en=%b idle_x=%b, io now=%h", dir, dir_t, io_en, idle_x, io);
+    return $sformatf("req=%b since %0t, wr=%b, io_out now=%h", req, req_t, wr, io_out);
   endfunction
 
   task automatic finish_xact();
@@ -257,7 +261,7 @@ module pin_link_agent import forte_link_pkg::*; #(
   end
 
   initial begin : sampler
-    logic s_dir, s_req, s_wr;
+    logic s_req, s_wr;
     logic [LINK_W-1:0] s_io;
     bit gap;
     line_w = new[BEATS];
@@ -265,7 +269,7 @@ module pin_link_agent import forte_link_pkg::*; #(
     forever begin
       @(posedge clk_out);
       #(sample_ns);
-      s_dir = dir; s_req = req; s_wr = wr; s_io = io;
+      s_req = req; s_wr = wr; s_io = io_out;
 
       n_rvalid = 1'b0; n_en = 1'b0;
 
@@ -280,14 +284,14 @@ module pin_link_agent import forte_link_pkg::*; #(
         gap = (gap_pct > 0) && ((rand64() % 100) < 64'(gap_pct));
 
         // -- always-on pin checks --------------------------------------------
-        if ($isunknown({s_dir, s_req, s_wr})) err($sformatf("X/Z on dir/req/wr = %b%b%b", s_dir, s_req, s_wr));
-        if (s_req && !s_dir) err("req while dir=0");
-        if (io_en && s_dir === 1'b1) err("contention: agent driving io while dir=1");
-        if (io_en && s_io !== io_val) err($sformatf("io resolves to %h while agent drives %h", s_io, io_val));
+        if ($isunknown({s_req, s_wr})) err($sformatf("X/Z on req/wr = %b%b", s_req, s_wr));
+        // Header and write words have their own, more specific, messages below.
+        if (unk(s_io) && !(st == A_IDLE && s_req === 1'b1) && st != A_HDR && st != A_WDATA)
+          err($sformatf("X/Z on io_out outside a transaction: %h  [%s]", s_io, bus_state()));
         notready_cnt = ready ? 0 : notready_cnt + 1;
 
         // Watchdog (the FPGA's WDOG): a transaction that has not finished in
-        // WDOG_CYC link cycles is a hang -- e.g. dir never falls for a read.
+        // WDOG_CYC link cycles is a hang -- e.g. a write that stops short.
         // Reported once per transaction, the moment it happens, instead of
         // after the whole run's timeout.
         if (st != A_IDLE && cyc - xact_start == longint'(wdog_cyc))
@@ -298,35 +302,39 @@ module pin_link_agent import forte_link_pkg::*; #(
           A_IDLE: begin
             if (s_req === 1'b1) begin
               if (notready_cnt > GUARD) err($sformatf("req %0d cycles after ready fell (guard band %0d)", notready_cnt, GUARD));
-              if (unk(s_io)) err($sformatf("X/Z on io in header word 0: %h  [%s]", s_io, bus_state()));
-              hdr_hi = s_io; twr = s_wr; xact_start = cyc; st = A_HDR;
+              if (unk(s_io)) err($sformatf("X/Z on io_out in header word 0: %h  [%s]", s_io, bus_state()));
+              addr = 32'(s_io); hdr_n = 1; twr = s_wr; xact_start = cyc; st = A_HDR;
             end
           end
           A_HDR: begin
-            if (s_req !== 1'b1) err("req dropped after one header word");
+            if (s_req !== 1'b1) err($sformatf("req dropped after %0d header words, not %0d", hdr_n, ADDR_WORDS));
             if (s_wr !== twr) err("wr changed inside the header");
-            if (unk(s_io)) err($sformatf("X/Z on io in header word 1: %h  [%s]", s_io, bus_state()));
-            addr = {hdr_hi, s_io};
-            if (addr < MEM_BASE || addr > MEM_LIMIT) err($sformatf("address %08h outside EXT_MEM", addr));
-            if (addr % LINE_B != 0) err($sformatf("address %08h not line-aligned", addr));
-            if (first_xact && (twr || addr != RESET_VEC))
-              err($sformatf("first transaction is %s %08h, expected read of %08h", twr ? "write" : "read", addr, RESET_VEC));
-            first_xact = 0;
-            wcnt = 0;
-            if (twr) st = A_WDATA;
-            else begin
-              for (int b = 0; b < BEATS; b++) line_w[b] = mem_rd({32'b0, addr} + 64'(8 * b));
-              if (mutate == 1 && n_rd == 0) line_w[0] = ~line_w[0];   // self-test: corrupt the reset-vector fetch
-              ta_cnt = 0; st = A_RD_TA;
+            if (unk(s_io)) err($sformatf("X/Z on io_out in header word %0d: %h  [%s]", hdr_n, s_io, bus_state()));
+            addr = {addr[31-LINK_W:0], s_io};
+            hdr_n++;
+            if (hdr_n == ADDR_WORDS) begin
+              if (addr < MEM_BASE || addr > MEM_LIMIT) err($sformatf("address %08h outside EXT_MEM", addr));
+              if (addr % LINE_B != 0) err($sformatf("address %08h not line-aligned", addr));
+              if (first_xact && (twr || addr != RESET_VEC))
+                err($sformatf("first transaction is %s %08h, expected read of %08h", twr ? "write" : "read", addr, RESET_VEC));
+              first_xact = 0;
+              wcnt = 0;
+              if (twr) st = A_WDATA;
+              else begin
+                for (int b = 0; b < BEATS; b++) line_w[b] = mem_rd({32'b0, addr} + 64'(8 * b));
+                if (mutate == 1 && n_rd == 0) line_w[0] = ~line_w[0];   // self-test: corrupt the reset-vector fetch
+                // No turnaround: io_in is ours, so the first word may go out on
+                // the very next launch.
+                lat_cnt = rd_latency; st = (rd_latency > 0) ? A_RD_LAT : A_RD_DATA;
+              end
             end
             n_ready = 1'b0;
           end
           A_WDATA: begin
             if (s_req === 1'b1) err("req during write data");
-            if (s_dir !== 1'b1) err("dir fell during write data");
             if (s_wr !== 1'b1) err("wr dropped during write data");
-            if (unk(s_io)) err($sformatf("X/Z on io in write word %0d of %08h: %h", wcnt, addr, s_io));
-            line_w[wcnt / 4][16 * (wcnt % 4) +: 16] = s_io;
+            if (unk(s_io)) err($sformatf("X/Z on io_out in write word %0d of %08h: %h", wcnt, addr, s_io));
+            line_w[wcnt / WPB][LINK_W * (wcnt % WPB) +: LINK_W] = s_io;
             wcnt++;
             if (wcnt == WORDS) begin
               for (int b = 0; b < BEATS; b++) mem_wr({32'b0, addr} + 64'(8 * b), line_w[b], 8'hFF);
@@ -342,31 +350,19 @@ module pin_link_agent import forte_link_pkg::*; #(
               st = A_IDLE;
             end
           end
-          A_RD_TA: begin
-            if (s_req === 1'b1) err("req during read turnaround");
-            if (s_dir === 1'b0) ta_cnt++; else ta_cnt = 0;
-            if (ta_cnt >= TA) begin lat_cnt = rd_latency; st = (rd_latency > 0) ? A_RD_LAT : A_RD_DATA; end
-          end
           A_RD_LAT: begin
-            if (s_dir !== 1'b0) err("dir rose during read latency");
+            if (s_req === 1'b1) err("req during read latency");
             lat_cnt = lat_cnt - 1;
             if (lat_cnt == 0) st = A_RD_DATA;
           end
           A_RD_DATA: begin
-            if (s_dir !== 1'b0) err("dir rose during read data");
             if (s_req === 1'b1) err("req during read data");
             if (!gap && !(mutate == 3 && n_rd == 10 && wcnt == WORDS - 1)) begin   // 3: drop a word
               n_en = 1'b1; n_rvalid = 1'b1;
-              n_val = line_w[wcnt / 4][16 * (wcnt % 4) +: 16];
+              n_val = line_w[wcnt / WPB][LINK_W * (wcnt % WPB) +: LINK_W];
               wcnt++;
-              if (wcnt == WORDS) begin finish_xact(); rel_cnt = 0; st = A_RD_REL; end
+              if (wcnt == WORDS) begin finish_xact(); st = A_IDLE; end
             end
-          end
-          A_RD_REL: begin
-            // TA after the last rvalid before the chip may take the bus back.
-            rel_cnt++;
-            if (s_dir === 1'b1 && rel_cnt <= TA) err($sformatf("dir rose %0d cycles after last rvalid (TA=%0d)", rel_cnt, TA));
-            if (rel_cnt >= TA) st = A_IDLE;
           end
         endcase
 

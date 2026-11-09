@@ -25,12 +25,10 @@ export SRAM_LIB = $(shell find $(CURDIR)/../sram/output/ -name "*.db")
 # Overridable so `make synth DESIGN_TOP=forte_top` synthesizes the ASIC top.
 export DESIGN_TOP ?= rv64_core_wrapper
 
-# Vendored OpenTitan primitives for the link CDC (third_party/opentitan).
-# prim_assert.sv is a macro header included by prim_fifo_async, so it goes on
-# synthesis.tcl's search_path rather than into the source list.
-PRIM_SRCS      := $(CURDIR)/../third_party/opentitan/prim_flop_2sync.sv \
-                  $(CURDIR)/../third_party/opentitan/prim_fifo_async.sv
-export HDL_SRCS := $(HDL_SRCS) $(PRIM_SRCS)
+# The vendored OpenTitan primitives for the link CDC (prim_flop_2sync,
+# prim_fifo_async, and the prim_assert.sv macro header they include) live in
+# hdl/ since 1c0c0d9 and come in through TOP_SRCS above.  Listing them again
+# from third_party/opentitan/, where they no longer exist, failed analysis.
 export PKG_SRCS := $(PKG_SRCS) $(LINK_PKG)
 
 export STD_CELL_LIB=$(FREEPDK45)/stdcells.db

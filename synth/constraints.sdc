@@ -22,8 +22,8 @@ set_false_path -from [get_ports {irq[*] uart_rx fault_inject test_mode scan_en}]
 # ---- link ---------------------------------------------------------------
 # FPGA launches on the rising edge; delays are FPGA clock-to-out + board
 # trace (max) and the minimum of the same (min), relative to core_clk at our pad.
-set link_in  [get_ports {io[*] ready rvalid}]
-set link_out [get_ports {io[*] dir req wr burst}]
+set link_in  [get_ports {io_in[*] ready rvalid}]
+set link_out [get_ports {io_out[*] req wr}]
 set_input_delay  -clock my_clk -max 4.0  $link_in                  ;# PLACEHOLDER: Tco_fpga(max) + trace
 set_input_delay  -clock my_clk -min 1.0  $link_in                  ;# PLACEHOLDER: Tco_fpga(min) + trace
 set_output_delay -clock my_clk -max 3.0  $link_out                 ;# PLACEHOLDER: FPGA Tsu + trace

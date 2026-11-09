@@ -72,8 +72,8 @@ set TIMING_PROBES [subst -nocommands {
    "Pads"
    fault_inject        {get_ports fault_inject}               {}                                   {}
    fault_inject_units  {probe_ck $core/faultinjectreg/*}      {}                                   {}
-   link_in             {get_ports {io[*] ready rvalid}}       {}                                   {}
-   link_out            {}                                     {}                                   {get_ports {io[*] dir req wr}}
+   link_in             {get_ports {io_in[*] ready rvalid}}    {}                                   {}
+   link_out            {}                                     {}                                   {get_ports {io_out[*] req wr}}
 }]
 
 proc timing_probes {outfile} {

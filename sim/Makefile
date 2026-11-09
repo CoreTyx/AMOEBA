@@ -108,7 +108,7 @@ export VCS_ARCH_OVERRIDE=linux
 # DUT selects the device under test.  legacy is rv64_core_wrapper
 # (wallypipelinedsoc + ahb_to_memitf, the CI reference); forte is the ASIC
 # top behind hvl/common/forte_dut_wrap.sv, talking to memory over the
-# 16-bit link through forte_link_model.  Same testbench, same checkers.
+# 8-in/8-out link through forte_link_model.  Same testbench, same checkers.
 #
 #     make run_isa_level DUT=forte PROG=...
 #     make linux_boot    DUT=forte

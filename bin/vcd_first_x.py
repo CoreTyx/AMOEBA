@@ -15,7 +15,7 @@ regular expression -- e.g. control (pointers, valids, state) rather than data
 paths, which go X harmlessly whenever their valid is low.
 
 --show prints every value change of the signals matching REGEX (time, value,
-name) up to --until (ns, default 1000) instead -- e.g. what dir/req/io do
+name) up to --until (ns, default 1000) instead -- e.g. what req/io_out/io_in do
 through reset, for a signal that was never known and so never shows above.
 
 Made for hvl/pin/pin_tb.sv's +PIN_VCD dumps (build with WAVES=1).
