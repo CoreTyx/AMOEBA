@@ -4,3 +4,6 @@ reports
 outputs
 *.log
 default.svf
+sim
+regressions
+

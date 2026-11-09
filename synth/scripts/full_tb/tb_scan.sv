@@ -18,20 +18,26 @@
 // between each cell and scan-out (b_inv) is known too, so any value can be
 // loaded into the flops and read out of them exactly.
 //
-// WHY CAPTURES ARE PREDICTABLE.  With ready=0 the first fetch never completes:
-// IFUStallF stalls every stage (hazard.sv), so a register with a ~Stall enable
-// holds what is loaded, and with the fetch committed no exception can trap
-// (trap.sv: TrapM = ExceptionM & ~CommittedF).  A flush can still happen
-// (mret, CSR write fence, branch mispredict), and those come from the control
-// registers, so those (kind CTRL) are only ever loaded with their reset value.
+// SINGLE-CAPTURE CONTRACT. load_in_reset aligns the first capture with the
+// first functional edge after reset (RST_LAT must match the reset pipeline).
+// The unscanned FetchCheckedQ is still reset to zero: the IFU fetch-check
+// interlock holds the pipeline for that edge, provided no HPTW fault or flush
+// overrides it. CTRL cells stay at their checked reset baseline, leaving no
+// valid older instruction to branch, return, write a CSR, or trap. This is a
+// directed first-edge expectation, not a guarantee supplied by ready=0.
+// Subsequent edges can advance unscanned fetch/cache/bus state, and a flush
+// can release the stall. Reloading base does not restore that unscanned state.
+// +SCAN_SWEEP enables the longer D/E retention experiments explicitly; their
+// unchanged-state expectation is diagnostic and their failures remain fatal.
 // The ECC registers repair a 1-bit error even while stalled, so they are only
 // loaded with valid codewords except where a check injects an error on purpose.
 // While a load shifts, every pattern passes through the control cells upstream
 // of it, and with the stall released by a passing branch bit the logic OFF the
 // chains (CSRs, bus FSM, register file) would act on them.  So every load holds
 // the functional reset through the shift and releases it as the last bit goes
-// in (load_in_reset): at the capture edge everything off the chains is in its
-// reset state, as in B.  Scan cells take SI whatever reset does: the core's
+// in (load_in_reset). Each independent case first gets a functional reset
+// with scan disabled. This isolates test history; it does not recreate B's
+// 200-clock non-scan state. Scan cells take SI whatever reset does: the core's
 // resets are synchronous.
 // Every check loads all cells: the register under test gets its pattern, every
 // other cell its value after B's reset ("base").  Every cell is compared on
@@ -49,16 +55,16 @@
 //                   of the DFT lock.  Prints each chain's registers, the bits a
 //                   register has no cell for (constant or merged flops), and the
 //                   cells per group.
-//   B  reset        reset, run with ready=0 (the pipeline sits stalled), shift
+//   B  reset        reset, run 200 clocks without external responses, shift
 //                   out: every cell must hold its register's reset value (X only
 //                   where the register has no reset).  What is read is "base".
 //   C  round trip   random data in, the same data (through inv[k]) out.
-//   D  hold         base loaded, one capture edge in test mode, unloaded: every
-//                   cell unchanged.  Again with 50 functional cycles.
+//   D  capture      base loaded, one capture edge in test mode, unloaded: every
+//                   cell unchanged. Long holds only with +SCAN_SWEEP.
 //   E  PC           PC values held, every other cell at base: all 0, all 1,
 //                   checkerboards, walking 1 and walking 0 over every PC bit,
-//                   random; a few with a functional-mode hold, at PCs in
-//                   EXT_MEM (FETCH_BASE/FETCH_MASK) so the fetch waits on the bus.
+//                   random. +SCAN_SWEEP adds functional-mode hold experiments
+//                   at EXT_MEM PCs (FETCH_BASE/FETCH_MASK).
 //   P  registers    each DATA, ECC, MPP, STICKY and MSECFAULT register on its
 //                   own: all 1, 0x5555..., 0xAAAA..., random (an ECC register
 //                   gets the codeword of each), one capture edge.  Then all six
@@ -87,7 +93,7 @@
 // Pins follow docs/top_level_plan.md s3: test_mode static for the session,
 // scan enable toggled per cycle on scan_en.  In test mode the chip drives
 // io[15:8] and listens on io[7:0]; the bench drives io[7:0] only then, and
-// otherwise leaves the bus to the chip (weak pull-downs keep it out of Z).
+// otherwise releases the bus, as the post-synthesis pin bench does.
 // The DFT lock resets to unlocked, so it does not get in the way here; it is
 // not tested.
 //
@@ -104,6 +110,9 @@
 `ifndef RST_LAT
   `define RST_LAT 4
 `endif
+`ifndef SCAN_MAX_LEN
+  `define SCAN_MAX_LEN 1024
+`endif
 // PCs for E's functional-mode holds: inside EXT_MEM (pkg/config.vh,
 // 0x8000_0000 + 0x0FFF_FFFF), word aligned.
 `ifndef FETCH_BASE
@@ -116,19 +125,21 @@
 module tb_scan;
 
   // FSDB path is relative to the simulator's working directory.
+`ifdef SCAN_FSDB
   initial begin : fsdb_dump
     $fsdbDumpfile("dump.fsdb");
     $fsdbDumpvars(0, tb_scan);
   end
+`endif
 
   localparam int N        = 8;     // chains c0..c7: io[7:0] in, io[15:8] out
-  localparam int MAX_LEN  = 1024;  // give up on a chain longer than this
+  localparam int MAX_LEN  = `SCAN_MAX_LEN; // maximum discoverable chain length
   localparam int MAX_REGS = 256;
   localparam int MAX_W    = 256;   // widest register (PP1Reg/PP2Reg: 128)
   localparam int ECC_DW   = 64;    // the ECC registers: XLEN data bits,
   localparam int ECC_R    = 7;     // 7 Hamming bits and an overall parity:
   localparam int ECC_CW   = 72;    // {data, parity, hamming} (ecc_secded_enc.sv)
-  localparam int FUNC_CYC = 50;    // functional-mode hold, in cycles
+  localparam int FUNC_CYC = 50;    // optional retention experiment, in cycles
 
   // MSECFAULT bits (csrharden.sv)
   localparam int MSF_TMR_SEC = 0, MSF_MPP = 1, MSF_TMR_UNC = 3, MSF_ECC_SEC = 4, MSF_ECC_DED = 5;
@@ -144,7 +155,6 @@ module tb_scan;
 
   // Scan in on io[7:0], driven only in test mode; scan out read from io[15:8].
   assign io[7:0] = test_mode ? si : 'z;
-  assign (pull0, pull1) io = '0;
   assign so = io[15:8];
 
   forte_top dut (
@@ -161,6 +171,13 @@ module tb_scan;
   bit trace_cycles, trace_shift, dump_on_error = 1'b1;
   bit in_check_fail = 1'b0;
   bit have_snapshot = 1'b0;
+  // A/M/B are prerequisites. Remaining letters execute in the requested order.
+  string phase_order = "CDEPHF", case_filter = "", scan_op = "capture";
+  bit baseline_ok = 0, sentinel_enabled = 0, sweep_enabled = 0;
+  bit unload_reset_enabled = 0;
+  int case_repeats = 1, cases_selected = 0, checks_skipped = 0;
+  int unsigned scan_seed = 1;
+  real launch_ns = 2.0; // post-synthesis FPGA_TCO_PS convention
   // Set +SCAN_NO_DUMP to omit large failure snapshots.
   // Set +SCAN_TRACE_CYCLES for per-clock traces or +SCAN_TRACE_SHIFT for shift progress.
   initial begin
@@ -183,22 +200,32 @@ module tb_scan;
   // Per-phase summary: errors counts fail() calls, not individual wrong bits.
   int phase_errors [0:8];
   bit phase_ran [0:8];
+  int phase_skips [0:8];
+  int phase_cases [0:8];
+  bit phase_empty [0:8];
   string phase_names [0:8] = '{"A chain lengths", "M scan map", "B reset",
-      "C round trip", "D base hold", "E PC", "P registers",
+      "C round trip", "D base capture", "E PC", "P registers",
       "H hardening", "F reset recovery"};
   int phase_start_errors;
+  int phase_start_cases, phase_start_skips;
 
   task automatic phase_begin(input int p);
     phase_start_errors = errors;
+    phase_start_cases = cases_selected;
+    phase_start_skips = checks_skipped;
     phase_ran[p] = 1'b1;
     $display("[%0t] PHASE START: %s (errors so far: %0d)",
              $time, phase_names[p], errors);
   endtask
 
   task automatic phase_end(input int p);
-    phase_errors[p] = errors - phase_start_errors;
+    phase_errors[p] += errors - phase_start_errors;
+    phase_skips[p] += checks_skipped - phase_start_skips;
+    phase_cases[p] += cases_selected - phase_start_cases;
+    phase_empty[p] = p >= 4 && phase_cases[p] == 0;
     $display("[%0t] PHASE END: %s: %s (%0d new errors)",
-             $time, phase_names[p], phase_errors[p] == 0 ? "PASS" : "FAIL",
+             $time, phase_names[p], phase_errors[p] != 0 ? "FAIL" :
+             (phase_empty[p] ? "SKIP" : (phase_skips[p] != 0 ? "PARTIAL" : "PASS")),
              phase_errors[p]);
   endtask
 
@@ -206,10 +233,24 @@ module tb_scan;
     $display("================ DFT PHASE SUMMARY ================");
     for (int p = 0; p < 9; p++)
       $display("PHASE: %-20s %-5s errors=%0d", phase_names[p],
-               !phase_ran[p] ? "SKIP" : (phase_errors[p] == 0 ? "PASS" : "FAIL"),
+               (!phase_ran[p] || phase_empty[p]) ? "SKIP" :
+               (phase_errors[p] != 0 ? "FAIL" : (phase_skips[p] != 0 ? "PARTIAL" : "PASS")),
                phase_errors[p]);
     $display("PHASE: TOTAL errors=%0d", errors);
+    $display("PHASE: selected_cases=%0d explicit_skips=%0d operation=%s", cases_selected, checks_skipped, scan_op);
     $display("===================================================");
+  endtask
+
+  function automatic bit case_selected(input string tag);
+    if (case_filter == "") return 1;
+    for (int i = 0; i + case_filter.len() <= tag.len(); i++)
+      if (tag.substr(i, i + case_filter.len() - 1) == case_filter) return 1;
+    return 0;
+  endfunction
+
+  task automatic skip_check(input string tag, input string reason);
+    checks_skipped++;
+    $display("[%0t] SKIP: %s: %s", $time, tag, reason);
   endtask
 
 
@@ -250,15 +291,26 @@ module tb_scan;
   int     ecc_r [$];
   st_t    base;                          // the cells after B's reset, X read as 0
   st_t    rst_exp;                       // the reset values, X where there is none
-`include "scan_map.svh"
-`include "hookups.svh"
+`include "scan_map.generated.svh"
+`ifdef SCAN_NO_HOOKUPS
+  // Diagnostic hookups are never required for the pin-level verdict.
+  val_t internal_raw_by_name[string];
+  val_t internal_est_by_name[string];
+  val_t internal_available_by_name[string];
+`else
+`include "scan_hookups.generated.svh"
+`endif
 
   // A scan unload overwrites the flop state. Save live hookups before shifting.
   val_t internal_raw_snapshot[string];
   val_t internal_est_snapshot[string];
   val_t internal_available_snapshot[string];
+  val_t before_raw_snapshot[string];
+  val_t before_est_snapshot[string];
+  val_t before_available_snapshot[string];
+  bit have_before_snapshot = 0;
   string internal_snapshot_tag;
-  task automatic snapshot_internal(input string tag);
+  task automatic snapshot_internal(input string tag, input bit before_capture = 0);
     internal_snapshot_tag = tag;
     internal_raw_snapshot.delete();
     internal_est_snapshot.delete();
@@ -270,6 +322,12 @@ module tb_scan;
         internal_est_snapshot[reg_name[r]] = internal_est_by_name[reg_name[r]];
       if (internal_available_by_name.exists(reg_name[r]))
         internal_available_snapshot[reg_name[r]] = internal_available_by_name[reg_name[r]];
+    end
+    if (before_capture) begin
+      before_raw_snapshot = internal_raw_snapshot;
+      before_est_snapshot = internal_est_snapshot;
+      before_available_snapshot = internal_available_snapshot;
+      have_before_snapshot = 1;
     end
     $display("[%0t] TRACE internal snapshot: %s, physical_Q(no_logical_polarity)=%0d logical_est(Q_xor_map_ph)=%0d registers",
              $time, tag, internal_raw_snapshot.num(), internal_est_snapshot.num());
@@ -293,7 +351,7 @@ module tb_scan;
     #30;
     out_bits = so;
     if (trace_cycles) $display("[%0t] TRACE cycle SAMPLE: SI=%b SO=%b", $time, in_bits, out_bits);
-    @(posedge clk); #5;
+    @(posedge clk); #(launch_ns);
   endtask
 
   task automatic idle(input int n);
@@ -321,7 +379,7 @@ module tb_scan;
 
   // The shift-in stream that leaves s in the cells.
   function automatic bits_t encode(input st_t s);
-    bits_t in = '{default: 1'b0};
+    bits_t in = '{default: '{default: 1'b0}};
     for (int k = 1; k <= N; k++)
       for (int j = 1; j <= len[k]; j++)
         in[k][maxlen - j] = s[k][j] ^ a_inv[k][j];
@@ -330,7 +388,7 @@ module tb_scan;
 
   // The cells, from the stream shifted out of them.
   function automatic st_t decode(input bits_t out);
-    st_t s = '{default: 1'bx};
+    st_t s = '{default: '{default: 1'bx}};
     for (int k = 1; k <= N; k++)
       for (int t = 0; t < len[k]; t++)
         s[k][len[k] - t] = out[k][t] ^ b_inv[k][len[k] - t];
@@ -405,11 +463,17 @@ module tb_scan;
     if (!internal_raw_snapshot.exists(reg_name[r]) ||
         !internal_est_snapshot.exists(reg_name[r]) ||
         !internal_available_snapshot.exists(reg_name[r])) begin
-      $display("[%0t] INTERNAL: %s no complete diagnostic snapshot; regenerate hookups.svh with internal_hookups.py",
+      $display("[%0t] INTERNAL: %s no complete diagnostic snapshot; enable generated hookups with SCAN_HOOKUPS=1",
                $time, reg_name[r]);
       return;
     end
     available = internal_available_snapshot[reg_name[r]];
+    if (have_before_snapshot && before_raw_snapshot.exists(reg_name[r]) &&
+        before_est_snapshot.exists(reg_name[r]) && before_available_snapshot.exists(reg_name[r]))
+      $display("[%0t] INTERNAL BEFORE CAPTURE: %s raw_Q='b%s logical_est(Q^map_ph)='b%s",
+               $time, reg_name[r],
+               internal_bits(before_raw_snapshot[reg_name[r]], before_available_snapshot[reg_name[r]], reg_width[r]),
+               internal_bits(before_est_snapshot[reg_name[r]], before_available_snapshot[reg_name[r]], reg_width[r]));
     // raw_Q is physical Q (.Q or ~.QN), without map_ph correction.
     // logical_est applies map_ph only to available observations.
     $display("[%0t] INTERNAL: %s snapshot=%s raw_Q='b%s logical_est(Q^map_ph)='b%s scan_read=0x%s expected=0x%s",
@@ -485,9 +549,23 @@ module tb_scan;
   // Shift s in with rst_n low, raised RST_LAT edges before the end: the core
   // leaves reset just after the last shift edge, so the capture edge is its
   // first cycle out of reset, with s in the cells.
+  task automatic prepare_case();
+    // Called at the post-edge launch slot, never between loading and capture.
+    // Allow reset to assert before disabling scan/remapping the shared pads.
+    rst_n = 1'b0;
+    idle(20);
+    set_se(1'b0);
+    test_mode = 1'b0;
+    idle(20);
+    test_mode = 1'b1;
+    set_se(1'b1);
+  endtask
+
   task automatic load_in_reset(input st_t s);
     bits_t in = encode(s);
     logic [N:1] i_b, o_b;
+    have_before_snapshot = 0;
+    prepare_case();
     $display("[%0t] TRACE load_in_reset START: %0d scan clocks, reset release at cycle %0d", $time, maxlen, maxlen-`RST_LAT);
     rst_n = 1'b0;
     for (int t = 0; t < maxlen; t++) begin
@@ -501,50 +579,122 @@ module tb_scan;
     $display("[%0t] TRACE task END: load_in_reset", $time);
   endtask
 
+  // Observe the loaded/captured state before asserting reset. No extra clocks
+  // are inserted: scan remains enabled throughout the reset-protected shift.
+  // Reset must not override the selected cells' scan path. The pin comparison
+  // still checks the original loaded/captured expectation, never reset values.
+  task automatic scan_readout(input string tag, output bits_t got);
+    bits_t zeros = '{default: '{default: 1'b0}};
+    logic saved_rst_n = rst_n;
+    if (scan_en !== 1'b1 || test_mode !== 1'b1) begin
+      got = '{default: '{default: 1'bx}};
+      fail({tag, ": readout requires scan_en=1 and test_mode=1"});
+      return;
+    end
+    $display("[%0t] READOUT START: %s reset_protection=%b rst_n=%b SE=%b TM=%b",
+             $time, tag, unload_reset_enabled, rst_n, scan_en, test_mode);
+    if (unload_reset_enabled) rst_n = 1'b0;
+    shift(zeros, got);
+    for (int k = 1; k <= N; k++)
+      for (int t = 0; t < len[k]; t++)
+        if ($isunknown(got[k][t])) begin
+          $display("[%0t] READOUT FIRST X/Z: %s c%0d sample=%0d (zero-based=%0d) reset_protection=%b",
+                   $time, tag, k-1, t+1, t, unload_reset_enabled);
+          break;
+        end
+    if (unload_reset_enabled) rst_n = saved_rst_n;
+    $display("[%0t] READOUT END: %s rst_n=%b SE=%b TM=%b", $time, tag, rst_n, scan_en, test_mode);
+  endtask
+
   // Load, hold, unload, compare.  func_cyc = 0: one capture clock in test mode.
-  // Otherwise func_cyc clocks in functional mode (test_mode=0, the bus back with
-  // the chip); the fetch stays stalled on ready=0 throughout.
-  task automatic hold(input string tag, input st_t load, input st_t exp, input int func_cyc = 0);
-    bits_t zeros = '{default: 1'b0}, got;
+  // Otherwise func_cyc clocks with scan disabled; keep_test_mode optionally
+  // retains the scan pad mux. A single capture uses the fetch-check interlock; longer
+  // unchanged-state holds are optional diagnostics, not guaranteed by ready=0.
+  task automatic hold_once(input string tag, input st_t load, input st_t exp,
+                           input int func_cyc = 0, input bit keep_test_mode = 0);
+    bits_t got;
     $display("[%0t] TRACE hold START: %s, functional cycles=%0d", $time, tag, func_cyc);
     load_in_reset(load);
+    snapshot_internal({tag, " before capture"}, 1'b1);
     set_se(1'b0);
     $display("[%0t] TRACE hold: SE=0, %s", $time, func_cyc == 0 ? "one capture edge" : "enter functional mode");
     if (func_cyc == 0) begin
-      @(posedge clk); #5;
+      @(posedge clk); #(launch_ns);
     end
     else begin
-      test_mode = 1'b0;
-      $display("[%0t] TRACE hold: test_mode=0", $time);
+      if (!keep_test_mode) test_mode = 1'b0;
+      $display("[%0t] TRACE hold: test_mode=%b", $time, test_mode);
       idle(func_cyc);
       test_mode = 1'b1;
       $display("[%0t] TRACE hold: test_mode=1", $time);
     end
     set_se(1'b1);
     snapshot_internal(tag);
-    shift(zeros, got);
+    scan_readout(tag, got);
     check(tag, decode(got), exp);
     $display("[%0t] TRACE hold END: %s", $time, tag);
   endtask
 
-  // Functional reset, then ready=0 so the first fetch (RESET_VEC) never
-  // completes and the pipeline sits stalled; returns in test mode, shifting.
+  task automatic load_only(input string tag, input st_t load, output bit passed);
+    bits_t got;
+    int before_errors = errors;
+    load_in_reset(load);
+    snapshot_internal({tag, " after load, no capture"});
+    // SE stays high: the first sample observes the loaded state before shifting.
+    scan_readout({tag, " [load-only]"}, got);
+    check({tag, " [load-only]"}, decode(got), load);
+    passed = errors == before_errors;
+  endtask
+
+  task automatic hold(input string tag, input st_t load, input st_t exp,
+                      input int func_cyc = 0, input bit keep_test_mode = 0);
+    bit loaded;
+    int sentinel_errors;
+    if (!case_selected(tag)) return;
+    cases_selected++;
+    for (int rep = 0; rep < case_repeats; rep++) begin
+      $display("[%0t] CASE: %s repeat=%0d/%0d seed=%0d operation=%s", $time,
+               tag, rep+1, case_repeats, scan_seed, scan_op);
+      if (sentinel_enabled) begin
+        sentinel_errors = errors;
+        hold_once({tag, " [baseline sentinel]"}, base, base);
+        if (errors != sentinel_errors) begin
+          skip_check(tag, "baseline sentinel failed; target not run");
+          continue;
+        end
+      end
+      if (scan_op == "load" || scan_op == "both") begin
+        load_only(tag, load, loaded);
+        if (!loaded) begin
+          skip_check(tag, "load-only failed; capture result would be uninterpretable");
+          continue;
+        end
+      end
+      // Reload independently after the destructive diagnostic unload.
+      if (scan_op != "load") hold_once(tag, load, exp, func_cyc, keep_test_mode);
+    end
+  endtask
+
+  // Reset plus startup check at RESET_VEC without external memory responses.
+  // This follows a naturally reached state; unlike scan reload, it preserves
+  // coherence between scanned and unscanned logic. Returns in scan mode.
   task automatic reset_stalled();
     $display("[%0t] TRACE reset_stalled START", $time);
     set_se(1'b0); test_mode = 1'b0;
     rst_n = 1'b0; idle(20);
     rst_n = 1'b1;
-    $display("[%0t] TRACE reset_stalled: deassert reset, wait 1 stalled clocks", $time);
+    $display("[%0t] TRACE reset_stalled: deassert reset, wait 200 clocks without memory responses", $time);
     idle(200);
     test_mode = 1'b1; set_se(1'b1);
     $display("[%0t] TRACE reset_stalled END", $time);                   // just after an edge: no extra shift
   endtask
 
   task automatic unload(output st_t s);
-    bits_t zeros = '{default: 1'b0}, got;
+    bits_t got;
+    have_before_snapshot = 0;
     $display("[%0t] TRACE unload START", $time);
     snapshot_internal("unload");
-    shift(zeros, got);
+    scan_readout("unload", got);
     s = decode(got);
     $display("[%0t] TRACE unload END", $time);
   endtask
@@ -730,8 +880,9 @@ module tb_scan;
   // ---- B: reset values ----------------------------------------------------------------
   task automatic phase_b();
     st_t got;
+    int before_errors = errors;
     $display("[%0t] B: every cell after reset", $time);
-    rst_exp = '{default: 1'bx};
+    rst_exp = '{default: '{default: 1'bx}};
     for (int r = 0; r < n_regs; r++)
       if (reg_kind[r] != K_UNKNOWN && reg_kind[r] != K_LOCK)
         for (int b = 0; b < reg_width[r]; b++)
@@ -740,7 +891,14 @@ module tb_scan;
     reset_stalled();
     unload(got);
     check("B reset value", got, rst_exp);
+    baseline_ok = errors == before_errors;
+    if (!baseline_ok) begin
+      $display("[%0t] BLOCKED: constrained reset baseline failed; dependent cases will not run", $time);
+      return;
+    end
     base = got;
+    // Deliberate deterministic stimulus for unconstrained bits only. The
+    // observation in got/rst_exp is never sanitized, and constrained Xs failed.
     foreach (base[k, j]) if (base[k][j] !== 1'b1) base[k][j] = 1'b0;
     if (pc_r >= 0) $display("[%0t] B: PC = %h", $time, pc_t'(reg_val(got, pc_r)));
     $display("[%0t] TRACE task END: phase_b", $time);
@@ -762,12 +920,20 @@ module tb_scan;
     $display("[%0t] TRACE task END: phase_c", $time);
   endtask
 
-  // ---- D: the reset state held ------------------------------------------------------------
+  // ---- D: first capture; optional longer retention experiments ----------------------------
   task automatic phase_d();
-    $display("[%0t] D: base held", $time);
+    int durations [6] = '{1, 2, 4, 8, 16, FUNC_CYC};
+    $display("[%0t] D: baseline first capture", $time);
     n_pat = 0; n_pat_bad = 0;
     hold("D base, one capture edge", base, base);
-    hold($sformatf("D base, %0d functional cycles", FUNC_CYC), base, base, FUNC_CYC);
+    if (sweep_enabled) begin
+      $display("[%0t] DIAGNOSTIC D: long retention assumes a persistent stall; ready=0 does not guarantee it. Mismatches fail this run.", $time);
+      hold($sformatf("D base, %0d functional cycles", FUNC_CYC), base, base, FUNC_CYC);
+      foreach (durations[i]) begin
+        hold($sformatf("D sweep functional %0d", durations[i]), base, base, durations[i]);
+        hold($sformatf("D sweep test-mode %0d", durations[i]), base, base, durations[i], 1'b1);
+      end
+    end
     $display("[%0t] D: %0d holds, %0d failed", $time, n_pat, n_pat_bad);
     $display("[%0t] TRACE task END: phase_d", $time);
   endtask
@@ -782,7 +948,7 @@ module tb_scan;
   task automatic phase_e();
     pc_t v;
     if (pc_r < 0) begin
-      $display("[%0t] E: the PC is on no chain: skipped", $time);
+      skip_check("E", "the PC is on no chain");
       return;
     end
     $display("[%0t] E: PC values through scan load, hold, scan unload", $time);
@@ -805,16 +971,16 @@ module tb_scan;
       v = {$urandom, $urandom};
       hold_pc($sformatf("E random %0d", i), v);
     end
-    // Held for longer, with the chip in functional mode.  Each load leaves reset
-    // with the loaded PC as the first fetch, so it must be one the core fetches
-    // from the bus (EXT_MEM), where it waits on ready=0.  Anywhere else the
-    // fetch faults without reaching the bus, and the core traps within a few
-    // cycles.  One capture edge (above) is too short for that.
-    hold_pc("E functional hold, all 1",     `FETCH_BASE | ('1          & `FETCH_MASK), FUNC_CYC);
-    hold_pc("E functional hold, 0x5555...", `FETCH_BASE | ({32{2'b01}} & `FETCH_MASK), FUNC_CYC);
-    hold_pc("E functional hold, 0xAAAA...", `FETCH_BASE | ({32{2'b10}} & `FETCH_MASK), FUNC_CYC);
-    v = {$urandom, $urandom};
-    hold_pc("E functional hold, random",    `FETCH_BASE | (v           & `FETCH_MASK), FUNC_CYC);
+    // An external-memory PC alone does not establish a persistent global
+    // stall after scan reload. Keep these as explicitly requested experiments.
+    if (sweep_enabled) begin
+      $display("[%0t] DIAGNOSTIC E: long retention assumes a persistent stall; EXT_MEM addressing does not guarantee it. Mismatches fail this run.", $time);
+      hold_pc("E functional hold, all 1",     `FETCH_BASE | ('1          & `FETCH_MASK), FUNC_CYC);
+      hold_pc("E functional hold, 0x5555...", `FETCH_BASE | ({32{2'b01}} & `FETCH_MASK), FUNC_CYC);
+      hold_pc("E functional hold, 0xAAAA...", `FETCH_BASE | ({32{2'b10}} & `FETCH_MASK), FUNC_CYC);
+      v = {$urandom, $urandom};
+      hold_pc("E functional hold, random",    `FETCH_BASE | (v           & `FETCH_MASK), FUNC_CYC);
+    end
     $display("[%0t] E: %0d values, %0d failed", $time, n_pat, n_pat_bad);
     $display("[%0t] TRACE task END: phase_e", $time);
   endtask
@@ -835,13 +1001,19 @@ module tb_scan;
             s = reg_put(base, r, pat[i]);
             hold($sformatf("P %s %s", reg_name[r], name[i]), s, s);
           end
-        K_ECC:
-          // With bits missing (merged or constant flops) only all-1 data is
-          // sure to be a codeword the cells can hold.
-          for (int i = 0; i < (reg_cells[r] == ECC_CW ? 4 : 1); i++) begin
+        K_ECC: begin
+          // Missing cells do not establish constant or merged-bit constraints.
+          // Do not claim arbitrary codewords are representable without them.
+          if (reg_cells[r] != ECC_CW) begin
+            if (case_selected({"P ", reg_name[r]}))
+              skip_check({"P ", reg_name[r]}, "incomplete ECC mapping; codeword representability unproven");
+            continue;
+          end
+          for (int i = 0; i < 4; i++) begin
             s = reg_put(base, r, val_t'(ecc_enc(pat[i][ECC_DW-1:0])));
             hold($sformatf("P %s codeword of %s", reg_name[r], name[i]), s, s);
           end
+        end
         K_MPP:
           for (int v = 1; v <= 3; v += 2) begin
             s = reg_put(base, r, val_t'(v));
@@ -855,6 +1027,8 @@ module tb_scan;
       for (int c = 0; c < 6; c++) s = reg_put(s, tmr_r[c], '0);
       hold("P privmode: all six copies U (00)", s, s);
     end
+    else if (case_selected("P privmode: all six copies U (00)"))
+      skip_check("P privmode", "not all six privmode copies are on the chains");
     $display("[%0t] P: %0d values, %0d failed", $time, n_pat, n_pat_bad);
     $display("[%0t] TRACE task END: phase_p", $time);
   endtask
@@ -865,15 +1039,14 @@ module tb_scan;
     string tmr_name [6] = '{"mode copy a", "mode copy b", "mode copy c", "check copy a", "check copy b", "check copy c"};
     bit    tmr_ok = 1;
     if (msf_r < 0) begin
-      $display("[%0t] H: MSECFAULT is on no chain: skipped", $time);
+      skip_check("H", "MSECFAULT is on no chain");
       return;
     end
-    $display("[%0t] H: ECC repair, TMR voting and MPP check through a capture edge", $time);
+    $display("[%0t] H: ECC repair, privilege fault flags and MPP check through a capture edge", $time);
     n_pat = 0; n_pat_bad = 0;
 
-    // ECC 1-bit error: repaired on the capture edge, MSECFAULT[4] set.  A
-    // register with bits missing starts from the zero codeword, and gets its
-    // error in a Hamming bit (no two of those can be merged).  Not in the
+    // ECC 1-bit error: repaired on the capture edge, MSECFAULT[4] set. Incomplete
+    // mappings are skipped until their bit constraints are known. Not in the
     // overall parity bit: ecc_secded_dec flags an error only on a non-zero
     // syndrome, so that one is neither flagged nor repaired.
     foreach (ecc_r[i]) begin
@@ -881,6 +1054,11 @@ module tb_scan;
       bit complete = reg_cells[r] == ECC_CW;
       logic [ECC_CW-1:0] cw = complete ? ecc_enc({$urandom, $urandom}) : '0;
       int flips [$];
+      if (!complete) begin
+        if (case_selected({"H ECC 1-bit error: ", reg_name[r]}))
+          skip_check({"H ECC 1-bit error: ", reg_name[r]}, "incomplete ECC mapping; codeword representability unproven");
+        continue;
+      end
       if (complete) flips.push_back(ECC_R + 1 + $urandom_range(ECC_DW - 1));
       flips.push_back($urandom_range(ECC_R - 1));    // a Hamming bit
       foreach (flips[f]) begin
@@ -899,9 +1077,9 @@ module tb_scan;
     // privmode TMR.  The copies hold while the pipeline is stalled; the vote
     // only raises the flags.
     for (int c = 0; c < 6; c++) tmr_ok &= tmr_r[c] >= 0;
-    if (!tmr_ok) $display("[%0t] H: not all six privmode copies are on the chains: TMR checks skipped", $time);
+    if (!tmr_ok) skip_check("H privmode", "not all six privmode copies are on the chains");
     else begin
-      for (int c = 0; c < 6; c++) begin                // one copy bad: corrected
+      for (int c = 0; c < 6; c++) begin                // one copy bad: flag; stored copy holds
         ld = reg_put(base, tmr_r[c], '0);
         hold($sformatf("H privmode %s 00", tmr_name[c]), ld, with_flag(ld, MSF_TMR_SEC));
       end
@@ -911,7 +1089,7 @@ module tb_scan;
       hold("H privmode copy a reserved 10", ld, with_flag(ld, MSF_TMR_SEC));
     end
 
-    if (mpp_r < 0) $display("[%0t] H: mstatus.MPP is on no chain: MPP check skipped", $time);
+    if (mpp_r < 0) skip_check("H mstatus.MPP", "MPP is on no chain");
     else begin
       ld = reg_put(base, mpp_r, val_t'(2));
       hold("H mstatus.MPP reserved 10", ld, with_flag(ld, MSF_MPP));
@@ -921,6 +1099,11 @@ module tb_scan;
     // trap record, which the next load's reset clears.
     foreach (ecc_r[i]) begin
       int r = ecc_r[i], b0 = -1, b1 = -1;
+      if (reg_cells[r] != ECC_CW) begin
+        if (case_selected({"H ECC 2-bit error: ", reg_name[r]}))
+          skip_check({"H ECC 2-bit error: ", reg_name[r]}, "incomplete ECC mapping; baseline codeword unproven");
+        continue;
+      end
       for (int b = 0; b <= ECC_R; b++)
         if (reg_k[r][b] > 0) begin
           if (b0 < 0) b0 = b;
@@ -936,21 +1119,37 @@ module tb_scan;
 
   // ---- F: reset over loaded cells --------------------------------------------------------
   task automatic reset_all(input string tag, input st_t load);
-    bits_t unused;
     st_t   got;
-    $display("[%0t] TRACE reset_all START: %s", $time, tag);
-    shift(encode(load), unused);
-    reset_stalled();
-    unload(got);
-    check(tag, got, rst_exp);
-    $display("[%0t] TRACE reset_all END: %s", $time, tag);
+    if (!case_selected(tag)) return;
+    cases_selected++;
+    for (int rep = 0; rep < case_repeats; rep++) begin
+      $display("[%0t] CASE: %s repeat=%0d/%0d seed=%0d operation=%s", $time,
+               tag, rep+1, case_repeats, scan_seed, scan_op);
+      $display("[%0t] TRACE reset_all START: %s", $time, tag);
+      // Unlike E/P/H, F intentionally resets AFTER loading. Verify that load
+      // independently in diagnostic mode, then reload before the reset test.
+      if (scan_op == "load" || scan_op == "both") begin
+        bit loaded;
+        load_only(tag, load, loaded);
+        if (!loaded) begin
+          skip_check(tag, "load-only failed; reset recovery not run");
+          return;
+        end
+        if (scan_op == "load") continue;
+      end
+      load_in_reset(load);
+      reset_stalled();
+      unload(got);
+      check(tag, got, rst_exp);
+      $display("[%0t] TRACE reset_all END: %s", $time, tag);
+    end
   endtask
 
   task automatic phase_f();
     st_t s;
     $display("[%0t] F: reset over loaded cells", $time);
     n_pat = 0; n_pat_bad = 0;
-    s = '{default: 1'b1};
+    s = '{default: '{default: 1'b1}};
     reset_all("F from all 1", s);
     foreach (s[k, j]) s[k][j] = ~base[k][j];
     reset_all("F from ~base", s);
@@ -991,41 +1190,89 @@ module tb_scan;
 
   // ---- run ---------------------------------------------------------------------------------
   initial begin
-    rst_n = 1'b0; ready = 1'b0; rvalid = 1'b0; irq = '0; uart_rx = 1'b1;
+    int timing_ps, seed_state;
+    void'($value$plusargs("SCAN_PHASES=%s", phase_order));
+    void'($value$plusargs("SCAN_CASE=%s", case_filter));
+    void'($value$plusargs("SCAN_OP=%s", scan_op));
+    void'($value$plusargs("SCAN_REPEAT=%d", case_repeats));
+    void'($value$plusargs("SCAN_SEED=%d", scan_seed));
+    if ($value$plusargs("FPGA_TCO_PS=%d", timing_ps)) launch_ns = timing_ps / 1000.0;
+    if (!(launch_ns > 0 && launch_ns < 50)) $fatal(1, "FPGA_TCO_PS must be between 0 and 50000 exclusive");
+    if (case_repeats < 1) $fatal(1, "SCAN_REPEAT must be positive");
+    if (scan_op != "capture" && scan_op != "load" && scan_op != "both")
+      $fatal(1, "SCAN_OP must be capture, load, or both");
+    if (`RST_LAT < 1 || `RST_LAT > MAX_LEN) $fatal(1, "invalid RST_LAT");
+    for (int i = 0; i < phase_order.len(); i++)
+      if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F"}))
+        $fatal(1, "SCAN_PHASES contains an unknown phase: %s", phase_order.substr(i,i));
+    sentinel_enabled = $test$plusargs("SCAN_SENTINEL");
+    sweep_enabled = $test$plusargs("SCAN_SWEEP");
+    unload_reset_enabled = $test$plusargs("SCAN_UNLOAD_RESET");
+    seed_state = int'(scan_seed);
+    seed_state = $urandom(seed_state);
+    $display("[%0t] CONFIG: phases=%s case='%s' operation=%s repeat=%0d seed=%0d TCO=%0.3f ns sentinel=%b sweep=%b unload_reset=%b",
+             $time, phase_order, case_filter, scan_op, case_repeats, scan_seed, launch_ns, sentinel_enabled, sweep_enabled, unload_reset_enabled);
+    rst_n = 1'bx; ready = 1'b0; rvalid = 1'b0; irq = '0; uart_rx = 1'b1;
     fault_inject = 1'b0; test_mode = 1'b0; si = '0;
     set_se(1'b0);
+    #0.5; rst_n = 1'b0;
     idle(20); rst_n = 1'b1; idle(5);
 
     phase_begin(0); phase_a(); phase_end(0);
     if (maxlen == 0) fail("no chain shifts at all; skipping M-F");
     else begin
       phase_begin(1); phase_m(); phase_end(1);
-      if (map_ok) begin
+      if (maxlen < `RST_LAT) begin
+        fail("discovered chains are too short for RST_LAT");
+        map_ok = 0;
+      end
+      if (map_ok && phase_errors[1] == 0) begin
         phase_begin(2); phase_b(); phase_end(2);
       end
-      phase_begin(3); phase_c(); phase_end(3);
-      if (map_ok) begin
-        phase_begin(4); phase_d(); phase_end(4);
-    //     phase_begin(5); phase_e(); phase_end(5);
-//         phase_begin(6); phase_p(); phase_end(6);
-// `ifndef NO_HARDEN
-//         phase_begin(7); phase_h(); phase_end(7);
-// `endif
-//         phase_begin(8); phase_f(); phase_end(8);
+      for (int i = 0; i < phase_order.len(); i++) begin
+        string p;
+        p = phase_order.substr(i,i);
+        if (p inside {"A", "M", "B"}) continue; // prerequisites already ran
+        if (p != "C" && !baseline_ok) begin
+          skip_check(p, "blocked by invalid map/reset baseline");
+          continue;
+        end
+        case (p)
+          "C": begin phase_begin(3); phase_c(); phase_end(3); end
+          "D": begin phase_begin(4); phase_d(); phase_end(4); end
+          "E": begin phase_begin(5); phase_e(); phase_end(5); end
+          "P": begin phase_begin(6); phase_p(); phase_end(6); end
+          "H": begin
+`ifndef NO_HARDEN
+            phase_begin(7); phase_h(); phase_end(7);
+`else
+            skip_check("H", "NO_HARDEN build");
+`endif
+          end
+          "F": begin phase_begin(8); phase_f(); phase_end(8); end
+        endcase
       end
       if (map_ok) summary();
     end
+    if (case_filter != "" && cases_selected == 0)
+      fail($sformatf("no executable cases matched SCAN_CASE='%s'; inspect any skip reasons", case_filter));
     phase_summary();
 
-    if (errors == 0) $display("DFT TB PASS");
+    if (errors == 0 && checks_skipped == 0) $display("DFT TB PASS");
+    else if (errors == 0) $display("DFT TB PASS (partial coverage: %0d explicit skips)", checks_skipped);
     else             $display("DFT TB FAIL (%0d errors)", errors);
+    if (errors != 0) $fatal(1, "DFT checks failed");
     $finish;
   end
 
   initial begin
-    #100ms;
+    longint timeout_ns;
+    timeout_ns = 100_000_000; // original 100 ms watchdog
+    void'($value$plusargs("SCAN_TIMEOUT_NS=%d", timeout_ns));
+    if (timeout_ns <= 0) $fatal(1, "SCAN_TIMEOUT_NS must be positive");
+    #(timeout_ns);
     $display("DFT TB FAIL (timeout)");
-    $finish;
+    $fatal(1, "DFT timeout");
   end
 
 endmodule

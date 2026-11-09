@@ -1,26 +1,26 @@
 #!/bin/bash
 # Build and run tb_scan.sv on the scanned forte_top gate netlist (pads included).
-#   ./run.sh [env file] [vcs args...]
+#   ./run.sh [paths file] [vcs args...] [runtime plusargs...]
 #   ./run.sh clean                     remove generated simulation outputs
-#   ./run.sh env.s                     expect "DFT TB PASS"
-#   ./run.sh env.s +define+BREAK_SE    self-test: scan enable held off, expect FAIL
-#   ./run.sh env.s +define+BREAK_MAP   self-test: one inversion in the map moved, expect FAIL
-#   ./run.sh env.s +define+NO_HARDEN   skip phase H (ECC repair, TMR vote, MPP check)
+#   ./run.sh                           expect "DFT TB PASS"
+#   ./run.sh --regen                   regenerate map/hookups, then build/run
+#   ./run.sh +define+BREAK_SE           scan enable held off, expect FAIL
+#   ./run.sh +define+BREAK_MAP          one inversion in the map moved, expect FAIL
+#   ./run.sh +define+NO_HARDEN          skip phase H
 #
-# Paths come from the env file if one is given first (sourced here), else from
-# the environment (exported):
+# Source paths.sh beside this script, or an alternate file given first:
 #   NETLIST          the gate netlist to simulate
 #   STDCELL_MODELS   standard-cell Verilog models
 #   SRAM_MODELS      SRAM macro Verilog models
 #   PAD_MODELS       pad cell Verilog models
 #   VCS_FLAGS        extra VCS flags, added after the defaults so they win
 #   SCANDEF          the scandef written with NETLIST; default forte_top.scandef
-#                    next to it.  Required: scan_map.awk turns it into
-#                    scan_map.svh, which tells the bench which register bit each
+#                    next to it. Needed only for --regen: scan_map.awk creates
+#                    scan_map.generated.svh, which tells the bench which register bit each
 #                    scan cell holds.
 # Each *_MODELS may be a file, a glob, or a folder (all the .v and .sv in it), or
 # several of those separated by spaces or as a bash array, X=(dir/*.v).  An
-# array cannot be exported: set it in the env file and pass that file first.
+# array cannot be exported: set it directly in the sourced paths file.
 #
 # Compile order, as in hvl/pin/pin.sh: pad and SRAM models as ordinary sources
 # ahead of the netlist, so any `define, `timescale or primitive they carry is
@@ -28,22 +28,18 @@
 # cells the netlist uses are elaborated.
 
 
-export NETLIST=/groups/ece427-group4/dft_testing/synth/synout/forte_top.gate.v
-
-# SDF for the same netlist.  Empty = zero-delay functional gate simulation
-# (post-synthesis).  Set it for post-PnR timing simulation.
-export SDF="${SDF:-}"
-export SDF_CORNER="${SDF_CORNER:-max}"          # min | typ | max
+# Private netlist/model paths come from the environment or the supplied file.
 
 # Verilog simulation models.  Each is compiled with -v (library: only the
 # modules the design references are elaborated).
 # TODO: removed in git version, add back in VM
 
-# Used for the RTL reference too: forte_top under `SYNTHESIS instantiates the
-# SRAM macros and pad cells, so the RTL build needs SRAM_MODELS and PAD_MODELS.
-# Leave both empty to fall back to hvl/pin/models/*_behav.sv (NOT sign-off).
+# This runner requires the real SRAM/pad models; it does not build an RTL
+# reference. Use hvl/pin/pin.sh separately for functional RTL/gate comparisons.
 
-export VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4 -fgp)
+if ! declare -p VCS_FLAGS &>/dev/null; then
+    VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
+fi
 
 set -euo pipefail
 
@@ -52,16 +48,24 @@ die() { echo "run.sh: $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$SCRIPT_DIR/sim"
 if [[ "${1:-}" == clean ]]; then
-    rm -rf -- "$SIM_DIR"
+    # Netlist-derived metadata is reused until --regen is requested.
+    if [[ -d "$SIM_DIR" ]]; then
+        find "$SIM_DIR" -mindepth 1 -maxdepth 1 \
+            ! -name scan_map.generated.svh \
+            ! -name scan_hookups.generated.svh \
+            ! -name scan_hookups.generated.report.tsv \
+            -exec rm -rf -- {} +
+    fi
     # Also clean outputs left in the script directory by older runs.
     rm -rf -- "$SCRIPT_DIR/csrc" "$SCRIPT_DIR/simv_scan.daidir" \
         "$SCRIPT_DIR/simv_scan" "$SCRIPT_DIR/ucli.key" \
         "$SCRIPT_DIR/verdi_config_file"
     rm -f -- "$SCRIPT_DIR/run.log" "$SCRIPT_DIR/compile.log" \
-        "$SCRIPT_DIR/sim.log" "$SCRIPT_DIR/scan_phase.txt" "$SCRIPT_DIR/scan_map.svh" "$SCRIPT_DIR/novas.*"
-    echo "run.sh: cleaned simulation outputs"
+        "$SCRIPT_DIR/sim.log" "$SCRIPT_DIR/scan_map.svh" "$SCRIPT_DIR/novas.*"
+    echo "run.sh: cleaned simulation outputs; preserved generated map/hookups and phase metadata"
     exit 0
 fi
+
 mkdir -p "$SIM_DIR"
 
 # Everything printed from here on (these messages, VCS's output, the results)
@@ -69,13 +73,38 @@ mkdir -p "$SIM_DIR"
 # output, compile.log the full compile.
 exec > >(tee "$SIM_DIR/run.log") 2>&1
 
+PATHS_FILE="$SCRIPT_DIR/paths.sh"
 if [ $# -gt 0 ] && [[ "$1" != [-+]* ]]; then
-    [ -f "$1" ] || die "no such env file: $1"
-    echo "run.sh: sourcing $1"
-    # shellcheck disable=SC1090
-    source "$(realpath "$1")"
+    PATHS_FILE="$1"
     shift
 fi
+[ -f "$PATHS_FILE" ] || die "no paths file: $PATHS_FILE; create paths.sh beside run.sh or supply a file first"
+echo "run.sh: sourcing $PATHS_FILE"
+# shellcheck disable=SC1090
+source "$(realpath "$PATHS_FILE")"
+[ -z "${SDF:-}" ] || die "full_tb runs zero-delay only; use hvl/pin for SDF simulation"
+
+# Compiler options and simulator plusargs have different destinations. A bare
+# +NAME or +NAME=value is a runtime argument; known VCS +options stay at build.
+COMPILE_ARGS=(); RUN_ARGS=()
+runtime_only=0
+REGENERATE=0
+for arg in "$@"; do
+    if [[ "$arg" == -- ]]; then
+        runtime_only=1
+    elif (( runtime_only )); then
+        RUN_ARGS+=("$arg")
+    elif [[ "$arg" == --regen ]]; then
+        REGENERATE=1
+    else
+        case "$arg" in
+            +define+*|+incdir+*|+libext+*|+nospecify|+notimingcheck|+vcs+*|+v2k)
+                COMPILE_ARGS+=("$arg") ;;
+            +*) RUN_ARGS+=("$arg") ;;
+            *) COMPILE_ARGS+=("$arg") ;;
+        esac
+    fi
+done
 
 # The entries of variable $1, one per line: an array's elements (X=(a/*.v)),
 # or a string split on spaces and glob-expanded (X="a/*.v b.v").  $X alone
@@ -96,7 +125,7 @@ entries() {
 model_files() {
     local e list
     list=$(entries "$1")
-    [ -n "$list" ] || die "$1 is not set: give the env file first (./run.sh env.s), or export it"
+    [ -n "$list" ] || die "$1 is not set: configure it in paths.sh"
     while IFS= read -r e; do
         if [ -d "$e" ]; then
             local f files
@@ -119,35 +148,56 @@ FLAGS=()
 flags=$(set -f; entries VCS_FLAGS)
 [ -z "$flags" ] || mapfile -t FLAGS <<< "$flags"
 
-[ -n "${NETLIST:-}" ] || die "NETLIST is not set: give the env file first (./run.sh env.s), or export it"
+[ -n "${NETLIST:-}" ] || die "NETLIST is not set: configure it in paths.sh"
 [ -f "$NETLIST" ] || die "NETLIST: no such file: $NETLIST"
 NETLIST=$(realpath "$NETLIST")
-SCANDEF=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
-[ -f "$SCANDEF" ] || die "no scandef at $SCANDEF: set SCANDEF to the one written with NETLIST"
-SCANDEF=$(realpath "$SCANDEF")
+SCAN_MAP="$SIM_DIR/scan_map.generated.svh"
+SCAN_HOOKUP_FILE="$SIM_DIR/scan_hookups.generated.svh"
+SCAN_REPORT="$SIM_DIR/scan_hookups.generated.report.tsv"
+if (( REGENERATE )); then
+    SCANDEF=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
+    [ -f "$SCANDEF" ] || die "no scandef at $SCANDEF: set SCANDEF to the one written with NETLIST"
+    SCANDEF=$(realpath "$SCANDEF")
 
-# Scan map from the scandef: which register bit each scan cell holds
-rm -f scan_map.svh
-# rm -f scan_phase.txt # uncomment for regen of scan_phase
-# Optional phase extraction: add -v NETLIST="$NETLIST" -v PHASE_OUT="$SCRIPT_DIR/scan_phase.txt"
-awk \
-    -v LOGICAL_PHASE="$SCRIPT_DIR/scan_phase.txt" \
-    -v TOP=forte_top \
-    -f "$SCRIPT_DIR/scan_map.awk" \
-    "$SCANDEF" > "$SCRIPT_DIR/scan_map.svh" \
-    || die "failed to generate scan map"
-echo "run.sh: scan map from $SCANDEF"
-
-rm -f hookups.svh
-# Generate internal register hookups from scandef and scan map
-python3 "$SCRIPT_DIR/internal_hookups.py" \
-    --scandef "$SCANDEF" \
-    --scan_map "$SCRIPT_DIR/scan_map.svh" \
-    --netlist "$NETLIST" \
-    --dut dut \
-    -o "$SCRIPT_DIR/hookups.svh" \
-    || die "failed to generate internal hookups"
-echo "run.sh: generated internal register hookups in $SIM_DIR/hookups.svh"
+    # Verified logical phase is an input, never generated or overwritten here.
+    if [[ -n "${LOGICAL_PHASE:-}" ]]; then
+        [ -f "$LOGICAL_PHASE" ] || die "no logical-polarity metadata at $LOGICAL_PHASE"
+        LOGICAL_PHASE=$(realpath "$LOGICAL_PHASE")
+    elif [[ -f "$SCRIPT_DIR/scan_phase.txt" ]]; then
+        LOGICAL_PHASE="$SCRIPT_DIR/scan_phase.txt"
+    else
+        LOGICAL_PHASE=""
+    fi
+    # Publish only after all requested generation steps succeed.
+    awk -v LOGICAL_PHASE="$LOGICAL_PHASE" -v TOP=forte_top \
+        -f "$SCRIPT_DIR/scan_map.awk" "$SCANDEF" > "$SCAN_MAP.tmp" \
+        || die "failed to generate scan map"
+    if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
+        python3 "$SCRIPT_DIR/internal_hookups.py" \
+            --scandef "$SCANDEF" --scan_map "$SCAN_MAP.tmp" \
+            --netlist "$NETLIST" --dut dut \
+            -o "$SCAN_HOOKUP_FILE.tmp" --report "$SCAN_REPORT.tmp" \
+            || die "failed to generate internal hookups"
+    fi
+    mv "$SCAN_MAP.tmp" "$SCAN_MAP"
+    if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
+        mv "$SCAN_HOOKUP_FILE.tmp" "$SCAN_HOOKUP_FILE"
+        mv "$SCAN_REPORT.tmp" "$SCAN_REPORT"
+    else
+        # An older hookup file must not be paired with the newly generated map.
+        rm -f -- "$SCAN_HOOKUP_FILE" "$SCAN_REPORT"
+    fi
+    echo "run.sh: regenerated scan map and enabled hookups from $SCANDEF"
+else
+    [ -s "$SCAN_MAP" ] || die "no cached scan map at $SCAN_MAP; run ./run.sh --regen once"
+    if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
+        [ -s "$SCAN_HOOKUP_FILE" ] || die "no cached hookups at $SCAN_HOOKUP_FILE; run ./run.sh --regen"
+    fi
+    echo "run.sh: reusing generated map/hookups; use --regen after netlist, scandef, or phase changes"
+fi
+if [[ "${SCAN_HOOKUPS:-1}" != 1 ]]; then
+  COMPILE_ARGS+=(+define+SCAN_NO_HOOKUPS)
+fi
 
 cd "$SIM_DIR"
 
@@ -170,14 +220,20 @@ echo "run.sh: ${#SRCS[@]} pad/SRAM model file(s), $(( ${#LIBS[@]} / 2 )) cell li
 grep -qE '^[[:space:]]*module[[:space:]]+forte_top([^[:alnum:]_]|$)' "$NETLIST" \
     || die "no forte_top module in $NETLIST (it needs the pad ring, not just forte_chip)"
 
-module load Synopsys_x86-64
+if ! command -v vcs >/dev/null; then
+    if type module &>/dev/null; then module load Synopsys_x86-64; fi
+    command -v vcs >/dev/null || die "vcs not found; load the simulator environment first"
+fi
 
 # Zero-delay functional simulation: no specify-block delays or timing checks
 vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     +nospecify +notimingcheck ${FLAGS[@]+"${FLAGS[@]}"} \
-    "$@" \
-    "+incdir+$SCRIPT_DIR" "+incdir+$SIM_DIR" \
+    "${COMPILE_ARGS[@]}" \
+    "+incdir+$SIM_DIR" "+incdir+$SCRIPT_DIR" \
     "${SRCS[@]}" "$SCRIPT_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
     -Mdir=csrc -top tb_scan -o simv_scan
 
-./simv_scan -l sim.log | grep -E '^\[|^(GROUP|REG|PC|PHASE):|DFT TB|^=+'
+rm -f sim.log
+./simv_scan -l sim.log "${RUN_ARGS[@]}" | grep -E '^\[|^(GROUP|REG|PC|PHASE):|DFT TB|^=+'
+grep -qE '^DFT TB PASS($| \(partial coverage:)' sim.log \
+    || die "simulation did not produce a passing verdict; see $SIM_DIR/sim.log"

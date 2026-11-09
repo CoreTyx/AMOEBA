@@ -6,4 +6,6 @@ hvl/ft_shadow/build/
 hdl/cvw/addins/
 sim/pin/
 hvl/pin/vm_paths.sh
+synth/scripts/full_tb/paths.sh
+synth/scripts/full_tb/regressions/
 third_party/cascade/
