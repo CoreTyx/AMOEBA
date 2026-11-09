@@ -50,10 +50,6 @@ suppress_message PWR-591
 suppress_message PWR-806
 # In design %s, there are sequential cells not driving any load.
 suppress_message OPT-109
-# In design '%s', input pin '%s' of hierarchical cell '%s' has no internal loads and is not connected to any nets.
-suppress_message LINT-60
-# Performing clock-gating on design
-suppress_message PWR-730
 
 # %s DEFAULT branch of CASE statement cannot be reached.
 suppress_message ELAB-311
@@ -87,12 +83,3 @@ suppress_message LINT-33
 suppress_message OPT-1206
 # The register '' will be removed.
 suppress_message OPT-1207
-# the register '' is removed because it is merged to ''
-suppress_message OPT-1215
-# Complementing port ''
-suppress_message OPT-319
-
-# Converting capacitance units for library ''
-suppress_message TIM-106
-# Use the 'check_design' command for more information about warnings.
-suppress_message LINT-98
