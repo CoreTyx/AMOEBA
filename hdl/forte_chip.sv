@@ -227,8 +227,29 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // and on this board rst_n is an FPGA output, so this defends against a runtime
   // compromise and not against physical access.  See the header of
   // forte_dft_lock.sv for the rest of the threat model.
+  //
+  // TEST_MODE IS SYNCHRONISED; SCAN_EN IS NOT.  test_mode is a board strap with
+  // no timing relationship to core_clk (the SDC false-paths it), and it selects
+  // what drives the io_out pads.  Raw, any noise on the pin reached the link
+  // outputs between clock edges and could go metastable in scan_q's enable.
+  // Through two flops it can change only on a core_clk edge.  It is static for a
+  // whole test session, so the two-cycle lag costs nothing.  Two things it does
+  // NOT do: hold a floating pin low (the pad has no pull; the board must strap
+  // it), or reset -- rst_n is a DFT reset that ATPG may pulse mid-test, and that
+  // must not drop test mode.  The flops come up random for two cycles after the
+  // clock starts, which is inside rst_n on any sane bring-up.
+  //
+  // scan_en cannot take the same treatment: the tester toggles it between shift
+  // and capture, and two cycles of lag would shift on the capture cycle.
+  //
+  // DFT: the tmsync flops must stay OFF the scan chains (shifting them would
+  // drop test mode mid-shift), and DRC must be told their output is 1 in test,
+  // as it is for the dft_lock flop.
+  logic test_mode_s;
+  synchronizer tmsync(.clk(core_clk), .d(test_mode), .q(test_mode_s));
+
   logic test_mode_dft, scan_en_dft;
-  assign test_mode_dft = test_mode & dft_unlocked;
+  assign test_mode_dft = test_mode_s & dft_unlocked;
   assign scan_en_dft   = scan_en   & dft_unlocked;
 
   logic [LINK_W-1:0] scan_q;
