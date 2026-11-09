@@ -166,6 +166,28 @@ LINK_ERRORS = {
 }
 
 # fbu_mem_bram port B: window w at w << 18; registers at 0xC0000
+# fbu_top's configuration registers that only a PL reset clears (REG_SOFT_RESET
+# does not), with their reset values.  The bitstream is loaded once per boot,
+# so Forte.configure() writes these back at the start of every run: a run must
+# not inherit the last one's fault-injection mask, triggers or console match.
+TRIGGERS = 4
+UART_MATCH_WORDS = 32 // 4
+CONFIG_RESET = (
+    [(REG_MEM_BASE, 0x8000_0000), (REG_MEM_LIMIT, 0x8FFF_FFFF), (REG_RESET_VEC, 0x8000_0000),
+     (REG_UART_RX_BIT, 32), (REG_UART_TX_PERIOD, 32 << 8), (REG_UART_TX_GAP, 0), (REG_UART_MATCH_LEN, 0)]
+    + [(REG_UART_MATCH0 + 4 * w, 0) for w in range(UART_MATCH_WORDS)]
+    + [(REG_UART_MATCH1 + 4 * w, 0) for w in range(UART_MATCH_WORDS)]
+    + [(REG_FI_ARG0, 0), (REG_FI_ARG1, 0), (REG_FI_SEED, 1), (REG_FI_LATENCY, 4), (REG_FI_PHASE_OFS, 4)]
+    + [(REG_FI_PHASE_MASK + 4 * w, 0) for w in range(16)]
+    + [(REG_TRIG + 16 * t + o, 0) for t in range(TRIGGERS) for o in (0, 4, 8)]
+    + [(REG_SCAN_LEN, 0), (REG_SCAN_ADDR, 0)])
+# The ones whose read-back is the stored value, checked against the RTL's
+# reset values after a load.
+CONFIG_RESET_READABLE = {REG_MEM_BASE, REG_MEM_LIMIT, REG_RESET_VEC, REG_UART_RX_BIT, REG_UART_TX_PERIOD,
+                         REG_UART_TX_GAP, REG_UART_MATCH_LEN, REG_FI_ARG0, REG_FI_ARG1, REG_FI_SEED,
+                         REG_FI_LATENCY, REG_FI_PHASE_OFS, REG_SCAN_LEN} | \
+                        {REG_FI_PHASE_MASK + 4 * w for w in range(16)}
+
 MEM_WINDOWS = [(0x8000_0000, 128 * 1024), (0x8080_0000, 4 * 1024), (0x8FEF_C000, 16 * 1024)]
 MEM_REG_WINDOW_BASE = 0xC0000
 MEM_REG_OUT_OF_WINDOW_WRITES = 0xC000C

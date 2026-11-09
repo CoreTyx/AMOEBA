@@ -75,7 +75,8 @@ def file_md5(path: str) -> str:
         return hashlib.md5(fh.read()).hexdigest()
 
 
-def program_once(bitstream: str, fclk_mhz: float) -> None:
+def program_once(bitstream: str, fclk_mhz: float) -> bool:
+    """True when it loaded the PL, False when the bitstream was already there."""
     digest = file_md5(bitstream)
     try:
         with open(LOADED_MARK) as fh:
@@ -84,20 +85,22 @@ def program_once(bitstream: str, fclk_mhz: float) -> None:
         loaded = ""
     if loaded == digest and pl._fpga_state() == "operating":
         print(f"# {os.path.basename(bitstream)} already loaded; FCLK0 -> {pl.set_fclk0_mhz(fclk_mhz):.3f} MHz")
-        return
+        return False
     pl.program(bitstream, fclk_mhz=fclk_mhz)
     with open(LOADED_MARK, "w") as fh:
         fh.write(digest + "\n")
+    return True
 
 
 class Forte:
     def __init__(self, bitstream: str = None, fclk_mhz: float = 25.0):
-        if bitstream:
-            program_once(bitstream, fclk_mhz)
+        loaded = bool(bitstream) and program_once(bitstream, fclk_mhz)
         self.ctl = Mmio(R.CTL_BASE, R.CTL_SPAN)
         found = self.ctl.read(R.REG_ID)
         if found != R.FBU_ID:
             raise RuntimeError(f"ID reads 0x{found:08X}, expected 0x{R.FBU_ID:08X}: wrong bitstream?")
+        if loaded:
+            self.check_config_reset()
         self.is_ddr = bool(self.ctl.read(R.REG_CAPS) & R.CAPS_MEM_AXI)
         # O_SYNC (Mmio) maps the carve-out uncached: HP0 is not coherent with
         # the A9's caches, so a cached write could sit in L2 while the chip
@@ -124,11 +127,26 @@ class Forte:
         return self.rd64(R.REG_LINK_CYC_LO)
 
     # ---- configuration ----
+    def check_config_reset(self) -> None:
+        """Straight after a load: regs.CONFIG_RESET must be the RTL's reset values."""
+        wrong = [(a, v, self.rd(a)) for a, v in R.CONFIG_RESET if a in R.CONFIG_RESET_READABLE and self.rd(a) != v]
+        if wrong:
+            raise RuntimeError("regs.CONFIG_RESET disagrees with the bitstream's reset values: " +
+                               ", ".join(f"0x{a:03X} table 0x{v:X} PL 0x{got:X}" for a, v, got in wrong))
+
+    def restore_config(self) -> None:
+        """The configuration a fresh load gives (regs.CONFIG_RESET), fault injection stopped."""
+        self.wr(R.REG_FI_CTRL, R.pack(R.REG_FI_CTRL, stop=1))
+        self.wr(R.REG_SCAN_CTRL, 0)
+        for addr, value in R.CONFIG_RESET:
+            self.wr(addr, value)
+
     def configure(self, *, seed=1, gap_pct=0, rd_lat=0, wdog=1000, mutate=0, det=True,
                   tohost=0x8080_0000, stop_on_error=True, boot_gate=False,
                   boot_gate_selftest=False, boot_gate_retries=2):
         self.wr(R.REG_PIN_CTRL, 0)
         self.wr(R.REG_SOFT_RESET, 1)
+        self.restore_config()
         self.wr(R.REG_LINK_CFG, R.pack(R.REG_LINK_CFG, det=int(det), gap_pct=gap_pct, rd_lat=rd_lat))
         self.wr(R.REG_LINK_WDOG, R.pack(R.REG_LINK_WDOG, wdog=wdog, mutate=mutate))
         init = prng_seed_state(seed)

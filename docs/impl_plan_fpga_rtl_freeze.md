@@ -774,7 +774,13 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
     (`Forte.hold`, also on SIGTERM), so HP0 is idle whenever the PS acts. The
     `MEM_*` counters then count from the load: `run_cmd.py` prints per-run
     differences, and a sticky `MEM_ERR` from an earlier run is reported, not
-    charged to the current one.
+    charged to the current one. Configuration registers that only a PL reset
+    clears (FI mode, seed, latency, phase offset and mask, triggers, console
+    match, UART timing, memory window, scan) are written back to their reset
+    values by `configure()` from `regs.CONFIG_RESET`, which is checked against
+    the bitstream after each load: without it, `fe_fault_site`'s last phase
+    mask gated CTRL-20's static pin to one phase and its traces ran up to 22
+    cycles fast.
   - **Board results (rd_latency 64, 25 MHz).** smoke and sorting_algo, 30
     runs from one load: all PASS, traces match the bench cycle for cycle,
     read latency mean 14 and max 24 cycles, no HP0 errors.
@@ -1355,6 +1361,9 @@ real code is low.
 
 ## 13. Backlog (TODO, not scheduled)
 
+- **`REG_SOFT_RESET` should reset the configuration registers** (§5.10), so
+  their reset values live only in `fbu_top` and `regs.CONFIG_RESET` goes.
+  Needs a rebuild and the gates.
 - **Root-cause the HP0 reload wedge** (§5.10). Candidates: AFI/HP0 state
   the PL teardown leaves behind, or the boot design's PS7 settings for HP0
   that `fpga_manager` loads do not apply. Sample the AFI registers
