@@ -3,12 +3,13 @@
 //
 // Written: Siddharth Rau (sidrau2@illinois.edu)
 //
-// Purpose: Fault-tolerant wrapper for Wally's registered integer multiplier.
+// Purpose: Fault-tolerant wrapper for the sequential integer multiplier.
 //
 // Usage:
-// Instantiated by the MDU. Preserves the multiplier's E-input/M-output
-// boundary and returns the half of the product the instruction asks for, with
-// recovery status.
+// Instantiated by the MDU. Takes a multiply's operands as it leaves Execute,
+// runs the multiplier while holding the pipeline with the multiply in Memory,
+// and returns the half of the product the instruction asks for, with recovery
+// status.
 //
 // Functionality:
 // One multiplier, checked with residues modulo 15 (residue15.sv): the
@@ -22,10 +23,8 @@ module ft_mul import cvw::*; #(
   parameter cvw_t P,
   parameter int TE_THRESHOLD = 3
 ) (
-  // Preserve Wally's E-input/M-output boundary while adding replay control.
   input  logic                clk, reset,
   input  logic                StallM, FlushM,
-  input  logic                HoldE,                  // Execute's operands cannot be used this cycle (ECC stall)
   input  logic [P.XLEN-1:0]   ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0]          Funct3E,
   input  logic                MulActiveE,
@@ -37,30 +36,28 @@ module ft_mul import cvw::*; #(
   output logic                stall_req, unresolved,
   output logic                fault_detect            // a check found the product wrong
 );
-  // saved_* is the architectural transaction; mul_* selects current E inputs
-  // or that saved transaction during an M-stage replay.
-  logic [P.XLEN-1:0] saved_a, saved_b, mul_a, mul_b;
-  logic [2:0] saved_funct3, mul_funct3;
-  logic mul_active_m, mismatch, replay_load;
-  logic [P.XLEN*2-1:0] prod_raw, prod;
-  logic [P.XLEN*2-1:0] prod_q;                       // the product as captured in SUM
-  logic internal_stall_m;
-  // One evaluation of the product in Memory.  As in ft_alu, nothing crosses from
-  // the adder to the rest of the core inside one cycle:
-  //   SUM      the multiplier adds its partial products; the product is captured.
-  //   COMPARE  the captured product is checked and the controller acts.
-  //   REPLAY   after a failed check: the multiplier is given the saved operands
-  //   LOAD     ... and the partial-product registers reload; then SUM again.
+  // saved_* is the architectural transaction: loaded as the multiply leaves
+  // Execute and held, while the pipeline waits, for the multiplier and for
+  // every replay.
+  logic [P.XLEN-1:0]   saved_a, saved_b;
+  logic [2:0]          saved_funct3;
+  logic                mul_active_m, mismatch;
+  logic                mul_start, mul_done, capture;
+  logic [P.XLEN*2-1:0] prod_raw, prod;               // the multiplier's product register; with the fault applied
+  // One evaluation of the product in Memory.  Nothing crosses from the adder to
+  // the rest of the core inside one cycle:
+  //   RUN      the multiplier loads and steps (XLEN+1 cycles).  The cycle after its last
+  //            step, the product register is rewritten through the fault
+  //            injector -- the product as captured -- and the expected residue
+  //            is registered.
+  //   COMPARE  the captured product is checked and the controller acts.  A
+  //            failed check restarts the multiplier on the saved operands and
+  //            goes back to RUN.
   //   DONE     the captured product is presented and the stall released.
-  typedef enum logic [2:0] {SUM, COMPARE, REPLAY, LOAD, DONE} phase_t;
+  typedef enum logic [1:0] {RUN, COMPARE, DONE} phase_t;
   phase_t phase;
-  logic check, retry, replay_sel;
-  logic [P.XLEN-1:0] e_a_q, e_b_q;                   // Execute's operands and multiply type, registered
-  logic [2:0]        e_funct3_q;
-  logic [1:0]        e_cnt;                          // full cycles the multiplier has had on this instruction (saturates at 2)
+  logic check, retry;
 
-  // Save the transaction that produced the current partial product. A retry
-  // must replay these exact operands while the architectural stages are held.
   // The operands need no reset: they are read only for a multiply in Memory.
   always_ff @(posedge clk)
     if (reset | (FlushM & ~StallM)) saved_funct3 <= '0;
@@ -76,48 +73,22 @@ module ft_mul import cvw::*; #(
   // new evaluation.  (A flush that Memory accepts is such an edge too.)
   assign check = (phase == COMPARE);
   always_ff @(posedge clk)
-    if (reset | ~StallM) phase <= SUM;
+    if (reset | ~StallM) phase <= RUN;
     else case (phase)
-      SUM:     phase <= COMPARE;
-      COMPARE: phase <= retry ? REPLAY : DONE;
-      REPLAY:  phase <= LOAD;
-      LOAD:    phase <= SUM;
+      RUN:     if (mul_done) phase <= COMPARE;
+      COMPARE: phase <= retry ? RUN : DONE;
       DONE:    phase <= DONE;
-      default: phase <= SUM;
+      default: phase <= RUN;
     endcase
 
-  // After a failed check, load the saved transaction into the internal PP registers
-  // even though the architectural pipeline is globally held.  The multiplier
-  // takes two cycles (mul.sv), so the saved operands are presented for two and
-  // the registers load in the second.
-  assign replay_sel  = (phase == REPLAY) | (phase == LOAD);
-  assign replay_load = (phase == LOAD);
-  assign internal_stall_m = StallM & ~replay_load;
-  // A multiply arriving in Execute takes three cycles to reach the
-  // partial-product registers: its operands are registered here (so the
-  // multiplier starts at a register and not behind the forwarding muxes), the
-  // half products are registered in mul.sv, and their sum loads when the
-  // pipeline advances.  e_cnt counts the cycles the chain has had since the
-  // instruction arrived; an ECC stall dirties the operand register and starts
-  // the count again, and a replay borrows the multiplier, costing one cycle.
-  always_ff @(posedge clk) begin
-    e_a_q      <= ForwardedSrcAE;
-    e_b_q      <= ForwardedSrcBE;
-    e_funct3_q <= Funct3E;
-  end
-  assign mul_a = replay_sel ? saved_a : e_a_q;
-  assign mul_b = replay_sel ? saved_b : e_b_q;
-  assign mul_funct3 = replay_sel ? saved_funct3 : e_funct3_q;
-  always_ff @(posedge clk)
-    if (reset | ~StallM | HoldE) e_cnt <= 2'd0;
-    else if (replay_sel)         e_cnt <= 2'd1;
-    else if (e_cnt != 2'd2)      e_cnt <= e_cnt + 2'd1;
-  // Permit the internal PP registers to load the saved retry transaction even
-  // when the architectural hazard unit is asserting StallM.
-  mul #(P.XLEN) primary(.clk, .reset, .StallM(internal_stall_m), .FlushM(FlushM & ~StallM),
-    .ForwardedSrcAE(mul_a), .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .ProdM(prod_raw));
-  // Fault-injection endpoint: corrupt the completed product before the check
-  // and the architectural product output.
+  // The multiplier starts on the edge a multiply enters Memory, which is the
+  // edge saved_* load, and again on the edge a failed check sends it back.
+  assign mul_start = (MulActiveE & ~StallM) | (check & retry);
+  assign capture   = (phase == RUN) & mul_done;
+  mul #(P.XLEN) primary(.clk, .reset, .Start(mul_start), .A(saved_a), .B(saved_b), .Funct3(saved_funct3),
+    .Load(capture), .PIn(prod), .Done(mul_done), .Prod(prod_raw));
+  // Fault-injection endpoint: the completed product passes through it once, into
+  // the product register, before the check reads it.
   ft_fault_inject #(.WIDTH(P.XLEN*2), .PHASE(9'h17E)) result_fi(
     .reset, .lfsr(fi_lfsr), .count(fi_count), .fi_enable, .data_i(prod_raw), .data_o(prod));
 
@@ -132,7 +103,7 @@ module ft_mul import cvw::*; #(
   // mul.sv forms it unsigned.
   /////////////////////////////////////////////////////////////////////////////////////////////
   logic       signed_a, signed_b;
-  logic [3:0] res_a_bits, res_b_bits, res_a, res_b, res_ab, res_ab_q, res_prod, res_expected;
+  logic [3:0] res_a_bits, res_b_bits, res_a, res_b, res_a_q, res_b_q, res_ab, res_ab_q, res_prod, res_expected;
 
   assign signed_a = (saved_funct3 == 3'b001) | (saved_funct3 == 3'b010);
   assign signed_b = (saved_funct3 == 3'b001);
@@ -140,16 +111,19 @@ module ft_mul import cvw::*; #(
   residue15 #(P.XLEN) bres(saved_b, res_b_bits);
   residue15 #(5) aval(5'(res_a_bits) + ((signed_a & saved_a[P.XLEN-1]) ? 5'd14 : 5'd0), res_a);
   residue15 #(5) bval(5'(res_b_bits) + ((signed_b & saved_b[P.XLEN-1]) ? 5'd14 : 5'd0), res_b);
-  residue15 #(8) abres(8'(res_a) * 8'(res_b), res_ab);
-
-  // No reset: nothing reads these before SUM has written them.
+  // The operands are steady for the whole multiply (XLEN+1 cycles), so the
+  // expected residue is pipelined: the operand residues are registered every
+  // cycle, and their product is captured with the result.
+  // No reset: nothing reads these before the capture has written res_ab_q.
+  always_ff @(posedge clk) begin
+    res_a_q <= res_a;
+    res_b_q <= res_b;
+  end
+  residue15 #(8) abres(8'(res_a_q) * 8'(res_b_q), res_ab);
   always_ff @(posedge clk)
-    if (phase == SUM) begin
-      prod_q   <= prod;
-      res_ab_q <= res_ab;
-    end
-  residue15 #(P.XLEN*2) prodres(prod_q, res_prod);
-  residue15 #(5) expres(5'(res_ab_q) + {4'b0, signed_a & prod_q[P.XLEN*2-1]}, res_expected);
+    if (capture) res_ab_q <= res_ab;
+  residue15 #(P.XLEN*2) prodres(prod_raw, res_prod);
+  residue15 #(5) expres(5'(res_ab_q) + {4'b0, signed_a & prod_raw[P.XLEN*2-1]}, res_expected);
   assign mismatch = mul_active_m & (res_prod != res_expected);
   assign fault_detect = check & mismatch;
 
@@ -166,11 +140,10 @@ module ft_mul import cvw::*; #(
     .pe_primary(), .pe_shadow());
   /* verilator lint_on PINCONNECTEMPTY */
 
-  // The pipeline waits for a multiply's evaluation in Memory to finish, and for
-  // the multiplier to have had its cycles with a multiply in Execute.
-  assign stall_req = (mul_active_m & (phase != DONE)) | (MulActiveE & (e_cnt != 2'd2));
+  // The pipeline waits for a multiply's evaluation in Memory to finish.
+  assign stall_req = mul_active_m & (phase != DONE);
   // The product reads as zero until the evaluation is DONE, and stays zero if it
   // ended unresolved.  Both conditions, the half select, and the product are registers.
   assign ProdM = ((phase != DONE) | unresolved) ? '0 :
-                 (saved_funct3[1:0] == 2'b00) ? prod_q[P.XLEN-1:0] : prod_q[P.XLEN*2-1:P.XLEN];
+                 (saved_funct3[1:0] == 2'b00) ? prod_raw[P.XLEN-1:0] : prod_raw[P.XLEN*2-1:P.XLEN];
 endmodule
