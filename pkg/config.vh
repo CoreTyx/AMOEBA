@@ -298,9 +298,11 @@ localparam CACHE_SRAMLEN = 32'd128;
 
 // Integer Divider Configuration
 // IDIV_BITSPERCYCLE must be 1, 2, or 4
-// 2, not 4: each bit is one subtract-and-select in series, and four of them do
-// not fit a 2.5 ns cycle.  A 64-bit divide takes 32 iterations instead of 16.
-localparam IDIV_BITSPERCYCLE = 32'd2;
+// 1: one subtract-and-select per cycle, so the divider has a single subtractor,
+// used again every cycle -- for area, as with the sequential multiplier
+// (mul.sv); divides are a small share of the instruction mix.  A 64-bit
+// divide takes 64 iterations, a W-type divide 32.
+localparam IDIV_BITSPERCYCLE = 32'd1;
 localparam logic IDIV_ON_FPU = 0;   // must be 0: there is no FPU to share
 
 // Legal number of PMP entries are 0, 16, or 64

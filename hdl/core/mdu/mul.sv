@@ -2,7 +2,7 @@
 // mul.sv
 //
 // Written: David_Harris@hmc.edu 16 February 2021
-// Modified:
+// Modified: 2026-11 -- sequential shift-add, one multiplier bit per cycle
 //
 // Purpose: Integer multiplication
 //
@@ -27,81 +27,108 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
+// SEQUENTIAL SHIFT-ADD MULTIPLIER, ONE MULTIPLIER BIT PER CYCLE.
+//
+// Multiplies and divides are a small share of the dynamic instruction mix, so
+// this trades latency for area: one adder, used again every cycle, in place of
+// the four 32x32 array multipliers and 512 partial-product flops it replaces.
+// A multiply takes XLEN+1 cycles (65): a load, then XLEN steps.  The product is
+// held until the next Start.
+//
+//   Acc  XLEN+1 bits   the running high half.  Its top bit is the carry out
+//                      of each step's add -- the sign of the partial sum.
+//   MQ   XLEN bits     the multiplier, shifted out at the bottom one bit per
+//                      cycle while the product's low half shifts in at the top.
+//
+// Step k (k = 0..XLEN-1) adds A to Acc when multiplier bit k is set, then
+// shifts {sum, MQ} right by one.  After XLEN steps {Acc[XLEN-1:0], MQ} is the
+// 2*XLEN-bit product.  Per bit of the adder that is one sum and one carry
+// function of three inputs -- the two LUT3s -- and the row is used once per
+// cycle for XLEN cycles.
+//
+// Signedness costs no extra cycles.  A signed multiplicand (mulh, mulhsu) is
+// sign-extended to XLEN+1 bits, so the partial sums stay right in two's
+// complement; the arithmetic shift keeps them so.  A signed multiplier (mulh)
+// has bit XLEN-1 of weight -2^(XLEN-1), so the last step subtracts instead of
+// adding.  mul's low half is the same whatever the signedness and is formed
+// unsigned; mulw's is the low 32 bits of the same product, truncated in mdu.
+//
+// TIMING.  A step is one XLEN+2-bit add whose only late input is MQ[0], a
+// register, selecting A or 0 per bit.  Everything else in front of the adder
+// comes from registers that are steady for the whole multiply: A, the
+// signedness, and Last -- the last step, registered a step ahead rather than
+// decoded from the count -- so A's subtract-or-add form settles early.  The load
+// cycle is what keeps a "first step reads B" mux off this path.
+//
+// A, B and Funct3 must be held from the Start edge until Done: ft_mul feeds
+// them from its saved-transaction registers.
+//
+// Load overwrites the product register with PIn.  ft_mul uses it, once the
+// product is complete, to place an injected fault where the residue check sees
+// it, so the product register doubles as the captured result.
+
 module mul #(parameter XLEN) (
   input  logic                clk, reset,
-  input  logic                StallM, FlushM,
-  input  logic [XLEN-1:0]     ForwardedSrcAE, ForwardedSrcBE, // source A and B from after Forwarding mux
-  input  logic [2:0]          Funct3E,                        // type of multiply
-  output logic [XLEN*2-1:0]   ProdM                           // double-widthproduct
+  input  logic                Start,                         // load next cycle, then XLEN steps
+  input  logic [XLEN-1:0]     A, B,                          // multiplicand, multiplier; held until Done
+  input  logic [2:0]          Funct3,                        // type of multiply; held until Done
+  input  logic                Load,                          // replace the product with PIn (only when Done)
+  input  logic [XLEN*2-1:0]   PIn,
+  output logic                Done,                          // Prod is the product
+  output logic [XLEN*2-1:0]   Prod
 );
 
-  // Number systems
-  // Let A' = sum(i=0, XLEN-2, A[i]*2^i)
-  // Unsigned: A = A' + A[XLEN-1]*2^(XLEN-1)
-  // Signed:   A = A' - A[XLEN-1]*2^(XLEN-1)
+  localparam CNTW = $clog2(XLEN);
 
-  // Multiplication: A*B
-  // Let P' = A' * B'
-  //     PA = (A' * B[XLEN-1])
-  //     PB = (B' * A[XLEN-1])
-  //     PP = A[XLEN-1] * B[XLEN-1]
-  // Signed * Signed     = P' + (-PA - PB)*2^(XLEN-1) + PP*2^(2XLEN-2)
-  // Signed * Unsigned   = P' + ( PA - PB)*2^(XLEN-1) - PP*2^(2XLEN-2)
-  // Unsigned * Unsigned = P' + ( PA + PB)*2^(XLEN-1) + PP*2^(2XLEN-2)
+  logic [XLEN:0]   Acc;                                      // running high half, with its sign
+  logic [XLEN-1:0] MQ;                                       // multiplier out, product low half in
+  logic [CNTW-1:0] Cnt;                                      // step number
+  logic            Loading, Busy, Last;
+  logic            SignedA, SignedB, Sub;
+  logic [XLEN:0]   AExt, AOp, Addend;
+  logic [XLEN+1:0] Sum;
 
-  logic [XLEN-1:0]    Aprime, Bprime;                       // lower bits of source A and B
-  logic               MULH, MULHSU;                         // type of multiply
-  logic [XLEN-2:0]    PA, PB;                               // product of msb and lsbs
-  logic               PP;                                   // product of msbs
-  logic [XLEN*2-1:0]  PP1E, PP2E, PP3E, PP4E;               // partial products
-  logic [XLEN*2-1:0]  PP1M, PP2M, PP3M, PP4M;               // registered partial proudcts
+  // flavour of multiply: mulh is signed x signed, mulhsu signed x unsigned
+  assign SignedA = (Funct3 == 3'b001) | (Funct3 == 3'b010);
+  assign SignedB = (Funct3 == 3'b001);
 
-  //////////////////////////////
-  // Execute Stage: Compute partial products
-  //////////////////////////////
+  // The signed multiplier's top bit is worth -2^(XLEN-1): the last step subtracts.
+  assign Sub    = SignedB & Last;
+  assign AExt   = {SignedA & A[XLEN-1], A};
+  assign AOp    = AExt ^ {(XLEN+1){Sub}};                    // A or ~A, settled before the step
+  assign Addend = MQ[0] ? AOp : '0;
+  assign Sum    = {Acc[XLEN], Acc} + {Addend[XLEN], Addend} + (XLEN+2)'(Sub & MQ[0]);
 
-  assign Aprime = {1'b0, ForwardedSrcAE[XLEN-2:0]};
-  assign Bprime = {1'b0, ForwardedSrcBE[XLEN-2:0]};
-  // Aprime * Bprime takes two cycles.  In the first, the four products of the
-  // operands' halves go into registers; from the second on, PP1E is their sum.
-  // One full-width multiply did not fit a 2.5 ns cycle.
-  // The registers run freely, so the operands must have been presented, unchanged,
-  // for a full cycle before the partial-product registers below load PP1E.  ft_mul
-  // registers the operands and holds the pipeline until that is so.
-  localparam HALF = XLEN/2;
-  logic [XLEN-1:0]    LLE, LHE, HLE, HHE;                   // products of the halves
-  logic [XLEN-1:0]    LLQ, LHQ, HLQ, HHQ;                   // ... registered
-  assign LLE = Aprime[HALF-1:0]    * Bprime[HALF-1:0];
-  assign LHE = Aprime[HALF-1:0]    * Bprime[XLEN-1:HALF];
-  assign HLE = Aprime[XLEN-1:HALF] * Bprime[HALF-1:0];
-  assign HHE = Aprime[XLEN-1:HALF] * Bprime[XLEN-1:HALF];
-  flop #(4*XLEN) halvesreg(clk, {LLE, LHE, HLE, HHE}, {LLQ, LHQ, HLQ, HHQ});
-  assign PP1E = {HHQ, LLQ} + {{(HALF-1){1'b0}}, ({1'b0, LHQ} + {1'b0, HLQ}), {HALF{1'b0}}};
-  assign PA = {(XLEN-1){ForwardedSrcAE[XLEN-1]}} & ForwardedSrcBE[XLEN-2:0];
-  assign PB = {(XLEN-1){ForwardedSrcBE[XLEN-1]}} & ForwardedSrcAE[XLEN-2:0];
-  assign PP = ForwardedSrcAE[XLEN-1] & ForwardedSrcBE[XLEN-1];
+  always_ff @(posedge clk)
+    if (reset) begin
+      Loading <= 1'b0;
+      Busy    <= 1'b0;
+    end else if (Start) begin
+      Loading <= 1'b1;
+      Busy    <= 1'b0;
+    end else if (Loading) begin
+      Loading <= 1'b0;
+      Busy    <= 1'b1;
+      Cnt     <= '0;
+      Last    <= 1'b0;
+    end else if (Busy) begin
+      Cnt     <= Cnt + 1'b1;
+      Last    <= (Cnt == CNTW'(XLEN-2));
+      if (Last) Busy <= 1'b0;
+    end
 
-  // flavor of multiplication
-  assign MULH   = (Funct3E == 3'b001);
-  assign MULHSU = (Funct3E == 3'b010);
+  // The datapath registers need no reset: nothing reads them before a multiply has written them.
+  always_ff @(posedge clk)
+    if (Loading) begin
+      Acc <= '0;
+      MQ  <= B;
+    end else if (Busy) begin
+      Acc <= Sum[XLEN+1:1];
+      MQ  <= {Sum[0], MQ[XLEN-1:1]};
+    end else if (Load) begin
+      {Acc, MQ} <= {PIn[XLEN*2-1], PIn};
+    end
 
-  // Select partial products, handling signed multiplication
-  assign PP2E = {2'b00, (MULH | MULHSU) ? ~PA : PA, {(XLEN-1){1'b0}}};
-  assign PP3E = {2'b00, (MULH) ? ~PB : PB, {(XLEN-1){1'b0}}};
-  always_comb
-  if (MULH)        PP4E = {1'b1, PP, {(XLEN-3){1'b0}}, 1'b1, {(XLEN){1'b0}}};
-  else if (MULHSU) PP4E = {1'b1, ~PP, {(XLEN-2){1'b0}}, 1'b1, {(XLEN-1){1'b0}}};
-  else             PP4E = {1'b0, PP, {(XLEN*2-2){1'b0}}};
-
-  //////////////////////////////
-  // Memory Stage: Sum partial proudcts
-  //////////////////////////////
-
-  flopenrc #(XLEN*2) PP1Reg(clk, reset, FlushM, ~StallM, PP1E, PP1M);
-  flopenrc #(XLEN*2) PP2Reg(clk, reset, FlushM, ~StallM, PP2E, PP2M);
-  flopenrc #(XLEN*2) PP3Reg(clk, reset, FlushM, ~StallM, PP3E, PP3M);
-  flopenrc #(XLEN*2) PP4Reg(clk, reset, FlushM, ~StallM, PP4E, PP4M);
-
-  // add up partial products; this multi-input add implies CSAs and a final CPA
-  assign ProdM = PP1M + PP2M + PP3M + PP4M; //ForwardedSrcAE * ForwardedSrcBE;
- endmodule
+  assign Done = ~Loading & ~Busy;
+  assign Prod = {Acc[XLEN-1:0], MQ};
+endmodule
