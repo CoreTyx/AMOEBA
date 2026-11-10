@@ -7,10 +7,12 @@ from collections import defaultdict
 import re
 from pathlib import Path
 
-SCANDEF_PATH = Path("/groups/ece427-group4/dft_testing/synth/synout/forte_top.scandef")
-SCAN_MAP_PATH = Path("/groups/ece427-group4/dft_testing/synth/scripts/full_tb/scan_map.svh")
-OUT_PATH = Path("/groups/ece427-group4/dft_testing/synth/scripts/full_tb/hookups.svh")
-NETLIST_PATH = Path("/groups/ece427-group4/dft_testing/synth/synout/forte_top.gate.v")
+FULL_TB_DIR = Path(__file__).resolve().parents[1]
+SYNOUT_DIR = FULL_TB_DIR.parents[1] / "synout"
+SCANDEF_PATH = SYNOUT_DIR / "forte_top.scandef"
+SCAN_MAP_PATH = FULL_TB_DIR / "sim/scan_map.generated.svh"
+OUT_PATH = FULL_TB_DIR / "sim/scan_hookups.generated.svh"
+NETLIST_PATH = SYNOUT_DIR / "forte_top.gate.v"
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scandef", type=Path,default=SCANDEF_PATH)

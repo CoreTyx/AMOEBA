@@ -81,6 +81,8 @@
 //   F  reset        every cell loaded (all 1, ~base, random; control registers
 //                   too), then a functional reset: every cell back at its reset
 //                   value.
+//   R  randomized   multi-register first-edge patterns and modeled faults.
+//   I  instructions short RV64 sequences, WFI endpoint, scan-visible writes.
 // Ends with one line per group and register that failed, the PC bits that
 // failed, then "DFT TB PASS" or "DFT TB FAIL".
 //
@@ -149,6 +151,8 @@ module tb_scan;
   logic        rst_n, ready, rvalid, uart_rx, test_mode, scan_en, fault_inject;
   logic [1:0]  irq;
   logic [N:1]  si;
+  bit link_active = 0;
+  wire link_ready, link_rvalid;
   wire  [N:1]  so;
   wire  [15:0] io;
   wire         dir, req, wr, clk_out, uart_tx, status;
@@ -156,6 +160,13 @@ module tb_scan;
   // Scan in on io[7:0], driven only in test mode; scan out read from io[15:8].
   assign io[7:0] = test_mode ? si : 'z;
   assign so = io[15:8];
+  always_comb begin
+    ready = link_active ? link_ready : 1'b0;
+    rvalid = link_active ? link_rvalid : 1'b0;
+  end
+  pin_link_agent #(.BEATS(2), .RESET_VEC(32'(`RESET_VEC))) link (
+    .core_clk(clk), .clk_out, .rst_n, .io, .dir, .req, .wr,
+    .ready(link_ready), .rvalid(link_rvalid), .enable(link_active));
 
   forte_top dut (
     .core_clk(clk), .rst_n, .io, .dir, .req, .clk_out, .wr, .ready, .rvalid,
@@ -172,11 +183,12 @@ module tb_scan;
   bit in_check_fail = 1'b0;
   bit have_snapshot = 1'b0;
   // A/M/B are prerequisites. Remaining letters execute in the requested order.
-  string phase_order = "CDEPHF", case_filter = "", scan_op = "capture";
+  string phase_order = "CDEPHFRI", case_filter = "", scan_op = "capture";
   bit baseline_ok = 0, sentinel_enabled = 0, sweep_enabled = 0;
-  bit unload_reset_enabled = 0;
+  bit unload_reset_enabled = 1;
   int case_repeats = 1, cases_selected = 0, checks_skipped = 0;
   int unsigned scan_seed = 1;
+  int random_iters = 100, exec_iters = 16;
   real launch_ns = 2.0; // post-synthesis FPGA_TCO_PS convention
   // Set +SCAN_NO_DUMP to omit large failure snapshots.
   // Set +SCAN_TRACE_CYCLES for per-clock traces or +SCAN_TRACE_SHIFT for shift progress.
@@ -198,14 +210,14 @@ module tb_scan;
 
 
   // Per-phase summary: errors counts fail() calls, not individual wrong bits.
-  int phase_errors [0:8];
-  bit phase_ran [0:8];
-  int phase_skips [0:8];
-  int phase_cases [0:8];
-  bit phase_empty [0:8];
-  string phase_names [0:8] = '{"A chain lengths", "M scan map", "B reset",
+  int phase_errors [0:10];
+  bit phase_ran [0:10];
+  int phase_skips [0:10];
+  int phase_cases [0:10];
+  bit phase_empty [0:10];
+  string phase_names [0:10] = '{"A chain lengths", "M scan map", "B reset",
       "C round trip", "D base capture", "E PC", "P registers",
-      "H hardening", "F reset recovery"};
+      "H hardening", "F reset recovery", "R randomized", "I instruction scan"};
   int phase_start_errors;
   int phase_start_cases, phase_start_skips;
 
@@ -231,10 +243,10 @@ module tb_scan;
 
   task automatic phase_summary();
     $display("================ DFT PHASE SUMMARY ================");
-    for (int p = 0; p < 9; p++)
+    for (int p = 0; p < 11; p++)
       $display("PHASE: %-20s %-5s errors=%0d", phase_names[p],
-               (!phase_ran[p] || phase_empty[p]) ? "SKIP" :
-               (phase_errors[p] != 0 ? "FAIL" : (phase_skips[p] != 0 ? "PARTIAL" : "PASS")),
+               !phase_ran[p] ? "SKIP" : (phase_errors[p] != 0 ? "FAIL" :
+               (phase_empty[p] ? "SKIP" : (phase_skips[p] != 0 ? "PARTIAL" : "PASS"))),
                phase_errors[p]);
     $display("PHASE: TOTAL errors=%0d", errors);
     $display("PHASE: selected_cases=%0d explicit_skips=%0d operation=%s", cases_selected, checks_skipped, scan_op);
@@ -552,6 +564,7 @@ module tb_scan;
   task automatic prepare_case();
     // Called at the post-edge launch slot, never between loading and capture.
     // Allow reset to assert before disabling scan/remapping the shared pads.
+    link_active = 0;
     rst_n = 1'b0;
     idle(20);
     set_se(1'b0);
@@ -1161,6 +1174,9 @@ module tb_scan;
     $display("[%0t] TRACE task END: phase_f", $time);
   endtask
 
+`include "scan_random.svh"
+`include "scan_exec.svh"
+
   // ---- summary -----------------------------------------------------------------------------
   task automatic summary();
     int    g_regs [4], g_cells [4], g_bad [4];
@@ -1196,6 +1212,9 @@ module tb_scan;
     void'($value$plusargs("SCAN_OP=%s", scan_op));
     void'($value$plusargs("SCAN_REPEAT=%d", case_repeats));
     void'($value$plusargs("SCAN_SEED=%d", scan_seed));
+    void'($value$plusargs("SCAN_RANDOM_ITERS=%d", random_iters));
+    void'($value$plusargs("SCAN_EXEC_ITERS=%d", exec_iters));
+    if (random_iters < 1 || exec_iters < 1) $fatal(1, "iteration counts must be positive");
     if ($value$plusargs("FPGA_TCO_PS=%d", timing_ps)) launch_ns = timing_ps / 1000.0;
     if (!(launch_ns > 0 && launch_ns < 50)) $fatal(1, "FPGA_TCO_PS must be between 0 and 50000 exclusive");
     if (case_repeats < 1) $fatal(1, "SCAN_REPEAT must be positive");
@@ -1203,16 +1222,18 @@ module tb_scan;
       $fatal(1, "SCAN_OP must be capture, load, or both");
     if (`RST_LAT < 1 || `RST_LAT > MAX_LEN) $fatal(1, "invalid RST_LAT");
     for (int i = 0; i < phase_order.len(); i++)
-      if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F"}))
+      if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F","R","I"}))
         $fatal(1, "SCAN_PHASES contains an unknown phase: %s", phase_order.substr(i,i));
     sentinel_enabled = $test$plusargs("SCAN_SENTINEL");
     sweep_enabled = $test$plusargs("SCAN_SWEEP");
-    unload_reset_enabled = $test$plusargs("SCAN_UNLOAD_RESET");
+    if ($test$plusargs("SCAN_UNLOAD_RESET") && $test$plusargs("SCAN_UNLOAD_NO_RESET"))
+      $fatal(1, "choose only one of SCAN_UNLOAD_RESET and SCAN_UNLOAD_NO_RESET");
+    unload_reset_enabled = !$test$plusargs("SCAN_UNLOAD_NO_RESET");
     seed_state = int'(scan_seed);
     seed_state = $urandom(seed_state);
-    $display("[%0t] CONFIG: phases=%s case='%s' operation=%s repeat=%0d seed=%0d TCO=%0.3f ns sentinel=%b sweep=%b unload_reset=%b",
-             $time, phase_order, case_filter, scan_op, case_repeats, scan_seed, launch_ns, sentinel_enabled, sweep_enabled, unload_reset_enabled);
-    rst_n = 1'bx; ready = 1'b0; rvalid = 1'b0; irq = '0; uart_rx = 1'b1;
+    $display("[%0t] CONFIG: phases=%s case='%s' operation=%s repeat=%0d seed=%0d TCO=%0.3f ns sentinel=%b sweep=%b unload_reset=%b random_iters=%0d exec_iters=%0d",
+             $time, phase_order, case_filter, scan_op, case_repeats, scan_seed, launch_ns, sentinel_enabled, sweep_enabled, unload_reset_enabled, random_iters, exec_iters);
+    rst_n = 1'bx; irq = '0; uart_rx = 1'b1;
     fault_inject = 1'b0; test_mode = 1'b0; si = '0;
     set_se(1'b0);
     #0.5; rst_n = 1'b0;
@@ -1250,6 +1271,8 @@ module tb_scan;
 `endif
           end
           "F": begin phase_begin(8); phase_f(); phase_end(8); end
+          "R": begin phase_begin(9); phase_r(); phase_end(9); end
+          "I": begin phase_begin(10); phase_i(); phase_end(10); end
         endcase
       end
       if (map_ok) summary();

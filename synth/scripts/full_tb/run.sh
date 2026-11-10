@@ -46,6 +46,8 @@ set -euo pipefail
 die() { echo "run.sh: $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+SRC_DIR="$SCRIPT_DIR/src"
 SIM_DIR="$SCRIPT_DIR/sim"
 if [[ "${1:-}" == clean ]]; then
     # Netlist-derived metadata is reused until --regen is requested.
@@ -67,6 +69,10 @@ if [[ "${1:-}" == clean ]]; then
 fi
 
 mkdir -p "$SIM_DIR"
+for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" \
+    "$REPO_DIR/hdl/forte_link_pkg.sv" "$REPO_DIR/hvl/pin/pin_link_agent.sv"; do
+    [ -s "$source_file" ] || die "missing source: $source_file; use matching full_tb, hdl, and hvl/pin sources"
+done
 
 # Everything printed from here on (these messages, VCS's output, the results)
 # also goes to sim/run.log.  sim.log keeps the full simulation
@@ -170,10 +176,10 @@ if (( REGENERATE )); then
     fi
     # Publish only after all requested generation steps succeed.
     awk -v LOGICAL_PHASE="$LOGICAL_PHASE" -v TOP=forte_top \
-        -f "$SCRIPT_DIR/scan_map.awk" "$SCANDEF" > "$SCAN_MAP.tmp" \
+        -f "$SRC_DIR/scan_map.awk" "$SCANDEF" > "$SCAN_MAP.tmp" \
         || die "failed to generate scan map"
     if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
-        python3 "$SCRIPT_DIR/internal_hookups.py" \
+        python3 "$SRC_DIR/internal_hookups.py" \
             --scandef "$SCANDEF" --scan_map "$SCAN_MAP.tmp" \
             --netlist "$NETLIST" --dut dut \
             -o "$SCAN_HOOKUP_FILE.tmp" --report "$SCAN_REPORT.tmp" \
@@ -229,8 +235,9 @@ fi
 vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     +nospecify +notimingcheck ${FLAGS[@]+"${FLAGS[@]}"} \
     "${COMPILE_ARGS[@]}" \
-    "+incdir+$SIM_DIR" "+incdir+$SCRIPT_DIR" \
-    "${SRCS[@]}" "$SCRIPT_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
+    "+incdir+$SIM_DIR" "+incdir+$SRC_DIR" \
+    "${SRCS[@]}" "$REPO_DIR/hdl/forte_link_pkg.sv" \
+    "$REPO_DIR/hvl/pin/pin_link_agent.sv" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
     -Mdir=csrc -top tb_scan -o simv_scan
 
 rm -f sim.log

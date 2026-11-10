@@ -47,8 +47,9 @@ module pin_link_agent import forte_link_pkg::*; #(
   input  wire               dir,
   input  wire               req,
   input  wire               wr,
-  output logic              ready,
-  output logic              rvalid
+  output wire               ready,
+  output wire               rvalid,
+  input  logic              enable = 1'b1 // low releases pins for scan
 );
 
   localparam int WORDS     = 4 * BEATS;      // 16-bit words per transaction
@@ -180,12 +181,15 @@ module pin_link_agent import forte_link_pkg::*; #(
   // ---- pin drivers ---------------------------------------------------------
   logic [LINK_W-1:0] io_val;
   logic              io_en;
+  logic              ready_drive, rvalid_drive;
+  assign ready = enable === 1'b1 ? ready_drive : 1'b0;
+  assign rvalid = enable === 1'b1 ? rvalid_drive : 1'b0;
   logic              idle_x = 1'b0;        // idle_drive == "x", as a plain bit for the assign
   // FPGA_IO_IDLE=x drives X only while the chip has RELEASED the bus (dir=0)
   // and no read word is being returned -- garbage on a floating bus.  While
   // dir=1 the chip owns io and the FPGA must not drive it at all; driving X
   // there would be contention, not a model of anything on the board.
-  assign io = io_en ? io_val : ((idle_x && dir === 1'b0) ? {LINK_W{1'bx}} : {LINK_W{1'bz}});
+  assign io = enable !== 1'b1 ? {LINK_W{1'bz}} : io_en ? io_val : ((idle_x && dir === 1'b0) ? {LINK_W{1'bx}} : {LINK_W{1'bz}});
 
   initial begin
     int v;
@@ -205,7 +209,7 @@ module pin_link_agent import forte_link_pkg::*; #(
     if ($value$plusargs("TOHOST=%h", tohost_addr)) ;
     prng ^= 64'(seed) * 64'h2545_F491_4F6C_DD1D;
     if (prng == 0) prng = 64'h1;
-    io_en = 1'b0; io_val = '0; ready = 1'b0; rvalid = 1'b0;
+    io_en = 1'b0; io_val = '0; ready_drive = 1'b0; rvalid_drive = 1'b0;
     trace_fd = $fopen(trace_path, "w");
     if (trace_fd == 0) $display("[FPGA-LINK] WARNING: cannot open trace %s", trace_path);
   end
@@ -248,11 +252,18 @@ module pin_link_agent import forte_link_pkg::*; #(
   logic n_ready = 1'b0, n_rvalid = 1'b0, n_en = 1'b0;
   logic [LINK_W-1:0] n_val = '0;
 
+  // Abort a functional transaction when scan takes the pins. No resume is
+  // implied: the next case resets the DUT. Preserve cumulative error counts.
+  always @(negedge enable) begin
+    st = A_IDLE; first_xact = 1; notready_cnt = 0;
+    n_ready = 0; n_rvalid = 0; n_en = 0;
+  end
+
   initial begin : launcher
     forever begin
       @(posedge core_clk);
       #(tco_ns);
-      ready = n_ready; rvalid = n_rvalid; io_en = n_en; io_val = n_val;
+      ready_drive = enable ? n_ready : 1'b0; rvalid_drive = enable ? n_rvalid : 1'b0; io_en = enable ? n_en : 1'b0; io_val = n_val;
     end
   end
 
@@ -269,7 +280,7 @@ module pin_link_agent import forte_link_pkg::*; #(
 
       n_rvalid = 1'b0; n_en = 1'b0;
 
-      if (rst_n !== 1'b1) begin   // X (power-up) counts as in reset
+      if (enable !== 1'b1 || rst_n !== 1'b1) begin   // X (power-up) counts as in reset
         // +FPGA_X_IN_RESET: reset must dominate whatever the board does to
         // the inputs before it releases rst_n -- a 4-state-only question.
         st = A_IDLE; cyc = 0; first_xact = 1; notready_cnt = 0;
