@@ -1,4 +1,4 @@
-# Work log: sequential multiplier, one-bit divider (area for DFT)
+# Work log: sequential multiplier (area for DFT)
 
 Branch `mdu_area_opt`, from `main` at `1c44a28`.  Goal: cut chip area to make room
 for DFT logic.  Multiplies and divides are a small share of the dynamic
@@ -44,17 +44,21 @@ Execute) and holds the pipeline until DONE.
 - Phases: RUN -> COMPARE -> DONE; a failed check restarts the multiplier on the
   saved operands.
 
-**Divider**: `IDIV_BITSPERCYCLE` 2 -> 1 in all four `pkg/config*.vh`.  `div.sv`
-is already a restoring shift-subtract divider; one bit per cycle leaves a
-single subtractor, used again every cycle.  64 iterations, 32 for W-type.  The
-lookup-table idea does not carry over: each quotient bit depends on the
-previous remainder's comparison.
+**Divider: unchanged.**  The first commit on this branch also set
+`IDIV_BITSPERCYCLE` 2 -> 1 (one subtractor instead of two).  The follow-up
+commit reverts that: it saved only 389 um^2 (`ft_div` 5,889 -> 5,500,
+unconstrained), and a 64-bit divide went from 32 to 64 iterations.
 
 **Benches and probes**: `ft_recompute_fault_tb` waits for the multiplier's check
 instead of a fixed number of cycles, and no longer connects `HoldE`.  The
 `synth/timing/probes.tcl` multiplier probes point at the new registers.
 
 ## Area and timing
+
+**Every number below was measured with the one-bit divider**, before it was
+reverted.  The multiplier's share is 18,551 um^2 unconstrained; with the divider
+back at two bits per cycle the saving is that, minus the divider's 389 um^2.
+The branch as it now stands has not been resynthesized.
 
 `make synth DESIGN_TOP=forte_top`, `clock` 2500 ps, SRAM macros left as black
 boxes.  The calibrated flow (`make -C synth timing`) does not run on `main`:
@@ -98,6 +102,9 @@ fixed them at a cost of 687 um^2.
   rerun at the pinned `ce221a8` it passed.)
 - Linux boot, baseline: `main` at `1c44a28`, forte DUT, reached
   `AMOEBA_LINUX_BOOT_OK` at cycle 677,978,564.
-- Linux boot, this branch: **still running when this was committed**, same
+- Everything above ran with the one-bit divider.  The reverted divider is
+  `main`'s, which passed all of it; the combination (new multiplier, two-bit
+  divider) was not rerun before pushing.
+- Linux boot, this branch (one-bit divider): **still running when this was committed**, same
   image as the baseline, `LINUX_TIMEOUT=1500000000`.  Its result and cycle
   count, the cost of the slower multiply and divide, are to be added here.
