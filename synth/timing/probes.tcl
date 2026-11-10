@@ -37,9 +37,9 @@ set TIMING_PROBES [subst -nocommands {
    alu_to_dcache_addr  {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $core/lsu/IEUAdrE*}       {probe_pin $dc/*/sramIP/A*}
    branch_to_pc        {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $core/ifu/PCSrcE}         {probe_d $core/ifu/pcreg/*}
    "Multiply / divide"
-   mul_E_product       {probe_ck $dp/RD1EReg/cw_stored*}      {probe_pin $mul/primary/ForwardedSrcAE*} {probe_d $mul/primary/PP1Reg/*}
-   mul_M_result        {probe_ck $mul/primary/PP*Reg/*}       {probe_pin $mul/ProdM*}              {probe_d $core/mdu.mdu/MDUResultWReg/*}
-   mul_M_to_ft_stall   {probe_ck $mul/primary/PP*Reg/*}       {probe_pin $mul/stall_req}           {}
+   mul_step            {probe_ck $mul/primary/*_reg*}         {}                                   {probe_d $mul/primary/Acc_reg*}
+   mul_M_result        {probe_ck $mul/primary/*_reg*}         {probe_pin $mul/ProdM*}              {probe_d $core/mdu.mdu/MDUResultWReg/*}
+   mul_M_to_ft_stall   {probe_ck $mul/*phase*}                {probe_pin $mul/stall_req}           {}
    div_internal        {probe_ck $core/mdu.mdu/div.ftdiv/*}   {}                                   {probe_d $core/mdu.mdu/div.ftdiv/*}
    div_step            {probe_ck $core/mdu.mdu/div.ftdiv/primary/dabsreg/*} {}                     {probe_d $core/mdu.mdu/div.ftdiv/primary/wreg/*}
    "Data cache"
@@ -72,8 +72,8 @@ set TIMING_PROBES [subst -nocommands {
    "Pads"
    fault_inject        {get_ports fault_inject}               {}                                   {}
    fault_inject_units  {probe_ck $core/faultinjectreg/*}      {}                                   {}
-   link_in             {get_ports {io[*] ready rvalid}}       {}                                   {}
-   link_out            {}                                     {}                                   {get_ports {io[*] dir req wr}}
+   link_in             {get_ports {io_in[*] ready rvalid}}    {}                                   {}
+   link_out            {}                                     {}                                   {get_ports {io_out[*] req wr}}
 }]
 
 proc timing_probes {outfile} {

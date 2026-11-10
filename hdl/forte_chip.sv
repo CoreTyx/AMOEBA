@@ -17,9 +17,10 @@
 // one clock port, RTL simulation sees zero skew between the domains and the
 // Gray-coded pointer logic in the FIFOs is never exercised at all.
 //
-// Bus ownership: forte_link_phy is the only driver.  There is no training FSM
-// to arbitrate with -- the core leaves reset as soon as rst_n is released, and
-// it is the FPGA that decides when that happens (hdl/forte_link_pkg.sv).
+// The link is two one-way buses, so there is no bus ownership to manage:
+// forte_link_phy drives io_o and the FPGA drives io_i, always.  There is no
+// training FSM either -- the core leaves reset as soon as rst_n is released,
+// and it is the FPGA that decides when that happens (hdl/forte_link_pkg.sv).
 //
 // THE BURST LENGTH IS DECIDED HERE.  This is the only module that sees both the
 // core config and the link, so it is where DCACHE_LINELENINBITS / AHBW becomes
@@ -51,11 +52,9 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   input  logic              core_clk,
   input  logic              link_clk,       // tied to the core_clk pad in forte_top
   input  logic              rst_n,
-  // link
+  // link: io_o drives the io_out pads, io_i comes from the io_in pads
   output logic [LINK_W-1:0] io_o,
-  output logic [LINK_W-1:0] io_oe,          // per pad; all == dir in functional mode
   input  logic [LINK_W-1:0] io_i,
-  output logic              dir,
   output logic              req,
   output logic              wr,
   input  logic              ready,
@@ -104,7 +103,6 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   forte_rst_sync linkrstsync(.clk(link_clk), .rst_n_in(rst_n), .rst_n_out(link_rst_n_s));
 
   logic [LINK_W-1:0] lm_io_o;
-  logic              lm_io_oe, lm_dir;
 
   // ---- SoC ------------------------------------------------------------------
   logic              reset_soc, reset_ext;
@@ -144,9 +142,9 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // core domain          |  link domain
   //   forte_link_core   |
   //     cmd + beats  --> | ofifo --> forte_link_phy --> pads
-  //     read beats   <-- | ififo <--      (assembles beats from 16-bit words)
+  //     read beats   <-- | ififo <--      (assembles beats from 8-bit words)
   //
-  // The crossing carries transactions and 64-bit beats, never 16-bit link
+  // The crossing carries transactions and 64-bit beats, never 8-bit link
   // words: serialization is a link-domain implementation detail.
   logic                oc_valid, oc_ready;     // core -> ofifo (write side)
   logic [FLIT_W-1:0]   oc_data;
@@ -191,7 +189,7 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
     .link_clk, .link_rst_n(link_rst_n_s),
     .ocmd_valid(op_valid), .ocmd_ready(op_ready), .ocmd_data(op_data), .ocmd_depth(op_depth_w),
     .ibeat_valid(ip_valid), .ibeat_ready(ip_ready), .ibeat_data(ip_data),
-    .io_o(lm_io_o), .io_oe(lm_io_oe), .io_i, .dir(lm_dir), .req, .wr, .ready, .rvalid,
+    .io_o(lm_io_o), .io_i, .req, .wr, .ready, .rvalid,
     .txn_done, .busy(lm_busy));
 
   // Occupancy outputs we do not consume.  Sunk rather than left dangling so the
@@ -199,16 +197,18 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   logic unused_depths;
   assign unused_depths = ^{oc_depth_unused, ip_depth_unused, ic_depth_unused};
 
-  // ---- bus ownership and scan mux -------------------------------------------
+  // ---- scan mux -------------------------------------------------------------
   // EIGHT PARALLEL SCAN CHAINS EACH WAY (docs/impl_plan_link_clocking.md s11):
-  // io[7:0] are scan_in[7:0] and io[15:8] are scan_out[7:0] when test_mode=1.
+  // io_in[7:0] are scan_in[7:0] and io_out[7:0] are scan_out[7:0] when
+  // test_mode=1.  The pads already point the right way for that, so test mode
+  // only changes what drives io_o, never a pad's direction.
   // CSRs go on chain 0, registers from the other subsystems on 1..7; shift time
   // is set by the LONGEST chain, so DFT insertion should balance them.
   //
   // The shift clock is core_clk, not a pin.  Standard scan shifts on the
   // functional clock, which the tester already drives through its own pad; a
-  // dedicated scan clock would cost two of the sixteen bus pins and leave seven
-  // chains each way instead of eight, for nothing.
+  // dedicated scan clock would cost a link pin and leave seven chains one way
+  // instead of eight, for nothing.
   //
   // The one-flop chain stubs below reserve the structure; DFT insertion replaces
   // them.  scan_en is qualified with test_mode: on its own it would shift the
@@ -219,29 +219,47 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // it no longer needs scan; with no efuses on this part it is the only thing
   // standing between a booted system and full scan access to every flop,
   // including the register file and the CSRs.  Both pins are qualified, not just
-  // scan_en: test_mode on its own remaps the pads, and leaving that reachable
-  // would let a locked part still have its bus mapped onto the scan pins.
+  // scan_en: test_mode on its own puts the scan chains on io_out, and leaving
+  // that reachable would let a locked part still drive its scan-out pins.
   //
   // Clearing it is one-way until reset, so there is no software path back to a
   // scannable part.  Reset DOES re-enable DFT -- nothing here is non-volatile --
   // and on this board rst_n is an FPGA output, so this defends against a runtime
   // compromise and not against physical access.  See the header of
   // forte_dft_lock.sv for the rest of the threat model.
+  //
+  // TEST_MODE IS SYNCHRONISED; SCAN_EN IS NOT.  test_mode is a board strap with
+  // no timing relationship to core_clk (the SDC false-paths it), and it selects
+  // what drives the io_out pads.  Raw, any noise on the pin reached the link
+  // outputs between clock edges and could go metastable in scan_q's enable.
+  // Through two flops it can change only on a core_clk edge.  It is static for a
+  // whole test session, so the two-cycle lag costs nothing.  Two things it does
+  // NOT do: hold a floating pin low (the pad has no pull; the board must strap
+  // it), or reset -- rst_n is a DFT reset that ATPG may pulse mid-test, and that
+  // must not drop test mode.  The flops come up random for two cycles after the
+  // clock starts, which is inside rst_n on any sane bring-up.
+  //
+  // scan_en cannot take the same treatment: the tester toggles it between shift
+  // and capture, and two cycles of lag would shift on the capture cycle.
+  //
+  // DFT: the tmsync flops must stay OFF the scan chains (shifting them would
+  // drop test mode mid-shift), and DRC must be told their output is 1 in test,
+  // as it is for the dft_lock flop.
+  logic test_mode_s;
+  synchronizer tmsync(.clk(core_clk), .d(test_mode), .q(test_mode_s));
+
   logic test_mode_dft, scan_en_dft;
-  assign test_mode_dft = test_mode & dft_unlocked;
+  assign test_mode_dft = test_mode_s & dft_unlocked;
   assign scan_en_dft   = scan_en   & dft_unlocked;
 
-  logic [7:0] scan_q;
-  always_ff @(posedge core_clk) if (test_mode_dft & scan_en_dft) scan_q <= io_i[7:0];
+  logic [LINK_W-1:0] scan_q;
+  always_ff @(posedge core_clk) if (test_mode_dft & scan_en_dft) scan_q <= io_i;
 
-  // The test-mode override on dir and io_oe is load-bearing, not cosmetic: dir
-  // is itself a scanned flop, so during shift it toggles pseudo-randomly, and
-  // anything deriving the pad directions from it would reverse all sixteen pads
-  // every shift cycle.  In test mode the directions are fixed by the scan
-  // mapping instead -- the low half driven in, the high half driven out.
-  assign dir   = lm_dir;
-  assign io_o  = test_mode_dft ? {scan_q, 8'h00} : lm_io_o;
-  assign io_oe = test_mode_dft ? {8'hFF, 8'h00}  : {LINK_W{lm_io_oe}};
+  // There used to be a test-mode override on the pad directions here, because
+  // dir was itself a scanned flop and would have reversed every pad on every
+  // shift cycle.  With dedicated io_in / io_out pads there is no direction to
+  // protect: test mode only selects what io_out carries.
+  assign io_o = test_mode_dft ? scan_q : lm_io_o;
 
   // ---- status: three distinguishable rates, never frozen ---------------------
   // In the LINK domain: txn_done and busy are the phy's, and counting them in

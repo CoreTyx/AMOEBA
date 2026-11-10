@@ -46,7 +46,6 @@ set -euo pipefail
 die() { echo "run.sh: $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
 SIM_DIR="$SCRIPT_DIR/sim"
 if [[ "${1:-}" == clean ]]; then
@@ -70,8 +69,8 @@ fi
 
 mkdir -p "$SIM_DIR"
 for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" \
-    "$REPO_DIR/hdl/forte_link_pkg.sv" "$REPO_DIR/hvl/pin/pin_link_agent.sv"; do
-    [ -s "$source_file" ] || die "missing source: $source_file; use matching full_tb, hdl, and hvl/pin sources"
+    "$SRC_DIR/forte_link_pkg_legacy.sv" "$SRC_DIR/pin_link_agent_legacy.sv"; do
+    [ -s "$source_file" ] || die "missing source: $source_file; use the complete full_tb/src directory"
 done
 
 # Everything printed from here on (these messages, VCS's output, the results)
@@ -236,8 +235,8 @@ vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     +nospecify +notimingcheck ${FLAGS[@]+"${FLAGS[@]}"} \
     "${COMPILE_ARGS[@]}" \
     "+incdir+$SIM_DIR" "+incdir+$SRC_DIR" \
-    "${SRCS[@]}" "$REPO_DIR/hdl/forte_link_pkg.sv" \
-    "$REPO_DIR/hvl/pin/pin_link_agent.sv" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
+    "${SRCS[@]}" "$SRC_DIR/forte_link_pkg_legacy.sv" \
+    "$SRC_DIR/pin_link_agent_legacy.sv" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
     -Mdir=csrc -top tb_scan -o simv_scan
 
 rm -f sim.log

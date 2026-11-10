@@ -32,11 +32,13 @@ export LINT_DEFINES := $(patsubst +define+%,%,$(shell python3 $(REPO_ROOT)/bin/g
 # The ASIC top (docs/top_level_plan.md) and the vendored OpenTitan primitives it
 # needs, added only when they are the thing being linted -- see DESIGN_TOP above.
 ifeq ($(DESIGN_TOP),forte_top)
-  PRIM_SRCS        := $(REPO_ROOT)/third_party/opentitan/prim_flop_2sync.sv \
-                      $(REPO_ROOT)/third_party/opentitan/prim_fifo_async.sv
+  # The OpenTitan prims live in hdl/ since 1c0c0d9 (prim_assert.sv is the
+  # macro header they include, found through INCDIRS).
+  PRIM_SRCS        := $(REPO_ROOT)/hdl/prim_flop_2sync.sv \
+                      $(REPO_ROOT)/hdl/prim_fifo_async.sv
   export PKG_SRCS  := $(PKG_SRCS) $(LINK_PKG)
   export HDL_SRCS  := $(HDL_SRCS) $(filter-out $(LINK_PKG),$(sort $(wildcard $(REPO_ROOT)/hdl/forte_*.sv))) $(PRIM_SRCS)
-  export INCDIRS   := $(INCDIRS) $(REPO_ROOT)/third_party/opentitan
+  export INCDIRS   := $(INCDIRS) $(REPO_ROOT)/hdl
 endif
 
 # SpyGlass intermittently fails to create its work tree on NFS home directories,

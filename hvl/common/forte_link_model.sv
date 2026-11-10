@@ -6,14 +6,16 @@
 // mem_itf_w_mask on the other, so the whole existing regression runs through
 // the real protocol with the memory model, tohost snoop and RVFI unchanged.
 //
-//   header     req=1 for two cycles: A[31:16] then A[15:0].  wr comes off the
-//              pins.  Every transfer is a full BEATS-beat burst, so there is
-//              no size and no byte strobes on the wire, and no `burst` pin
-//   write      4*BEATS words, contiguous, LSW first; beats are queued and
-//              written to mem_itf in order with every lane live
-//   read       beats are fetched from mem_itf in order into a line buffer
-//              and streamed as they arrive, after dir has fallen and TA has
-//              elapsed; the bus is released after the last word
+//   header     req=1 for ADDR_WORDS cycles on io_out: A[31:24] .. A[7:0].  wr
+//              comes off the pins.  Every transfer is a full BEATS-beat burst,
+//              so there is no size and no byte strobes on the wire, and no
+//              `burst` pin
+//   write      WORDS_PER_BEAT*BEATS bytes on io_out, contiguous, LSB first;
+//              beats are queued and written to mem_itf in order with every
+//              lane live
+//   read       beats are fetched from mem_itf in order into a line buffer and
+//              streamed on io_in as they arrive, starting as soon as the header
+//              is in: io_in is ours alone, so there is no turnaround
 //   ready      "may start", asserted only while the queue can take TWO lines.
 //              See "the ready guard band" in hdl/forte_link_pkg.sv: the ASIC
 //              samples ready through two registers and issues req a cycle
@@ -24,8 +26,8 @@
 // +LINK_GAPS=1 (+LINK_SEED=n) withholds ready and rvalid at random so the
 // ASIC's handling of both is exercised; the protocol guarantees neither is
 // ever required to be immediate.
-// Checks: req only while dir=1; a header only while idle; the model never
-// drives while dir=1; the queue never overflows; TA honoured on both dir edges.
+// Checks: a header only while idle; req for exactly ADDR_WORDS cycles; the
+// queue never overflows.
 //
 // BEATS must be the SAME expression forte_chip uses -- DCACHE_LINELENINBITS /
 // AHBW -- or the model and the DUT disagree about where a transaction ends and
@@ -40,8 +42,8 @@ module forte_link_model import forte_link_pkg::*; #(
 )(
   input  logic              clk,
   input  logic              rst,
-  inout  wire  [LINK_W-1:0] io,
-  input  logic              dir,
+  input  logic [LINK_W-1:0] io_out,     // from the ASIC
+  output logic [LINK_W-1:0] io_in,      // to the ASIC
   input  logic              req,
   input  logic              wr,
   output logic              ready,
@@ -55,10 +57,7 @@ module forte_link_model import forte_link_pkg::*; #(
   input  logic              mem_resp
 );
 
-  logic [LINK_W-1:0] io_o;
-  logic              io_oe;
-  assign io = io_oe ? io_o : {LINK_W{1'bz}};
-  wire [LINK_W-1:0] io_i = io;
+  wire [LINK_W-1:0] io_i = io_out;
 
   // ---- plusargs --------------------------------------------------------------
   bit          gaps = 0;
@@ -99,20 +98,23 @@ module forte_link_model import forte_link_pkg::*; #(
 
   // ---- link state ------------------------------------------------------------
   link_slave_st_t lst;                 // states in hdl/forte_link_pkg.sv
-  logic [15:0] hdr_hi;
+  localparam int HCW    = $clog2(ADDR_WORDS);
+  logic [31-LINK_W:0] hdr_hi;             // header words before the last
+  logic [HCW-1:0] hcnt;                   // header words seen, for the req check
   logic [31:0] taddr;
   logic        twr;
-  localparam int WORDS  = 4 * BEATS;
-  localparam int WCNT_W = $clog2(WORDS);  // >= 3, since BEATS >= 2
+  localparam int WORDS  = WORDS_PER_BEAT * BEATS;
+  localparam int WCNT_W = $clog2(WORDS);  // >= 4, since BEATS >= 2
+  localparam int SUB_W  = $clog2(WORDS_PER_BEAT);
   localparam int RQW    = $clog2(BEATS + 1);
   logic [WCNT_W-1:0] wcnt;                // words in this transaction
-  logic [47:0] wacc;
-  logic [3:0]  ta_cnt;
+  logic [63-LINK_W:0] wacc;
+  wire  [SUB_W-1:0]  sub = wcnt[SUB_W-1:0];
   logic [RQW-1:0] rd_queue_idx;           // beats queued so far (0..BEATS)
   logic        gap_ready, gap_rvalid;
 
   // The beat index inside the transaction: wcnt divided by WORDS_PER_BEAT.
-  wire [BCW-1:0] beat_idx = wcnt[WCNT_W-1:2];
+  wire [BCW-1:0] beat_idx = wcnt[WCNT_W-1:SUB_W];
 
   wire [63:0] taddr_al  = 64'({taddr[31:3], 3'b000});
   wire [63:0] beat_addr = taddr_al + 64'(beat_idx) * 8;
@@ -121,9 +123,9 @@ module forte_link_model import forte_link_pkg::*; #(
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      lst <= LS_IDLE; io_o <= '0; io_oe <= 1'b0; ready <= 1'b0; rvalid <= 1'b0;
+      lst <= LS_IDLE; io_in <= '0; ready <= 1'b0; rvalid <= 1'b0;
       q_tail <= '0; rd_start <= 1'b0;
-      wcnt <= '0; wacc <= '0; ta_cnt <= '0;
+      wcnt <= '0; wacc <= '0; hcnt <= '0;
       hdr_hi <= '0; taddr <= '0; twr <= 1'b0;
       rd_queue_idx <= RQW'(BEATS); gap_ready <= 1'b0; gap_rvalid <= 1'b0;
     end else begin
@@ -141,7 +143,7 @@ module forte_link_model import forte_link_pkg::*; #(
       // Read beats are queued one per cycle from the header on, whenever the
       // queue has room; writes and reads never push in the same cycle because
       // the ASIC cannot be sending write words during a read.
-      if (rd_more & ~q_full & lst != LS_WDATA & lst != LS_HDR1) begin
+      if (rd_more & ~q_full & lst != LS_WDATA & lst != LS_HDR) begin
         q[q_tail[QIW-1:0]] <= '{is_wr: 1'b0, addr: taddr_al + 64'(rd_queue_idx) * 8,
                                 data: '0, mask: 8'hFF};
         q_tail <= q_tail + 1'b1;
@@ -151,51 +153,52 @@ module forte_link_model import forte_link_pkg::*; #(
       case (lst)
         // --- idle: wait for a header ---------------------------------------
         LS_IDLE: begin
-          io_oe <= 1'b0; rvalid <= 1'b0;
+          io_in <= '0;
           if (req) begin
-            hdr_hi <= io_i; lst <= LS_HDR1;
+            hdr_hi <= (32-LINK_W)'(io_i);
+            hcnt <= HCW'(1); lst <= LS_HDR;
           end
         end
-        LS_HDR1: begin
-          taddr  <= {hdr_hi, io_i};                // the whole address, unpacked
-          twr    <= wr; wcnt <= '0; wacc <= '0;
-          if (wr) lst <= LS_WDATA;
-          else begin
-            rd_queue_idx <= '0; rd_start <= 1'b1;
-            ta_cnt <= '0; lst <= LS_RD_TA;
+        LS_HDR: begin
+          hcnt <= hcnt + 1'b1;
+          if (!req) $error("link model: req fell after %0d header words, not %0d", hcnt, ADDR_WORDS);
+          if (hcnt != HCW'(ADDR_WORDS - 1)) begin
+            hdr_hi <= {hdr_hi[31-2*LINK_W:0], io_i};
+          end else begin
+            taddr  <= {hdr_hi, io_i};              // the whole address, unpacked
+            twr    <= wr; wcnt <= '0; wacc <= '0;
+            if (wr) lst <= LS_WDATA;
+            else begin
+              rd_queue_idx <= '0; rd_start <= 1'b1;
+              lst <= LS_RD;
+            end
           end
         end
 
         // --- write: words arrive back to back ------------------------------
         LS_WDATA: begin
-          case (wcnt[1:0])
-            2'd0: wacc[15:0]  <= io_i;
-            2'd1: wacc[31:16] <= io_i;
-            2'd2: wacc[47:32] <= io_i;
-            default: begin
-              if (q_full) $fatal(1, "link model: op queue overflow -- the ready guard band was violated");
-              q[q_tail[QIW-1:0]] <= '{is_wr: 1'b1, addr: beat_addr, data: {io_i, wacc}, mask: 8'hFF};
-              q_tail <= q_tail + 1'b1;
-            end
-          endcase
+          if (sub != SUB_W'(WORDS_PER_BEAT - 1)) begin
+            wacc[LINK_W * sub +: LINK_W] <= io_i;
+          end else begin
+            if (q_full) $fatal(1, "link model: op queue overflow -- the ready guard band was violated");
+            q[q_tail[QIW-1:0]] <= '{is_wr: 1'b1, addr: beat_addr, data: {io_i, wacc}, mask: 8'hFF};
+            q_tail <= q_tail + 1'b1;
+          end
           wcnt <= wcnt + 1'b1;
           if (last_word) lst <= LS_IDLE;
         end
 
-        // --- read: wait for the bus, TA, then stream as beats arrive --------
-        LS_RD_TA: begin
-          if (~dir) begin
-            ta_cnt <= ta_cnt + 1'b1;
-            if (ta_cnt == 4'(TA - 1)) begin ta_cnt <= '0; lst <= LS_RD; end
-          end else ta_cnt <= '0;
-        end
+        // --- read: stream as beats arrive ----------------------------------
+        // rd_start is high for this state's first cycle and clears the line
+        // buffer at the end of it.  Until then rbuf_valid still describes the
+        // previous line, so nothing streams in that cycle.
         LS_RD: begin
-          if (rbuf_valid[beat_idx] & ~gap_rvalid) begin
-            io_oe <= 1'b1; io_o <= rbuf[beat_idx][16 * wcnt[1:0] +: 16]; rvalid <= 1'b1;
+          if (~rd_start & rbuf_valid[beat_idx] & ~gap_rvalid) begin
+            io_in <= rbuf[beat_idx][LINK_W * sub +: LINK_W]; rvalid <= 1'b1;
             wcnt <= wcnt + 1'b1;
             if (last_word) lst <= LS_IDLE;
           end else begin
-            io_oe <= 1'b0; rvalid <= 1'b0;
+            io_in <= '0; rvalid <= 1'b0;
           end
         end
         default: lst <= LS_IDLE;
@@ -231,9 +234,7 @@ module forte_link_model import forte_link_pkg::*; #(
 
   // ---- protocol checks -------------------------------------------------------
   always_ff @(posedge clk) if (!rst) begin
-    if (req & ~dir)                         $error("link model: req while dir=0");
-    if (req & lst != LS_IDLE & lst != LS_HDR1) $error("link model: header while busy (state %0d)", lst);
-    if (io_oe & dir)                        $error("link model: driving io while dir=1");
+    if (req & lst != LS_IDLE & lst != LS_HDR)  $error("link model: header while busy (state %0d)", lst);
     if (mem_wmask != '0 & mem_addr[2:0] != 3'b000) $error("link model: unaligned write to memory: %h", mem_addr);
     // There is no longer a single-transfer check here, because there is no
     // longer any way for the ASIC to ASK for one: with the burst pin gone every

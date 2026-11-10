@@ -31,7 +31,7 @@ matches its RTL at the pins.
 | VCS on `PATH` | Load it in the same shell first (e.g. `module load vcs`, or the site's Synopsys setup script) and check with `which vcs`.  A new shell needs this again.  One licence is enough; everything runs sequentially. |
 | `python3`, `bash`, `tar` | Standard. |
 | The synthesized netlist | `make -C synth synth DESIGN_TOP=forte_top` writes `synth/outputs/forte_top.gate.v`. |
-| Verilog simulation models | Standard cells; the SRAM macros `rf_sp_64_128`, `rf_sp_64_46`, `rf_sp_64_53` and `rf_sp_64_137` (preflight lists any the netlist needs and the models lack); the pad cells `io_in`, `io_out`, `io_tri`. |
+| Verilog simulation models | Standard cells; the SRAM macros `rf_sp_64_128`, `rf_sp_64_46`, `rf_sp_64_53` and `rf_sp_64_137` (preflight lists any the netlist needs and the models lack); the pad cells `io_in` and `io_out`. |
 | `vm_bundle.tgz` | Everything else, about 8 MB: the bench, the RTL it compiles, and prebuilt program images.  The VM has neither git nor a RISC-V toolchain, so it is packed elsewhere; see below. |
 
 ### Making `vm_bundle.tgz`
@@ -164,7 +164,7 @@ A `regress` line reads:
 ```
 PASS smoke                                rtl=PASS gate=PASS trace=MATCH     12s
 FAIL isa_tc_amo                           rtl=PASS gate=FAIL trace=DIFF     310s
-       gate: [FPGA-LINK] ERROR @... cyc 1234: X/Z on io in write word 3 of 80001230: xxxx
+       gate: [FPGA-LINK] ERROR @... cyc 1234: X/Z on io_out in write word 3 of 80001230: xx
 ```
 
 ## Reading a failure
@@ -174,7 +174,7 @@ FAIL isa_tc_amo                           rtl=PASS gate=FAIL trace=DIFF     310s
 | `rtl=FAIL` | A bench or program problem, not the netlist.  Report it; it should also fail locally under Verilator. |
 | `rtl=PASS gate=FAIL` with an X/Z error | An X escaped on the netlist: an uninitialised flop or macro reaching a pin.  The error names the pin and the cycle. |
 | `rtl=PASS gate=PASS trace=DIFF` | The netlist does something different at the pins.  `cmp_<name>.log` shows the first differing transaction. |
-| `watchdog: read ... has not finished` | A link transaction hung, e.g. `dir` never fell for a read. |
+| `watchdog: read ... has not finished` | A link transaction hung, e.g. a read the FPGA never answered or a write cut short. |
 | `timeout: no tohost write` | The program never finished, or never flushed its result (`fence.i`). |
 | `framing error ... div N?` | The console speed disagrees with the program's UART setup.  The message suggests the divisor it actually saw. |
 | `first transaction is ..., expected read of 80000000` | The chip's first fetch after reset is wrong: reset or the link is broken. |

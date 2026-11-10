@@ -24,18 +24,18 @@ after the `clk_out` posedge, so an SDF run's clock insertion delay is tracked
 the way the FPGA tracks it.
 
 **4-state.**  Every earlier test ran 2-state.  Here the chip's flops start X,
-unwritten memory can read back X (`mem_policy x`), the bus floats Z whenever
-nobody owns it, and every sampled pin is checked with `$isunknown`.  Verilator
+unwritten memory can read back X (`mem_policy x`), `io_in` can carry X between
+read words (`+FPGA_IO_IDLE=x`), and every sampled pin is checked with `$isunknown`.  Verilator
 collapses all of that to 2-state: a Verilator pass validates the bench and the
 flow, **not** X behaviour.  That is what the VCS runs are for.
 
 ## Checks
 
 Link (each is an error, and the first error ends the run by default):
-`dir`/`req`/`wr` never X/Z; `io` never X/Z while the chip drives a header or
-write data; `req` only with `dir=1`, exactly two cycles, never mid-transaction;
-`wr` held; no contention; TA honoured after the last `rvalid`; every address in
-`EXT_MEM` and line-aligned; the first transaction after reset is a read of
+`req`/`wr` never X/Z; `io_out` never X/Z (the chip drives it continuously and
+parks it at 0 between transactions); `req` for exactly four cycles (the four
+address bytes), never mid-transaction; `wr` held; every address in `EXT_MEM` and
+line-aligned; the first transaction after reset is a read of
 `0x8000_0000`; a `req` more than 3 cycles after `ready` fell; a transaction
 not finished within 1000 link cycles (watchdog).
 UART: `uart_tx` never X/Z, framing (stop bit), optional fail patterns.
@@ -90,7 +90,7 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 ## Plusargs
 
 `+FPGA_TCO_PS` `+FPGA_SAMPLE_PS` `+FPGA_RD_LAT` `+FPGA_GAP_PCT` `+FPGA_SEED`
-`+FPGA_MEM=x|zero|rand` `+FPGA_IO_IDLE=z|x` `+FPGA_X_IN_RESET` `+FPGA_WDOG` `+UART_DIV`
+`+FPGA_MEM=x|zero|rand` `+FPGA_IO_IDLE=0|x|z` `+FPGA_X_IN_RESET` `+FPGA_WDOG` `+UART_DIV`
 `+UART_PRESCALE` `+UART_TX_GAP` `+UART_QUIET` `+MAX_ERRORS` `+TIMEOUT` `+CLK_PS`.
 `+FPGA_MUTATE=1..3` breaks the bench on purpose (self-test only).
 

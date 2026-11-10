@@ -96,22 +96,17 @@ module forte_cdc_tb import forte_link_pkg::*; ();
   simple_memory_w_mask simple_memory(.itf(mem_itf));
 
   // ---- pins ----------------------------------------------------------------
-  wire  [LINK_W-1:0] io;
-  logic [LINK_W-1:0] io_o, io_oe, io_i;
-  logic              dir, req, wr, ready, rvalid, clk_out, status, uart_tx;
-
-  // Behavioural pads, one enable per lane -- the same model forte_top uses.
-  for (genvar i = 0; i < LINK_W; i++) begin : g_io
-    assign io[i] = io_oe[i] ? io_o[i] : 1'bz;
-  end
-  assign io_i = io;
+  // The link pads are one-way, so forte_top's behavioural pads are plain wires
+  // and the chip connects to the model directly.
+  logic [LINK_W-1:0] io_in, io_out;
+  logic              req, wr, ready, rvalid, clk_out, status, uart_tx;
 
   forte_chip chip(
     .core_clk     (core_clk),
     .link_clk     (link_clk),
     .rst_n        (rst_n),
-    .io_o, .io_oe, .io_i,
-    .dir, .req, .wr, .ready, .rvalid,
+    .io_o (io_out), .io_i (io_in),
+    .req, .wr, .ready, .rvalid,
     .clk_out      (clk_out),
     .irq          (2'b00),
     .uart_tx      (uart_tx),
@@ -125,7 +120,7 @@ module forte_cdc_tb import forte_link_pkg::*; ();
   // the DUT cannot disagree about where a transaction ends.
   forte_link_model #(.BEATS(DCACHE_LINELENINBITS / AHBW)) model (
     .clk(link_clk), .rst(rst),
-    .io, .dir, .req, .wr, .ready, .rvalid,
+    .io_out, .io_in, .req, .wr, .ready, .rvalid,
     .mem_addr (mem_itf.addr [0]),
     .mem_rmask(mem_itf.rmask[0]),
     .mem_wmask(mem_itf.wmask[0]),

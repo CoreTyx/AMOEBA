@@ -34,7 +34,6 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic [15:0]       FaultLfsr,                      // shared fault-injection generator (ft_fault_gen)
   input  logic [FI_COUNT_BITS-1:0] FaultCount,
   input  logic              StallM, StallW,
-  input  logic              HoldE,                          // Execute's operands cannot be used this cycle (ECC stall)
   input  logic              FlushE, FlushM, FlushW,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // inputs A and B from IEU forwarding mux output
   input  logic [2:0]        Funct3E, Funct3M,               // type of MDU operation
@@ -58,13 +57,14 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   logic                     MulFTStallM, MulUnresolvedM;
   logic                     DivFTStallM, DivUnresolvedM;
 
-  // Multiplier.  The wrapper preserves the original E->M PP register
-  // timing and retries only a held MUL transaction.
-  // MUL retries its M-stage transaction by reloading the partial products.
+  // Multiplier.  Sequential (mul.sv, one multiplier bit per cycle): the
+  // multiply's operands are taken as it leaves Execute, and it holds the
+  // pipeline in Memory while the multiplier runs.  MUL retries its M-stage
+  // transaction by restarting the multiplier on the saved operands.
   // DIV retries the held E-stage transaction by restarting the divider FSM;
   // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
-  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM, .HoldE,
+  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product bits before the M-stage check.
     .fi_enable(fault_inject_mul), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),

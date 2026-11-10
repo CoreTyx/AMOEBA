@@ -2,18 +2,22 @@
 // forte_link_phy.sv
 //
 // The link domain: flits in, pins out.  This is hdl/forte_link_master.sv with
-// its AHB face replaced by a FIFO face -- the LM_* FSM, the TA counters, the
-// word accounting, the dir control and the negedge inbound capture are all the
-// same logic, because none of it was ever AHB-specific.
+// its AHB face replaced by a FIFO face -- the LM_* FSM, the word accounting and
+// the negedge inbound capture are the same logic, because none of it was ever
+// AHB-specific.
 //
 //   LM_START     wait for ready (see "ready" in hdl/forte_link_pkg.sv: a hint
 //                with a guard band, not a handshake)
-//   LM_HDR0/1    req=1, io = A[31:16], A[15:0]
-//   LM_WDATA     WORDS words, LSW first, back to back; a new data flit is
-//                popped every fourth word
-//   LM_RD_TA     dir=0, TA idle cycles
-//   LM_RD_DATA   collect rvalid words; push a beat every fourth
-//   LM_RD_TA2    TA idle cycles after the last word, then dir=1
+//   LM_HDR       req=1 for ADDR_WORDS cycles, io_o = A[31:24] .. A[7:0]
+//   LM_WDATA     WORDS bytes on io_o, LSB first, back to back; a new data flit
+//                is popped every WORDS_PER_BEAT-th byte
+//   LM_RD_DATA   collect rvalid bytes from io_i; push a beat every
+//                WORDS_PER_BEAT-th
+//
+// io_o and io_i are separate pads, so nothing here ever turns a bus around:
+// there is no dir, no output enable and no TA state.  A read goes straight from
+// the last header byte to collecting data, and the next transaction may start
+// the cycle after the last read byte.
 //
 // THE BUFFERING INVARIANT.  hdl/forte_link_pkg.sv and top_level_plan.md s4:
 // "there is no mid-transaction handshake in either direction, so the ASIC never
@@ -61,11 +65,9 @@ module forte_link_phy import forte_link_pkg::*; #(
   input  logic               ibeat_ready,
   output logic [63:0]        ibeat_data,
 
-  // link pins
+  // link pins: io_o to the io_out pads, io_i from the io_in pads
   output logic [LINK_W-1:0]  io_o,
-  output logic               io_oe,        // == dir
   input  logic [LINK_W-1:0]  io_i,
-  output logic               dir,
   output logic               req,
   output logic               wr,
   input  logic               ready,
@@ -78,12 +80,12 @@ module forte_link_phy import forte_link_pkg::*; #(
   output logic               busy
 );
 
-  localparam TA_W = (TA < 2) ? 1 : $clog2(TA + 1);
-
-  // Words on the wire per transaction, and the width needed to index them.
-  // BEATS >= 2 (checked in forte_link_core), so WORDS >= 8 and WCNT_W >= 3.
+  // Words on the wire per transaction, and the widths needed to index them.
+  // BEATS >= 2 (checked in forte_link_core), so WORDS >= 16 and WCNT_W >= 4.
   localparam WORDS  = BEATS * WORDS_PER_BEAT;
   localparam WCNT_W = $clog2(WORDS);
+  localparam SUB_W  = $clog2(WORDS_PER_BEAT);      // word within a beat
+  localparam HCNT_W = $clog2(ADDR_WORDS);          // header word
 
   // ---- inbound capture: negedge, then posedge ------------------------------
   logic [LINK_W-1:0] io_n, io_s;
@@ -94,19 +96,24 @@ module forte_link_phy import forte_link_pkg::*; #(
   // ---- state ----------------------------------------------------------------
   link_st_t st;                        // states in hdl/forte_link_pkg.sv
 
-  logic [31:0]     addr_r;
-  logic            wr_r;
-  logic [63:0]     wdat_r;             // the write beat being serialized
+  logic [31:0]       addr_r;
+  logic              wr_r;
+  logic [63:0]       wdat_r;           // the write beat being serialized
   logic [WCNT_W-1:0] wcnt;             // word within the transaction
-  logic [47:0]     beat_r;             // first three words of the beat being assembled
-  logic [TA_W-1:0] ta_cnt;
+  logic [HCNT_W-1:0] hcnt;             // header word on the pins this cycle
+  logic [63-LINK_W:0] beat_r;          // all but the last word of the beat being assembled
 
-  logic [1:0] sub;
-  logic       last_word, beat_end;
+  logic [SUB_W-1:0]  sub;
+  logic              last_word, beat_end, last_hdr;
+  logic [HCNT_W-1:0] hnext, hsel;
 
-  assign sub       = wcnt[1:0];
-  assign beat_end  = (sub == 2'd3);
-  assign last_word = (wcnt == WCNT_W'(WORDS - 1));   // BEATS beats x 4 words
+  assign sub       = wcnt[SUB_W-1:0];
+  assign beat_end  = (sub == SUB_W'(WORDS_PER_BEAT - 1));
+  assign last_word = (wcnt == WCNT_W'(WORDS - 1));
+  assign last_hdr  = (hcnt == HCNT_W'(ADDR_WORDS - 1));
+  assign hnext     = hcnt + 1'b1;
+  // Header words go out MSB first, so word hnext is the hsel-th from the bottom.
+  assign hsel      = HCNT_W'(ADDR_WORDS - 1) - hnext;
 
   // A command may be taken only when the whole transaction is buffered.
   logic cmd_is_wr, cmd_present, cmd_complete;
@@ -114,40 +121,40 @@ module forte_link_phy import forte_link_pkg::*; #(
   assign cmd_present  = ocmd_valid & ocmd_data[64];                 // is_cmd
   assign cmd_complete = cmd_present & (cmd_is_wr ? (ocmd_depth >= DEPTH_W'(BEATS + 1)) : 1'b1);
 
-  // The FIFO is popped for the command, then once per write beat.  On the
-  // fourth word of a beat the next beat is pulled so wdat_r holds it by the
-  // cycle word 0 is registered -- the same one-ahead discipline the old
-  // HREADYOUT pulse gave this FSM for free.
+  // The FIFO is popped for the command, then once per write beat.  The first
+  // beat is pulled on the first header cycle, so wdat_r holds it by the last
+  // one, which registers word 0; after that the next beat is pulled on the last
+  // word of each beat so wdat_r holds it by the cycle its word 0 is registered
+  // -- the same one-ahead discipline the old HREADYOUT pulse gave this FSM.
   assign ocmd_ready = ((st == LM_IDLE)  & cmd_complete)
-                    | ((st == LM_HDR0)  & wr_r)
+                    | ((st == LM_HDR)   & wr_r & (hcnt == '0))
                     | ((st == LM_WDATA) & beat_end & ~last_word);
 
-  // A read beat is pushed on every fourth rvalid word.
+  // A read beat is pushed on every WORDS_PER_BEAT-th rvalid word.
   assign ibeat_valid = (st == LM_RD_DATA) & rvalid_s & beat_end;
   assign ibeat_data  = {io_s, beat_r};
 
   assign busy = (st != LM_IDLE);
 
   assign txn_done = (st == LM_WDATA & last_word)
-                  | (st == LM_RD_TA2 & ta_cnt == TA_W'(TA - 1));
+                  | (st == LM_RD_DATA & rvalid_s & last_word);
 
   // Asynchronous reset, unlike the synchronous HRESETn style this FSM inherited
   // from forte_link_master.  Two reasons: everything else in the link domain
   // (both FIFO ports, the status heartbeat) takes link_rst_n asynchronously, and
   // mixing the two on one net is a real design smell -- Verilator flags it as
   // SYNCASYNCNET.  More importantly this module drives pads: an async assert
-  // parks the bus (dir=1, io_oe=1, io_o=0) the instant reset is asserted rather
-  // than waiting for an edge, which is what a pad-facing module should do.
+  // parks the outputs (io_o=0, req=0, wr=0) the instant reset is asserted
+  // rather than waiting for an edge, which is what a pad-facing module should do.
   always_ff @(posedge link_clk or negedge link_rst_n) begin
     if (!link_rst_n) begin
-      st <= LM_IDLE; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
-      req <= 1'b0; wr <= 1'b0;
+      st <= LM_IDLE; io_o <= '0; req <= 1'b0; wr <= 1'b0;
       addr_r <= '0; wr_r <= 1'b0; wdat_r <= '0;
-      wcnt <= '0; beat_r <= '0; ta_cnt <= '0;
+      wcnt <= '0; hcnt <= '0; beat_r <= '0;
     end else begin
       case (st)
         LM_IDLE: begin
-          req <= 1'b0; wr <= 1'b0; io_o <= '0; io_oe <= 1'b1; dir <= 1'b1;
+          req <= 1'b0; wr <= 1'b0; io_o <= '0;
           if (cmd_complete) begin
             addr_r <= ocmd_data[31:0];
             wr_r   <= cmd_is_wr;
@@ -157,59 +164,43 @@ module forte_link_phy import forte_link_pkg::*; #(
 
         LM_START: begin
           if (ready_s) begin
-            io_o <= addr_r[31:16]; req <= 1'b1; wr <= wr_r;
-            st <= LM_HDR0;
+            io_o <= addr_r[31 -: LINK_W]; req <= 1'b1; wr <= wr_r;
+            hcnt <= '0;
+            st <= LM_HDR;
           end
         end
 
-        // The first write beat is pulled here (ocmd_ready above), so wdat_r
-        // holds beat 0 by the time LM_WDATA registers word 0.
-        LM_HDR0: begin
-          io_o <= addr_r[15:0];
-          st <= LM_HDR1;
-        end
-
-        LM_HDR1: begin
-          req <= 1'b0;
-          if (wr_r) begin
-            io_o <= wdat_r[15:0]; wcnt <= WCNT_W'(1);  // word 0 is on the pins next cycle
-            st <= LM_WDATA;
+        // io_o shows header word hcnt this cycle; register the next one, or on
+        // the last header word, whatever follows the header.
+        LM_HDR: begin
+          hcnt <= hnext;
+          if (!last_hdr) begin
+            io_o <= addr_r[LINK_W * hsel +: LINK_W];
           end else begin
-            io_o <= '0; io_oe <= 1'b0; dir <= 1'b0; ta_cnt <= '0; wcnt <= '0;
-            st <= LM_RD_TA;
+            req <= 1'b0;
+            if (wr_r) begin
+              io_o <= wdat_r[LINK_W-1:0]; wcnt <= WCNT_W'(1);   // word 0 is on the pins next cycle
+              st <= LM_WDATA;
+            end else begin
+              io_o <= '0; wcnt <= '0;
+              st <= LM_RD_DATA;
+            end
           end
         end
 
         LM_WDATA: begin
           // io_o shows word wcnt-1 this cycle; register word wcnt for the next.
-          io_o <= wdat_r[16 * wcnt[1:0] +: 16];
+          io_o <= wdat_r[LINK_W * sub +: LINK_W];
           if (last_word) st <= LM_IDLE;
           else           wcnt <= wcnt + WCNT_W'(1);
         end
 
-        LM_RD_TA: begin
-          ta_cnt <= ta_cnt + 1'b1;
-          if (ta_cnt == TA_W'(TA - 1)) begin ta_cnt <= '0; st <= LM_RD_DATA; end
-        end
-
         LM_RD_DATA: begin
           if (rvalid_s) begin
-            case (sub)
-              2'd0: beat_r[15:0]  <= io_s;
-              2'd1: beat_r[31:16] <= io_s;
-              2'd2: beat_r[47:32] <= io_s;
-              default: ;                         // the 4th goes straight out
-            endcase
+            // The last word of a beat goes straight out with ibeat_data.
+            if (!beat_end) beat_r[LINK_W * sub +: LINK_W] <= io_s;
             wcnt <= wcnt + WCNT_W'(1);
-            if (last_word) begin ta_cnt <= '0; st <= LM_RD_TA2; end
-          end
-        end
-
-        LM_RD_TA2: begin
-          ta_cnt <= ta_cnt + 1'b1;
-          if (ta_cnt == TA_W'(TA - 1)) begin
-            io_oe <= 1'b1; dir <= 1'b1;
-            st <= LM_IDLE;
+            if (last_word) st <= LM_IDLE;
           end
         end
 
@@ -242,10 +233,11 @@ module forte_link_phy import forte_link_pkg::*; #(
     if (!link_rst_n)                        push_cnt <= '0;
     else if (st == LM_IDLE)                 push_cnt <= '0;
     else if (ibeat_valid & ibeat_ready)     push_cnt <= push_cnt + PC_W'(1);
+  // Checked on the last read word, whose beat is being pushed in that cycle.
   always @(posedge link_clk)
-    if (armed & st == LM_RD_TA2 & ta_cnt == TA_W'(TA - 1))
-      assert (push_cnt == PC_W'(BEATS))
-        else $fatal(1, "link phy: pushed %0d beats for a read, not %0d", push_cnt, BEATS);
+    if (armed & st == LM_RD_DATA & rvalid_s & last_word)
+      assert (ibeat_valid & (push_cnt == PC_W'(BEATS - 1)))
+        else $fatal(1, "link phy: pushed %0d beats for a read, not %0d", push_cnt + 1, BEATS);
 
   // The FPGA cannot absorb an underrun, so a transaction must never start
   // without its whole payload buffered.
@@ -258,6 +250,16 @@ module forte_link_phy import forte_link_pkg::*; #(
     $fatal(1, "link phy: data flit at the head of the outbound FIFO while idle");
   always @(posedge link_clk) if (armed & st == LM_WDATA & ocmd_ready & ocmd_valid & ocmd_data[64])
     $fatal(1, "link phy: command flit where a write beat was expected");
+  // Every write-beat pop must find a beat.  ocmd_ready is not qualified by
+  // ocmd_valid, and wdat_r loads only on a valid pop, so a pop that found the
+  // FIFO empty would leave the previous beat in wdat_r and put it on the wire
+  // with nothing to say so.  The whole-transaction-buffered rule above is what
+  // makes this impossible; this is the check that it holds, through the CDC.
+  // Written as if/$fatal, not `assert`: Verilator drops immediate assertions
+  // unless built with --assert, which no Verilator flow in this repo passes.
+  always @(posedge link_clk) if (armed & ocmd_ready & st != LM_IDLE & ~(ocmd_valid & ~ocmd_data[64]))
+    $fatal(1, "link phy: write-beat pop in state %0d found valid=%b is_cmd=%b",
+           st, ocmd_valid, ocmd_data[64]);
   // The inbound FIFO is sized to BEATS+2 against at most BEATS beats in flight
   // with the core draining, so it can never refuse a push.  If it ever does, a
   // beat is lost.

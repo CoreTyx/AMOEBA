@@ -5,11 +5,12 @@
 // result, so they are tested against independent models before anything they
 // say about the netlist is believed.
 //
-//   link   asic_bfm below plays the chip's side of hdl/forte_link_pkg.sv the
-//          way forte_link_phy does (idle: dir=1, io=0; read: dir falls after
-//          the header, TA, words on rvalid, TA, dir rises), issues random
-//          line reads and writes, and checks every read against a shadow
-//          memory.  Also: .lst loading, mem_policy rand stability.
+//   link   the chip-side model below plays hdl/forte_link_pkg.sv the way
+//          forte_link_phy does (idle: io_out=0; header: req for ADDR_WORDS
+//          words; write: words back to back on io_out; read: words collected
+//          from io_in on rvalid, no turnaround), issues random line reads and
+//          writes, and checks every read against a shadow memory.  Also: .lst
+//          loading, mem_policy rand stability.
 //   uart   reference serialiser/deserialiser written independently of the
 //          agent, random bytes both ways at several divisors.
 //   negative (+VIOLATE=<n>): the models break one rule on purpose, and the
@@ -24,7 +25,8 @@ module pin_selftest_tb;
   import forte_link_pkg::*;
 
   localparam int BEATS = 2;
-  localparam int WORDS = 4 * BEATS;
+  localparam int WPB   = WORDS_PER_BEAT;
+  localparam int WORDS = WPB * BEATS;
   localparam int LINE  = 8 * BEATS;
 
   logic clk = 0;
@@ -32,15 +34,13 @@ module pin_selftest_tb;
 
   logic rst_n;                         // falls at 0.5 ns: see pin_tb.sv
   initial begin rst_n = 1'bx; #0.5 rst_n = 1'b0; end
-  wire  [LINK_W-1:0] io;
-  logic dir = 1, req = 0, wr = 0;
+  logic [LINK_W-1:0] io_out = '0;     // the chip's side drives this ...
+  wire  [LINK_W-1:0] io_in;           // ... and reads this
+  logic req = 0, wr = 0;
   wire  ready, rvalid;
-  logic [LINK_W-1:0] bfm_io = '0;
-  logic bfm_oe = 1;
-  assign io = bfm_oe ? bfm_io : 'z;
 
   pin_link_agent #(.BEATS(BEATS)) link (
-    .core_clk(clk), .clk_out(clk), .rst_n, .io, .dir, .req, .wr, .ready, .rvalid);
+    .core_clk(clk), .clk_out(clk), .rst_n, .io_out, .io_in, .req, .wr, .ready, .rvalid);
 
   wire  u_tx;           // reference TX -> agent RX (the chip's uart_tx)
   logic u_tx_drv = 1;
@@ -62,12 +62,12 @@ module pin_selftest_tb;
   // outputs at the negedge (as the phy's inbound capture does).
   logic s_ready, s_rvalid;
   logic [LINK_W-1:0] s_io;
-  always @(negedge clk) begin s_ready = ready; s_rvalid = rvalid; s_io = io; end
+  always @(negedge clk) begin s_ready = ready; s_rvalid = rvalid; s_io = io_in; end
 
   task automatic tick(); @(posedge clk); #0.1; endtask
 
   task automatic idle();
-    dir = 1; bfm_oe = 1; bfm_io = '0; req = 0; wr = 0;
+    io_out = '0; req = 0; wr = 0;
   endtask
 
   task automatic header(input logic [31:0] a, input logic w, input bit short_req = 0);
@@ -78,18 +78,21 @@ module pin_selftest_tb;
       repeat (8) tick();
     end else
       while (s_ready !== 1'b1) begin tick(); waited++; if (waited > 1000) begin fail("ready never rose"); return; end end
-    req = 1; wr = w; bfm_io = a[31:16]; tick();
-    if (violate == 7) link.gap_pct = 0;               // let the transaction finish
-    if (!short_req) begin bfm_io = a[15:0]; tick(); end
+    req = 1; wr = w;
+    for (int h = 0; h < (short_req ? 2 : ADDR_WORDS); h++) begin
+      io_out = a[31 - LINK_W * h -: LINK_W]; tick();
+      if (violate == 7) link.gap_pct = 0;             // let the transaction finish
+    end
   endtask
 
   task automatic line_write(input logic [31:0] a, input logic [63:0] d[BEATS]);
     header(a, 1);
-    req = 0;
+    req = (violate == 3);                             // req held into the write data
     for (int i = 0; i < WORDS; i++) begin
-      bfm_io = d[i / 4][16 * (i % 4) +: 16];
-      if (violate == 6 && i == 3) bfm_io = 'x;        // X on the bus mid-write (4-state only)
+      io_out = d[i / WPB][LINK_W * (i % WPB) +: LINK_W];
+      if (violate == 6 && i == 3) io_out = 'x;        // X on the bus mid-write (4-state only)
       tick();
+      req = 0;
     end
     idle();
   endtask
@@ -97,15 +100,15 @@ module pin_selftest_tb;
   task automatic line_read(input logic [31:0] a, output logic [63:0] d[BEATS]);
     int got = 0, guard = 0;
     header(a, 0);
-    req = 0; wr = 0; dir = 0; bfm_oe = 0; bfm_io = '0;
+    // violation 1 holds req one word past the header, into the read data
+    req = (violate == 1); wr = 0; io_out = '0;
     while (got < WORDS) begin
       tick();
-      if (violate == 8 && got == 2) begin dir = 1; bfm_oe = 1; end   // grab the bus mid-read
-      if (s_rvalid === 1'b1) begin d[got / 4][16 * (got % 4) +: 16] = s_io; got++; end
+      req = 0;
+      if (s_rvalid === 1'b1) begin d[got / WPB][LINK_W * (got % WPB) +: LINK_W] = s_io; got++; end
       if (++guard > 2000) begin fail($sformatf("read %08h: only %0d words arrived", a, got)); break; end
     end
-    if (violate == 3) begin idle(); tick(); end      // take the bus back before TA
-    else begin repeat (TA) tick(); idle(); end
+    idle();
     tick();
   endtask
 
@@ -189,18 +192,18 @@ module pin_selftest_tb;
   // Each violation names the substring its error message must contain.
   function automatic string expect_msg(input int v);
     case (v)
-      1:  return "req while dir=0";
-      2:  return "req dropped after one header word";
-      3:  return "dir rose";
+      1:  return "req during read data";
+      2:  return "req dropped after 2 header words";
+      3:  return "req during write data";
       4:  return "outside EXT_MEM";
       5:  return "not line-aligned";
-      6:  return "X/Z on io in write word";
+      6:  return "X/Z on io_out in write word";
       7:  return "after ready fell";
-      8:  return "contention";
+      8:  return "X/Z on io_out outside a transaction";
       9:  return "first transaction";
       10: return "framing error";
       11: return "uart_tx is";
-      12: return "X/Z on dir/req/wr";
+      12: return "X/Z on req/wr";
       13: return "watchdog";
       default: return "";
     endcase
@@ -210,9 +213,10 @@ module pin_selftest_tb;
     logic [63:0] d[BEATS], q[BEATS];
     d[0] = 64'h1; d[1] = 64'h2;
     case (v)
-      1: begin header(32'h8000_0000, 0); end          // see below: dir dropped first
+      1: line_read(32'h8000_0000, q);
       2: begin header(32'h8000_0000, 0, 1); req = 0; repeat (4) tick(); end
-      3, 8: line_read(32'h8000_0000, q);
+      3: begin line_read(32'h8000_0000, q); line_write(32'h8000_0010, d); end
+      8: begin tick(); io_out = 'x; tick(); tick(); io_out = '0; end
       4: begin line_read(32'h8000_0000, q); line_write(32'h9000_0000, d); end
       5: begin line_read(32'h8000_0000, q); line_write(32'h8000_0008, d); end
       6: begin line_read(32'h8000_0000, q); line_write(32'h8000_0010, d); end
@@ -221,7 +225,10 @@ module pin_selftest_tb;
       10: begin uart.div = 1; ubit = 16 * (1 << uart.prescale); ref_send(8'h55, 1); repeat (2 * ubit) @(posedge clk); end
       11: begin uart.div = 1; ubit = 16 * (1 << uart.prescale); ref_send(8'h55, 0, 1); repeat (2 * ubit) @(posedge clk); end
       12: begin tick(); wr = 1'bx; tick(); tick(); wr = 0; end
-      13: begin header(32'h8000_0000, 0); req = 0; repeat (1100) tick(); end   // read, bus never released
+      // A read the FPGA never answers.  The chip cannot hang a read any more --
+      // with no bus to hand back, nothing it does can stall the agent -- so
+      // the agent's own latency knob is what holds the read open.
+      13: begin link.rd_latency = 1200; header(32'h8000_0000, 0); idle(); repeat (1100) tick(); end
     endcase
     repeat (4) tick();
   endtask
@@ -235,12 +242,11 @@ module pin_selftest_tb;
     uart.echo = 0;
     // 4-state-only checks cannot fire under a 2-state simulator.
 `ifdef VERILATOR
-    if (violate == 6 || violate == 11 || violate == 12) begin
+    if (violate == 6 || violate == 8 || violate == 11 || violate == 12) begin
       $display("SELFTEST_RESULT: PASS (violation %0d needs a 4-state simulator: skipped)", violate);
       $finish;
     end
 `endif
-    if (violate == 1) dir = 0;
     repeat (4) @(posedge clk);
     #2 rst_n = 1;
     repeat (4) @(posedge clk);

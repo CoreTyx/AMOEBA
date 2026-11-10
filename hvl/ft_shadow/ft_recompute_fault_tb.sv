@@ -86,7 +86,7 @@ module ft_recompute_fault_tb #(
     .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
-    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .HoldE(1'b0), .ForwardedSrcAE(mul_a),
+    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
     .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .MulActiveE(mul_active),
     .fi_enable(mul_fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
     .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved));
@@ -551,14 +551,15 @@ module ft_recompute_fault_tb #(
     end
   endtask
 
-  // The multiplier wrapper evaluates a product over two clock edges (SUM, then
-  // COMPARE), and after a failed check takes two more to reload its partial products
-  // (REPLAY, LOAD) before evaluating again.
+  // The multiplier is sequential: an evaluation runs it (RUN), then checks the
+  // product (COMPARE).  A failed check restarts it on the saved operands, so a
+  // retry is another whole evaluation.  Both end on the edge after the check.
   task automatic mul_eval;
-    repeat (2) clock_edge();
+    while (!mul_dut.check) clock_edge();
+    clock_edge();
   endtask
   task automatic mul_retry;
-    repeat (4) clock_edge();
+    mul_eval();
   endtask
 
   task automatic mul_transient(input string test_id);
@@ -567,9 +568,9 @@ module ft_recompute_fault_tb #(
       launch_mul(FI_XOR);
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, kind_name(mul_kind), mul_bit);
-      // First edge fills the M-stage partial-product registers.  Keep the
-      // fault through the evaluation so the controller actually enters RETRY.
-      repeat (3) clock_edge();  // operand register, half products, partial-product registers
+      // Keep the fault through the evaluation so the controller actually
+      // enters RETRY.
+      clock_edge();  // the multiply enters Memory and the multiplier starts
       mul_eval();
       if (THRESHOLD == 1) begin
         mul_retry();  // the evaluation that ends in the unresolved state is released
@@ -598,7 +599,7 @@ module ft_recompute_fault_tb #(
       mul_bit = 4;
       $display("[%0t] %s INPUT a=%0h b=%0h funct3=%b; INJECT kind=%s bit=%0d", $time, test_id, mul_a, mul_b,
                mul_funct3, kind_name(mul_kind), mul_bit);
-      repeat (3) clock_edge();  // operand register, half products, partial-product registers
+      clock_edge();  // the multiply enters Memory and the multiplier starts
       mul_eval();
       check(mul_stall && mul_prod == '0, {test_id, ": initial failed check contained"});
       $display("  injected: raw/product=%0h/%0h; arch product=%0h stall=%b",

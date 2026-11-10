@@ -6,6 +6,19 @@ The scandef supplies register-to-cell assignments. Chain lengths and output
 inversions are measured from the pins. Internal hookups provide diagnostics;
 pin comparisons determine pass/fail.
 
+## Netlist interface compatibility
+
+This bench targets the 16-bit bidirectional `io[15:0]`/`dir` interface of the
+existing DFT netlist. The current `hdl/` RTL and normal pin bench use separate
+8-bit `io_in`/`io_out` buses. Porting DFT to that interface is an open action
+item. The existing netlist, cached map, and phase input remain usable here;
+regenerating metadata alone does not port the testbench to a different link
+protocol or pad interface.
+
+The DFT build compiles its own legacy link package and agent from `src/`.
+The normal pin bench compiles the current package/agent from `hdl/` and
+`hvl/pin/`. Compile one protocol version per simulation, not both.
+
 ## Directory structure
 
 | Path | Contents |
@@ -13,6 +26,8 @@ pin comparisons determine pass/fail.
 | `src/tb_scan.sv` | Pin-level testbench, scan tasks, directed phases, and summaries. |
 | `src/scan_random.svh` | Randomized multi-register and fault cases. |
 | `src/scan_exec.svh` | Instruction builder and functional-to-scan checks. |
+| `src/forte_link_pkg_legacy.sv` | Protocol package for the existing 16-bit DFT netlist. |
+| `src/pin_link_agent_legacy.sv` | Matching memory/link agent with DFT handoff control. |
 | `src/scan_map.awk` | Netlist/scandef-to-map generator. |
 | `src/internal_hookups.py` | Optional diagnostic hookup/report generator. |
 | `src/set_scan_phase.py` | Explicit phase-file editing utility; not called by the runner. |
@@ -23,8 +38,8 @@ pin comparisons determine pass/fail.
 | `generated/` | Checked-in hookup include/report snapshots; not used by the runner. |
 
 Run commands from `full_tb/`; source layout changes do not require regenerating
-netlist-derived metadata. The pin-link package and agent are shared from `hdl/`
-and `hvl/pin/` in the same checkout.
+netlist-derived metadata. The runner uses the matching legacy protocol sources
+in `src/`, independently of the current RTL link interface.
 
 ## Test structure
 
@@ -101,9 +116,9 @@ counts, not exhaustive fault-coverage measurements. `SCAN_OP`, filters,
 sentinels, repetitions, and the existing seed apply to R.
 
 I runs 16 independent instruction sequences by default. It reuses
-`hvl/pin/pin_link_agent.sv`, the pin driver used by post-synthesis functional
-verification. The agent models the off-chip FPGA's memory interface. Each
-sequence initializes a 4 KiB instruction window at `RESET_VEC`; no ELF,
+`src/pin_link_agent_legacy.sv`, the 16-bit pin driver preserved from
+post-synthesis functional verification. The agent models the off-chip FPGA's
+memory interface. Each sequence initializes a 4 KiB instruction window at `RESET_VEC`; no ELF,
 toolchain, software runtime, or external image is needed. There are no data
 loads/stores. Instruction fetches exercise multiple cache lines, read latency
 from 0 to 15 link cycles, and ready/rvalid gap profiles of 0/10/25 percent.
@@ -339,6 +354,18 @@ during capture or an optional retention diagnostic.
 
 ## Open action items
 
+- [ ] **Port DFT to the new link interface.** Adapt scan pad connections,
+  testbench/agent, DFT declarations, and pin constraints for separate 8-bit
+  `io_in` and `io_out` buses, including byte serialization in functional phase
+  I. Replace the isolated legacy protocol sources only after validating the
+  new interface against a regenerated DFT netlist. Account for the current
+  RTL's two-clock `test_mode` synchronizer: specify mode-entry and capture
+  timing, keep its synchronizer cells off scan chains, and preserve the
+  intended snapshot without inserting unintended functional or shift edges.
+- [ ] **Update scan selection for the revised multiplier.** Review the
+  sequential multiplier's state/registers against the existing PP1/PP2 scan
+  selectors and map classifications. Re-establish the intended scanned state
+  and coverage before verifying a newly synthesized netlist.
 - [ ] **Identify the cause of unprotected readout corruption.** Reproduce a
   failing case with `SCAN_UNLOAD_NO_RESET` and compare it with protected
   readout. Trace the first divergence alongside effective scan enable,
@@ -400,9 +427,10 @@ during capture or an optional retention diagnostic.
 | `test_mode_dft` | Requests a pipeline stall for the entire DFT session, including clocks with scan enable low. | Recommended for the intended halted-pipeline scan/readout contract. Verify entry/exit timing and define behavior of independent functional state. |
 | Effective `scan_en_dft` | Requests the pipeline stall during shift; releases that request when scan enable goes low. | Insufficient for a halt that must persist through capture. Appropriate only for a separately specified protocol that intentionally permits functional pipeline advancement during capture. |
 
-In the current RTL, `test_mode_dft = test_mode & dft_unlocked` and
-`scan_en_dft = scan_en & dft_unlocked`. Do not drive a processor stall directly
-from an unqualified external DFT pin: a locked part should not acquire a new
+The legacy DFT target qualifies raw `test_mode` with `dft_unlocked`. Current
+RTL uses `test_mode_dft = test_mode_s & dft_unlocked`, where `test_mode_s` is
+the synchronized pin, and `scan_en_dft = scan_en & dft_unlocked`. Do not drive
+a processor stall directly from an unqualified external DFT pin: a locked part should not acquire a new
 stall path from a pin whose scan access is disabled. Currently scan enable and
 pad-mode qualification are separate. Confirm their supported combinations
 against the inserted scan-cell controls and test procedure.
@@ -415,11 +443,12 @@ Document this distinction when interpreting coverage. Functional or ATPG
 capture that requires pipeline advancement needs an explicit halt-release
 mechanism/procedure. The halt does not make destructive scan readout resumable.
 
-## Shared pin-link agent changes
+## DFT pin-link agent handoff
 
-`hvl/pin/pin_link_agent.sv` has an optional `enable` input, defaulting to one.
-Existing functional benches that omit it retain the enabled behavior. The DFT
-bench connects it to `link_active`, enabling the agent only for phase I's
+`src/pin_link_agent_legacy.sv` preserves the DFT-specific optional `enable`
+input, defaulting to one. The normal pin bench uses the separate current
+`hvl/pin/pin_link_agent.sv` with the new interface. The DFT bench connects the
+legacy agent's enable to `link_active`, enabling it only for phase I's
 functional execution and disabling it before selecting the scan pad mux.
 
 Disabling the agent:

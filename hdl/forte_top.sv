@@ -3,9 +3,9 @@
 //
 // The ASIC: forte_chip plus the pad ring.  DESIGN_TOP for synthesis and lint.
 //
-// Pad list (docs/top_level_plan.md s3): core_clk, rst_n, io[15:0] bidir, dir,
-// req, wr, clk_out, ready, rvalid, irq[1:0], uart_tx, uart_rx, test_mode,
-// scan_en, fault_inject, status -- 32 signal pads.  Power and ground are the
+// Pad list (docs/top_level_plan.md s3): core_clk, rst_n, io_in[7:0],
+// io_out[7:0], req, wr, clk_out, ready, rvalid, irq[1:0], uart_tx, uart_rx,
+// test_mode, scan_en, fault_inject, status -- 31 signal pads.  Power and ground are the
 // pad library's business and are NOT instantiated here; see "what this ring
 // does not do" below.
 //
@@ -15,7 +15,7 @@
 // nets, the forte_chip instance -- is identical either way, so the two
 // configurations cannot drift apart in anything but the cells themselves.
 //
-// The three PDK wrappers, and the one convention that matters: `chipout` is
+// The PDK wrappers, and the one convention that matters: `chipout` is
 // always the signal at the CHIP BOUNDARY (the pin) and `chipin` is always the
 // signal inside the die.  So for an input pad chipout is the cell's input and
 // chipin its output, and for an output pad it is the other way round.  The
@@ -25,15 +25,16 @@
 //
 //   io_in  (input  wire  chipout, output wire  chipin)
 //   io_out (output wire  chipout, input  wire  chipin)
-//   io_tri (inout  wire  chipout, output logic i, input logic o, input logic t)
 //
-// Each of the sixteen bidirectional pads gets its OWN t.  A single bus-wide
-// enable happens to be exact in functional mode, where every io_oe bit equals
-// dir, but test mode drives the two halves of the bus in opposite directions
-// (io[7:0] scan in, io[15:8] scan out), so one shared enable makes scan
-// unobservable.  See docs/impl_plan_link_clocking.md s11.
+// THE LINK IS TWO ONE-WAY BUSES, io_in[7:0] and io_out[7:0], on plain io_in and
+// io_out cells.  It used to be sixteen io_tri pads with a tristate enable each
+// and a dir pin; nothing on the link changes direction any more, so none of
+// that exists (hdl/forte_link_pkg.sv).  The PORTS io_in / io_out share their
+// names with the CELLS io_in / io_out.  That is legal -- modules and ports live
+// in different namespaces -- and it reads naturally enough below, where every
+// io_in port bit goes through an io_in cell.
 //
-// WHAT THIS RING DOES NOT DO, because the three wrappers above cannot express
+// WHAT THIS RING DOES NOT DO, because the wrappers above cannot express
 // it -- each is a question for whoever owns the pad library, not something to
 // be guessed at here:
 //   - No power or ground pads.  Count, placement and the IR-drop budget are a
@@ -53,8 +54,8 @@ module forte_top import forte_link_pkg::*; #(
 )(
   input  wire              core_clk,
   input  wire              rst_n,
-  inout  wire [LINK_W-1:0] io,
-  output wire              dir,
+  input  wire [LINK_W-1:0] io_in,        // link, FPGA -> ASIC
+  output wire [LINK_W-1:0] io_out,       // link, ASIC -> FPGA
   output wire              req,
   // Forwarded link clock; see forte_chip.  Replaces the `burst` pin, which was
   // always 1 -- every transfer is a full line and the single path does not
@@ -80,27 +81,13 @@ module forte_top import forte_link_pkg::*; #(
   // only to these, never to the ports, so the pad ring is the only difference
   // between the synthesis and simulation configurations.
   logic              core_clk_i, rst_n_i;
-  logic [LINK_W-1:0] io_o, io_oe, io_i;
-  logic              dir_o, req_o, wr_o, clk_out_o;
+  logic [LINK_W-1:0] io_in_i, io_out_o;
+  logic              req_o, wr_o, clk_out_o;
   logic              ready_i, rvalid_i;
   logic [1:0]        irq_i;
   logic              uart_tx_o, uart_rx_i;
   logic              test_mode_i, scan_en_i, fault_inject_i;
   logic              status_o;
-
-  // Tristate control for the bidirectional pads, derived in ONE place.
-  //
-  // t IS ACTIVE-HIGH TRISTATE: t=0 drives the pad, t=1 releases it.  CONFIRMED
-  // against the PDK cell, which is already in use by others on this tapeout --
-  // this is not an assumption and should not be "corrected" to io_oe.
-  //
-  // It is derived in one place because getting it backwards makes all sixteen
-  // pads drive exactly when they should be listening, and simulation cannot
-  // catch that: the behavioural model further down is written against this same
-  // expression, so it would be wrong in precisely the same direction and every
-  // test would still pass.
-  logic [LINK_W-1:0] io_t;
-  assign io_t = ~io_oe;
 
   // link_clk is tied to the core_clk pad: one clock off the board, two clock
   // trees on the die (docs/impl_plan_link_clocking.md s4).  The separate port on
@@ -112,8 +99,8 @@ module forte_top import forte_link_pkg::*; #(
     .core_clk      (core_clk_i),
     .link_clk      (core_clk_i),
     .rst_n         (rst_n_i),
-    .io_o, .io_oe, .io_i,
-    .dir           (dir_o),
+    .io_o          (io_out_o),
+    .io_i          (io_in_i),
     .req           (req_o),
     .wr            (wr_o),
     .clk_out       (clk_out_o),
@@ -140,30 +127,20 @@ module forte_top import forte_link_pkg::*; #(
   io_in  io_scan_en      (.chipout (scan_en),      .chipin (scan_en_i));
   io_in  io_fault_inject (.chipout (fault_inject), .chipin (fault_inject_i));
 
-  io_out io_dir          (.chipout (dir),          .chipin (dir_o));
   io_out io_req          (.chipout (req),          .chipin (req_o));
   io_out io_wr           (.chipout (wr),           .chipin (wr_o));
   io_out io_clk_out      (.chipout (clk_out),      .chipin (clk_out_o));
   io_out io_uart_tx      (.chipout (uart_tx),      .chipin (uart_tx_o));
   io_out io_status       (.chipout (status),       .chipin (status_o));
 
-  // One cell per lane, each with its own t -- see io_t above.
-  for (genvar i = 0; i < LINK_W; i++) begin : g_io
-    io_tri io_io (
-      .chipout (io[i]),
-      .i       (io_i[i]),
-      .o       (io_o[i]),
-      .t       (io_t[i]));
+  for (genvar i = 0; i < LINK_W; i++) begin : g_link
+    io_in  io_link_in  (.chipout (io_in[i]),  .chipin (io_in_i[i]));
+    io_out io_link_out (.chipout (io_out[i]), .chipin (io_out_o[i]));
   end
 
 `else
   // ---- behavioural pads -----------------------------------------------------
-  // Inputs and outputs are straight-through; only the bidirectional lanes need
-  // modelling, and they are modelled per lane for the same reason the real ring
-  // has a t per lane.  Driving all sixteen from one enable is what made test
-  // mode unsimulatable: forte_chip sets io_oe = {8'hFF, 8'h00} for scan, whose
-  // low half is 0, so a bus-wide enable taken from io_oe[0] tristated the whole
-  // bus and the eight scan-out chains could not be observed at all.
+  // Every pad is one-way, so every pad is a straight-through assign.
   assign core_clk_i     = core_clk;
   assign rst_n_i        = rst_n;
   assign ready_i        = ready;
@@ -173,18 +150,14 @@ module forte_top import forte_link_pkg::*; #(
   assign test_mode_i    = test_mode;
   assign scan_en_i      = scan_en;
   assign fault_inject_i = fault_inject;
+  assign io_in_i        = io_in;
 
-  assign dir            = dir_o;
+  assign io_out         = io_out_o;
   assign req            = req_o;
   assign wr             = wr_o;
   assign clk_out        = clk_out_o;
   assign uart_tx        = uart_tx_o;
   assign status         = status_o;
-
-  for (genvar i = 0; i < LINK_W; i++) begin : g_io
-    assign io[i] = io_t[i] ? 1'bz : io_o[i];
-  end
-  assign io_i = io;
 `endif
 
 endmodule
