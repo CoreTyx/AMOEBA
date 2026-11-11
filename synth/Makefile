@@ -1,6 +1,9 @@
 include libs.mk
 
 export REPORT_DIR			= reports
+# Scan selection read by dft_setup.tcl: pc (PC only, pc_tb) or full (full_tb).
+# make synth DFT_SCOPE=full
+export DFT_SCOPE			?= pc
 
 .PHONY: synth
 synth: clean

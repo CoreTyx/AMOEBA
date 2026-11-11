@@ -88,9 +88,9 @@ analyze -library WORK -format sverilog ../hdl/prim_flop_2sync.sv
 # IO Drivers
 # ------------------------------------------------------------
 
+# forte_top uses only io_in and io_out cells (the link is two one-way buses).
 analyze -library WORK -format sverilog ../io_drivers/io_in.sv
 analyze -library WORK -format sverilog ../io_drivers/io_out.sv
-analyze -library WORK -format sverilog ../io_drivers/io_tri.sv
 
 # ------------------------------------------------------------
 # Behavorial SRAM Models
@@ -535,38 +535,42 @@ set_fix_hold sdc_top_clk
 #add core_clk?
 set inputs [get_ports {rst_n ready rvalid uart_rx test_mode scan_en fault_inject irq[1] irq[0]}]
 
-# Inouts
-set inout [get_ports {io[15] io[14] io[13] io[12] io[11] io[10] io[9] io[8] io[7] io[6] io[5] io[4] io[3] io[2] io[1] io[0]}]
+# Link: two one-way 8-bit buses (hdl/forte_link_pkg.sv).  io_in also carries
+# scan-in and io_out scan-out in test mode (dft_insert.tcl).
+set link_in  [get_ports {io_in[*]}]
+set link_out [get_ports {io_out[*]}]
 
 # Outputs
-set outputs [get_ports {dir req clk_out wr uart_tx status}]
+set outputs [get_ports {req clk_out wr uart_tx status}]
 
 
 group_path -name INREG  -from $inputs
 group_path -name OUTREG -to   $outputs
-group_path -name IOREG_IN  -from $inout
-group_path -name IOREG_OUT -to   $inout
+group_path -name IOREG_IN  -from $link_in
+group_path -name IOREG_OUT -to   $link_out
 
-# Apply input delays to data inputs and bidirectional pins.
-set_input_delay -clock sdc_top_clk -min 0.4 \ [add_to_collection $inputs $inout]
-set_input_delay -clock sdc_top_clk -max 1.5 \ [add_to_collection $inputs $inout]
+# Apply input delays to data inputs and the inbound link.
+set_input_delay -clock sdc_top_clk -min 0.4 [add_to_collection $inputs $link_in]
+set_input_delay -clock sdc_top_clk -max 1.5 [add_to_collection $inputs $link_in]
 
-# Output delays for output pins and bidirectional pins.
-set_output_delay -clock sdc_top_clk -min 1.5 \ [add_to_collection $outputs $inout]
-set_output_delay -clock sdc_top_clk -max 1.5 \ [add_to_collection $outputs $inout]
+# Output delays for output pins and the outbound link.
+set_output_delay -clock sdc_top_clk -min 1.5 [add_to_collection $outputs $link_out]
+set_output_delay -clock sdc_top_clk -max 1.5 [add_to_collection $outputs $link_out]
 
 set_false_path -from [get_clocks sdc_top_clk] -to [get_ports clk_out]
 
 set_max_transition 3 $inputs
-set_max_transition 3 $inout
+set_max_transition 3 $link_in
 set_max_transition 3 $outputs
 
-set_load -pin_load 2 [add_to_collection $inout $outputs]
+set_load -pin_load 2 [add_to_collection $link_out $outputs]
 
 link
 
-# Select scan registers and preserve the three control nets before mapping.
-source dft_setup_full.tcl
+# Select scan registers (DFT_SCOPE: pc by default, or full) and preserve the
+# four DFT control nets before mapping.
+source dft_procs.tcl
+source dft_setup.tcl
 compile_ultra -scan -gate_clock -retime
 
 change_names -rules verilog -hierarchy
@@ -602,36 +606,14 @@ proc gate_reports {dir} {
 
 gate_reports $report_dir/pre_dft
 
-# Bind the preserved control nets to their final mapped pins. Precompile RTL
-# pin names are not stable through mapping, even when the net is dont_touch.
-foreach net_name {dft_unlocked scan_en_dft test_mode_dft} {
-  set control_net [get_nets chip/$net_name]
-  if {[sizeof_collection $control_net] != 1} {
-    error "DFT: expected one preserved net chip/$net_name; found [sizeof_collection $control_net]"
-  }
-  set control_drv [get_pins -leaf -of_objects $control_net -filter "direction==out"]
-  if {[sizeof_collection $control_drv] != 1} {
-    error "DFT: $net_name requires exactly one mapped driver; found [sizeof_collection $control_drv]"
-  }
-  puts "DFT hookup: $net_name -> [get_object_name $control_drv]"
-  switch -- $net_name {
-    dft_unlocked {
-      # Analysis assumption only; hardware still requires clocked reset/unlock.
-      set_dft_signal -view existing_dft -type Constant \
-        -hookup_pin $control_drv -active_state 1
-    }
-    scan_en_dft {
-      set_dft_signal -view spec -type ScanEnable -port scan_en \
-        -hookup_pin $control_drv -active_state 1
-    }
-    test_mode_dft {
-      set_dft_signal -view spec -type TestMode -port test_mode \
-        -hookup_pin $control_drv -active_state 1
-    }
-  }
-}
-# Insertion may now add loads and optimize the mapped control distribution.
-set_dont_touch [get_nets {chip/scan_en_dft chip/test_mode_dft chip/dft_unlocked}] false
+# Bind the preserved control nets to their final mapped pins (dft_procs.tcl).
+# Precompile RTL pin names are not stable through mapping, even when the net is
+# dont_touch.  The two Constants (dft_unlocked, test_mode_s) are traced back to
+# the flop that drives them; a QN pin or an inverter on the way flips the
+# active_state, which the log reports.  Releases the nets' dont_touch.
+# The Constants are analysis assumptions only; hardware still needs the clocked
+# reset (lock = 1) and test_mode held through the synchroniser.
+dft_bind_hookups chip
 
 # Immutable pre-insertion checkpoint for subsequent make dft iterations.
 # DDC retains the DFT signal definitions and scan-element attributes; ordinary
@@ -639,7 +621,7 @@ set_dont_touch [get_nets {chip/scan_en_dft chip/test_mode_dft chip/dft_unlocked}
 file mkdir synout
 write -format ddc -hierarchy -output synout/forte_top.pre_dft.ddc
 set dft_standalone false
-source dft_insert_full.tcl
+source dft_insert.tcl
 
 
 # CHANGED: case analysis scoped to the functional-mode reports and removed afterward
@@ -669,7 +651,7 @@ set output_files [concat \
     [glob -nocomplain $report_dir/*.rpt] \
     [glob -nocomplain $report_dir/pre_dft/*.rpt] \
     [glob -nocomplain $report_dir/scan_mode/*.rpt] \
-    [glob -nocomplain $syn_out_dir/$design_toplevel.gate.*] \
+    [glob -nocomplain $syn_out_dir/$design_toplevel.*] \
     [list synout/forte_top.pre_dft.ddc]]
 
 foreach f $output_files {

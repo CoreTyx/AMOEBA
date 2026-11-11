@@ -7,3 +7,8 @@ default.svf
 sim
 regressions
 
+# pc_tb generated files (run.sh)
+scripts/pc_tb/scan_map.svh
+scripts/pc_tb/simv_scan*
+scripts/pc_tb/csrc
+scripts/pc_tb/ucli.key

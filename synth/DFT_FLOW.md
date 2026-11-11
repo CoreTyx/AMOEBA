@@ -41,7 +41,7 @@ Setup and insertion both operate on `forte_top`. The scan endpoints are package 
 
 ### 2. Preserve the control nets and lock-state interface
 
-`scan_en_dft`, `test_mode_dft`, and the one-bit `dft_unlocked` net receive `dont_touch` attributes during compilation. The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
+`scan_en_dft`, `test_mode_dft`, `test_mode_s` (test_mode after the two-flop `tmsync` synchroniser), and the one-bit `dft_unlocked` net receive `dont_touch` attributes during compilation. The `tmsync` flops, like the lock, are kept non-scan and out of retiming. The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
 
 This preservation is targeted. It does not freeze the whole processor or prevent mapping of the surrounding logic.
 
@@ -74,7 +74,7 @@ The external `core_clk` pad feeds both clock inputs of `forte_chip`. Only the pa
 
 ### 5. Model the unlocked test condition
 
-The pre-compile driver of `dft_unlocked` is declared constant high for DFT analysis. This lets DRC analyze scan operation with the existing lock permitting access.
+After mapping, `dft_bind_hookups` (`dft_procs.tcl`) declares `dft_unlocked` and `test_mode_s` constant high for DFT analysis. For each net, it traces back from the net's driver through buffers and inverters to the flop that drives it. It places the constant on that flop's Q or QN pin, with `-active_state` flipped once per inverter crossed, so a net that DC drives from QN still gets the correct value. This lets DRC analyze scan operation with the lock permitting access and with test mode already through the synchroniser.
 
 The declaration does not alter the hardware lock. A real test must initialize the lock through the reset/clock sequence. DRC accepting an unlocked assumption is not proof that the physical initialization sequence works.
 
@@ -90,7 +90,7 @@ scan_en_dft = scan_en AND dft_unlocked
 
 The current scan test assumes `test_mode=1`. This setup does not add test-mode qualification to that expression or implement a new authorization circuit.
 
-The existing `test_mode_dft` driver is also declared as the `TestMode` hookup associated with the external `test_mode` port. Inserted test-mode logic must use this lock-qualified source; the existing RTL already uses it to select scan pad directions and the output mux.
+The existing `test_mode_dft` driver is also declared as the `TestMode` hookup associated with the external `test_mode` port. Inserted test-mode logic must use this lock-qualified source; the existing RTL already uses it to select what `io_out` carries.
 
 Both hookups are declared before mapping. Correct propagation of that internal hookup through compilation and DDC reload must be confirmed in the actual DC run.
 
@@ -99,11 +99,11 @@ Both hookups are declared before mapping. Correct propagation of that internal h
 For `k = 0..7`, the setup declares:
 
 ```text
-io[k]   : scan input
-io[k+8] : scan output
+io_in[k]  : scan input
+io_out[k] : scan output
 ```
 
-These are the existing bidirectional package ports: the tester drives the lower byte and receives the upper byte. The pad library models must allow DC to trace the input/output paths and recognize the test-mode direction controls. The backslashes around brackets in Tcl expressions ensure names such as `io[0]` are passed literally rather than interpreted as command substitutions.
+These are the dedicated one-way link ports: the tester drives `io_in` and receives `io_out`, and no pad changes direction. The pad library models must allow DC to trace the input/output paths. The backslashes around brackets in Tcl expressions ensure names such as `io_in[0]` are passed literally rather than interpreted as command substitutions.
 
 This step declares signal roles. It does not yet allocate PC cells to chains or stitch their serial connections.
 
@@ -123,7 +123,7 @@ Scan-aware mapping uses the previously assigned scan-element attributes. Clock g
 
 The script then:
 
-1. Releases `dont_touch` on `scan_en_dft`, `test_mode_dft`, and `dft_unlocked` so insertion can add connections and optimize the logic.
+1. Binds the four control hookups (`dft_bind_hookups`) and releases `dont_touch` on `scan_en_dft`, `test_mode_dft`, `test_mode_s` and `dft_unlocked` so insertion can add connections and optimize the logic.
 2. Applies the existing Verilog and custom naming rules.
 3. Selects `forte_top` and saves `synout/forte_top.pre_dft.ddc`.
 4. Sets `dft_standalone false` and sources `dft_insert.tcl`.
@@ -159,7 +159,7 @@ The script selects and links `forte_top` and remains at that scope for insertion
 The insertion defaults are eight chains, period 100, internal-pin support, and no clock mixing. For each chain `k`:
 
 ```text
-io[k] → input pad → selected PC scan cells → output mux/pad → io[k+8]
+io_in[k] → input pad → selected PC scan cells → output mux/pad → io_out[k]
 ```
 
 Scan-cell eligibility and internal hookups are carried by the prepared design. Before each chain is specified, insertion explicitly re-declares its stable input/output ports as `ScanDataIn` and `ScanDataOut` in the active design/test mode. This avoids relying on those port roles remaining active after compilation or checkpoint reload. No mapped internal-signal search is required. Chain count and endpoint assignments can be edited without rerunning compilation, within the available interface.
@@ -253,6 +253,8 @@ Paths below are relative to the repository root when using `make -C synth dft`.
 | `synth/reports/dft/dft_scan_path.rpt` | Final chains and scan-cell membership |
 | `synth/synout/dft/forte_top.spf` | Top-level test protocol |
 | `synth/synout/dft/forte_top.scandef` | Top-level scan-chain information |
+| `synth/synout/dft/forte_top.scan_phase.txt` | Per-scan-cell logical phase (1 = stored inverted) for the benches |
+| `synth/reports/dft/dft_phase.rpt` | Per-cell Q/QN usage and phase, with totals |
 | `synth/synout/dft/forte_top.gate.v` | Complete inserted ASIC Verilog |
 | `synth/synout/dft/forte_top.gate.ddc` | Complete inserted ASIC DDC |
 

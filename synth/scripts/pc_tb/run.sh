@@ -25,7 +25,7 @@
 # cells the netlist uses are elaborated.
 
 
-export NETLIST=/groups/ece427-group4/dft_testing/synth/synout/forte_top.gate.v
+export NETLIST="${NETLIST:-/groups/ece427-group4/dft_testing/synth/synout/forte_top.gate.v}"
 
 # SDF for the same netlist.  Empty = zero-delay functional gate simulation
 # (post-synthesis).  Set it for post-PnR timing simulation.
@@ -104,13 +104,23 @@ flags=$(set -f; entries VCS_FLAGS)
 NETLIST=$(realpath "$NETLIST")
 SCANDEF=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
 [ ! -f "$SCANDEF" ] || SCANDEF=$(realpath "$SCANDEF")
+# Per-cell logical phase written by dft_insert.tcl beside the scandef.
+SCAN_PHASE=${SCAN_PHASE:-$(dirname "$SCANDEF")/forte_top.scan_phase.txt}
+[ ! -f "$SCAN_PHASE" ] || SCAN_PHASE=$(realpath "$SCAN_PHASE")
 cd "$(dirname "$0")"
 
 # Scan map from the scandef: which PC bit each scan cell holds
 MAP=()
 rm -f scan_map.svh
 if [ -f "$SCANDEF" ]; then
-    awk -f scan_map.awk "$SCANDEF" > scan_map.svh || die "cannot read the scan chains in $SCANDEF"
+    if [ -f "$SCAN_PHASE" ]; then
+        echo "run.sh: logical phase from $SCAN_PHASE"
+    else
+        echo "run.sh: WARNING: no scan phase file at $SCAN_PHASE: every cell taken as stored in true polarity"
+        SCAN_PHASE=""
+    fi
+    awk -v LOGICAL_PHASE="$SCAN_PHASE" -f scan_map.awk "$SCANDEF" > scan_map.svh \
+        || die "cannot read the scan chains in $SCANDEF"
     MAP=(+define+SCAN_MAP)
     echo "run.sh: scan map from $SCANDEF"
 else
@@ -144,3 +154,5 @@ vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     -top tb_scan -o simv_scan
 
 ./simv_scan -l sim.log | grep -E '^\[|^PC:|DFT TB'
+# Exit status follows the verdict, so a FAIL (or no verdict) is not missed.
+grep -q '^DFT TB PASS' sim.log

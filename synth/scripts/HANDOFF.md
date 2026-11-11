@@ -6,36 +6,37 @@ In your mom
 
 | File | Read by | Role |
 |---|---|---|
-| `dft_setup.tcl` | `synthesis.tcl`, **before** `compile_ultra` | Picks the flops to scan and declares the existing test signals |
-| `dft_insert.tcl` | `synthesis.tcl` after compile (integrated), or `make dft` (standalone) | Declares the 8 chains, runs `insert_dft`, writes the protocol, scandef and reports |
-| `run.sh` | you | Builds and runs `tb_scan.sv` on a netlist; turns the scandef into `scan_map.svh` |
-| `scan_map.awk` | `run.sh` | Scandef → `scan_map.svh`: which register bit each scan cell holds, plus that register's group, kind and reset value |
-| `tb_scan.sv` | VCS | Full bench: every register on the chains (PC, pipeline, hardened CSRs) |
-| `pc_only/run.sh`, `pc_only/scan_map.awk`, `pc_only/tb_scan.sv` | you / VCS | The earlier bench that checks only the PC bits (section 10) |
+| `dft_procs.tcl` | `synthesis.tcl` and `dft_insert.tcl` | Shared procs: Q/QN-aware control hookups (`dft_bind_hookups`), the per-cell phase file (`dft_write_phase`) |
+| `dft_setup.tcl` | `synthesis.tcl`, **before** `compile_ultra` | Picks the flops to scan (`DFT_SCOPE`), keeps the four control nets, declares the existing test signals |
+| `dft_insert.tcl` | `synthesis.tcl` after compile (integrated), or `make dft` (standalone) | Declares the 8 chains `io_in[k] -> io_out[k]`, runs `insert_dft`, writes the protocol, scandef, phase file and reports |
+| `pc_tb/run.sh`, `pc_tb/scan_map.awk`, `pc_tb/tb_scan.sv` | you / VCS | The PC bench (section 10). **Ported to `io_in`/`io_out`**; the one to run with `DFT_SCOPE=pc` |
+| `full_tb/` | you / VCS | Full bench: every register on the chains (PC, pipeline, hardened CSRs). **Still on the old 16-bit `io`/`dir` netlist**; see `full_tb/README.md` |
 | `HANDOFF.md` | people | This file |
 
 **Generated, safe to delete:** `scan_map.svh`, `simv_scan`, `simv_scan.daidir/`, `csrc/`, `compile.log`, `sim.log`, `ucli.key`. They are written into the folder `run.sh` lives in.
 
 **DC outputs:**
 - `synout/forte_top.pre_dft.ddc`: the checkpoint before insertion.
-- `$SYN_OUT_DIR` (default `outputs/`): `forte_top.spf`, `forte_top.scandef`; standalone runs also write `forte_top.gate.v` and `forte_top.gate.ddc`.
-- `reports/dft/` next to `dft_insert.tcl`: `dft_signals.rpt`, `dft_drc_pre.rpt`, `dft_preview.rpt`, `dft_drc_post.rpt`, `dft_scan_path.rpt`.
+- `$SYN_OUT_DIR` (default `outputs/`): `forte_top.spf`, `forte_top.scandef`, `forte_top.scan_phase.txt`; standalone runs also write `forte_top.gate.v` and `forte_top.gate.ddc`.
+- `reports/dft/` next to `dft_insert.tcl`: `dft_signals.rpt`, `dft_drc_pre.rpt`, `dft_preview.rpt`, `dft_drc_post.rpt`, `dft_scan_path.rpt`, `dft_phase.rpt`.
 
 ## 3. How DFT fits into synthesis
 
 This is the DFT part of `synthesis.tcl` on ece-427-02. It is not in this folder.
 
 ```tcl
-source dft_setup.tcl
+source dft_procs.tcl
+source dft_setup.tcl                 ;# DFT_SCOPE=pc (default) or full
 compile_ultra -scan -gate_clock -retime
 change_names -rules verilog -hierarchy
 change_names -rules nameRules -hierarchy
-# Bind chip/dft_unlocked, chip/scan_en_dft, chip/test_mode_dft to their mapped
-# driver pins (error unless exactly one net and one driver each):
-#   dft_unlocked  -> set_dft_signal -view existing_dft -type Constant   -hookup_pin <drv> -active_state 1
-#   scan_en_dft   -> set_dft_signal -view spec -type ScanEnable -port scan_en   -hookup_pin <drv> -active_state 1
-#   test_mode_dft -> set_dft_signal -view spec -type TestMode   -port test_mode -hookup_pin <drv> -active_state 1
-set_dont_touch [get_nets {chip/scan_en_dft chip/test_mode_dft chip/dft_unlocked}] false
+dft_bind_hookups chip
+# Binds the four preserved nets to their mapped pins (error unless exactly one
+# net and one driver each), then releases their dont_touch:
+#   dft_unlocked  -> existing_dft Constant, traced back to the lock flop's Q or QN
+#   test_mode_s   -> existing_dft Constant, traced back to the tmsync flop's Q or QN
+#   scan_en_dft   -> spec ScanEnable -port scan_en   -hookup_pin <net driver> -active_state 1
+#   test_mode_dft -> spec TestMode   -port test_mode -hookup_pin <net driver> -active_state 1
 file mkdir synout
 write -format ddc -hierarchy -output synout/forte_top.pre_dft.ddc
 set dft_standalone false
@@ -46,12 +47,13 @@ set_case_analysis 0 [get_ports {test_mode scan_en}]
 
 Why things are in this order:
 - **`-scan`:** a test-ready compile maps every flop to a scan flop. `insert_dft -unscan` later turns the unused ones back into plain flops. Without `-scan`, DC uses the scan mux as a functional mux, and those cells can't be put on a chain.
-- **Hookups after mapping:** the control-net hookups are bound after mapping and `change_names`, because RTL pin names don't survive mapping. `dft_setup.tcl` preserves the three nets (`enable_keep_signal_dt_net`, `set_dont_touch`) so they can be found.
+- **Hookups after mapping:** the control-net hookups are bound after mapping and `change_names`, because RTL pin names don't survive mapping. `dft_setup.tcl` preserves the four nets (`enable_keep_signal_dt_net`, `set_dont_touch`) so they can be found.
+- **Q/QN-aware constants:** `dft_unlocked` and `test_mode_s` are 1 in test mode, but DC may drive either net from a flop's QN, or from Q through an inverter. `dft_trace_driver` walks from the net's driver back through buffers and inverters (lib `function` `A` / `!A`) to the flop, places the Constant on the flop pin it reaches, and flips `-active_state` once per inverter. The log shows each one as `DFT hookup: chip/dft_unlocked=1 -> <pin> (Q|QN, <cell>, n inversion(s), active_state a)`, then the walk and what the flop stores. A hard-coded "Q pin, 1" (the old `dft.tcl`) was wrong whenever DC chose QN.
 - **`set_case_analysis` after insertion:** placed there so `dft_drc`/`insert_dft` never see `test_mode` forced to 0 while the protocol holds it at 1.
 
 **What a change needs:**
 - **Full re-synthesis:** any change to `dft_setup.tcl` or to `compile_ultra`. `dft_setup.tcl` runs before compile, and its attributes are saved in the pre-DFT `.ddc`.
-- **`make dft` is enough:** a change to `dft_insert.tcl` only. It reads `synout/forte_top.pre_dft.ddc` in a fresh `dc_shell` (`dft_standalone true`).
+- **`make dft` is enough:** a change to `dft_insert.tcl` only. It reads `synout/forte_top.pre_dft.ddc` (or `$DFT_PRE_DDC`) in a fresh `dc_shell` (`dft_standalone true`).
 - **Standalone runs skip `synthesis.tcl`:** so they don't apply the `set_case_analysis`. If that matters, add it to `dft_insert.tcl` after `insert_dft`.
 
 Not done: false-pathing the `io[*]` bus. It is still timed against the link `set_input_delay`/`set_output_delay` in the SDC, on its functional paths only.
@@ -59,7 +61,10 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 ## 4. `dft_setup.tcl`: what gets scanned
 
 - **Scope:** run on `forte_top`. The pad ring is included; only the `chip` instance is kept as a hierarchy boundary (`set_ungroup chip false`, boundary optimisation allowed).
-- **Scan groups** (`scan_reg_groups`): one hierarchical pattern per line, matched against the elaborated, pre-compile names. `*` spans hierarchy, and only sequential cells are taken, each once.
+- **Scope** (`DFT_SCOPE` in the environment, exported by the Makefile; `make synth DFT_SCOPE=full`):
+  - `pc` (default): the `pc` group only, 63 flops after PC[0] is optimised away. The bench is `pc_tb/`.
+  - `full`: all three groups below. The bench is `full_tb/`, once it is ported to the new pins.
+- **Scan groups** (`scan_group_*`): one hierarchical pattern per line, matched against the elaborated, pre-compile names. `*` spans hierarchy, and only sequential cells are taken, each once.
 
   | Group | Contents |
   |---|---|
@@ -70,7 +75,11 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
   Not scanned: the divider iteration state, caches, TLBs and register file.
 - **Pattern checks:** a pattern that matches nothing prints a `WARNING`. A group that matches nothing is an `error`. The log prints the flop count per group. After any change, check the counts: the RTL widths add up to about 1,600 flops (pc 64, pipeline ≈1,470, hardened_csr ≈60).
 - **`set_dont_retime` on every scan flop:** `-retime` would otherwise move or rename these registers, and the scandef names would stop matching the RTL. This is a timing cost (section 12).
-- **Scan selection:** every edge-triggered register is first made non-scan, then only the groups are enabled. The DFT lock (`chip/soc/uncore/dftlock/*`) is forced non-scan and not retimed. It must never be on a chain.
+- **Scan selection:** every edge-triggered register is first made non-scan, then only the groups are enabled. Two sets of flops are forced non-scan and not retimed, and the script errors if either matches nothing:
+  - The DFT lock (`chip/soc/uncore/dftlock/*`). It must never be on a chain.
+  - test_mode's synchroniser (`chip/tmsync/*`). Shifting it would drop test mode mid-shift.
+- **No inverted storage:** `compile_seqmap_enable_output_inversion false` (also DC's default, set and printed explicitly). With it, and with every scan flop kept out of retiming, each scan cell holds its RTL bit in true polarity. That is what lets `dft_write_phase` write phase 0.
+- **Preserved nets:** `chip/scan_en_dft`, `chip/test_mode_dft`, `chip/test_mode_s`, `chip/dft_unlocked`. The script errors unless all four exist.
 - **Existing test signals:**
   - `ScanClock core_clk`, timing `{45 55}`. The single `core_clk` pad feeds both `core_clk` and `link_clk`, so there is no second test clock.
   - `Reset rst_n`, active 0.
@@ -79,7 +88,7 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 
 ## 5. `dft_insert.tcl`: the chains
 
-- **Eight chains** `c0..c7`. Scan-in is `io[k]` and scan-out is `io[k+8]`, using the existing bidirectional package pads. The pads allow no more than 8. `insert_dft` balances the scan flops across them (≈200 each with the full selection).
+- **Eight chains** `c0..c7`. Scan-in is `io_in[k]` and scan-out is `io_out[k]`, the dedicated one-way link pads. Nothing changes direction in test mode. There are 8 of each, so no more than 8 chains. `insert_dft` balances the scan flops across them: 8 each with `pc` (7 on one chain), ≈200 each with `full`.
 - **Settings:**
   - `test_default_period 100` (ns).
   - `set_dft_insertion_configuration -preserve_design_name true -synthesis_optimization all -unscan true`.
@@ -96,6 +105,10 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
   10. In standalone mode only: write the gate `.v` and `.ddc`, then `exit`.
 - **QN inversions:** by default `insert_dft` takes each cell's scan output from whichever of Q/QN has more slack, so some chains invert. The commented-out `set test_disable_find_best_scan_out true` makes it pick by availability instead; the man page says the result can still invert. The benches handle inversions either way.
   - Count them: `grep -c 'OUT QN' ../synout/forte_top.scandef`.
+- **Logical phase (`forte_top.scan_phase.txt`):** after `write_scan_def`, `dft_write_phase` writes one line per scan cell, `<scandef instance path> <0|1>`, where 1 means the flop stores its RTL bit inverted. This is the same format as `full_tb`'s `LOGICAL_PHASE`, and `pc_tb/run.sh` reads it as `SCAN_PHASE`.
+  - With output inversion off (above), every cell is 0 by construction. QN-only fanout is **not** taken as evidence of inversion, because logic that wants `~q` legitimately reads QN of a true-polarity flop.
+  - If output inversion is ever turned on, cells whose Q has no functional load and whose QN does are written 1 and marked `UNVERIFIED`. The benches' exact reset checks (B, F) then confirm or refute each one.
+  - `reports/dft/dft_phase.rpt` lists every cell: chain, index, scan-out pin, Q/QN functional load counts, and phase. It ends with totals and notes (QN-only fanout, no functional load, cells not found).
 - **Checking DRC** (in `reports/dft/`):
 
   ```bash
@@ -109,9 +122,10 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 ## 6. The chip's DFT hardware (`hdl/forte_chip.sv`)
 
 - **Gated test pins:**
-  - `test_mode_dft = test_mode & dft_unlocked`
-  - `scan_en_dft = scan_en & dft_unlocked`
-- **Pad direction:** in test mode the pads are fixed: `io[7:0]` input (scan in), `io[15:8]` output (scan out).
+  - `test_mode_s`: `test_mode` through a 2-flop `synchronizer tmsync` on `core_clk`. It follows the pin two edges late.
+  - `test_mode_dft = test_mode_s & dft_unlocked`
+  - `scan_en_dft = scan_en & dft_unlocked`. Not synchronised: the tester toggles it per cycle.
+- **Link pads:** two one-way 8-bit buses, `io_in` (FPGA→ASIC) and `io_out` (ASIC→FPGA). There is no `dir` pin and no tristate. In test mode `io_out` carries `scan_q` (`io_o = test_mode_dft ? scan_q : lm_io_o`), and `insert_dft` adds its scan-out mux in front of each `io_out` pad.
 - **Chain stubs:** the RTL holds an 8-flop `scan_q` stub that reserves the structure. `insert_dft` builds the real chains.
 - **DFT lock:** `hdl/forte_dft_lock.sv` is an APB register in the uncore.
   - It resets to `unlocked = 1`. Software writing 0 locks DFT until the next reset.
@@ -123,12 +137,13 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 Both benches use the same `run.sh` interface and the same env file.
 
 ```bash
-cd /groups/ece427-group4/dft_testing/synth/scripts      # or .../scripts/pc_tb
+cd /groups/ece427-group4/dft_testing/synth/scripts/pc_tb
 ./run.sh env.s                          # expect "DFT TB PASS"
 ./run.sh env.s +define+BREAK_SE         # self-test: must FAIL
 ./run.sh env.s +define+BREAK_MAP        # self-test: must FAIL
-./run.sh env.s +define+NO_HARDEN        # full bench only: skip phase H
 ```
+
+`full_tb/` has its own runner and `paths.sh`; see `full_tb/README.md`.
 
 **The env file** is sourced by `run.sh` when given as the first argument. Pass it explicitly: on ece-427-02, variables exported in the interactive shell did not reach `run.sh`, and the cause was never found.
 
@@ -137,8 +152,9 @@ NETLIST=/path/to/forte_top.gate.v                  # must contain module forte_t
 SCANDEF=/path/to/forte_top.scandef                 # default: forte_top.scandef next to NETLIST
 STDCELL_MODELS=(/path/to/stdcells/*.v)             # array form: all files
 SRAM_MODELS=/path/to/sram_models                   # a folder: every .v/.sv in it
-PAD_MODELS="/path/io_in.sv /path/io_out.sv /path/io_tri.sv"   # space-separated, globs allowed
-VCS_FLAGS="+define+EXPECTED_CELLS=1600"            # optional, added after the defaults
+PAD_MODELS="/path/io_in.sv /path/io_out.sv"        # space-separated, globs allowed
+SCAN_PHASE=/path/to/forte_top.scan_phase.txt       # default: next to SCANDEF; missing = all phase 0, with a warning
+VCS_FLAGS="+define+EXPECTED_CELLS=63"              # optional, added after the defaults
 ```
 
 - **Forms each `*_MODELS` accepts:** a file, a glob, a folder, several of those separated by spaces, or a bash array. Arrays can't be exported, so they only work from the env file.
@@ -146,7 +162,7 @@ VCS_FLAGS="+define+EXPECTED_CELLS=1600"            # optional, added after the d
 
 **What `run.sh` does:**
 1. Sources the env file and resolves the file lists to absolute paths.
-2. Requires the scandef (the full bench can't run without it; `pc_only` makes it optional) and runs `awk -f scan_map.awk SCANDEF > scan_map.svh`.
+2. Requires the scandef (the full bench can't run without it; `pc_tb` makes it optional) and runs `awk -v LOGICAL_PHASE=$SCAN_PHASE -f scan_map.awk SCANDEF > scan_map.svh`.
 3. Checks that the netlist has `module forte_top`.
 4. Compiles: `vcs -full64 -sverilog -timescale=1ns/1ps +nospecify +notimingcheck`, then `VCS_FLAGS`, then your extra args. The order is pad/SRAM models as sources, then `tb_scan.sv`, then the netlist, then the standard cells with `-v` (the same order as `hvl/pin/pin.sh`). This is a zero-delay functional simulation.
 5. Runs `./simv_scan -l sim.log`. The terminal shows only `[time]` lines, the `GROUP:`/`REG:`/`PC:` summary and `DFT TB`. Everything is in `sim.log`.
@@ -249,10 +265,12 @@ VCS_FLAGS="+define+EXPECTED_CELLS=1600"            # optional, added after the d
 - **Cell order** within a chain comes from the scandef. A swapped pair only shows where the two reset values differ (B, F).
 - **A wrong inversion** does show, which is what `BREAK_MAP` exercises.
 
-## 10. `pc_only/` (= `pc_tb/` on ece-427-02)
+## 10. `pc_tb/`
 
-The earlier, PC-focused bench, kept as it was before the full bench replaced it.
-- **Map:** `scan_map.awk` records only which PC bit each cell holds (`map_bit`, -1 for a non-PC cell) and its QN flag.
+The PC-focused bench. It is the first bench to run on a new netlist, and the one for `DFT_SCOPE=pc`.
+- **Pins:** `io_in[k-1]` is chain k's scan-in, always driven by the bench (0 outside test). `io_out[k-1]` is its scan-out.
+- **test_mode synchroniser:** every time `test_mode` rises, the bench holds `scan_en` low for `TM_SYNC` = 3 cycles (`enter_test`) before it shifts. That covers the two tmsync flops, whichever of scan enable or test mode `insert_dft` used for its scan-out mux and clock-gate test pins. The core is stalled on `ready=0`, so those cycles change nothing.
+- **Map:** `scan_map.awk` records which PC bit each cell holds (`map_bit`, -1 for a non-PC cell), its scan-out QN flag (`map_qn`) and its logical phase (`map_ph`, from `SCAN_PHASE`). Phase M prints `~` for a QN scan-out and `!` for a cell stored inverted.
 - **Phases:** A (lengths), M (map vs pins), B (PC = `RESET_VEC`, no PC bit X), C (round trip), D (load, capture, unload), E (PC patterns), F (reset over a loaded PC, every bit back to `RESET_VEC`).
 - **Non-PC cells:** every load puts them back to the value they held after B's reset, and only PC bits are compared. That makes it usable on the widened chains too.
 - **Without a scandef** it still runs A, C and coarse versions of B and D. Those coarse checks only make sense if the chains hold nothing but the PC.
@@ -260,7 +278,17 @@ The earlier, PC-focused bench, kept as it was before the full bench replaced it.
 
 ## 11. Status
 
-- **PC-only chains: passes on the real netlist.** 63 PC flops: c0–c6 have 8 cells each and c7 has 7; c0 and c7 invert. `DFT TB PASS`, and post-insertion DRC had 0 errors and 0 fatals.
+- **Ported to the 8-in/8-out link (this revision):** `dft_setup.tcl`, `dft_insert.tcl`, the new `dft_procs.tcl`, the SDC block and the DFT calls in `synthesis.tcl`, and `pc_tb/`. `dft_setup_full.tcl` and `dft_insert_full.tcl` were merged into `DFT_SCOPE`, and the old below-pad `dft.tcl` was removed.
+- **Files to copy to the IP VM:** `synth/{synthesis.tcl,dft_procs.tcl,dft_setup.tcl,dft_insert.tcl,Makefile}` and `synth/scripts/pc_tb/{run.sh,scan_map.awk,tb_scan.sv}`, plus `hdl/` and `pkg/` if the VM's copy predates the `io_in`/`io_out` RTL. The VM's `io_drivers/` needs only `io_in.sv` and `io_out.sv`.
+- **Verified locally on EWS (2026-11-11), with FreePDK45 in place of TSMC:**
+  - Setup: DC W-2024.09, the real `synthesis.tcl` (`DFT_SCOPE=pc`), behavioural pads, SRAMs as black boxes. FreePDK45's `stdcells.db` has no `test_cell` models, so a copy with `test_cell` added to the `SDFF*` cells was used.
+  - Integrated run: 16 min. Post-insertion DRC had 0 errors and 0 fatals. 8 chains, 63 PC cells (c0–c6 have 8, c7 has 7), 55 scan out of QN.
+  - Hookups: DC drove `test_mode_s` from **`tmsync/q_reg/QN`**. The tracer put the Constant on that QN pin with active state 1. A hard-coded Q pin would have been wrong there.
+  - `scan_phase.txt` is all 0. Standalone `make dft`-style insertion from the checkpoint gives the same result in about 1 min.
+  - `pc_tb` passes on both netlists: B reads `PC = 0x8000_0000`, E passes 155/155, F passes 8/8. `BREAK_SE` and `BREAK_MAP` fail, and `run.sh` now exits non-zero on a FAIL.
+  - Local-only quirk: FreePDK45's `stdcells.v` drives its own `RN`/`SN` input nets through `ng_xbuf` unless `+define+TETRAMAX` is given. Without it, `rst_n` reads X. The TSMC models on the VM don't need this.
+- **Scandef STOP:** this DC writes `+ STOP U8 B`: the input pin of the scan-out mux in front of `io_out[k]`, not `PIN io_out[k]`. A STOP is a chain endpoint, never a scan cell. `pc_tb/scan_map.awk` and `dft_procs.tcl` now ignore it; before this, they counted it as a ninth cell per chain. `full_tb/src/scan_map.awk` still has the old STOP handling and needs the same fix when it is ported.
+- **Earlier result, on the old 16-bit-link netlist:** PC-only passed. 63 PC flops: c0–c6 had 8 cells each and c7 had 7; c0 and c7 inverted. `DFT TB PASS`, and post-insertion DRC had 0 errors and 0 fatals.
 - **Widened selection: not yet run on a real netlist.** This is the pc, pipeline and hardened_csr selection described above. The full bench has only been run in VCS W-2024.09 against a behavioural stand-in for the chip (275 cells, built with the real `ecc_secded_enc/dec` RTL):
   - The clean run passes.
   - `BREAK_SE` and `BREAK_MAP` fail as they should.

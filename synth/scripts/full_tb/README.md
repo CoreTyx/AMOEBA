@@ -221,6 +221,10 @@ transitions, and delayed/corner simulations remain outside current coverage.
   16-bit bidirectional link with separate 8-bit `io_in`/`io_out`, update agent
   serialization, pad/scan declarations and constraints, and validate phase I
   and scan readout against the corresponding DFT netlist.
+  The DFT tcl side is done: chains are `io_in[k] -> io_out[k]`, and
+  `dft_insert.tcl` now writes `forte_top.scan_phase.txt` beside the scandef,
+  in this bench's `LOGICAL_PHASE` format (set `LOGICAL_PHASE` to it). The
+  `pc_tb/tb_scan.sv` port shows the pin and test_mode-synchroniser changes.
 - [ ] **Explain and fix unprotected readout corruption.** Compare matched
   protected/unprotected cases at the first divergence; inspect effective scan
   enable, DFT lock, pad mux, clocks/resets, and unscanned activity. Keep protected

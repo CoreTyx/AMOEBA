@@ -5,8 +5,8 @@
 // values are not checked.
 //
 // Drives and observes ONLY the package pins.  The chains are the ones
-// dft_insert.tcl declares: c0..c7, scan in on io[k], scan out on io[k+8].
-// Below, chain k = 1..8 is c(k-1): io[k-1] -> io[k+7].  Chain lengths and
+// dft_insert.tcl declares: c0..c7, scan in on io_in[k], scan out on io_out[k].
+// Below, chain k = 1..8 is c(k-1): io_in[k-1] -> io_out[k-1].  Chain lengths and
 // inversions are discovered from the pins.  Which PC bit each cell holds comes
 // from the scandef: run.sh turns it into scan_map.svh (+define+SCAN_MAP).
 // Without it the PC phases that need it (exact B, E, F) are skipped.
@@ -19,6 +19,13 @@
 // between each cell and scan-out (b_inv) is known too, so a PC value can be
 // loaded into the flops and read out of them exactly.
 //
+// LOGICAL PHASE.  Separately from the scan path, a flop could store its RTL bit
+// inverted.  dft_insert.tcl writes forte_top.scan_phase.txt (one line per scan
+// cell, 1 = inverted); run.sh passes it to scan_map.awk as map_ph, and a_inv /
+// b_inv then run to the RTL bit rather than to the flop.  dft_setup.tcl
+// forbids inverted storage, so it is all 0 unless DC was told otherwise; B and
+// F (exact reset values) would catch a wrong entry.
+//
 // NON-PC CELLS.  Random data in the pipeline registers and CSRs is not a state
 // the core can hold: a bad ECC codeword repairs itself even while stalled, and
 // MSECFAULT / MFTSTATUS have no enable, so a capture clock would rewrite them
@@ -27,7 +34,7 @@
 // and only the PC cells are compared.
 //
 //   A  lengths      shift zeros and read each scan-out: that is inv[k].  Then
-//                   one 1 into every io[7:0]; the cycle io[k+8] first differs
+//                   one 1 into every io_in; the cycle io_out[k] first differs
 //                   from inv[k] is that chain's length.  With
 //                   +define+EXPECTED_CELLS=n the total must be n (M checks
 //                   every chain against the scandef anyway).
@@ -68,13 +75,20 @@
 // in B and F.  +define+BREAK_MAP corrupts one inversion as a self-test.
 //
 // Pins follow docs/top_level_plan.md s3: test_mode static for the session,
-// scan enable toggled per cycle on scan_en.  In test mode the chip drives
-// io[15:8] and listens on io[7:0]; the bench drives io[7:0] only then, and
-// otherwise leaves the bus to the chip (weak pull-downs keep it out of Z).
+// scan enable toggled per cycle on scan_en.  The link is two one-way buses:
+// the bench always drives io_in (scan-in in test mode, 0 otherwise) and reads
+// scan-out from io_out.  No pad changes direction.
 // The DFT lock resets to unlocked, so it does not get in the way here; it is
 // not tested.
 //
-// Test cycle as the SPF: 100 ns; inputs change at 10 ns, io[15:8] sampled at
+// TEST_MODE IS SYNCHRONISED in forte_chip (tmsync, two core_clk flops), so
+// test_mode_dft -- which selects what io_out carries, and may gate the scan-out
+// mux or clock-gate test pins insert_dft added -- follows the pin two edges
+// late.  Every time test_mode rises the bench holds scan_en low and idles
+// TM_SYNC cycles (enter_test) before it shifts.  The core is stalled on ready=0
+// throughout, so those cycles change nothing.  scan_en is not synchronised.
+//
+// Test cycle as the SPF: 100 ns; inputs change at 10 ns, io_out sampled at
 // 40 ns, core_clk rises at 50 ns.
 
 `timescale 1ns/1ps
@@ -85,8 +99,9 @@
 
 module tb_scan;
 
-  localparam int N       = 8;     // chains c0..c7: io[7:0] in, io[15:8] out
+  localparam int N       = 8;     // chains c0..c7: io_in[k] in, io_out[k] out
   localparam int MAX_LEN = 512;   // give up on a chain longer than this
+  localparam int TM_SYNC = 3;     // cycles for test_mode through tmsync (2 flops) + 1
 
   // ---- DUT ------------------------------------------------------------------
   logic        clk = 1'b0;
@@ -94,16 +109,15 @@ module tb_scan;
   logic [1:0]  irq;
   logic [N:1]  si;
   wire  [N:1]  so;
-  wire  [15:0] io;
-  wire         dir, req, wr, clk_out, uart_tx, status;
+  wire  [N-1:0] io_in, io_out;
+  wire          req, wr, clk_out, uart_tx, status;
 
-  // Scan in on io[7:0], driven only in test mode; scan out read from io[15:8].
-  assign io[7:0] = test_mode ? si : 'z;
-  assign (pull0, pull1) io = '0;
-  assign so = io[15:8];
+  // Scan in on io_in, scan out on io_out: chain k is bit k-1 of each.
+  assign io_in = si;
+  assign so    = io_out;
 
   forte_top dut (
-    .core_clk(clk), .rst_n, .io, .dir, .req, .clk_out, .wr, .ready, .rvalid,
+    .core_clk(clk), .rst_n, .io_in, .io_out, .req, .clk_out, .wr, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .fault_inject, .status);
 
   always #50 clk = ~clk;            // rises at 50, 150, ...
@@ -124,6 +138,7 @@ module tb_scan;
   int   map_len [N:1];
   int   map_bit [N:1][1:MAX_LEN];   // PC bit the cell holds; -1: not a PC flop
   int   map_qn  [N:1][1:MAX_LEN];   // 1: scan output from QN; 2: not in the scandef
+  int   map_ph  [N:1][1:MAX_LEN];   // 1: the flop stores its RTL bit inverted (scan_phase.txt)
   logic a_inv   [N:1][1:MAX_LEN];   // inversion from scan-in to the cell's SI
   logic b_inv   [N:1][1:MAX_LEN];   // inversion from the cell's Q to scan-out
   logic cell_rst [N:1][1:MAX_LEN];  // each cell's value after B's reset; X read as 0
@@ -157,9 +172,17 @@ module tb_scan;
     repeat (n) cycle('0, unused);
   endtask
 
+  // Raise test_mode and let it through tmsync before the first shift edge.
+  task automatic enter_test();
+    set_se(1'b0);
+    test_mode = 1'b1;
+    idle(TM_SYNC);
+    set_se(1'b1);
+  endtask
+
   // Shift maxlen cycles: chain k takes in[k][t] at cycle t and its output is
   // returned in out[k][t].  The first bit out of a chain is the one next to
-  // its io[k+8]; after the shift, chain k holds in[k][maxlen-len[k] .. maxlen-1],
+  // its io_out; after the shift, chain k holds in[k][maxlen-len[k] .. maxlen-1],
   // cell j holding in[k][maxlen-j].
   typedef logic bits_t [N:1][MAX_LEN];
   task automatic shift(input bits_t in, output bits_t out);
@@ -227,7 +250,7 @@ module tb_scan;
     logic [N:1] got;
     int total = 0;
     $display("[%0t] A: chain lengths", $time);
-    test_mode = 1'b1; set_se(1'b1);
+    enter_test();
     idle(MAX_LEN);                                    // flush to zeros
     foreach (len[k]) len[k] = -1;
     for (int t = 0; t <= MAX_LEN; t++) begin
@@ -235,7 +258,7 @@ module tb_scan;
       for (int k = 1; k <= N; k++) begin
         if ($isunknown(got[k])) begin
           if (len[k] != 0)
-            fail($sformatf("A: c%0d: io[%0d] is X after a zero flush (chain broken?)", k-1, k+7));
+            fail($sformatf("A: c%0d: io_out[%0d] is X after a zero flush (chain broken?)", k-1, k-1));
           len[k] = 0;
         end
         // t = 0 is strobed before the 1 is clocked in: the flushed value
@@ -245,10 +268,10 @@ module tb_scan;
     end
     for (int k = 1; k <= N; k++) begin
       if (len[k] <= 0) begin
-        fail($sformatf("A: c%0d: the 1 from io[%0d] never reached io[%0d]", k-1, k-1, k+7));
+        fail($sformatf("A: c%0d: the 1 from io_in[%0d] never reached io_out[%0d]", k-1, k-1, k-1));
         len[k] = 0;
       end
-      $display("[%0t] A: c%0d (io[%0d] -> io[%0d]) length %0d%s", $time, k-1, k-1, k+7, len[k],
+      $display("[%0t] A: c%0d (io_in[%0d] -> io_out[%0d]) length %0d%s", $time, k-1, k-1, k-1, len[k],
                string'(inv[k] === 1'b1 ? ", inverting" : ""));
       total += len[k];
       if (len[k] > maxlen) maxlen = len[k];
@@ -276,7 +299,7 @@ module tb_scan;
     string s;
     $display("[%0t] M: scan map", $time);
     foreach (map_len[k]) map_len[k] = 0;
-    foreach (map_bit[k, j]) begin map_bit[k][j] = -1; map_qn[k][j] = 0; end
+    foreach (map_bit[k, j]) begin map_bit[k][j] = -1; map_qn[k][j] = 0; map_ph[k][j] = 0; end
     scan_map_init();
 `ifdef BREAK_MAP
     // self-test: move an inversion one cell along c0, keeping the chain's parity
@@ -313,6 +336,12 @@ module tb_scan;
       for (int j = 2; j <= last; j++) a_inv[k][j] = a_inv[k][j-1] ^ (map_qn[k][j-1] == 1);
       b_inv[k][last] = (map_qn[k][last] == 1);
       for (int j = last - 1; j >= 1; j--) b_inv[k][j] = b_inv[k][j+1] ^ (map_qn[k][j] == 1);
+      // A flop that stores its bit inverted: a_inv/b_inv run to the RTL bit.
+      for (int j = 1; j <= last; j++)
+        if (map_ph[k][j] == 1) begin
+          a_inv[k][j] ^= 1'b1;
+          b_inv[k][j] ^= 1'b1;
+        end
       s = "";
       for (int j = 1; j <= last; j++) begin
         if (map_bit[k][j] < 0) s = {s, " ?"};
@@ -321,8 +350,9 @@ module tb_scan;
           if (map_bit[k][j] < 64) begin seen[map_bit[k][j]]++; on_chain[map_bit[k][j]] = 1'b1; end
         end
         if (map_qn[k][j] == 1) s = {s, "~"};
+        if (map_ph[k][j] == 1) s = {s, "!"};
       end
-      $display("[%0t] M: c%0d, PC bits from scan-in to scan-out (~ = QN):%s", $time, k-1, s);
+      $display("[%0t] M: c%0d, PC bits from scan-in to scan-out (~ = scan out of QN, ! = stored inverted):%s", $time, k-1, s);
     end
     for (int b = 0; b < 64; b++)
       if (seen[b] > 1) begin
@@ -346,7 +376,7 @@ module tb_scan;
     set_se(1'b0); test_mode = 1'b0;
     rst_n = 1'b0; idle(20);
     rst_n = 1'b1; idle(200);                          // ready=0: the fetch never completes
-    test_mode = 1'b1; set_se(1'b1);                   // just after an edge: no extra shift
+    enter_test();                                     // ends just after an edge: no extra shift
     shift(zeros, pc_read);
     for (int k = 1; k <= N; k++) begin
       $display("[%0t] B: c%0d, first bit out first: %s%s", $time, k-1, chain_str(pc_read, k),
@@ -424,7 +454,8 @@ module tb_scan;
 
   // Load v into the PC, hold it, read it back.  func_cyc = 0: one capture clock
   // in test mode.  Otherwise func_cyc clocks in functional mode (test_mode=0,
-  // the bus back with the chip); the fetch stays stalled on ready=0 throughout.
+  // io_out back with the link), plus TM_SYNC more while test_mode settles; the
+  // fetch stays stalled on ready=0 throughout.
   task automatic hold_pc(input string tag, input pc_t v, input int func_cyc = 0);
     bits_t zeros = '{default: 1'b0}, got, unused;
     int err0 = errors;
@@ -436,7 +467,7 @@ module tb_scan;
     else begin
       test_mode = 1'b0;
       idle(func_cyc);
-      test_mode = 1'b1;
+      enter_test();
     end
     set_se(1'b1);
     shift(zeros, got);
@@ -484,7 +515,7 @@ module tb_scan;
     set_se(1'b0); test_mode = 1'b0;
     rst_n = 1'b0; idle(20);
     rst_n = 1'b1; idle(200);                          // as B: the fetch stalls on ready=0
-    test_mode = 1'b1; set_se(1'b1);
+    enter_test();
     shift(zeros, got);
     check_pc(tag, decode(got), `RESET_VEC);
     n_pat++;
