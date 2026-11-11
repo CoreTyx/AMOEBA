@@ -38,7 +38,7 @@ class Run:
         self.policy = "rand"
         self.console = bytearray()
         self.console_cursor = 0
-        self.fail_pattern = None
+        self.fail_patterns = []
         self.phase_delta = 0
 
     # ---- bookkeeping ----
@@ -63,7 +63,7 @@ class Run:
         data, framing = self.dev.drain_uart(64)
         self.uart.write(data)
         self.console += data
-        if self.fail_pattern is not None and not self.fail_reported and self.fail_pattern in self.console:
+        if not self.fail_reported and any(p in self.console for p in self.fail_patterns):
             self.fail_reported = True
             self.error("console printed the fail pattern")
         for b in framing:
@@ -80,7 +80,7 @@ class Run:
     def drain_all(self) -> None:
         while True:
             self.service()
-            if not self.dev.rd(R.REG_UART_RX_DATA) >> 31 and not self.dev.rd(R.REG_TRACE_STAT) & 1:
+            if not self.dev.output_pending():
                 return
 
     def run_cycles(self, n: int, until=None) -> bool:
@@ -104,7 +104,7 @@ class Run:
         while True:
             before = self.dev.rd(R.REG_TRACE_LEVEL)
             self.service()
-            if before == 0 and not self.dev.rd(R.REG_TRACE_STAT) & 1:
+            if before == 0 and not self.dev.output_pending():
                 break
         self.trace.close()
         self.uart.close()
@@ -168,9 +168,7 @@ class Run:
         elif cmd == "uart_gap":
             d.wr(R.REG_UART_TX_GAP, int(args[0]))
         elif cmd == "uart_fail":
-            if self.fail_pattern is not None:
-                self.error("uart_fail: one fail pattern per run")
-            self.fail_pattern = unescape(rest_after(line, 1)).encode("latin-1")
+            self.fail_patterns.append(unescape(rest_after(line, 1)).encode("latin-1"))
         elif cmd == "irq":
             d.irq(int(args[0]), int(args[1]))
         elif cmd == "fault_inject":

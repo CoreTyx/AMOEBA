@@ -3,6 +3,8 @@
 #
 #   fpga/pynq/sw/deploy_forte.sh [user@host] [run-dir-or-image ...]
 #   MEM_BACKEND=AXI fpga/pynq/sw/deploy_forte.sh ...      (the DDR build)
+#   MEM_BACKEND=AXI DEST=forte_ddr fpga/pynq/sw/deploy_forte.sh xilinx@192.168.2.99 \
+#       testcode/linux/build/boot.lst                      (SYS-04: images/boot.lst)
 #
 # Images are .lst files (bin/generate_memory_file.py -8), or pin-bench run
 # directories, from which memory.lst is taken under the run's name.  Scripts in

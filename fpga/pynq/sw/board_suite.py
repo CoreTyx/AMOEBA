@@ -69,7 +69,10 @@ def main():
     ap.add_argument("--rd-lat", type=int,
                     help="one rd_latency for every run, in place of the knobs' (the DDR build "
                          "needs one above its worst read latency, as FORCE_RD_LAT in the gate)")
+    ap.add_argument("--nodet", action="store_true",
+                    help="natural link timing (LINK-10): the DDR's own latency, not the DET-mode slot")
     a = ap.parse_args()
+    common = ["--nodet"] if a.nodet else []
 
     bitstream = a.bitstream
     rows = []
@@ -81,13 +84,13 @@ def main():
             out = os.path.join("runs", name, "script")
             os.makedirs(out, exist_ok=True)
             rows.append((name, "script") + run(here, image, os.path.join(a.scripts, name + ".cmd"), out,
-                                               force_lat([], a.rd_lat), bitstream))
+                                               force_lat(common, a.rd_lat), bitstream))
             bitstream = None
             continue
         for knob, extra in (KNOBS[:1] if a.quick else KNOBS):
             out = os.path.join("runs", name, knob)
             os.makedirs(out, exist_ok=True)
-            rows.append((name, knob) + run(here, image, None, out, force_lat(extra, a.rd_lat), bitstream))
+            rows.append((name, knob) + run(here, image, None, out, force_lat(extra + common, a.rd_lat), bitstream))
             bitstream = None
         print(f"  {name} done", flush=True)
 

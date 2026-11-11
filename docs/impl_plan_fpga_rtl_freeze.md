@@ -441,10 +441,28 @@ that `hvl/pin/pin.sh compare` accepts unchanged.
 - **Depth:** 2048 records (~10 BRAM36). That is small enough for the BRAM
   backend budget (the old `asic-asic-BRAM` used 113 of 140 tiles). With the AXI
   backend the depth parameter goes to 8192.
-- **Full Linux traces** (4 M transactions) are out of scope for BRAM. An
-  optional streaming mode reuses `fpga/linux_boot`'s AXI DMA S2MM path into
-  the carve-out tail. It is deferred: the old DMA software was never
-  written, so don't depend on it.
+- **DDR sink** (`fpga/pynq/rtl/fbu_dma_sink.sv`, AXI builds, `CAPS.SINK`).
+  With a ring enabled (`SINK_*`, §6) the sink pops the trace FIFO and the
+  console RX FIFO itself and writes each entry over **HP2** into a ring in PS
+  memory: a record per 64-byte slot (5 beats, never across 4 KB), a console
+  byte per 16-bit entry (`[8]` framing error). `WR` advances on each B, the
+  PS returns `RD`, and the sink waits while the ring is full, so a slow reader
+  makes the BRAM FIFO fill and drop as before rather than overwrite. One write
+  is in flight; the rings take turns. The rings are `pynq.allocate` CMA
+  buffers, uncached; HP2's window is clamped to Linux's 256 MiB, never the
+  chip's carve-out. `run_cmd.py` uses it whenever the bitstream has it
+  (`--no-sink` to drain registers), and turns it off in `hold()` before the
+  buffers are freed and again at the start of every run. `--no-trace` runs
+  with the console only (Linux: 4 M records would cost minutes of Python).
+  Verified by `make test-dma-sink` (wrapping, full rings, a slow and an eager
+  reader, clear, a bad BRESP; four planted bugs caught) and `make
+  test-fbu-sink`: the DDR gate with the bitstream's 2048-record FIFO and every
+  run through the rings (271/271). Through the sink, `tc_link_abort` (24,446
+  records, 214 console bytes, all five link knobs) and Linux to the OpenSBI
+  banner (`linux_m0.cmd`, 18,969 records, rd_latency 64) match the pin bench
+  in full, where register draining drops past record ~2070.
+- **Bitstreams with the sink** (25 MHz, post-route WNS): BRAM +6.7 ns, AXI
+  +4.7 ns; HP2 mapped to `0x0000_0000`–`0x0FFF_FFFF`.
 
 ### 5.4 `fbu_pin_ctl.sv`: the control interface driver
 
@@ -784,6 +802,20 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
   - **Board results (rd_latency 64, 25 MHz).** smoke and sorting_algo, 30
     runs from one load: all PASS, traces match the bench cycle for cycle,
     read latency mean 14 and max 24 cycles, no HP0 errors.
+  - **P3 board runs** (from `~/forte_ddr/sw` after `MEM_BACKEND=AXI
+    deploy_forte.sh` with the images; one bitstream load per boot):
+    - DET suite: `sudo python3 board_suite.py --rd-lat 64` (trace and console
+      through the sink by default).
+    - LINK-10, natural mode: `sudo python3 board_suite.py --nodet`; each run
+      prints its read-latency histogram (`MEM_LAT_HIST`).
+    - CTRL-20/21/22, STAT, scan: the fault-tolerance set as before, with and
+      without `--nodet`.
+    - SYS-04: `sudo python3 run_cmd.py ../images/boot.lst ../scripts/linux.cmd
+      --bitstream ../forte.bit --nodet --no-trace --out runs/linux`
+      (`testcode/linux/build/boot.lst`; milestones M0..M5, console from the
+      sink only). `uart_fail` may repeat: the board script matches every
+      pattern in software; the gate testbench gives the first to the
+      gateware matcher and the rest to its PS model.
   - **Verification.** `make test-mem-axi-hp`: the backend against an AXI3
     model that applies a write only when it sends B (so a read issued early
     reads stale data), with random ready and latency, SLVERR lines and chip
@@ -808,7 +840,7 @@ side effect: FIFOs pop through their own `*_POP` register.
 |---|---|---|---|
 | 0x000 | ID | RO | `0x46425530` "FBU0" |
 | 0x004 | VERSION | RO | `0x0001_0000` |
-| 0x008 | CAPS | RO | [3:0] BEATS, [4] MEM_AXI (DDR backend), [15:8] log2 trace depth |
+| 0x008 | CAPS | RO | [3:0] BEATS, [4] MEM_AXI (DDR backend), [5] SINK (DDR sink), [15:8] log2 trace depth |
 | 0x00C | SCRATCH | RW | |
 | 0x010 | SOFT_RESET | W | resets the gateware below the register file (the chip is held in reset meanwhile) |
 | 0x100 | PIN_CTRL | RW | [0] RELEASE (rst_n, resets 0), [1] FAULT_INJECT, [2] TEST_MODE, [3] SCAN_EN, [5:4] IRQ, [6] RX_FORCE_EN, [7] RX_FORCE_VAL |
@@ -838,6 +870,7 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x250 | MEM_DROPPED | RO | writes outside EXT_MEM |
 | 0x254 | MEM_LAT_MAX | RO | longest read, request to response, in clk cycles |
 | 0x258/25C | MEM_LAT_SUM_LO/HI | RO | sum of read latencies (48 bits) |
+| 0x260–0x27C | MEM_LAT_HIST[8] | RO | reads by latency, 4 cycles a bin, the last 28+ (LINK-10's histograms) |
 | 0x280 | TOHOST_ADDR | RW | default `0x8080_0000` |
 | 0x284 | TOHOST_STAT | RO | [0] seen (cleared while rst_n is low) |
 | 0x288/28C | TOHOST_VAL_LO/HI | RO | |
@@ -848,6 +881,12 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x314 | TRACE_STAT | RO | [0] head valid, [1] overflow |
 | 0x318 | TRACE_CLEAR | W | |
 | 0x340–0x364 | TRACE_HEAD[10] | RO | the head record (`fbu_link_trace.sv` format) |
+| 0x380 | SINK_CTRL | RW | [0] trace ring, [1] console ring; W [8] clear both (with [1:0] = 0; also zeroes the RDs) |
+| 0x384 / 0x388 | SINK_TRACE_BASE / _LOG2 | RW | ring of 2^LOG2 64-byte slots |
+| 0x38C / 0x390 | SINK_TRACE_WR / _RD | RO / RW | records written (B received) / taken by the PS |
+| 0x394 / 0x398 | SINK_CON_BASE / _LOG2 | RW | ring of 2^LOG2 2-byte entries |
+| 0x39C / 0x3A0 | SINK_CON_WR / _RD | RO / RW | as for the trace ring |
+| 0x3A4 | SINK_STAT | RO | [0] a write got a bad BRESP (sticky until clear), [9:8] it, [16] write in flight |
 | 0x400 | UART_RX_BIT | RW | core cycles per received bit (32 = div 1) |
 | 0x404 | UART_TX_PERIOD | RW | transmitted bit period, 1/256 cycle |
 | 0x408 | UART_TX_GAP | RW | idle bit times between frames |
@@ -878,7 +917,9 @@ side effect: FIFOs pop through their own `*_POP` register.
 **Reserved for later stages** (offsets kept free): `0x0F0–0x0FC` split
 clock; `0x110–0x11C` RST_TRIG; `0x130–0x14C` IRQ_TRIG and latency;
 `0x150–0x1FC` fault-inject generator (§5.4.1); `0x240–0x27C` lane coverage,
-histograms, ready policy and stalls; `0x2A0–0x2FC` mailbox; `0x500–0x51C`
+histograms, ready policy and stalls (`0x240–0x27C` now the memory backend's
+status and latency histogram); `0x2A0–0x2FC` mailbox; `0x3A8–0x3FC` more
+sink rings; `0x500–0x51C`
 status monitor (now used); `0x600–0xEFF` scan (`0x600–0x610` used); `0xF00` EMU_TAPS.
 
 **Trace depth on the board.** Draining one record over AXI-Lite takes 11
@@ -886,7 +927,7 @@ accesses. A busy link can produce one every 14 cycles, faster than the PS
 can drain. The 2 048-record FIFO therefore bounds what a board run can
 compare cycle for cycle. Longer runs report `TRACE_DROPPED` and are judged
 on results and error counters. (`tb_fbu_vs_pin` builds `fbu_top` with a
-32 k-record FIFO.)
+32 k-record FIFO.) AXI builds lift the bound with the DDR sink (§5.3).
 
 ---
 

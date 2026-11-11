@@ -7,6 +7,8 @@ import struct
 import sys
 import time
 
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from amoeba.mmio import Mmio  # noqa: E402
 from amoeba import pl  # noqa: E402
@@ -101,7 +103,14 @@ class Forte:
             raise RuntimeError(f"ID reads 0x{found:08X}, expected 0x{R.FBU_ID:08X}: wrong bitstream?")
         if loaded:
             self.check_config_reset()
-        self.is_ddr = bool(self.ctl.read(R.REG_CAPS) & R.CAPS_MEM_AXI)
+        caps = self.ctl.read(R.REG_CAPS)
+        self.is_ddr = bool(caps & R.CAPS_MEM_AXI)
+        self.has_sink = bool(caps & R.CAPS_SINK)
+        self.sink = None
+        if self.has_sink:
+            # A run that died without hold() may have left the rings on, over
+            # memory its process has since freed.
+            self.sink_stop()
         # O_SYNC (Mmio) maps the carve-out uncached: HP0 is not coherent with
         # the A9's caches, so a cached write could sit in L2 while the chip
         # reads stale DDR.
@@ -143,7 +152,7 @@ class Forte:
 
     def configure(self, *, seed=1, gap_pct=0, rd_lat=0, wdog=1000, mutate=0, det=True,
                   tohost=0x8080_0000, stop_on_error=True, boot_gate=False,
-                  boot_gate_selftest=False, boot_gate_retries=2):
+                  boot_gate_selftest=False, boot_gate_retries=2, trace=True):
         self.wr(R.REG_PIN_CTRL, 0)
         self.wr(R.REG_SOFT_RESET, 1)
         self.restore_config()
@@ -155,7 +164,7 @@ class Forte:
         self.wr(R.REG_PRNG_LOAD, 1)
         self.wr(R.REG_TOHOST_ADDR, tohost)
         self.wr(R.REG_TRACE_CLEAR, 1)
-        self.wr(R.REG_TRACE_CTRL, R.pack(R.REG_TRACE_CTRL, enable=1, stop_on_error=int(stop_on_error)))
+        self.wr(R.REG_TRACE_CTRL, R.pack(R.REG_TRACE_CTRL, enable=int(trace), stop_on_error=int(stop_on_error)))
         self.wr(R.REG_UART_CLEAR, 1)
         self.wr(R.REG_BOOTGATE, R.pack(R.REG_BOOTGATE, enable=int(boot_gate), selftest=int(boot_gate_selftest),
                                        retries=boot_gate_retries, timeout=1000))
@@ -251,7 +260,53 @@ class Forte:
         return {"err": stat & 1, "err_resp": (stat >> 8) & 3, "err_addr": self.rd(R.REG_MEM_ERR_ADDR),
                 "reads": reads, "writes": self.rd(R.REG_MEM_WRITES), "dropped": self.rd(R.REG_MEM_DROPPED),
                 "lat_max": self.rd(R.REG_MEM_LAT_MAX), "lat_sum": lat_sum,
-                "lat_mean": lat_sum / reads if reads else 0.0}
+                "lat_mean": lat_sum / reads if reads else 0.0,
+                "hist": [self.rd(R.REG_MEM_LAT_HIST + 4 * b) for b in range(R.MEM_LAT_BINS)]}
+
+    # ---- DDR sink (fbu_dma_sink): trace and console rings in PS memory ----
+    def sink_start(self, trace_log2: int = 16, console_log2: int = 20, trace: bool = True) -> None:
+        """Rings of 2**trace_log2 records and 2**console_log2 console bytes, in
+        uncached CMA buffers: the PL writes them through HP2, which the A9's
+        caches do not see.  hold() turns the rings off before they are freed."""
+        from pynq import allocate
+        self.sink_stop()
+        trace_buf = allocate(shape=(R.SINK_TRACE_SLOT << trace_log2,), dtype="u1", cacheable=False)
+        console_buf = allocate(shape=(R.SINK_CONSOLE_ENTRY << console_log2,), dtype="u1", cacheable=False)
+        self.sink = {"trace": trace_buf, "console": console_buf, "trace_log2": trace_log2,
+                     "console_log2": console_log2, "trace_read": 0, "console_read": 0}
+        self.wr(R.REG_SINK_CTRL, 1 << 8)
+        self.wr(R.REG_SINK_TRACE_BASE, trace_buf.physical_address)
+        self.wr(R.REG_SINK_TRACE_LOG2, trace_log2)
+        self.wr(R.REG_SINK_CON_BASE, console_buf.physical_address)
+        self.wr(R.REG_SINK_CON_LOG2, console_log2)
+        self.wr(R.REG_SINK_CTRL, (1 if trace else 0) | 2)
+
+    def sink_stop(self) -> None:
+        """Rings off, and no write in flight, before any buffer goes away."""
+        self.wr(R.REG_SINK_CTRL, 0)
+        for _ in range(1000):
+            if not self.rd(R.REG_SINK_STAT) >> 16 & 1:
+                break
+        if self.sink is not None:
+            self.sink["trace"].freebuffer()
+            self.sink["console"].freebuffer()
+            self.sink = None
+
+    def sink_status(self) -> dict:
+        stat = self.rd(R.REG_SINK_STAT)
+        return {"err": stat & 1, "err_resp": stat >> 8 & 3,
+                "trace": self.sink["trace_read"] if self.sink else 0,
+                "console": self.sink["console_read"] if self.sink else 0}
+
+    def output_pending(self) -> bool:
+        """Anything the chip produced that drain_uart/drain_trace have not returned."""
+        if self.rd(R.REG_UART_RX_DATA) >> 31 or self.rd(R.REG_TRACE_STAT) & 1:
+            return True
+        if self.sink is None:
+            return False
+        return bool(self.rd(R.REG_SINK_STAT) >> 16 & 1 or
+                    self.rd(R.REG_SINK_TRACE_WR) != self.sink["trace_read"] & 0xFFFF_FFFF or
+                    self.rd(R.REG_SINK_CON_WR) != self.sink["console_read"] & 0xFFFF_FFFF)
 
     # ---- pins ----
     def set_pins(self, **fields) -> None:
@@ -273,6 +328,8 @@ class Forte:
         load's DMA fails, then the PS locks up)."""
         self.set_pins(release=0)
         time.sleep(0.01)
+        if self.has_sink:
+            self.sink_stop()
 
     def irq(self, line: int, level: int) -> None:
         irq = R.unpack(R.REG_PIN_CTRL, self.rd(R.REG_PIN_CTRL), "irq")
@@ -310,6 +367,8 @@ class Forte:
         """Received bytes, and the framing errors among them."""
         out = bytearray()
         framing = []
+        if self.sink is not None:
+            return self._sink_console(limit)
         for _ in range(limit):
             d = self.rd(R.REG_UART_RX_DATA)
             if not d >> 31:
@@ -324,12 +383,43 @@ class Forte:
     # ---- trace ----
     def drain_trace(self, limit: int = 4096):
         records = []
+        if self.sink is not None:
+            return self._sink_trace(limit)
         for _ in range(limit):
             if not self.rd(R.REG_TRACE_STAT) & 1:
                 break
             words = [self.rd(R.REG_TRACE_HEAD + 4 * i) for i in range(10)]
             self.wr(R.REG_TRACE_POP, 1)
             records.append(sum(w << (32 * i) for i, w in enumerate(words)))
+        return records
+
+    def _sink_console(self, limit: int):
+        sk = self.sink
+        wr = self.rd(R.REG_SINK_CON_WR)
+        n = min((wr - sk["console_read"]) & 0xFFFF_FFFF, max(limit, 1 << 16))
+        size = 1 << sk["console_log2"]
+        entries = sk["console"].view("<u2")[(sk["console_read"] + np.arange(n)) % size]
+        bad = (entries >> 8 & 1).astype(bool)
+        out = (entries[~bad] & 0xFF).astype("u1").tobytes()
+        framing = [int(e & 0xFF) for e in entries[bad]]
+        if n:
+            sk["console_read"] += n
+            self.wr(R.REG_SINK_CON_RD, sk["console_read"] & 0xFFFF_FFFF)
+        return bytes(out), framing
+
+    def _sink_trace(self, limit: int):
+        sk = self.sink
+        wr = self.rd(R.REG_SINK_TRACE_WR)
+        n = min((wr - sk["trace_read"]) & 0xFFFF_FFFF, max(limit, 1 << 12))
+        size = 1 << sk["trace_log2"]
+        buf = sk["trace"]
+        records = []
+        for i in range(n):
+            at = ((sk["trace_read"] + i) % size) * R.SINK_TRACE_SLOT
+            records.append(int.from_bytes(bytes(buf[at:at + R.SINK_RECORD_BYTES]), "little"))
+        if n:
+            sk["trace_read"] += n
+            self.wr(R.REG_SINK_TRACE_RD, sk["trace_read"] & 0xFFFF_FFFF)
         return records
 
     # ---- triggers ----
