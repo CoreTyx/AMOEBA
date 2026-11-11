@@ -6,6 +6,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   parameter int BEATS            = 2,
   parameter int TRACE_DEPTH_LOG2 = 11,
   parameter bit MEM_AXI          = 1'b0,
+  parameter bit SINK             = 1'b0,
   localparam int LINE_W          = 64 * BEATS
 )(
   input  logic              clk,
@@ -56,6 +57,17 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   input  logic [LINE_W-1:0] m_rsp_data,
   input  logic              m_rsp_err,
   input  mem_stat_t         mem_stat,
+
+  // The trace and console FIFO heads, for a sink that drains them in place of
+  // the PS (SINK builds; tie the pops low otherwise).
+  output logic [319:0]      trace_stream,
+  output logic              trace_stream_valid,
+  input  logic              trace_stream_pop,
+  output logic [8:0]        console_stream,
+  output logic              console_stream_valid,
+  input  logic              console_stream_pop,
+  output sink_cfg_t         sink_cfg,
+  input  sink_stat_t        sink_stat,
 
   output logic              link_error_seen,
   output logic              tohost_seen,
@@ -166,6 +178,18 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic         scan_pattern_scan_en;
   logic [10:0]  scan_len;
   logic [9:0]   scan_addr;
+  logic [1:0]   sink_ctrl;
+  logic [31:0]  sink_trace_base;
+  logic [4:0]   sink_trace_log2;
+  logic [31:0]  sink_trace_rd;
+  logic [31:0]  sink_console_base;
+  logic [4:0]   sink_console_log2;
+  logic [31:0]  sink_console_rd;
+  logic         sink_clear;
+
+  // A sink clear also restarts the PS's read pointers.  It acts only with both
+  // rings off, so no entry is in flight past it.
+  assign sink_clear = written(REG_SINK_CTRL) && reg_wdata[8] && reg_wdata[1:0] == 2'b00;
 
   assign fi_ctrl_written = merged({27'd0, fi_start_on_release, fi_mode});
   assign scan_ctrl_written = merged({30'd0, scan_pattern_scan_en, 1'b0});
@@ -202,6 +226,13 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       scan_pattern_scan_en <= 1'b0;
       scan_len             <= '0;
       scan_addr            <= '0;
+      sink_ctrl            <= '0;
+      sink_trace_base      <= '0;
+      sink_trace_log2      <= '0;
+      sink_trace_rd        <= '0;
+      sink_console_base    <= '0;
+      sink_console_log2    <= '0;
+      sink_console_rd      <= '0;
     end else begin
       if (reg_write) begin
       case (reg_waddr)
@@ -233,6 +264,13 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
         REG_SCAN_LEN:       scan_len             <= 11'(merged(32'(scan_len)));
         REG_SCAN_ADDR:      scan_addr            <= 10'(merged(32'(scan_addr)));
         REG_SCAN_PATTERN:   scan_addr            <= scan_addr + 1'b1;
+        REG_SINK_CTRL:      sink_ctrl            <= 2'(merged(32'(sink_ctrl)));
+        REG_SINK_TRACE_BASE: sink_trace_base     <= merged(sink_trace_base);
+        REG_SINK_TRACE_LOG2: sink_trace_log2     <= 5'(merged(32'(sink_trace_log2)));
+        REG_SINK_TRACE_RD:  sink_trace_rd        <= merged(sink_trace_rd);
+        REG_SINK_CON_BASE:  sink_console_base    <= merged(sink_console_base);
+        REG_SINK_CON_LOG2:  sink_console_log2    <= 5'(merged(32'(sink_console_log2)));
+        REG_SINK_CON_RD:    sink_console_rd      <= merged(sink_console_rd);
         REG_UART_MATCH_LEN: begin
           match_len[0] <= MATCH_LEN_W'(merged(32'(match_len[0])));
           match_len[1] <= MATCH_LEN_W'(merged(32'(match_len[1]) << 8) >> 8);
@@ -257,6 +295,10 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
           end
         end
       endcase
+      end
+      if (sink_clear) begin
+        sink_trace_rd   <= '0;
+        sink_console_rd <= '0;
       end
       pin_ctrl[5:4] <= (reg_write && reg_waddr == REG_PIN_CTRL ? 2'(merged(32'(pin_ctrl)) >> 4) : pin_ctrl[5:4])
                        & ~trigger_irq_clear | trigger_irq_set;
@@ -375,7 +417,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .cfg_rx_bit_cycles(uart_rx_bit), .cfg_tx_bit_period_q8(uart_tx_period),
     .cfg_tx_gap_bits(uart_tx_gap),
     .uart_tx, .uart_rx(uart_rx_from_uart),
-    .rx_head(uart_rx_head), .rx_valid(uart_rx_valid), .rx_pop(written(REG_UART_RX_POP)),
+    .rx_head(uart_rx_head), .rx_valid(uart_rx_valid), .rx_pop(written(REG_UART_RX_POP) || console_stream_pop),
     .rx_level(uart_rx_level), .rx_overflow(uart_rx_overflow),
     .tx_push(written(REG_UART_TX_PUSH)), .tx_entry(reg_wdata[9:0]),
     .tx_full(uart_tx_full), .tx_overflow(uart_tx_overflow), .tx_level(uart_tx_level),
@@ -479,9 +521,20 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .link_cyc, .chip_in_reset(!rst_n),
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line, .rec_tohost,
     .rec_end_cyc, .rec_tohost_val, .err_now, .irq,
-    .head(trace_head), .head_valid(trace_valid), .pop(written(REG_TRACE_POP)),
+    .head(trace_head), .head_valid(trace_valid), .pop(written(REG_TRACE_POP) || trace_stream_pop),
     .level(trace_level), .records_written(trace_written), .records_dropped(trace_dropped),
     .overflow(trace_overflow));
+
+  // ---- DDR sink ----
+  assign trace_stream         = trace_head;
+  assign trace_stream_valid   = trace_valid;
+  assign console_stream       = uart_rx_head;
+  assign console_stream_valid = uart_rx_valid;
+
+  assign sink_cfg = '{trace_en: SINK && sink_ctrl[0], console_en: SINK && sink_ctrl[1], clear: sink_clear,
+                      trace_base: sink_trace_base, trace_log2: sink_trace_log2, trace_rd: sink_trace_rd,
+                      console_base: sink_console_base, console_log2: sink_console_log2,
+                      console_rd: sink_console_rd};
 
   // ---- register reads ----
   logic [31:0] pin_in;
@@ -500,7 +553,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     case (reg_raddr)
       REG_ID:               reg_rdata = FBU_ID;
       REG_VERSION:          reg_rdata = FBU_VERSION;
-      REG_CAPS:             reg_rdata = {16'd0, 8'(TRACE_DEPTH_LOG2), 3'd0, MEM_AXI, 4'(BEATS)};
+      REG_CAPS:             reg_rdata = {16'd0, 8'(TRACE_DEPTH_LOG2), 2'd0, SINK, MEM_AXI, 4'(BEATS)};
       REG_SCRATCH:          reg_rdata = scratch;
       REG_PARTIAL_WRITES:   reg_rdata = partial_writes;
       REG_PIN_CTRL:         reg_rdata = {24'd0, pin_ctrl};
@@ -536,6 +589,16 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
       REG_MEM_LAT_MAX:      reg_rdata = {16'd0, mem_stat.read_latency_max};
       REG_MEM_LAT_SUM_LO:   reg_rdata = mem_stat.read_latency_sum[31:0];
       REG_MEM_LAT_SUM_HI:   reg_rdata = {16'd0, mem_stat.read_latency_sum[47:32]};
+      REG_SINK_CTRL:        reg_rdata = {30'd0, sink_ctrl};
+      REG_SINK_TRACE_BASE:  reg_rdata = sink_trace_base;
+      REG_SINK_TRACE_LOG2:  reg_rdata = 32'(sink_trace_log2);
+      REG_SINK_TRACE_WR:    reg_rdata = sink_stat.trace_wr;
+      REG_SINK_TRACE_RD:    reg_rdata = sink_trace_rd;
+      REG_SINK_CON_BASE:    reg_rdata = sink_console_base;
+      REG_SINK_CON_LOG2:    reg_rdata = 32'(sink_console_log2);
+      REG_SINK_CON_WR:      reg_rdata = sink_stat.console_wr;
+      REG_SINK_CON_RD:      reg_rdata = sink_console_rd;
+      REG_SINK_STAT:        reg_rdata = {15'd0, sink_stat.busy, 6'd0, sink_stat.err_resp, 7'd0, sink_stat.err};
       REG_TOHOST_ADDR:      reg_rdata = tohost_addr;
       REG_TOHOST_STAT:      reg_rdata = {31'd0, tohost_seen};
       REG_TOHOST_VAL_LO:    reg_rdata = tohost_val[31:0];
@@ -591,6 +654,9 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
         for (int w = 0; w < 16; w++)
           if (reg_raddr == REG_FI_PHASE_MASK + 12'(4 * w))
             reg_rdata = fi_phase_mask[32 * w +: 32];
+        for (int b = 0; b < MEM_LAT_BINS; b++)
+          if (reg_raddr == REG_MEM_LAT_HIST + 12'(4 * b))
+            reg_rdata = mem_stat.read_latency_hist[b];
         for (int t = 0; t < TRIGGERS; t++) begin
           if (reg_raddr == REG_TRIG + 12'(16 * t))
             reg_rdata = trig_ctrl[t] | {19'd0, trig_armed[t], 12'd0};

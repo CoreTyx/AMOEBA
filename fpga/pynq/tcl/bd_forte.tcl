@@ -4,6 +4,7 @@
 #   PS7 GP0 -> interconnect -> forte_pynq_top_v/s_axi_ctl  (4 KiB at ctl_base)
 #                           -> forte_pynq_top_v/s_axi_mem  (1 MiB at mem_base, BRAM builds)
 #   forte_pynq_top_v/m_axi_hp -> PS7 S_AXI_HP0 -> DDR carve-out (AXI builds)
+#   forte_pynq_top_v/m_axi_sink -> PS7 S_AXI_HP2 -> trace/console rings in Linux's CMA (AXI builds)
 #   FCLK_CLK0 -> everything; proc_sys_reset -> aresetn; led[3:0] -> pins
 #
 # Sourced by build_forte.tcl with the project open.  Reuses
@@ -22,6 +23,7 @@ proc forte_build_bd {args} {
         ctl_base         0x43C00000
         mem_base         0x44000000
         mem_backend      BRAM
+        linux_ram        256M
         ddr_carveout     0x10000000
         ddr_size         256M
     }
@@ -48,6 +50,8 @@ proc forte_build_bd {args} {
         CONFIG.PCW_USE_M_AXI_GP0             {1} \
         CONFIG.PCW_USE_S_AXI_HP0             $axi \
         CONFIG.PCW_S_AXI_HP0_DATA_WIDTH      {64} \
+        CONFIG.PCW_USE_S_AXI_HP2             $axi \
+        CONFIG.PCW_S_AXI_HP2_DATA_WIDTH      {64} \
         CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ  $opt(fclk_mhz) \
         CONFIG.PCW_EN_CLK0_PORT              {1} \
         CONFIG.PCW_EN_RST0_PORT              {1} \
@@ -77,15 +81,19 @@ proc forte_build_bd {args} {
     # fbu_mem_axi_hp speaks AXI3 at 64 bits, as HP0 does, so it connects
     # directly: no converter, no interconnect.  If IPI ever infers the port as
     # anything else, stop here rather than let it insert something silently.
+    # fbu_dma_sink is the same kind of port on HP2: its own DDR port, so the
+    # trace never queues behind the chip's line fills on HP0.
     if {$axi} {
-        set hp [get_bd_intf_pins dut/m_axi_hp]
-        set protocol [get_property CONFIG.PROTOCOL $hp]
-        if {$protocol ne "AXI3"} {
-            error "dut/m_axi_hp is inferred as '$protocol', expected AXI3"
+        foreach {master port} {dut/m_axi_hp S_AXI_HP0 dut/m_axi_sink S_AXI_HP2} {
+            set intf [get_bd_intf_pins $master]
+            set protocol [get_property CONFIG.PROTOCOL $intf]
+            if {$protocol ne "AXI3"} {
+                error "$master is inferred as '$protocol', expected AXI3"
+            }
+            connect_bd_net [get_bd_pins ps7/FCLK_CLK0] [get_bd_pins ps7/${port}_ACLK]
+            connect_bd_intf_net $intf [get_bd_intf_pins ps7/$port]
+            puts "  [string range $port 6 end]        : $master -> ps7/$port"
         }
-        connect_bd_net [get_bd_pins ps7/FCLK_CLK0] [get_bd_pins ps7/S_AXI_HP0_ACLK]
-        connect_bd_intf_net $hp [get_bd_intf_pins ps7/S_AXI_HP0]
-        puts "  hp0        : dut/m_axi_hp -> ps7/S_AXI_HP0"
     }
 
     make_bd_pins_external [get_bd_pins dut/led]
@@ -98,6 +106,10 @@ proc forte_build_bd {args} {
         # memory by construction.
         amoeba_assign_master dut/m_axi_hp ps7/S_AXI_HP0/HP0_DDR_LOWOCM \
             $opt(ddr_carveout) $opt(ddr_size)
+        # The rings are CMA buffers Linux allocates, so the sink reaches Linux's
+        # memory, and only that: never the chip's carve-out.
+        amoeba_assign_master dut/m_axi_sink ps7/S_AXI_HP2/HP2_DDR_LOWOCM \
+            0x00000000 $opt(linux_ram)
     } else {
         amoeba_assign dut/s_axi_mem/reg0 $opt(mem_base) 1M
     }

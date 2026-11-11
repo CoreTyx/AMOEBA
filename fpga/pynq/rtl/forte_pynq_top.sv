@@ -9,6 +9,7 @@
 //   s_axi_ctl  GP0 -> fbu_top registers (fbu_pkg REG_*)
 //   s_axi_mem  GP0 -> fbu_mem_bram port B (image load, window bases); unused with MEM_AXI
 //   m_axi_hp   fbu_mem_axi_hp -> HP0 -> DDR carve-out; idle without MEM_AXI
+//   m_axi_sink fbu_dma_sink -> HP2 -> trace and console rings; idle without MEM_AXI
 //   led[0] status pin   led[1] chip released   led[2] tohost seen
 //   led[3] link error or boot gate gave up
 ///////////////////////////////////////////////////////////////////////////////
@@ -99,6 +100,45 @@ module forte_pynq_top import forte_link_pkg::*; #(
   input  logic        m_axi_hp_rvalid,
   output logic        m_axi_hp_rready,
 
+  output logic [5:0]  m_axi_sink_awid,
+  output logic [31:0] m_axi_sink_awaddr,
+  output logic [3:0]  m_axi_sink_awlen,
+  output logic [2:0]  m_axi_sink_awsize,
+  output logic [1:0]  m_axi_sink_awburst,
+  output logic [1:0]  m_axi_sink_awlock,
+  output logic [3:0]  m_axi_sink_awcache,
+  output logic [2:0]  m_axi_sink_awprot,
+  output logic [3:0]  m_axi_sink_awqos,
+  output logic        m_axi_sink_awvalid,
+  input  logic        m_axi_sink_awready,
+  output logic [5:0]  m_axi_sink_wid,
+  output logic [63:0] m_axi_sink_wdata,
+  output logic [7:0]  m_axi_sink_wstrb,
+  output logic        m_axi_sink_wlast,
+  output logic        m_axi_sink_wvalid,
+  input  logic        m_axi_sink_wready,
+  input  logic [5:0]  m_axi_sink_bid,
+  input  logic [1:0]  m_axi_sink_bresp,
+  input  logic        m_axi_sink_bvalid,
+  output logic        m_axi_sink_bready,
+  output logic [5:0]  m_axi_sink_arid,
+  output logic [31:0] m_axi_sink_araddr,
+  output logic [3:0]  m_axi_sink_arlen,
+  output logic [2:0]  m_axi_sink_arsize,
+  output logic [1:0]  m_axi_sink_arburst,
+  output logic [1:0]  m_axi_sink_arlock,
+  output logic [3:0]  m_axi_sink_arcache,
+  output logic [2:0]  m_axi_sink_arprot,
+  output logic [3:0]  m_axi_sink_arqos,
+  output logic        m_axi_sink_arvalid,
+  input  logic        m_axi_sink_arready,
+  input  logic [5:0]  m_axi_sink_rid,
+  input  logic [63:0] m_axi_sink_rdata,
+  input  logic [1:0]  m_axi_sink_rresp,
+  input  logic        m_axi_sink_rlast,
+  input  logic        m_axi_sink_rvalid,
+  output logic        m_axi_sink_rready,
+
   output logic [3:0]  led
 );
 
@@ -143,8 +183,16 @@ module forte_pynq_top import forte_link_pkg::*; #(
   logic              tohost_seen;
   logic              boot_gate_gave_up;
   fbu_pkg::mem_stat_t mem_stat;
+  logic [319:0]      trace_stream;
+  logic              trace_stream_valid;
+  logic              trace_stream_pop;
+  logic [8:0]        console_stream;
+  logic              console_stream_valid;
+  logic              console_stream_pop;
+  fbu_pkg::sink_cfg_t  sink_cfg;
+  fbu_pkg::sink_stat_t sink_stat;
 
-  fbu_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(TRACE_DEPTH_LOG2), .MEM_AXI(MEM_AXI != 0)) fbu (
+  fbu_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(TRACE_DEPTH_LOG2), .MEM_AXI(MEM_AXI != 0), .SINK(MEM_AXI != 0)) fbu (
     .clk(aclk), .arst_n(aresetn),
     .s_axil_awaddr(s_axi_ctl_awaddr), .s_axil_awvalid(s_axi_ctl_awvalid), .s_axil_awready(s_axi_ctl_awready),
     .s_axil_wdata(s_axi_ctl_wdata), .s_axil_wstrb(s_axi_ctl_wstrb), .s_axil_wvalid(s_axi_ctl_wvalid),
@@ -157,11 +205,13 @@ module forte_pynq_top import forte_link_pkg::*; #(
     .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err, .mem_stat,
+    .trace_stream, .trace_stream_valid, .trace_stream_pop,
+    .console_stream, .console_stream_valid, .console_stream_pop, .sink_cfg, .sink_stat,
     .link_error_seen, .tohost_seen, .boot_gate_gave_up);
 
   // ---- external memory ----
   if (MEM_AXI != 0) begin : g_ddr
-    fbu_mem_axi_hp #(.BEATS(BEATS), .DDR_CARVEOUT(DDR_CARVEOUT)) mem (
+    fbu_mem_axi_hp #(.BEATS(BEATS), .DDR_CARVEOUT(DDR_CARVEOUT), .LAT_BINS(fbu_pkg::MEM_LAT_BINS)) mem (
       .clk(aclk), .arst_n(aresetn), .chip_in_reset(!rst_n),
       .req_valid(m_req_valid), .req_ready(m_req_ready), .req_wr(m_req_wr),
       .req_addr(m_req_addr), .req_data(m_req_data),
@@ -183,7 +233,33 @@ module forte_pynq_top import forte_link_pkg::*; #(
       .mem_err(mem_stat.err), .first_err_addr(mem_stat.first_err_addr),
       .first_err_resp(mem_stat.first_err_resp), .reads(mem_stat.reads), .writes(mem_stat.writes),
       .dropped_writes(mem_stat.dropped_writes), .read_latency_max(mem_stat.read_latency_max),
-      .read_latency_sum(mem_stat.read_latency_sum));
+      .read_latency_sum(mem_stat.read_latency_sum), .read_latency_hist(mem_stat.read_latency_hist));
+
+    fbu_dma_sink sink (
+      .clk(aclk), .arst_n(aresetn), .cfg(sink_cfg), .stat(sink_stat),
+      .trace_head(trace_stream), .trace_valid(trace_stream_valid), .trace_pop(trace_stream_pop),
+      .console_head(console_stream), .console_valid(console_stream_valid), .console_pop(console_stream_pop),
+      .m_axi_awid(m_axi_sink_awid), .m_axi_awaddr(m_axi_sink_awaddr), .m_axi_awlen(m_axi_sink_awlen),
+      .m_axi_awsize(m_axi_sink_awsize), .m_axi_awburst(m_axi_sink_awburst), .m_axi_awlock(m_axi_sink_awlock),
+      .m_axi_awcache(m_axi_sink_awcache), .m_axi_awprot(m_axi_sink_awprot), .m_axi_awqos(m_axi_sink_awqos),
+      .m_axi_awvalid(m_axi_sink_awvalid), .m_axi_awready(m_axi_sink_awready),
+      .m_axi_wid(m_axi_sink_wid), .m_axi_wdata(m_axi_sink_wdata), .m_axi_wstrb(m_axi_sink_wstrb),
+      .m_axi_wlast(m_axi_sink_wlast), .m_axi_wvalid(m_axi_sink_wvalid), .m_axi_wready(m_axi_sink_wready),
+      .m_axi_bid(m_axi_sink_bid), .m_axi_bresp(m_axi_sink_bresp), .m_axi_bvalid(m_axi_sink_bvalid),
+      .m_axi_bready(m_axi_sink_bready));
+
+    // Write-only: the read channel never starts.
+    assign m_axi_sink_arid    = '0;
+    assign m_axi_sink_araddr  = '0;
+    assign m_axi_sink_arlen   = '0;
+    assign m_axi_sink_arsize  = 3'd3;
+    assign m_axi_sink_arburst = 2'b01;
+    assign m_axi_sink_arlock  = '0;
+    assign m_axi_sink_arcache = 4'b0011;
+    assign m_axi_sink_arprot  = '0;
+    assign m_axi_sink_arqos   = '0;
+    assign m_axi_sink_arvalid = 1'b0;
+    assign m_axi_sink_rready  = 1'b1;
 
     // No image port: the PS writes the carve-out directly.  A stray access
     // completes with SLVERR rather than hanging the GP port.
@@ -251,6 +327,38 @@ module forte_pynq_top import forte_link_pkg::*; #(
     assign m_axi_hp_arqos   = '0;
     assign m_axi_hp_arvalid = 1'b0;
     assign m_axi_hp_rready  = 1'b1;
+
+    assign trace_stream_pop   = 1'b0;
+    assign console_stream_pop = 1'b0;
+    assign sink_stat          = '0;
+
+    assign m_axi_sink_awid    = '0;
+    assign m_axi_sink_awaddr  = '0;
+    assign m_axi_sink_awlen   = '0;
+    assign m_axi_sink_awsize  = '0;
+    assign m_axi_sink_awburst = '0;
+    assign m_axi_sink_awlock  = '0;
+    assign m_axi_sink_awcache = '0;
+    assign m_axi_sink_awprot  = '0;
+    assign m_axi_sink_awqos   = '0;
+    assign m_axi_sink_awvalid = 1'b0;
+    assign m_axi_sink_wid     = '0;
+    assign m_axi_sink_wdata   = '0;
+    assign m_axi_sink_wstrb   = '0;
+    assign m_axi_sink_wlast   = 1'b0;
+    assign m_axi_sink_wvalid  = 1'b0;
+    assign m_axi_sink_bready  = 1'b1;
+    assign m_axi_sink_arid    = '0;
+    assign m_axi_sink_araddr  = '0;
+    assign m_axi_sink_arlen   = '0;
+    assign m_axi_sink_arsize  = '0;
+    assign m_axi_sink_arburst = '0;
+    assign m_axi_sink_arlock  = '0;
+    assign m_axi_sink_arcache = '0;
+    assign m_axi_sink_arprot  = '0;
+    assign m_axi_sink_arqos   = '0;
+    assign m_axi_sink_arvalid = 1'b0;
+    assign m_axi_sink_rready  = 1'b1;
   end
 
   // ---- LEDs ----

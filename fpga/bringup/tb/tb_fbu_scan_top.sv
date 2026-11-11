@@ -60,6 +60,9 @@ module tb_fbu_scan_top;
     .m_axi_hp_awready(1'b0), .m_axi_hp_wready(1'b0), .m_axi_hp_bid(6'd0), .m_axi_hp_bresp(2'b00),
     .m_axi_hp_bvalid(1'b0), .m_axi_hp_arready(1'b0), .m_axi_hp_rid(6'd0), .m_axi_hp_rdata(64'd0),
     .m_axi_hp_rresp(2'b00), .m_axi_hp_rlast(1'b0), .m_axi_hp_rvalid(1'b0),
+    .m_axi_sink_awready(1'b0), .m_axi_sink_wready(1'b0), .m_axi_sink_bid(6'd0), .m_axi_sink_bresp(2'b00),
+    .m_axi_sink_bvalid(1'b0), .m_axi_sink_arready(1'b0), .m_axi_sink_rid(6'd0), .m_axi_sink_rdata(64'd0),
+    .m_axi_sink_rresp(2'b00), .m_axi_sink_rlast(1'b0), .m_axi_sink_rvalid(1'b0),
     .led);
 
   task automatic reg_write(input logic [11:0] a, input logic [31:0] d);

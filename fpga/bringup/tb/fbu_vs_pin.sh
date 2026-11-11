@@ -79,6 +79,7 @@ report() {   # ok(0/1) name detail
 
 # FORCE_RD_LAT replaces every run's +FPGA_RD_LAT on both sides: the DDR
 # backend's latency must fit inside the DET-mode read latency (test-fbu-ddr).
+# EXTRA_FBU_ARGS goes to every gateware run only (+SINK for test-fbu-sink).
 RUN_ARGS=()
 run_args() {
   local a
@@ -104,7 +105,8 @@ fbu_run() {   # dir -- plusargs
   local dir="$1"
   shift
   mkdir -p "$dir"
-  run_args "$@"
+  # shellcheck disable=SC2086
+  run_args "$@" ${EXTRA_FBU_ARGS:-}
   ( cd "$dir" && timeout 3600 "$TB" "${RUN_ARGS[@]}" > run.log 2>&1 ) || true
 }
 

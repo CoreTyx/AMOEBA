@@ -138,6 +138,8 @@ package fbu_pkg;
   localparam logic [11:0] REG_MEM_LAT_MAX      = 12'h254;   // read: request to response, in clk cycles
   localparam logic [11:0] REG_MEM_LAT_SUM_LO   = 12'h258;
   localparam logic [11:0] REG_MEM_LAT_SUM_HI   = 12'h25C;
+  localparam logic [11:0] REG_MEM_LAT_HIST     = 12'h260;   // 8 words: reads by latency, 4 cycles a bin, the last 28+
+  localparam int          MEM_LAT_BINS         = 8;
 
   localparam logic [11:0] REG_TOHOST_ADDR      = 12'h280;
   localparam logic [11:0] REG_TOHOST_STAT      = 12'h284;
@@ -154,6 +156,21 @@ package fbu_pkg;
   localparam logic [11:0] REG_TRACE_STAT       = 12'h314;
   localparam logic [11:0] REG_TRACE_CLEAR      = 12'h318;
   localparam logic [11:0] REG_TRACE_HEAD       = 12'h340;   // 10 words
+
+  // The DDR sink (fbu_dma_sink; CAPS.SINK): trace records and console entries
+  // streamed into two PS-memory rings instead of popped through registers.
+  // Pointers count entries from the last clear; an entry is in the ring once
+  // WR passes it, and the sink waits while WR - RD fills the ring.
+  localparam logic [11:0] REG_SINK_CTRL        = 12'h380;   // [0] trace, [1] console; W [8] clear (both rings, while off)
+  localparam logic [11:0] REG_SINK_TRACE_BASE  = 12'h384;   // 64 B slots, one record each (40 B used)
+  localparam logic [11:0] REG_SINK_TRACE_LOG2  = 12'h388;   // slots, log2
+  localparam logic [11:0] REG_SINK_TRACE_WR    = 12'h38C;   // R records in the ring
+  localparam logic [11:0] REG_SINK_TRACE_RD    = 12'h390;   // records the PS has taken
+  localparam logic [11:0] REG_SINK_CON_BASE    = 12'h394;   // 2 B entries: [7:0] byte, [8] framing error
+  localparam logic [11:0] REG_SINK_CON_LOG2    = 12'h398;   // entries, log2
+  localparam logic [11:0] REG_SINK_CON_WR      = 12'h39C;   // R entries in the ring
+  localparam logic [11:0] REG_SINK_CON_RD      = 12'h3A0;   // entries the PS has taken
+  localparam logic [11:0] REG_SINK_STAT        = 12'h3A4;   // R [0] write error seen, [9:8] its BRESP, [16] busy
 
   localparam logic [11:0] REG_UART_RX_BIT      = 12'h400;
   localparam logic [11:0] REG_UART_TX_PERIOD   = 12'h404;
@@ -201,6 +218,27 @@ package fbu_pkg;
     logic [31:0] dropped_writes;
     logic [15:0] read_latency_max;
     logic [47:0] read_latency_sum;
+    logic [MEM_LAT_BINS-1:0][31:0] read_latency_hist;
   } mem_stat_t;
+
+  typedef struct packed {
+    logic        trace_en;
+    logic        console_en;
+    logic        clear;
+    logic [31:0] trace_base;
+    logic [4:0]  trace_log2;
+    logic [31:0] trace_rd;
+    logic [31:0] console_base;
+    logic [4:0]  console_log2;
+    logic [31:0] console_rd;
+  } sink_cfg_t;
+
+  typedef struct packed {
+    logic        err;
+    logic [1:0]  err_resp;
+    logic        busy;
+    logic [31:0] trace_wr;
+    logic [31:0] console_wr;
+  } sink_stat_t;
 
 endpackage

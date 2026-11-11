@@ -29,6 +29,7 @@ module fbu_mem_axi_hp #(
   parameter int          BEATS        = 2,
   parameter logic [31:0] DDR_CARVEOUT = 32'h1000_0000,
   parameter int          MAX_WRITES   = 4,
+  parameter int          LAT_BINS     = 8,
   localparam int         LINE_W       = 64 * BEATS
 )(
   input  logic              clk,
@@ -90,7 +91,8 @@ module fbu_mem_axi_hp #(
   output logic [31:0]       writes,
   output logic [31:0]       dropped_writes,
   output logic [15:0]       read_latency_max,   // request accepted to rsp_valid
-  output logic [47:0]       read_latency_sum
+  output logic [47:0]       read_latency_sum,
+  output logic [LAT_BINS-1:0][31:0] read_latency_hist   // 4 cycles a bin, the last open-ended
 );
 
   localparam logic [31:0] EXT_MEM_BASE = 32'h8000_0000;
@@ -312,10 +314,13 @@ module fbu_mem_axi_hp #(
   logic        bad_write_ack;
   logic        bad_read;
   logic [15:0] read_latency_to_rsp;
+  logic [$clog2(LAT_BINS)-1:0] read_latency_bin;
 
   // Cycles from the request's acceptance to rsp_valid: what the slave's
   // DET-mode rd_latency must cover.
   assign read_latency_to_rsp = read_latency == '1 ? read_latency : read_latency + 16'd1;
+  assign read_latency_bin    = read_latency_to_rsp >= 16'(4 * (LAT_BINS - 1)) ? $clog2(LAT_BINS)'(LAT_BINS - 1)
+                                                                            : $clog2(LAT_BINS)'(read_latency_to_rsp >> 2);
 
   assign bad_write_ack = write_acked && m_axi_bresp != 2'b00;
   assign bad_read      = m_axi_rvalid && m_axi_rready && m_axi_rresp != 2'b00;
@@ -330,6 +335,7 @@ module fbu_mem_axi_hp #(
       dropped_writes   <= '0;
       read_latency_max <= '0;
       read_latency_sum <= '0;
+      read_latency_hist <= '0;
     end else begin
       if ((bad_write_ack || bad_read) && !mem_err) begin
         mem_err        <= 1'b1;
@@ -344,6 +350,7 @@ module fbu_mem_axi_hp #(
         dropped_writes <= dropped_writes + 32'd1;
       if (read_done) begin
         read_latency_sum <= read_latency_sum + 48'(read_latency_to_rsp);
+        read_latency_hist[read_latency_bin] <= read_latency_hist[read_latency_bin] + 32'd1;
         if (read_latency_to_rsp > read_latency_max)
           read_latency_max <= read_latency_to_rsp;
       end

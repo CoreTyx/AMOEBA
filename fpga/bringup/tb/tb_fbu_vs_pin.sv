@@ -59,6 +59,7 @@ module tb_fbu_vs_pin;
   string       trace_path  = "pin_trace.log";
   string       uart_path   = "uart.log";
   bit          det         = 1;
+  bit          sink_on     = 0;
   bit          gate_enable   = 0;
   bit          gate_selftest = 0;
   int          gate_retries  = 2;
@@ -126,7 +127,22 @@ module tb_fbu_vs_pin;
   logic [1:0]  hp_bresp, hp_rresp;
   logic        hp_bvalid, hp_bready, hp_rlast, hp_rvalid, hp_rready;
 
-  forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(15), .MEM_AXI(MEM_AXI), .DDR_CARVEOUT(DDR_CARVEOUT)) board (
+  // HP2: fbu_dma_sink's writes (DDR builds).
+  logic [31:0] sk_awaddr;
+  logic [3:0]  sk_awlen;
+  logic [2:0]  sk_awsize, sk_awprot;
+  logic [1:0]  sk_awburst;
+  logic        sk_awvalid, sk_awready;
+  logic [63:0] sk_wdata;
+  logic [7:0]  sk_wstrb;
+  logic        sk_wlast, sk_wvalid, sk_wready;
+  logic [1:0]  sk_bresp;
+  logic        sk_bvalid, sk_bready, sk_arvalid;
+
+`ifndef BOARD_TRACE_LOG2
+  `define BOARD_TRACE_LOG2 15
+`endif
+  forte_pynq_top #(.BEATS(BEATS), .TRACE_DEPTH_LOG2(`BOARD_TRACE_LOG2), .MEM_AXI(MEM_AXI), .DDR_CARVEOUT(DDR_CARVEOUT)) board (
     .aclk(clk), .aresetn(arst_n),
     .s_axi_ctl_awaddr(awaddr[11:0]), .s_axi_ctl_awvalid(awvalid && !bus_to_mem), .s_axi_ctl_awready(ctl_awready),
     .s_axi_ctl_wdata(wdata), .s_axi_ctl_wstrb(wstrb), .s_axi_ctl_wvalid(wvalid && !bus_to_mem),
@@ -153,6 +169,19 @@ module tb_fbu_vs_pin;
     .m_axi_hp_arqos(), .m_axi_hp_arvalid(hp_arvalid), .m_axi_hp_arready(hp_arready),
     .m_axi_hp_rid(6'd0), .m_axi_hp_rdata(hp_rdata), .m_axi_hp_rresp(hp_rresp), .m_axi_hp_rlast(hp_rlast),
     .m_axi_hp_rvalid(hp_rvalid), .m_axi_hp_rready(hp_rready),
+    .m_axi_sink_awid(), .m_axi_sink_awaddr(sk_awaddr), .m_axi_sink_awlen(sk_awlen),
+    .m_axi_sink_awsize(sk_awsize), .m_axi_sink_awburst(sk_awburst), .m_axi_sink_awlock(),
+    .m_axi_sink_awcache(), .m_axi_sink_awprot(sk_awprot), .m_axi_sink_awqos(),
+    .m_axi_sink_awvalid(sk_awvalid), .m_axi_sink_awready(sk_awready),
+    .m_axi_sink_wid(), .m_axi_sink_wdata(sk_wdata), .m_axi_sink_wstrb(sk_wstrb), .m_axi_sink_wlast(sk_wlast),
+    .m_axi_sink_wvalid(sk_wvalid), .m_axi_sink_wready(sk_wready),
+    .m_axi_sink_bid(6'd0), .m_axi_sink_bresp(sk_bresp), .m_axi_sink_bvalid(sk_bvalid),
+    .m_axi_sink_bready(sk_bready),
+    .m_axi_sink_arid(), .m_axi_sink_araddr(), .m_axi_sink_arlen(), .m_axi_sink_arsize(),
+    .m_axi_sink_arburst(), .m_axi_sink_arlock(), .m_axi_sink_arcache(), .m_axi_sink_arprot(),
+    .m_axi_sink_arqos(), .m_axi_sink_arvalid(sk_arvalid), .m_axi_sink_arready(1'b0),
+    .m_axi_sink_rid(6'd0), .m_axi_sink_rdata(64'd0), .m_axi_sink_rresp(2'b00), .m_axi_sink_rlast(1'b0),
+    .m_axi_sink_rvalid(1'b0), .m_axi_sink_rready(),
     .led);
 
   localparam int          WINDOWS       = 3;
@@ -182,6 +211,9 @@ module tb_fbu_vs_pin;
     .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0), .mem_stat('0),
+    .trace_stream(), .trace_stream_valid(), .trace_stream_pop(1'b0),
+    .console_stream(), .console_stream_valid(), .console_stream_pop(1'b0),
+    .sink_cfg(), .sink_stat('0),
     .link_error_seen(), .tohost_seen(), .boot_gate_gave_up());
 
 `endif
@@ -256,6 +288,13 @@ module tb_fbu_vs_pin;
     end
   end
 `endif
+
+  // +SINK (DDR builds): trace and console arrive through fbu_dma_sink's rings
+  // in HP2 memory; the PS model reads them there and hands back RD.
+  localparam logic [31:0] SINK_TRACE_BASE   = 32'h0400_0000;
+  localparam int          SINK_TRACE_LOG2   = 12;
+  localparam logic [31:0] SINK_CONSOLE_BASE = 32'h0600_0000;
+  localparam int          SINK_CONSOLE_LOG2 = 14;
 
 `ifdef BOARD_DDR
   // ---- HP0 and the DDR carve-out, holding this bench's memory ----
@@ -349,7 +388,94 @@ module tb_fbu_vs_pin;
       end
     end
   end
+
+  // ---- HP2: the sink's rings, in their own memory ----
+  // W may lead AW; a burst is written once its address and WLAST are in, and
+  // its B follows a few cycles later.
+  // One slot per trace record and one entry per console byte, written byte by
+  // byte under WSTRB; a write outside both rings is a model error.
+  logic [511:0] sink_trace_ring [1 << SINK_TRACE_LOG2];
+  logic [15:0]  sink_console_ring [1 << SINK_CONSOLE_LOG2];
+  logic [63:0] sk_w_data [$];
+  logic [7:0]  sk_w_strb [$];
+  bit          sk_aw_taken;
+  bit          sk_b_due;
+  logic [31:0] sk_burst_addr;
+  int          sk_burst_beats;
+  int          sk_b_wait;
+
+  always @(posedge clk) begin
+    sk_awready <= ($urandom % 3) != 0 && !sk_aw_taken;
+    sk_wready  <= ($urandom % 3) != 0;
+  end
+
+  task automatic sink_write_byte(input logic [31:0] a, input logic [7:0] v);
+    logic [31:0] trace_off;
+    logic [31:0] console_off;
+    trace_off   = a - SINK_TRACE_BASE;
+    console_off = a - SINK_CONSOLE_BASE;
+    if (a >= SINK_TRACE_BASE && trace_off < (32'd64 << SINK_TRACE_LOG2))
+      sink_trace_ring[trace_off >> 6][8 * trace_off[5:0] +: 8] = v;
+    else if (a >= SINK_CONSOLE_BASE && console_off < (32'd2 << SINK_CONSOLE_LOG2))
+      sink_console_ring[console_off >> 1][8 * console_off[0] +: 8] = v;
+    else
+      model_err($sformatf("HP2 write to %h, outside both rings", a));
+  endtask
+
+  always @(posedge clk) begin
+    if (!arst_n) begin
+      sk_aw_taken = 1'b0;
+      sk_b_due    = 1'b0;
+      sk_bvalid  <= 1'b0;
+      sk_bresp   <= 2'b00;
+    end else begin
+      if (sk_bvalid && sk_bready)
+        sk_bvalid <= 1'b0;
+      if (sk_arvalid)
+        model_err("HP2 read from the sink");
+      if (sk_awvalid && sk_awready) begin
+        sk_aw_taken    = 1'b1;
+        sk_burst_addr  = sk_awaddr;
+        sk_burst_beats = int'(sk_awlen) + 1;
+        if (sk_awprot !== 3'b000 || sk_awsize !== 3'd3 || sk_awburst !== 2'b01 ||
+            (sk_awaddr & 32'hFFF) + 32'(8 * sk_burst_beats) > 32'h1000)
+          model_err($sformatf("HP2 AW %h len %0d prot %b size %0d burst %b",
+                              sk_awaddr, sk_awlen, sk_awprot, sk_awsize, sk_awburst));
+      end
+      if (sk_wvalid && sk_wready) begin
+        sk_w_data.push_back(sk_wdata);
+        sk_w_strb.push_back(sk_wstrb);
+      end
+      if (sk_aw_taken && !sk_b_due && sk_w_data.size() >= sk_burst_beats) begin
+        for (int i = 0; i < sk_burst_beats; i++) begin
+          logic [63:0] d;
+          logic [7:0]  st;
+          d  = sk_w_data.pop_front();
+          st = sk_w_strb.pop_front();
+          for (int b = 0; b < 8; b++)
+            if (st[b])
+              sink_write_byte(sk_burst_addr + 32'(8 * i + b), d[8 * b +: 8]);
+        end
+        sk_b_due  = 1'b1;
+        sk_b_wait = int'($urandom % 8);
+      end
+      if (sk_b_due && !sk_bvalid) begin
+        if (sk_b_wait == 0) begin
+          sk_bvalid  <= 1'b1;
+          sk_bresp   <= 2'b00;
+          sk_b_due    = 1'b0;
+          sk_aw_taken = 1'b0;
+        end else begin
+          sk_b_wait--;
+        end
+      end
+    end
+  end
 `elsif BOARD_TOP
+  assign sk_awready = 1'b0;
+  assign sk_wready  = 1'b0;
+  assign sk_bresp   = 2'b00;
+  assign sk_bvalid  = 1'b0;
   assign hp_awready = 1'b0;
   assign hp_wready  = 1'b0;
   assign hp_bresp   = 2'b00;
@@ -549,6 +675,8 @@ module tb_fbu_vs_pin;
   bit     fail_pattern_on = 0;
   bit     fault_match_on  = 0;
   string  console_line    = "";
+  string  console_tail    = "";
+  string  extra_fail [$];
   string  fi_round_lines [$];
   string  cal_lines      [$];
   string  site_lines     [$];
@@ -627,27 +755,106 @@ module tb_fbu_vs_pin;
     endcase
   endfunction
 
+  int sink_trace_read   = 0;
+  int sink_console_read = 0;
+
+  task automatic sink_start();
+    reg_write(REG_SINK_CTRL, 32'h100);
+    reg_write(REG_SINK_TRACE_BASE, SINK_TRACE_BASE);
+    reg_write(REG_SINK_TRACE_LOG2, 32'(SINK_TRACE_LOG2));
+    reg_write(REG_SINK_CON_BASE, SINK_CONSOLE_BASE);
+    reg_write(REG_SINK_CON_LOG2, 32'(SINK_CONSOLE_LOG2));
+    reg_write(REG_SINK_CTRL, 32'h3);
+    sink_trace_read   = 0;
+    sink_console_read = 0;
+  endtask
+
+  function automatic logic [319:0] sink_trace_slot(input int n);
+`ifdef BOARD_DDR
+    return sink_trace_ring[n % (1 << SINK_TRACE_LOG2)][319:0];
+`else
+    return '0;
+`endif
+  endfunction
+
+  function automatic logic [15:0] sink_console_entry(input int n);
+`ifdef BOARD_DDR
+    return sink_console_ring[n % (1 << SINK_CONSOLE_LOG2)];
+`else
+    return '0;
+`endif
+  endfunction
+
+  // Anything not yet in the files: FIFO heads, a write in flight, ring entries.
+  task automatic output_pending(output bit pending);
+    logic [31:0] v;
+    reg_read(REG_TRACE_STAT, v);
+    pending = v[0];
+    if (!sink_on)
+      return;
+    reg_read(REG_UART_RX_DATA, v);
+    pending |= v[31];
+    reg_read(REG_SINK_STAT, v);
+    pending |= v[16];
+    reg_read(REG_SINK_TRACE_WR, v);
+    pending |= int'(v) != sink_trace_read;
+    reg_read(REG_SINK_CON_WR, v);
+    pending |= int'(v) != sink_console_read;
+  endtask
+
+  // In sink mode the records come from the ring up to WR; otherwise from the
+  // FIFO head registers.  One write_record call either way.
   task automatic drain_trace(input int max_records);
     logic [31:0]  stat;
+    logic [31:0]  sink_wr;
     logic [319:0] r;
     logic [31:0]  w;
-    for (int n = 0; n < max_records; n++) begin
-      reg_read(REG_TRACE_STAT, stat);
-      if (!stat[0])
-        return;
-      for (int i = 0; i < 10; i++) begin
-        reg_read(REG_TRACE_HEAD + 12'(4 * i), w);
-        r[32 * i +: 32] = w;
+    int           n;
+    if (sink_on)
+      reg_read(REG_SINK_TRACE_WR, sink_wr);
+    for (n = 0; n < max_records; n++) begin
+      if (sink_on) begin
+        if (sink_trace_read >= int'(sink_wr))
+          break;
+        r = sink_trace_slot(sink_trace_read);
+        sink_trace_read++;
+      end else begin
+        reg_read(REG_TRACE_STAT, stat);
+        if (!stat[0])
+          break;
+        for (int i = 0; i < 10; i++) begin
+          reg_read(REG_TRACE_HEAD + 12'(4 * i), w);
+          r[32 * i +: 32] = w;
+        end
+        reg_write(REG_TRACE_POP, 32'd1);
       end
-      reg_write(REG_TRACE_POP, 32'd1);
       write_record(r);
     end
+    if (sink_on && n != 0)
+      reg_write(REG_SINK_TRACE_RD, 32'(sink_trace_read));
   endtask
 
   // fe_fault_pin.c's per-round lines, "FI unit <u> PASS|FAIL d <18 deltas> ...",
   // are kept for check_fi_rounds.
+  function automatic void check_extra_fail(input logic [7:0] b);
+    int n;
+    console_tail = {console_tail, string'(b)};
+    if (console_tail.len() > 256)
+      console_tail = console_tail.substr(console_tail.len() - 256, console_tail.len() - 1);
+    foreach (extra_fail[i]) begin
+      n = extra_fail[i].len();
+      if (!fail_reported && console_tail.len() >= n &&
+          console_tail.substr(console_tail.len() - n, console_tail.len() - 1) == extra_fail[i]) begin
+        fail_reported = 1;
+        model_err("console printed the fail pattern");
+      end
+    end
+  endfunction
+
   task automatic console_byte(input logic [7:0] b);
     $fwrite(uart_fd, "%c", b);
+    if (extra_fail.size() != 0)
+      check_extra_fail(b);
     if (b != 8'h0A) begin
       console_line = {console_line, string'(b)};
       return;
@@ -663,16 +870,29 @@ module tb_fbu_vs_pin;
 
   task automatic drain_uart(input int max_bytes);
     logic [31:0] d;
-    for (int n = 0; n < max_bytes; n++) begin
-      reg_read(REG_UART_RX_DATA, d);
-      if (!d[31])
-        return;
-      reg_write(REG_UART_RX_POP, 32'd1);
+    logic [31:0] sink_wr;
+    int          n;
+    if (sink_on)
+      reg_read(REG_SINK_CON_WR, sink_wr);
+    for (n = 0; n < max_bytes; n++) begin
+      if (sink_on) begin
+        if (sink_console_read >= int'(sink_wr))
+          break;
+        d = 32'(sink_console_entry(sink_console_read));
+        sink_console_read++;
+      end else begin
+        reg_read(REG_UART_RX_DATA, d);
+        if (!d[31])
+          break;
+        reg_write(REG_UART_RX_POP, 32'd1);
+      end
       if (d[8])
         tb_err($sformatf("framing error on uart_tx (byte %02h)", d[7:0]));
       else
         console_byte(d[7:0]);
     end
+    if (sink_on && n != 0)
+      reg_write(REG_SINK_CON_RD, 32'(sink_console_read));
   endtask
 
   task automatic service();
@@ -686,8 +906,8 @@ module tb_fbu_vs_pin;
         tb_err("console printed the fail pattern");
       end
     end
-    drain_uart(16);
-    drain_trace(8);
+    drain_uart(sink_on ? 4096 : 16);
+    drain_trace(sink_on ? 4096 : 8);
   endtask
 
   function automatic bit stopped();
@@ -695,7 +915,7 @@ module tb_fbu_vs_pin;
   endfunction
 
   task automatic verdict(input bit pass, input string why);
-    logic [31:0] stat;
+    bit          pending;
     logic [31:0] v [8];
     if (done)
       return;
@@ -704,8 +924,8 @@ module tb_fbu_vs_pin;
     do begin
       drain_trace(1 << 16);
       drain_uart(1 << 16);
-      reg_read(REG_TRACE_STAT, stat);
-    end while (stat[0]);
+      output_pending(pending);
+    end while (pending);
     $fclose(trace_fd);
     $fclose(uart_fd);
     reg_read(REG_LINK_RD, v[0]);
@@ -726,6 +946,12 @@ module tb_fbu_vs_pin;
     reg_read(REG_MEM_WRITES, v[2]);
     reg_read(REG_MEM_LAT_MAX, v[3]);
     $display("[FBU_TB] ddr reads=%0d writes=%0d lat_max=%0d err=%0d", v[1], v[2], v[3], v[0][0]);
+    if (sink_on) begin
+      reg_read(REG_SINK_STAT, v[4]);
+      $display("[FBU_TB] sink trace=%0d console=%0d err=%0d", sink_trace_read, sink_console_read, v[4][0]);
+      if (v[4][0])
+        model_err("SINK_STAT error set");
+    end
     if (v[0][0])
       model_err("MEM_ERR set");
 `endif
@@ -974,13 +1200,17 @@ module tb_fbu_vs_pin;
         void'($sscanf(a1, "%d", v));
         reg_write(REG_UART_TX_GAP, 32'(v));
       end
+      // The first pattern goes to the gateware matcher, any more to the PS
+      // model, as the board's cmdscript matches all of them.
       "uart_fail": begin
-        if (fail_pattern_on)
-          tb_err("uart_fail: the gateware matches one fail pattern");
         if (fault_match_on)
           tb_err("fault_on_match and uart_fail both need console matcher 1");
-        fail_pattern_on = 1;
-        set_match(1, unescape(rest_after(ln, 1)));
+        if (fail_pattern_on) begin
+          extra_fail.push_back(unescape(rest_after(ln, 1)));
+        end else begin
+          fail_pattern_on = 1;
+          set_match(1, unescape(rest_after(ln, 1)));
+        end
       end
       "irq": begin
         void'($sscanf(a1, "%d", v));
@@ -1538,6 +1768,8 @@ module tb_fbu_vs_pin;
     reg_write(REG_TOHOST_ADDR, tohost_addr[31:0]);
     reg_write(REG_TRACE_CTRL, {30'd0, max_errors == 1, 1'b1});
     reg_write(REG_BOOTGATE, {16'd1000, 8'd0, 4'(gate_retries), 2'b00, gate_selftest, gate_enable});
+    if (sink_on)
+      sink_start();
   endtask
 
   initial begin
@@ -1563,6 +1795,7 @@ module tb_fbu_vs_pin;
     if ($value$plusargs("TRACE=%s", s))        trace_path = s;
     if ($value$plusargs("UART_LOG=%s", s))     uart_path = s;
     if ($test$plusargs("NODET"))               det = 0;
+    if ($test$plusargs("SINK"))                sink_on = 1;
     if ($test$plusargs("BOOT_GATE"))           gate_enable = 1;
     if ($test$plusargs("BOOT_GATE_SELFTEST"))  gate_selftest = 1;
     if ($value$plusargs("BOOT_GATE_RETRIES=%d", v)) gate_retries = v;

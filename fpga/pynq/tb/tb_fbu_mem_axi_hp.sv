@@ -79,6 +79,7 @@ module tb_fbu_mem_axi_hp;
   logic [31:0] dropped_writes;
   logic [15:0] read_latency_max;
   logic [47:0] read_latency_sum;
+  logic [7:0][31:0] read_latency_hist;
 
   fbu_mem_axi_hp #(.BEATS(BEATS), .DDR_CARVEOUT(CARVEOUT)) dut (
     .clk, .arst_n, .chip_in_reset,
@@ -96,7 +97,7 @@ module tb_fbu_mem_axi_hp;
     .m_axi_rid(6'd0), .m_axi_rdata(rdata), .m_axi_rresp(rresp), .m_axi_rlast(rlast),
     .m_axi_rvalid(rvalid), .m_axi_rready(rready),
     .mem_err, .first_err_addr, .first_err_resp, .reads, .writes, .dropped_writes,
-    .read_latency_max, .read_latency_sum);
+    .read_latency_max, .read_latency_sum, .read_latency_hist);
 
   int errors = 0;
 
@@ -331,6 +332,19 @@ module tb_fbu_mem_axi_hp;
       fail($sformatf("mem_err %b, want %b", mem_err, expect_mem_err));
     if (mem_err && first_err_addr[9:4] != 6'd13)
       fail($sformatf("first_err_addr %h is not a bad line", first_err_addr));
+    begin
+      longint hist_total = 0;
+      int     top_bin = -1;
+      for (int b = 0; b < 8; b++) begin
+        hist_total += read_latency_hist[b];
+        if (read_latency_hist[b] != 0)
+          top_bin = b;
+      end
+      if (hist_total != longint'(reads))
+        fail($sformatf("latency histogram holds %0d reads, want %0d", hist_total, reads));
+      if (top_bin != (read_latency_max >= 28 ? 7 : int'(read_latency_max) / 4))
+        fail($sformatf("highest histogram bin %0d, but the maximum latency %0d", top_bin, read_latency_max));
+    end
     $display("[MEM_AXI_TB] %0d reads, %0d writes, %0d dropped; read latency max %0d mean %0d",
              reads, writes, dropped_writes, read_latency_max,
              reads == 0 ? 0 : int'(read_latency_sum / 48'(reads)));

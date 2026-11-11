@@ -37,6 +37,11 @@ XILINX_PART ?= xc7z020clg400-1
 # Wally's own Arty A7 build runs at 20 MHz on the same -1 grade 7-series fabric,
 # so 25 MHz is a starting point, not a target.  Read the WNS and move.
 FCLK_MHZ    ?= 25
+
+# Parallel C++ compiles per Verilator build; each job of the forte model takes
+# several GB, so all cores can exhaust memory next to a desktop session.
+BUILD_JOBS ?= 4
+
 CLK_PERIOD_NS = $(shell echo "scale=3; 1000 / $(FCLK_MHZ)" | bc)
 
 # ---- configuration ---------------------------------------------------------
@@ -162,6 +167,7 @@ FORTE_FPGA := $(sort $(wildcard $(CURDIR)/rtl/emu/*.sv)) \
               $(filter-out %/fbu_pkg.sv,$(sort $(wildcard $(REPO)/fpga/bringup/rtl/*.sv))) \
               $(CURDIR)/rtl/fbu_mem_bram.sv \
               $(CURDIR)/rtl/fbu_mem_axi_hp.sv \
+              $(CURDIR)/rtl/fbu_dma_sink.sv \
               $(sort $(wildcard $(CURDIR)/rtl/forte_*.sv)) \
               $(CURDIR)/rtl/forte_pynq_top_v.v
 
@@ -222,6 +228,17 @@ test-mem-axi-hp:
 	    $(REPO)/fpga/pynq/rtl/fbu_mem_axi_hp.sv > $(BUILD)/tb_mem_axi_hp/build.log 2>&1
 	$(BUILD)/tb_mem_axi_hp/Vtb_fbu_mem_axi_hp | grep -v '^-' | tee $(BUILD)/tb_mem_axi_hp/run.log
 	@grep -q 'tb_fbu_mem_axi_hp PASS' $(BUILD)/tb_mem_axi_hp/run.log
+
+.PHONY: test-dma-sink
+test-dma-sink:
+	@mkdir -p $(BUILD)/tb_dma_sink
+	verilator --binary -sv --top-module tb_fbu_dma_sink --timing \
+	    --timescale 1ns/1ps -Wno-fatal -Mdir $(BUILD)/tb_dma_sink \
+	    $(REPO)/fpga/bringup/rtl/fbu_pkg.sv \
+	    $(REPO)/fpga/pynq/tb/tb_fbu_dma_sink.sv \
+	    $(REPO)/fpga/pynq/rtl/fbu_dma_sink.sv > $(BUILD)/tb_dma_sink/build.log 2>&1
+	$(BUILD)/tb_dma_sink/Vtb_fbu_dma_sink | grep -v '^-' | tee $(BUILD)/tb_dma_sink/run.log
+	@grep -q 'tb_fbu_dma_sink PASS' $(BUILD)/tb_dma_sink/run.log
 
 # The link slave against the real ASIC bridge: singles, INCR8, pipelined
 # accepts, a mid-burst abort.  The monitor inside asserts that every line op
@@ -304,13 +321,14 @@ test-top: $(SRCS_F)
 FBU_TB_DIR       := $(BUILD)/tb_fbu_vs_pin
 FBU_BOARD_TB_DIR := $(BUILD)/tb_fbu_vs_pin_board
 FBU_DDR_TB_DIR   := $(BUILD)/tb_fbu_vs_pin_ddr
-.PHONY: build-fbu build-fbu-board build-fbu-ddr test-fbu test-fbu-board test-fbu-ddr
+FBU_SINK_TB_DIR  := $(BUILD)/tb_fbu_vs_pin_sink
+.PHONY: build-fbu build-fbu-board build-fbu-ddr build-fbu-sink test-fbu test-fbu-board test-fbu-ddr test-fbu-sink
 
 # $(1) build directory, $(2) extra defines
 define build_fbu_tb
 	@mkdir -p $(1)
 	verilator --binary -sv --top-module tb_fbu_vs_pin --timing \
-	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(1) \
+	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $(BUILD_JOBS) -Mdir $(1) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
 	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR $(2) \
 	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_vs_pin.sv > $(1)/build.log 2>&1 \
@@ -336,6 +354,15 @@ build-fbu-ddr: $(SRCS_F)
 
 test-fbu-ddr: build-fbu-ddr
 	TB=$(FBU_DDR_TB_DIR)/Vtb_fbu_vs_pin OUT=$(REPO)/sim/fbu_vs_pin_ddr FORCE_RD_LAT=64 bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
+
+# The DDR build with the bitstream's trace FIFO (2048) and every run's trace
+# and console through fbu_dma_sink and an HP2 model: long runs must match in
+# full, where register draining would drop.
+build-fbu-sink: $(SRCS_F)
+	$(call build_fbu_tb,$(FBU_SINK_TB_DIR),+define+BOARD_TOP +define+BOARD_DDR +define+BOARD_TRACE_LOG2=11)
+
+test-fbu-sink: build-fbu-sink
+	TB=$(FBU_SINK_TB_DIR)/Vtb_fbu_vs_pin OUT=$(REPO)/sim/fbu_vs_pin_sink FORCE_RD_LAT=64 EXTRA_FBU_ARGS=+SINK bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
 
 test-fbu: build-fbu
 	bash $(REPO)/fpga/bringup/tb/fbu_vs_pin.sh
@@ -487,7 +514,7 @@ FORTE_DUT_DCP    := $(FORTE_BITDIR)/proj/forte.runs/forte_dut_0_synth_1/forte_du
 test-scan-rtl: $(SRCS_F)
 	@mkdir -p $(SCAN_RTL_DIR)
 	verilator --binary -sv --top-module tb_fbu_scan_top --timing \
-	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $$(nproc) -Mdir $(SCAN_RTL_DIR) \
+	    --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style -j $(BUILD_JOBS) -Mdir $(SCAN_RTL_DIR) \
 	    $(addprefix +incdir+,$(INCDIRS)) \
 	    $(addprefix +define+,$(CONFIG_DEFINES)) +define+SYNTHESIS +define+ECE411_VERILATOR \
 	    -f $(SRCS_F) $(REPO)/fpga/bringup/tb/tb_fbu_scan_top.sv > $(SCAN_RTL_DIR)/build.log 2>&1 \
