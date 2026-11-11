@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the pin-bench comparison set on the board and print one table.
 
-  sudo python3 board_suite.py [--bitstream ../forte.bit] [--images ../images]
+  sudo ./pynq_python.sh board_suite.py [--bitstream ../forte.bit] [--images ../images]
                               [--scripts ../scripts] [--quick]
 
 The same programs and knob sets as fpga/bringup/tb/fbu_vs_pin.sh, each into
@@ -26,6 +26,8 @@ SCRIPTED = ["irq", "uart_echo", "uart_lsr"]
 # fpga/bringup/tests programs wait on their own fbu scripts (run_cmd.py with
 # ../scripts/<name>.cmd); without one they would never reach tohost.
 OWN_SCRIPT_PREFIX = "fe_"
+# The Linux image runs alone, with linux.cmd (SYS-04).
+SKIP = {"boot"}
 
 
 def force_lat(extra, rd_lat):
@@ -78,7 +80,7 @@ def main():
     rows = []
     for image in sorted(glob.glob(os.path.join(a.images, "*.lst"))):
         name = os.path.splitext(os.path.basename(image))[0]
-        if name.startswith(OWN_SCRIPT_PREFIX):
+        if name.startswith(OWN_SCRIPT_PREFIX) or name in SKIP:
             continue
         if name in SCRIPTED:
             out = os.path.join("runs", name, "script")

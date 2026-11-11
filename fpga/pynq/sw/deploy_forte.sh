@@ -34,8 +34,8 @@ for x in "$@"; do
 done
 
 ssh "$BOARD" "mkdir -p ~/$DEST"
-rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' --exclude runs "$HERE/" "$BOARD:$DEST/sw/"
+rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' --exclude 'runs*' "$HERE/" "$BOARD:$DEST/sw/"
 rsync -a "$BITDIR/forte.bit" "$BITDIR/forte.hwh" "$BOARD:$DEST/"
 rsync -a "$STAGE/images" "$STAGE/scripts" "$BOARD:$DEST/"
 echo "deployed to $BOARD:~/$DEST ($(ls "$STAGE/images" | wc -l) images)"
-echo "  ssh $BOARD 'cd $DEST/sw && sudo python3 run_cmd.py ../images/smoke.lst --bitstream ../forte.bit'"
+echo "  ssh $BOARD 'cd $DEST/sw && sudo ./pynq_python.sh run_cmd.py ../images/smoke.lst --bitstream ../forte.bit'"

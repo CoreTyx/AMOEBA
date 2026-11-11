@@ -94,6 +94,38 @@ def program_once(bitstream: str, fclk_mhz: float) -> bool:
     return True
 
 
+
+SINK_WINDOW = 256 << 20   # HP2 reaches Linux's RAM only (bd_forte.tcl linux_ram)
+
+
+def cma_allocate(nbytes: int):
+    """An uncached, physically contiguous buffer from PYNQ's CMA allocator.
+
+    pynq.allocate() works only after PYNQ has registered an xclbin with XRT,
+    which it does when it downloads an overlay.  The PL here is programmed by
+    amoeba.pl instead, so register PYNQ's default xclbin (PS DDR only, no
+    bitstream section: the PL is untouched) once per process.  Needs PYNQ's
+    environment: run under sw/pynq_python.sh."""
+    import pynq
+    import tempfile
+    from pynq.pl_server.embedded_device import DEFAULT_XCLBIN
+    from pynq.pl_server.xclbin_parser import XclBin
+    dev = pynq.Device.active_device
+    if not hasattr(dev, "mem_dict"):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)       # _xrt_download writes loaded.xclbin to the cwd
+            try:
+                dev._xrt_download(DEFAULT_XCLBIN)
+            finally:
+                os.chdir(cwd)
+        dev.mem_dict = XclBin(xclbin_data=DEFAULT_XCLBIN).mem_dict
+    buf = pynq.allocate(shape=(nbytes,), dtype="u1", cacheable=False)
+    if buf.physical_address + nbytes > SINK_WINDOW:
+        buf.freebuffer()
+        raise RuntimeError(f"CMA buffer at {buf.physical_address:#x} is outside HP2's window")
+    return buf
+
 class Forte:
     def __init__(self, bitstream: str = None, fclk_mhz: float = 25.0):
         loaded = bool(bitstream) and program_once(bitstream, fclk_mhz)
@@ -268,10 +300,9 @@ class Forte:
         """Rings of 2**trace_log2 records and 2**console_log2 console bytes, in
         uncached CMA buffers: the PL writes them through HP2, which the A9's
         caches do not see.  hold() turns the rings off before they are freed."""
-        from pynq import allocate
         self.sink_stop()
-        trace_buf = allocate(shape=(R.SINK_TRACE_SLOT << trace_log2,), dtype="u1", cacheable=False)
-        console_buf = allocate(shape=(R.SINK_CONSOLE_ENTRY << console_log2,), dtype="u1", cacheable=False)
+        trace_buf = cma_allocate(R.SINK_TRACE_SLOT << trace_log2)
+        console_buf = cma_allocate(R.SINK_CONSOLE_ENTRY << console_log2)
         self.sink = {"trace": trace_buf, "console": console_buf, "trace_log2": trace_log2,
                      "console_log2": console_log2, "trace_read": 0, "console_read": 0}
         self.wr(R.REG_SINK_CTRL, 1 << 8)

@@ -803,14 +803,24 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
     runs from one load: all PASS, traces match the bench cycle for cycle,
     read latency mean 14 and max 24 cycles, no HP0 errors.
   - **P3 board runs** (from `~/forte_ddr/sw` after `MEM_BACKEND=AXI
-    deploy_forte.sh` with the images; one bitstream load per boot):
-    - DET suite: `sudo python3 board_suite.py --rd-lat 64` (trace and console
-      through the sink by default).
-    - LINK-10, natural mode: `sudo python3 board_suite.py --nodet`; each run
-      prints its read-latency histogram (`MEM_LAT_HIST`).
+    deploy_forte.sh` with the images; one bitstream load per boot). Run
+    under `pynq_python.sh`: the sink's rings come from `pynq.allocate`, which
+    needs PYNQ's venv and XRT; `device.cma_allocate` registers PYNQ's default
+    xclbin (PS DDR only, no bitstream) since `amoeba.pl`, not PYNQ, programs
+    the PL.
+    - DET suite: `sudo ./pynq_python.sh board_suite.py --rd-lat 64` (trace and
+      console through the sink by default). Board: 93/93 PASS; 92 match the
+      bench in full, `irq` all but its deassert after tohost (register
+      draining: 72 full, 20 cut at the trace drop).
+    - LINK-10, natural mode: `sudo ./pynq_python.sh board_suite.py --nodet`; each run
+      prints its read-latency histogram (`MEM_LAT_HIST`). Board: 93/93 PASS;
+      link transactions equal the bench's (92 in order, `irq` as a set); the
+      bench console is a prefix of every board console (the bench stops at
+      tohost, before the last UART byte). Over 188,340 reads: 95.9 % in
+      12-15 cycles, 2.5 % 16-19, 1.5 % 20-23, 32 reads ≥ 24, max 29.
     - CTRL-20/21/22, STAT, scan: the fault-tolerance set as before, with and
       without `--nodet`.
-    - SYS-04: `sudo python3 run_cmd.py ../images/boot.lst ../scripts/linux.cmd
+    - SYS-04: `sudo ./pynq_python.sh run_cmd.py ../images/boot.lst ../scripts/linux.cmd
       --bitstream ../forte.bit --nodet --no-trace --out runs/linux`
       (`testcode/linux/build/boot.lst`; milestones M0..M5, console from the
       sink only). `uart_fail` may repeat: the board script matches every

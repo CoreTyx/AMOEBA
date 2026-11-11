@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one program on the FPGA-emulated chip, as the pin bench would.
 
-  sudo python3 run_cmd.py <image.lst> [script.cmd] [--bitstream forte.bit]
+  sudo ./pynq_python.sh run_cmd.py <image.lst> [script.cmd] [--bitstream forte.bit]
                           [--seed N --gap PCT --lat N --wdog N --mutate N --nodet]
                           [--boot-gate] [--out runs/NAME]
 
