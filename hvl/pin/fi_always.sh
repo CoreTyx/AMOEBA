@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # fi_always.sh -- the design under continuous fault injection, from its pins.
 #
-#   hvl/pin/fi_always.sh            the vectors, then the whole matrix
+#   hvl/pin/fi_always.sh            the vectors, the unit tests, the whole matrix
 #   hvl/pin/fi_always.sh vectors    the vectors only
+#   hvl/pin/fi_always.sh units      the unit tests only
+#
+# Unit tests (tests/fi_units.c, tests/fi_rfpipe.c) arm FI_CONTROL from software,
+# one unit at a time (and RF with pipeline ECC), and check the chip's own fault
+# counters: the armed unit detected, nothing else moved, nothing went
+# uncorrectable, every result right.
 #
 # Every ISA-level and baremetal_ecc program, armed by bin/fi_arm_lst.py with
 # fault_inject held high, at three link settings: it must pass, with the console
@@ -71,6 +77,19 @@ vector_tests() {
   [ "$v" = PASS ] && report 1 vectors/tc_pmp_deny_arm5f "$v" || report 0 vectors/tc_pmp_deny_arm5f "${v:-no verdict}"
 }
 
+unit_tests() {
+  local t d v
+  for t in fi_units fi_rfpipe; do
+    d="$OUT/units/$t"
+    rm -rf "$d"
+    mkdir -p "$d"
+    "$R/hvl/pin/pin.sh" run "$R/hvl/pin/tests/$t.c" "$R/hvl/pin/tests/$t.cmd" > "$d/run.log" 2>&1
+    cp "$RUNS/$t/uart.log" "$d/" 2>/dev/null
+    v=$(verdict_of "$d/run.log")
+    [ "$v" = PASS ] && report 1 "units/$t" "$v" || report 0 "units/$t" "${v:-no verdict}"
+  done
+}
+
 matrix_tests() {
   local image base off d arm k name args v ok
   for image in "$R"/testcode/isa_level_testing/tc_*.c "$R"/testcode/isa_level_testing/tcf_*.c "$R"/testcode/baremetal_ecc/tc_*.c; do
@@ -108,8 +127,11 @@ mkdir -p "$OUT"
 SIM=verilator DUT=rtl "$R/hvl/pin/pin.sh" build > "$OUT/build.log" 2>&1 \
   || { tail -20 "$OUT/build.log"; exit 2; }
 
-vector_tests
-[ "${1:-}" = vectors ] || matrix_tests
+case "${1:-}" in
+  vectors) vector_tests ;;
+  units)   unit_tests ;;
+  *)       vector_tests; unit_tests; matrix_tests ;;
+esac
 
 echo "fi_always: $pass passed, ${#failed[@]} failed"
 if [ ${#failed[@]} != 0 ]; then

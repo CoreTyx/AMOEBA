@@ -340,7 +340,9 @@ jobs:
   # This drives forte_top's fault_inject pin with the link at three gap and
   # latency settings: that is what exposed an I$ ECC repair landing in the
   # wrong set, in one run of 144 (hvl/pin/fi_always.sh, which also replays that
-  # exact image from hvl/pin/tests/vectors/).
+  # exact image from hvl/pin/tests/vectors/).  Its unit tests arm FI_CONTROL
+  # one unit at a time and read the chip's fault counters: each unit must
+  # detect, and nothing may go uncorrectable or move another unit's counter.
   ci-fi-always:
     name: Always-on fault injection (pin bench)
     runs-on: ubuntu-latest
@@ -377,14 +379,16 @@ jobs:
       - name: Add Verilator to PATH
         run: echo "/opt/verilator/bin" >> $GITHUB_PATH
 
-      - name: Always-on fault injection, vectors and matrix
+      - name: Always-on fault injection, vectors, unit tests and matrix
         run: hvl/pin/fi_always.sh
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fi-always-logs
-          path: sim/pin/fi_always/**/run.log
+          path: |
+            sim/pin/fi_always/**/run.log
+            sim/pin/fi_always/units/**/uart.log
           retention-days: 14
 
   # ── Baremetal regression: run tests with cached Spike DPI simulator ────────
