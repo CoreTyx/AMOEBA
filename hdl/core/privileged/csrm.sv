@@ -33,7 +33,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module csrm  import cvw::*;  #(parameter cvw_t P) (
-  input  logic                     clk, reset,
+  input  logic                     clk, clk_scan, reset,
   input  logic                     UngatedCSRMWriteM, CSRMWriteM, MTrapM,
   input  logic [11:0]              CSRAdrM,
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
@@ -201,7 +201,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   flopenr #(P.XLEN) MCAUSEreg(clk, reset, WriteMCAUSEM, {NextCauseM[5], {(P.XLEN-6){1'b0}}, NextCauseM[4:0]}, MCAUSE_REGW);
   flopenr #(P.XLEN) MTVALreg(clk, reset, WriteMTVALM, NextMtvalM, MTVAL_REGW);
   flopenr #(32)   MCOUNTINHIBITreg(clk, reset, WriteMCOUNTINHIBITM, {CSRWriteValM[31:2], 1'b0, CSRWriteValM[0]}, MCOUNTINHIBIT_REGW);
-  flopenr #(32)   RANDINSTRFREQreg(clk, reset, WriteRANDINSTRFREQM, CSRWriteValM[31:0], RAND_INSTR_INSERT_FREQ_REGW);
+  flopenr #(32)   RANDINSTRFREQreg(clk_scan, reset, WriteRANDINSTRFREQM, CSRWriteValM[31:0], RAND_INSTR_INSERT_FREQ_REGW);
   if (P.U_SUPPORTED) begin : mcounteren // MCOUNTEREN only exists when user mode is supported
     flopenr #(32)   MCOUNTERENreg(clk, reset, WriteMCOUNTERENM, CSRWriteValM[31:0], MCOUNTEREN_REGW);
   end else assign MCOUNTEREN_REGW = '0;
@@ -255,7 +255,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
   assign WriteMSECFAULTM = CSRMWriteM & (CSRAdrM == MSECFAULT);
   assign msecfault_clr   = WriteMSECFAULTM ? CSRWriteValM[6:0] : 7'h00;
 
-  always_ff @(posedge clk)
+  always_ff @(posedge clk_scan)
     if (reset) MSECFAULT_REGW <= 7'h00;
     else       MSECFAULT_REGW <= (MSECFAULT_REGW | SecFaultM) & ~msecfault_clr;
 

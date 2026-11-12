@@ -28,7 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
-  input  logic              clk, reset,
+  input  logic              clk, clk_scan, reset,
   // Per-unit enables from the core; each injector selects bit and kind locally.
   input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
   input  logic [15:0]       FaultLfsr,                      // shared fault-injection generator (ft_fault_gen)
@@ -93,7 +93,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign ResidueUnresolved[1] = DivUnresolvedE;
     // Division completes in E. Carry its terminal fault through the same
     // E->M enable/flush as its instruction and PC before requesting a trap.
-    flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
+    flopenrc #(1) divfaultreg(clk_scan, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
   end
 
   assign FTStallM      = MulFTStallM | DivFTStallM;
@@ -109,7 +109,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   assign PrelimResultM = Funct3M[2] ? DivResultM : ProdM;
 
   // Handle sign extension for W-type instructions
-  flopenrc #(1) W64MReg(clk, reset, FlushM, ~StallM, W64E, W64M);
+  flopenrc #(1) W64MReg(clk_scan, reset, FlushM, ~StallM, W64E, W64M);
   if (P.XLEN == 64) begin : resmux // RV64 has W-type instructions
     assign MDUResultM = W64M ? {{32{PrelimResultM[31]}}, PrelimResultM[31:0]} : PrelimResultM;
   end else begin : resmux // RV32 has no W-type instructions
@@ -117,5 +117,5 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   end
 
   // Writeback stage pipeline register
-  flopenrc #(P.XLEN) MDUResultWReg(clk, reset, FlushW, ~StallW, MDUResultM, MDUResultW);
+  flopenrc #(P.XLEN) MDUResultWReg(clk_scan, reset, FlushW, ~StallW, MDUResultM, MDUResultW);
 endmodule // mdu

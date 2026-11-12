@@ -29,7 +29,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module csrsr import cvw::*;  #(parameter cvw_t P) (
-  input  logic              clk, reset, StallW,
+  input  logic              clk, clk_scan, reset, StallW,
   input  logic              WriteMSTATUSM, WriteMSTATUSHM, WriteSSTATUSM,
   input  logic              TrapM, FRegWriteM,
   input  logic [1:0]        NextPrivilegeModeM, PrivilegeModeW,
@@ -145,7 +145,6 @@ module csrsr import cvw::*;  #(parameter cvw_t P) (
       STATUS_SUM_INT  <= 1'b0;
       STATUS_MPRV_INT <= 1'b0; // Per Priv 3.3
       STATUS_FS_INT   <= 2'b00; // leave floating-point off until activated, even if F_SUPPORTED
-      STATUS_MPP      <= 2'b00;
       STATUS_SPP      <= 1'b0;
       STATUS_MPIE     <= 1'b0;
       STATUS_SPIE     <= 1'b0;
@@ -163,7 +162,6 @@ module csrsr import cvw::*;  #(parameter cvw_t P) (
         if (NextPrivilegeModeM == P.M_MODE) begin
           STATUS_MPIE <= STATUS_MIE;
           STATUS_MIE  <= 1'b0;
-          STATUS_MPP  <= PrivilegeModeW;
         end else if (P.S_SUPPORTED) begin // supervisor mode
           STATUS_SPIE <= STATUS_SIE;
           STATUS_SIE  <= 1'b0;
@@ -172,7 +170,6 @@ module csrsr import cvw::*;  #(parameter cvw_t P) (
       end else if (mretM) begin // Privileged 3.1.6.1
         STATUS_MIE      <= STATUS_MPIE; // restore global interrupt enable
         STATUS_MPIE     <= 1'b1; //
-        STATUS_MPP      <= P.U_SUPPORTED ? P.U_MODE : P.M_MODE; // set MPP to lowest supported privilege level
         STATUS_MPRV_INT <= STATUS_MPRV_INT & (STATUS_MPP == P.M_MODE); // page 21 of privileged spec.
       end else if (sretM & P.S_SUPPORTED) begin
         STATUS_SIE      <= STATUS_SPIE; // restore global interrupt enable
@@ -187,7 +184,6 @@ module csrsr import cvw::*;  #(parameter cvw_t P) (
         STATUS_SUM_INT  <= P.VIRTMEM_SUPPORTED & CSRWriteValM[18];
         STATUS_MPRV_INT <= P.U_SUPPORTED & CSRWriteValM[17];
         STATUS_FS_INT   <= CSRWriteValM[14:13];
-        STATUS_MPP      <= STATUS_MPP_NEXT;
         STATUS_SPP      <= P.S_SUPPORTED & CSRWriteValM[8];
         STATUS_MPIE     <= CSRWriteValM[7];
         STATUS_SPIE     <= P.S_SUPPORTED & CSRWriteValM[5];
@@ -211,5 +207,21 @@ module csrsr import cvw::*;  #(parameter cvw_t P) (
         STATUS_SIE      <= P.S_SUPPORTED & CSRWriteValM[1];
         STATUS_UBE      <= P.U_SUPPORTED & P.BIGENDIAN_SUPPORTED & CSRWriteValM[6];
       end else if (FRegWriteM | WriteFRMM | SetOrWriteFFLAGSM) STATUS_FS_INT <= 2'b11;
+    end
+
+  // mstatus.MPP is on the DFT scan chains (hardened_csr group), so it is
+  // clocked by clk_scan, not clk: in a DFT hold session it must shift with the
+  // other scan cells while the rest of MSTATUS is frozen on the gated clock
+  // (hdl/forte_chip.sv, "DFT HOLD").  Same priority as the block above:
+  // trap to M, then mret, then an MSTATUS write; sret and the MSTATUSH/SSTATUS
+  // writes never touch MPP.
+  always_ff @(posedge clk_scan)
+    if (reset)                                        STATUS_MPP <= 2'b00;
+    else if (~StallW) begin
+      if (TrapM) begin
+        if (NextPrivilegeModeM == P.M_MODE)           STATUS_MPP <= PrivilegeModeW;
+      end else if (mretM)                             STATUS_MPP <= P.U_SUPPORTED ? P.U_MODE : P.M_MODE; // lowest supported privilege level
+      else if (sretM & P.S_SUPPORTED) ;               // MPP unchanged
+      else if (WriteMSTATUSM)                         STATUS_MPP <= STATUS_MPP_NEXT;
     end
 endmodule

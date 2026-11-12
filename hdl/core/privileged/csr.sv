@@ -30,7 +30,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module csr import cvw::*;  #(parameter cvw_t P) (
-  input  logic                     clk, reset,
+  input  logic                     clk, clk_scan, reset,
   input  logic                     FlushM, FlushW,
   input  logic                     StallE, StallM, StallW,
   input  logic [31:0]              InstrM,                    // current instruction
@@ -247,7 +247,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
     .MExtInt, .SExtInt, .MTimerInt, .STimerInt, .MSwInt,
     .MIDELEG_REGW, .ENVCFG_STCE, .MIP_REGW, .MIE_REGW, .MIP_REGW_writeable);
 
-  csrsr #(P) csrsr(.clk, .reset, .StallW,
+  csrsr #(P) csrsr(.clk, .clk_scan, .reset, .StallW,
     .WriteMSTATUSM, .WriteMSTATUSHM, .WriteSSTATUSM,
     .TrapM, .FRegWriteM, .NextPrivilegeModeM, .PrivilegeModeW,
     .mretM, .sretM, .WriteFRMM, .SetOrWriteFFLAGSM, .CSRWriteValM, .SelHPTW,
@@ -256,7 +256,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
     .STATUS_MIE, .STATUS_SIE, .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_TVM,
     .STATUS_FS, .BigEndianM);
 
-  csrm #(P) csrm(.clk, .reset,
+  csrm #(P) csrm(.clk, .clk_scan, .reset,
     .UngatedCSRMWriteM, .CSRMWriteM, .MTrapM, .CSRAdrM,
     .NextEPCM, .NextCauseM, .NextMtvalM, .MSTATUS_REGW, .MSTATUSH_REGW,
     .CSRWriteValM, .FTStatus, .CSRMReadValM, .MTVEC_REGW,
@@ -333,7 +333,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
 
   // merge CSR Reads
   assign CSRReadValM = CSRUReadValM | CSRSReadValM | CSRMReadValM | CSRCReadValM;
-  flopenrc #(P.XLEN) CSRValWReg(clk, reset, FlushW, ~StallW, CSRReadValM, CSRReadValW);
+  flopenrc #(P.XLEN) CSRValWReg(clk_scan, reset, FlushW, ~StallW, CSRReadValM, CSRReadValW);
 
   // merge illegal accesses: illegal if none of the CSR addresses is legal or privilege is insufficient
   assign InsufficientCSRPrivilegeM = (CSRAdrM[9:8] == 2'b11 & PrivilegeModeW != P.M_MODE) |

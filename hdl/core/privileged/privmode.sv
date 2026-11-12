@@ -28,7 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module privmode import cvw::*;  #(parameter cvw_t P) (
-  input  logic             clk, reset,
+  input  logic             clk, clk_scan, reset,
   input  logic             StallW,
   input  logic             TrapM,               // Trap
   input  logic             mretM, sretM,        // return instruction
@@ -70,12 +70,12 @@ module privmode import cvw::*;  #(parameter cvw_t P) (
     // A corrupted copy is detected when data != check (requires 4-bit simultaneous
     // flip to forge a consistent valid-looking copy — blocks U→M 2-bit glitch attacks
     // that bypass XOR parity, since U_MODE and M_MODE share XOR parity = 0).
-    flopenl #(2) privmodereg_a(clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_a);
-    flopenl #(2) privmodereg_b(clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_b);
-    flopenl #(2) privmodereg_c(clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_c);
-    flopenl #(2) privchkreg_a (clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_a);
-    flopenl #(2) privchkreg_b (clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_b);
-    flopenl #(2) privchkreg_c (clk, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_c);
+    flopenl #(2) privmodereg_a(clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_a);
+    flopenl #(2) privmodereg_b(clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_b);
+    flopenl #(2) privmodereg_c(clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_mode_c);
+    flopenl #(2) privchkreg_a (clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_a);
+    flopenl #(2) privchkreg_b (clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_b);
+    flopenl #(2) privchkreg_c (clk_scan, reset, ~StallW, NextPrivValid, P.M_MODE, priv_chk_c);
 
     // Per-copy validity: data matches check AND not reserved encoding
     assign valid_a = (priv_mode_a == priv_chk_a) & (priv_mode_a != 2'b10);

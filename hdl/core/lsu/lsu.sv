@@ -31,7 +31,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 module lsu import cvw::*;  #(parameter cvw_t P) (
-  input  logic                    clk, reset,
+  input  logic                    clk, clk_scan, reset,
   // Cache fault injection: unit enables and the core's shared generator (ft_fault_gen)
   input  logic                    FaultInjectCacheSec, FaultInjectCacheDed,
   input  logic [15:0]             FaultLfsr,
@@ -183,7 +183,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // Zero-extend address to 34 bits for XLEN=32
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  flopenrc #(P.XLEN) AddressMReg(clk, reset, FlushM, ~StallM, IEUAdrE, IEUAdrM);
+  flopenrc #(P.XLEN) AddressMReg(clk_scan, reset, FlushM, ~StallM, IEUAdrE, IEUAdrM);
   if(MISALIGN_SUPPORT) begin : ziccslm_align
     logic [P.XLEN-1:0] IEUAdrSpillE;
     logic [P.XLEN-1:0] IEUAdrSpillM;
@@ -555,7 +555,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // MW Pipeline Register
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  flopen #(P.LLEN) ReadDataMWReg(clk, ~StallW, ReadDataM, ReadDataW);
+  flopen #(P.LLEN) ReadDataMWReg(clk_scan, ~StallW, ReadDataM, ReadDataW);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Big Endian Byte Swapper
