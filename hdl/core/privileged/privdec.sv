@@ -29,7 +29,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module privdec import cvw::*;  #(parameter cvw_t P) (
-  input  logic         clk, reset,
+  input  logic         clk, clk_scan, reset,
   input  logic         StallW, FlushW,
   input  logic [31:7 ] InstrM,                              // privileged instruction function field
   input  logic         PrivilegedM,                         // is this a privileged instruction (from IEU controller)
@@ -102,7 +102,7 @@ module privdec import cvw::*;  #(parameter cvw_t P) (
   // coverage on
   end else assign WFITimeoutM = 1'b0;
 
-  flopenrc #(1) wfiWReg(clk, reset, FlushW, ~StallW, wfiM, wfiW);
+  flopenrc #(1) wfiWReg(clk_scan, reset, FlushW, ~StallW, wfiM, wfiW);
 
   ///////////////////////////////////////////
   // Extract exceptions by name and handle them

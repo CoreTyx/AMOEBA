@@ -14,6 +14,11 @@ module forte_soc import cvw::*; #(
   parameter logic   PERIPH_ONCHIP = 1'b1
 )(
   input  logic                  core_clk,
+  // The scan-selected registers' clock (hdl/forte_chip.sv, "DFT HOLD"): the
+  // same edges as core_clk except in a DFT hold session, where it pulses only
+  // on shift cycles while core_clk is stopped.  Everything else here, uncore
+  // included, runs on core_clk.
+  input  logic                  clk_scan,
   input  logic                  reset_ext,        // external asynchronous reset
   output logic                  reset,            // reset synchronised to core_clk
   input  logic                  ExternalStall,
@@ -55,7 +60,7 @@ module forte_soc import cvw::*; #(
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
   synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
 
-  wallypipelinedcore #(P) core(.clk(core_clk), .reset, .fault_inject, .FaultInjectMask,
+  wallypipelinedcore #(P) core(.clk(core_clk), .clk_scan, .reset, .fault_inject, .FaultInjectMask,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
     .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,

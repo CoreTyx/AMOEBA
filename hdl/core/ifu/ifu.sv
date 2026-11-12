@@ -27,7 +27,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module ifu import cvw::*;  #(parameter cvw_t P) (
-  input  logic                 clk, reset,
+  input  logic                 clk, clk_scan, reset,
   // Cache fault injection: unit enables and the core's shared generator (ft_fault_gen)
   input  logic                 FaultInjectCacheSec, FaultInjectCacheDed,
   input  logic [15:0]          FaultLfsr,
@@ -176,9 +176,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
       .IFUCacheBusStallF(IFUCacheBusStallF | InvalidateICacheM), .ITLBMissOrUpdateAF(ITLBMissOrUpdateAFRaw), .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
       .PostSpillInstrRawF, .CompressedF);
-    flopenr #(1) SpillDReg(clk, reset, ~StallD, SelSpillF, SelSpillD);
-    flopenr #(1) SpillEReg(clk, reset, ~StallE, SelSpillD, SelSpillE);
-    flopenr #(1) SpillMReg(clk, reset, ~StallM, SelSpillE, SelSpillM);
+    flopenr #(1) SpillDReg(clk_scan, reset, ~StallD, SelSpillF, SelSpillD);
+    flopenr #(1) SpillEReg(clk_scan, reset, ~StallE, SelSpillD, SelSpillE);
+    flopenr #(1) SpillMReg(clk_scan, reset, ~StallM, SelSpillE, SelSpillM);
     assign PCIncrM = PCM + 'd2;
     mux2 #(P.XLEN) pcspillmmux(PCM, PCIncrM, SelSpillM, PCSpillM);
 
@@ -381,7 +381,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   assign IFUStallF = IFUCacheBusStallF | SelSpillNextF | InvalidateICacheM;
   assign GatedStallD = StallD & ~SelSpillNextF;
 
-  flopenl #(32) AlignedInstrRawDFlop(clk, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);
+  flopenl #(32) AlignedInstrRawDFlop(clk_scan, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // PCNextF logic
@@ -393,7 +393,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, UnalignedPCNextF);
   mux2 #(P.XLEN) pcresetmux({UnalignedPCNextF[P.XLEN-1:1], 1'b0}, P.RESET_VECTOR[P.XLEN-1:0], reset, PCNextF);
-  flopen #(P.XLEN) pcreg(clk, ~StallF | reset, PCNextF, PCF);
+  flopen #(P.XLEN) pcreg(clk_scan, ~StallF | reset, PCNextF, PCF);
 
   // pcadder
   // add 2 or 4 to the PC, based on whether the instruction is 16 bits or 32
@@ -435,7 +435,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       .BTBCallF(1'b0), .BTBReturnF(1'b0), .BTBJumpF(1'b0),
       .BTBBranchF(1'b0), .BPCallF(), .BPReturnF(), .BPJumpF(), .BPBranchF(), .IClassWrongM,
       .BPReturnWrongD());
-    flopenrc #(1) PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcE, BPWrongM);
+    flopenrc #(1) PCSrcMReg(clk_scan, reset, FlushM, ~StallM, PCSrcE, BPWrongM);
     assign RASPredPCWrongM = 1'b0;
     assign BPDirWrongM = BPWrongM;
     assign BTAWrongM = BPWrongM;
@@ -448,7 +448,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   ////////////////////////////////////////////////////////////////////////////////////////////////
 
   // Decode stage pipeline register and logic
-  flopenrc #(P.XLEN) PCDReg(clk, reset, FlushD, ~StallD, PCF, PCD);
+  flopenrc #(P.XLEN) PCDReg(clk_scan, reset, FlushD, ~StallD, PCF, PCD);
 
   // expand 16-bit compressed instructions to 32 bits
   if (P.ZCA_SUPPORTED) begin : decomp
@@ -472,28 +472,28 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Spec 3.1.14
   // Traps: Can’t happen.  The bottom two bits of MTVEC are ignored so the trap always is to a multiple of 4.  See 3.1.7 of the privileged spec.
   assign InstrMisalignedFaultE = (IEUAdrE[1] & ~P.ZCA_SUPPORTED) & PCSrcE;
-  flopenr #(1) InstrMisalignedReg(clk, reset, ~StallM, InstrMisalignedFaultE, InstrMisalignedFaultM);
+  flopenr #(1) InstrMisalignedReg(clk_scan, reset, ~StallM, InstrMisalignedFaultE, InstrMisalignedFaultM);
 
   // Instruction and PC pipeline registers flush to NOP, not zero
   mux2    #(32)     FlushInstrEMux(InstrD, nop, FlushE, NextInstrD);
-  flopenr #(32)     InstrEReg(clk, reset, ~StallE, NextInstrD, InstrE);
-  flopenr #(P.XLEN) PCEReg(clk, reset, ~StallE, PCD, PCE);
+  flopenr #(32)     InstrEReg(clk_scan, reset, ~StallE, NextInstrD, InstrE);
+  flopenr #(P.XLEN) PCEReg(clk_scan, reset, ~StallE, PCD, PCE);
 
   // InstrM is only needed with CSRs or atomic operations
   if (P.ZICSR_SUPPORTED | P.ZAAMO_SUPPORTED | P.ZALRSC_SUPPORTED) begin
     mux2    #(32)     FlushInstrMMux(InstrE, nop, FlushM, NextInstrE);
-    flopenr #(32)     InstrMReg(clk, reset, ~StallM, NextInstrE, InstrM);
+    flopenr #(32)     InstrMReg(clk_scan, reset, ~StallM, NextInstrE, InstrM);
   end else assign InstrM = '0;
   // PCM is only needed with CSRs or branch prediction
   if (P.ZICSR_SUPPORTED | P.BPRED_SUPPORTED)
-    flopenr #(P.XLEN) PCMReg(clk, reset, ~StallM, PCE, PCM);
+    flopenr #(P.XLEN) PCMReg(clk_scan, reset, ~StallM, PCE, PCM);
   else assign PCM = '0;
 
   // If compressed instructions are supported, increment PCLink by 2 or 4 for a jal.  Otherwise, just by 4
   if (P.ZCA_SUPPORTED) begin
     logic CompressedD;  // instruction is compressed
-    flopenrc #(1) CompressedDReg(clk, reset, FlushD, ~StallD, CompressedF, CompressedD);
-    flopenrc #(1) CompressedEReg(clk, reset, FlushE, ~StallE, CompressedD, CompressedE);
+    flopenrc #(1) CompressedDReg(clk_scan, reset, FlushD, ~StallD, CompressedF, CompressedD);
+    flopenrc #(1) CompressedEReg(clk_scan, reset, FlushE, ~StallE, CompressedD, CompressedE);
     assign PCLinkE = PCE + (CompressedE ? 'd2 : 'd4); // 'd4 means 4 but stops Design Compiler complaining about signed to unsigned conversion
   end else begin
     assign CompressedE = 1'b0;
@@ -503,9 +503,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // pipeline original compressed instruction in case it is needed for MTVAL on an illegal instruction exception
   if (P.ZICSR_SUPPORTED & P.ZCA_SUPPORTED | 1) begin
     logic CompressedM; // instruction is compressed
-    flopenrc #(16) InstrRawEReg(clk, reset, FlushE, ~StallE, InstrRawD[15:0], InstrRawE);
-    flopenrc #(16) InstrRawMReg(clk, reset, FlushM, ~StallM, InstrRawE, InstrRawM);
-    flopenrc #(1)  CompressedMReg(clk, reset, FlushM, ~StallM, CompressedE, CompressedM);
+    flopenrc #(16) InstrRawEReg(clk_scan, reset, FlushE, ~StallE, InstrRawD[15:0], InstrRawE);
+    flopenrc #(16) InstrRawMReg(clk_scan, reset, FlushM, ~StallM, InstrRawE, InstrRawM);
+    flopenrc #(1)  CompressedMReg(clk_scan, reset, FlushM, ~StallM, CompressedE, CompressedM);
     mux2     #(32) InstrOrigMux(InstrM, {16'b0, InstrRawM}, CompressedM, InstrOrigM);
   end else
     assign InstrOrigM = InstrM;

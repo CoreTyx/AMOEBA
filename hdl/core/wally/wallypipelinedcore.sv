@@ -28,7 +28,11 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
-   input  logic                  clk, reset,
+   // clk_scan clocks only the registers on the DFT scan chains (PC, pipeline
+   // registers, hardened CSRs; see hdl/forte_chip.sv, "DFT HOLD").  It has the
+   // same edges as clk except in a DFT hold session.  Tie it to clk anywhere
+   // there is no DFT (wallypipelinedsoc does).
+   input  logic                  clk, clk_scan, reset,
    // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
    input  logic                  fault_inject, // external master enable
    input  logic [FI_UNITS-1:0]   FaultInjectMask, // APB unit enables: ALU/CMP/MUL/DIV/regfile ECC/pipeline ECC/cache SEC/cache DED
@@ -240,7 +244,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign FlushDCacheF = FlushDCacheM | FenceIWaitDCache;
 
   // instruction fetch unit: PC, branch prediction, instruction cache
-  ifu #(P) ifu(.clk, .reset,
+  ifu #(P) ifu(.clk, .clk_scan, .reset,
     .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
     .FaultLfsr, .FaultCount,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
@@ -266,7 +270,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PMPCFG_ARRAY_REGW,  .PMPADDR_ARRAY_REGW, .InstrAccessFaultF);
 
   // integer execution unit: integer register file, datapath and controller
-  ieu #(P) ieu(.clk, .reset,
+  ieu #(P) ieu(.clk, .clk_scan, .reset,
      .RegfileSec, .RegfileDed, .PipeSec, .PipeDed, .FTDetect, .FTUnresolved,
      .FTUnresolvedM,
      .fault_inject_alu(FaultInjectUnits[FI_ALU]), .fault_inject_cmp(FaultInjectUnits[FI_CMP]),
@@ -318,7 +322,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .InjectReqD, .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
-    .clk, .reset,
+    .clk, .clk_scan, .reset,
     .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
     .FaultLfsr, .FaultCount,
     .StallM, .FlushM, .StallW, .FlushW,
@@ -390,7 +394,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign FTStatus = {FTUnresolvedM, 2'b00, (DIV_PE_p | DIV_PE_r),
                      (MUL_PE_p | MUL_PE_r), (CMP_PE_p | CMP_PE_r), (ALU_PE_p | ALU_PE_r)};
   // Sticky status survives the transient checker pulse and is read via CSR.
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk_scan) begin
     if (reset) FTStatusSticky <= '0;
     else       FTStatusSticky <= FTStatusSticky | FTStatus;
   end
@@ -413,7 +417,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // privileged unit
   if (P.ZICSR_SUPPORTED) begin : priv
     privileged #(P) priv(
-      .clk, .reset,
+      .clk, .clk_scan, .reset,
       .FlushD, .FlushE, .FlushM, .FlushW, .StallD, .StallE, .StallM, .StallW,
       .CSRReadM, .CSRWriteM, .SrcAM, .PCM, .PCSpillM,
       .InstrM, .InstrOrigM, .CSRReadValW, .EPCM, .TrapVectorM,
@@ -501,7 +505,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
-    mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+    mdu #(P) mdu(.clk, .clk_scan, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
       .fault_inject_mul(FaultInjectUnits[FI_MUL]), .fault_inject_div(FaultInjectUnits[FI_DIV]),
       .FaultLfsr, .FaultCount,
       .ForwardedSrcAE, .ForwardedSrcBE,

@@ -90,6 +90,7 @@ module csr_harden_tb;
 
   privmode #(.P(P)) dut_privmode (
     .clk                         (clk),
+    .clk_scan                    (clk),
     .reset                       (pm_reset),
     .StallW                      (pm_StallW),
     .TrapM                       (pm_TrapM),
