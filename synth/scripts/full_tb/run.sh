@@ -212,6 +212,12 @@ if (( REGENERATE )); then
     echo "run.sh: regenerated scan map and enabled hookups from $SCANDEF"
 else
     [ -s "$SCAN_MAP" ] || die "no cached scan map at $SCAN_MAP; run ./run.sh --regen once"
+    # A map older than what it was made from belongs to another netlist.
+    stale_src=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
+    for f in "$NETLIST" "$stale_src" "${LOGICAL_PHASE:-}" "$SRC_DIR/scan_map.awk"; do
+        [[ -n "$f" && -f "$f" && "$f" -nt "$SCAN_MAP" ]] \
+            && die "cached scan map is older than $f; run ./run.sh --regen"
+    done
     if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
         [ -s "$SCAN_HOOKUP_FILE" ] || die "no cached hookups at $SCAN_HOOKUP_FILE; run ./run.sh --regen"
     fi

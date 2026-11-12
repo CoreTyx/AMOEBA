@@ -82,8 +82,9 @@ python3 src/set_scan_phase.py '*verified_instance_pattern*' 1 --file scan_phase.
 
 The utility changes matching flags; it does not discover polarity or add
 missing entries. Regenerate after changing netlist, scandef, phase corrections,
-or generators. Normal runs reuse cached metadata without checking freshness;
-missing cache files request `--regen`.
+or generators. Normal runs reuse cached metadata; `run.sh` stops and asks for
+`--regen` when the map is missing or older than the netlist, scandef, phase
+file or `src/scan_map.awk`.
 
 ### 3. Run and inspect results
 
@@ -223,13 +224,13 @@ Errors seen when bringing the bench up on a new machine:
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| M: `cN is 9 cells in the scandef, 162 at the pins` (c7: 8) after A found the full chains | The cached map is the old PC-only one: the run reused `sim/` without `--regen` | `./run.sh --regen`. `run.sh` now refuses a map older than its netlist or scandef |
 | A finds 63 cells (7 × 8 + 7) | The netlist was built with `DFT_SCOPE=pc` | `make synth DFT_SCOPE=full`, then `./run.sh --regen` |
 | M: `cN is n+1 cells in the scandef, n at the pins` on every chain | An old `src/scan_map.awk` that counts the scandef `STOP` entry as a cell, or a cached map from before the fix | Copy the current `src/`; `grep -c stop_seen src/scan_map.awk` must print 0; rerun with `--regen` |
 | `Error-[IND] Identifier 'TA' not declared` in `pin_link_agent.sv` | The old 16-bit link agent compiled against the new 8-bit `forte_link_pkg.sv` | Copy the current `hvl/pin/pin_link_agent.sv`, or point `LINK_AGENT` at it in `paths.sh` |
 | `Error-[XMRE]` on `dut.chip.soc_core_..._reg_N_.Q` in `scan_hookups.generated.svh` | The netlist flattens `soc` into `chip` differently from the one `internal_hookups.py` was checked on, so the generated hierarchical paths do not resolve | Set `SCAN_HOOKUPS=0` in `paths.sh`. The hookups only add diagnostics; every check still runs without them |
 
-Normal runs reuse `sim/` metadata without checking that it is fresh: after
-copying new scripts or a new netlist, always run once with `--regen`.
+After copying new scripts or a new netlist, run once with `--regen`.
 
 ## Files
 
