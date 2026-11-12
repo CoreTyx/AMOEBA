@@ -20,7 +20,7 @@ target_site 0 1f0 256 none
 # CMP replica 0, replica 1
 target_site 1 1ce 256 10
 target_site 1 18e 256 10
-target_site 2 17e 256 12
+target_site 2 17e 4096 12
 target_site 3 15e 4096 14
 # I$, D$, then neither
 target_site 6 13e 256 4

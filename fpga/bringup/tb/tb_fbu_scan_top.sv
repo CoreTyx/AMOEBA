@@ -5,7 +5,7 @@
 // The top is the RTL forte_pynq_top_v, or (+define+SCAN_TB_TOP=forte_dut_0)
 // the bitstream build's synthesized DUT, written with write_verilog -mode
 // funcsim: the ports are the same, so a capture path that synthesis removes
-// fails here before it reaches the board.  The checker is fe_scan's: io[15:8]
+// fails here before it reaches the board.  The checker is fe_scan's: io_out
 // must be the pattern a fixed latency late while scan_en was high, held while
 // it was low, and exactly one latency in 1..6 may fit.
 ///////////////////////////////////////////////////////////////////////////////

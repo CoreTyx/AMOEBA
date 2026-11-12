@@ -494,8 +494,8 @@ class Forte:
         return {g: self.rd(R.REG_FI_EVENTS + 4 * i) for i, g in enumerate(R.FI_GROUPS)}
 
     def scan_session(self, pattern, scan_en_from_pattern: bool = True) -> list:
-        """One test-mode session (fbu_scan): pattern entries are (io[7:0], scan_en);
-        returns io[15:8] as captured each cycle.  test_mode is raised for the
+        """One test-mode session (fbu_scan): pattern entries are (io_in, scan_en);
+        returns io_out as captured each cycle.  test_mode is raised for the
         session and dropped after it."""
         ctrl = 2 if scan_en_from_pattern else 0
         self.wr(R.REG_SCAN_CTRL, ctrl)

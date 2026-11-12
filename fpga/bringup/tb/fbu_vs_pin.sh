@@ -44,7 +44,7 @@ for f in "$R"/testcode/isa_level_testing/tc_*.c "$R"/testcode/isa_level_testing/
   [ "$(basename "$f")" = tc_fault_control.c ] || ALWAYS_ON_IMAGES+=("$f")
 done
 # Known frozen-RTL failures (plan s12.1): these must keep failing the same way.
-ALWAYS_ON_KNOWN_HANGS=("tc_pmp_deny/0x5F-g10s4l7")   # F1: I$ ECC repair written to the flush target's set
+ALWAYS_ON_KNOWN_HANGS=()
 ALWAYS_ON_KNOBS=(
   "g30s1|+FPGA_GAP_PCT=30 +FPGA_SEED=1"
   "g60s3|+FPGA_GAP_PCT=60 +FPGA_SEED=3"
@@ -469,12 +469,14 @@ if [ $FULL = 1 ]; then
   natural_test
   link_test "$TESTS/smoke.c" wstrb "+FPGA_SEED=1 +WSTRB_TEST"
   link_test "$TESTS/smoke.c" fi_gen "+FPGA_SEED=1 +FI_TEST"
-  for st in 1 3 5; do
+  # Link states: 1 header, 2 write_data, 3 read_latency, 4 read_data.  A reset
+  # in the boot fetch leaves the trace equal to the bench's; read_latency needs
+  # a read latency to exist.
+  for st in 1 4; do
     link_test "$TESTS/smoke.c" "reset_in_state$st" "+FPGA_SEED=1 +TRIG_RESET_STATE=$st"
   done
-  for st in 2 6; do
-    self_test "reset_in_state$st" "+TRIG_RESET_STATE=$st" "reset trigger fired once"
-  done
+  link_test "$TESTS/smoke.c" reset_in_state3 "+FPGA_SEED=1 +FPGA_RD_LAT=2 +TRIG_RESET_STATE=3"
+  self_test reset_in_state2 "+TRIG_RESET_STATE=2" "reset trigger fired once"
   for t in irq uart_echo uart_lsr; do
     script_test "$t"
   done

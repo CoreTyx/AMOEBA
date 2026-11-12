@@ -14,7 +14,7 @@
 set -euo pipefail
 R="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$R"
-FREEZE_REF="${FREEZE_REF:-8babc55}"
+FREEZE_REF="${FREEZE_REF:-eb97143}"
 EMU=fpga/pynq/rtl/emu
 MODELS=hvl/pin/models
 fail=0

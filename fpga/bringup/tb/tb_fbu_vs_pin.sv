@@ -89,9 +89,9 @@ module tb_fbu_vs_pin;
   logic              rst_n;
   logic [1:0]        irq;
   logic              fault_inject, test_mode, scan_en, uart_rx;
-  logic [LINK_W-1:0] io_o, io_oe, io_i;
+  logic [LINK_W-1:0] io_in, io_out;
   logic              ready, rvalid_pin;
-  logic              dir, req, wr, clk_out, uart_tx, status;
+  logic              req, wr, clk_out, uart_tx, status;
 
 `ifdef BOARD_TOP
   logic        ctl_awready, ctl_wready, ctl_bvalid, ctl_arready, ctl_rvalid;
@@ -190,8 +190,8 @@ module tb_fbu_vs_pin;
 `else
   forte_emu_dut dut (
     .core_clk(clk), .rst_n,
-    .fpga_io_o(io_o), .fpga_io_oe(io_oe), .fpga_io_i(io_i),
-    .dir, .req, .wr, .clk_out, .uart_tx, .status,
+    .io_in, .io_out,
+    .req, .wr, .clk_out, .uart_tx, .status,
     .ready, .rvalid(rvalid_pin), .irq, .uart_rx,
     .test_mode, .scan_en, .fault_inject);
 
@@ -207,8 +207,8 @@ module tb_fbu_vs_pin;
     .s_axil_araddr(araddr), .s_axil_arvalid(arvalid), .s_axil_arready(arready),
     .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
     .rst_n, .irq, .fault_inject, .test_mode, .scan_en, .uart_rx,
-    .io_o, .io_oe, .ready, .rvalid(rvalid_pin),
-    .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
+    .io_in, .ready, .rvalid(rvalid_pin),
+    .io_out, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err(1'b0), .mem_stat('0),
     .trace_stream(), .trace_stream_valid(), .trace_stream_pop(1'b0),
@@ -266,14 +266,10 @@ module tb_fbu_vs_pin;
   int                rsp_due  [$];
   int                now = 0;
 
+  // A read accepted in cycle N returns its line in cycle N + mem_lat, as
+  // fbu_mem_bram does with mem_lat 1.
   always @(posedge clk) begin
     now++;
-    m_rsp_valid <= 1'b0;
-    if (rsp_due.size() != 0 && rsp_due[0] <= now) begin
-      m_rsp_valid <= 1'b1;
-      m_rsp_data  <= rsp_pipe.pop_front();
-      void'(rsp_due.pop_front());
-    end
     if (m_req_valid && m_req_ready) begin
       if (m_req_wr) begin
         for (int b = 0; b < BEATS; b++)
@@ -283,8 +279,14 @@ module tb_fbu_vs_pin;
         for (int b = 0; b < BEATS; b++)
           l[64 * b +: 64] = mem_rd(64'(m_req_addr) + 64'(8 * b));
         rsp_pipe.push_back(l);
-        rsp_due.push_back(now + mem_lat);
+        rsp_due.push_back(now + mem_lat - 1);
       end
+    end
+    m_rsp_valid <= 1'b0;
+    if (rsp_due.size() != 0 && rsp_due[0] <= now) begin
+      m_rsp_valid <= 1'b1;
+      m_rsp_data  <= rsp_pipe.pop_front();
+      void'(rsp_due.pop_front());
     end
   end
 `endif
@@ -1440,8 +1442,8 @@ module tb_fbu_vs_pin;
       "scan_session": begin
         // scan_session <len> <seed>: one test-mode session with a seeded
         // random pattern, scan_en high three cycles in four.  The chip's stub
-        // loads scan_q from io[7:0] while scan_en is high and drives it on
-        // io[15:8], so the capture must be the pattern some fixed latency
+        // loads scan_q from io_in while scan_en is high and drives it on
+        // io_out, so the capture must be the pattern some fixed latency
         // late, held while scan_en was low; exactly one latency may fit.
         int          len;
         int          seed;

@@ -390,14 +390,14 @@ class Run:
         if wrong:
             self.error(f"target_site unit {unit} phase {phase:03x}: {wrong} wrong kernel results")
 
-    # The latencies scan_session tries, from fbu_scan driving io[7:0] to it
-    # capturing the chip's scan_q on io[15:8].
+    # The latencies scan_session tries, from fbu_scan driving io_in to it
+    # capturing the chip's scan_q on io_out.
     SCAN_LATENCIES = range(1, 7)
 
     def scan_session(self, length: int, seed: int) -> None:
         """scan_session <len> <seed>: one test-mode session with a seeded random
         pattern, scan_en high three cycles in four.  The chip's stub loads
-        scan_q from io[7:0] while scan_en is high and drives it on io[15:8], so
+        scan_q from io_in while scan_en is high and drives it on io_out, so
         the capture must be the pattern some fixed latency late, held while
         scan_en was low; exactly one latency may fit."""
         rng = random.Random(seed)

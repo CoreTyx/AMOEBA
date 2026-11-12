@@ -12,27 +12,22 @@ package fbu_pkg;
   // ---- link checker error codes ---------------------------------------------
   // One bit each in the sticky LINK_ERR register.  1..20 are pin_link_agent's
   // checks, in its order; 21.. are the gateware's own.  The bench's X/Z checks
-  // have no code: hardware is 2-state.
+  // have no code: hardware is 2-state.  1-3, 12, 14, 16 and 18 were the
+  // checks of the tristate link (dir, contention, turnaround); since the split
+  // into io_in / io_out they are never raised and stay reserved.
   typedef enum logic [4:0] {
     LE_NONE          = 5'd0,
-    LE_REQ_DIR0      = 5'd1,   // req while dir=0
-    LE_CONTENTION    = 5'd2,   // slave driving io while dir=1
-    LE_IO_MISMATCH   = 5'd3,   // io resolves to something other than what the slave drives
     LE_WATCHDOG      = 5'd4,   // transaction not finished in WDOG cycles
     LE_GUARD         = 5'd5,   // req more than GUARD cycles after ready fell
-    LE_HDR_REQ_DROP  = 5'd6,   // req dropped after one header word
+    LE_HDR_REQ_DROP  = 5'd6,   // req dropped before the last header word
     LE_HDR_WR_CHG    = 5'd7,   // wr changed inside the header
     LE_ADDR_RANGE    = 5'd8,   // address outside EXT_MEM
     LE_ADDR_ALIGN    = 5'd9,   // address not line-aligned
     LE_FIRST_XACT    = 5'd10,  // first transaction after reset is not a read of RESET_VEC
     LE_WD_REQ        = 5'd11,  // req during write data
-    LE_WD_DIR        = 5'd12,  // dir fell during write data
     LE_WD_WR         = 5'd13,  // wr dropped during write data
-    LE_RTA_REQ       = 5'd14,  // req during read turnaround
-    LE_RLAT_DIR      = 5'd15,  // dir rose during read latency
-    LE_RD_DIR        = 5'd16,  // dir rose during read data
+    LE_RLAT_REQ      = 5'd15,  // req during read latency
     LE_RD_REQ        = 5'd17,  // req during read data
-    LE_REL_DIR       = 5'd18,  // dir rose within TA cycles of the last rvalid
     LE_LAT_OVERRUN   = 5'd21,  // DET: line not back from the backend when its first word was due
     LE_REQ_OVERFLOW  = 5'd22,  // backend request queue full on a push
     LE_MEM_ERR       = 5'd23   // backend reported an error (sticky RESP, out-of-window)

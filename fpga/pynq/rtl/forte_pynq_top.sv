@@ -151,12 +151,10 @@ module forte_pynq_top import forte_link_pkg::*; #(
   logic              test_mode;
   logic              scan_en;
   logic              uart_rx;
-  logic [LINK_W-1:0] io_o;
-  logic [LINK_W-1:0] io_oe;
-  logic [LINK_W-1:0] io_i;
+  logic [LINK_W-1:0] io_in;
+  logic [LINK_W-1:0] io_out;
   logic              ready;
   logic              rvalid;
-  logic              dir;
   logic              req;
   logic              wr;
   logic              clk_out;
@@ -165,8 +163,8 @@ module forte_pynq_top import forte_link_pkg::*; #(
 
   forte_emu_dut chip (
     .core_clk(aclk), .rst_n,
-    .fpga_io_o(io_o), .fpga_io_oe(io_oe), .fpga_io_i(io_i),
-    .dir, .req, .wr, .clk_out, .uart_tx, .status,
+    .io_in, .io_out,
+    .req, .wr, .clk_out, .uart_tx, .status,
     .ready, .rvalid, .irq, .uart_rx,
     .test_mode, .scan_en, .fault_inject);
 
@@ -201,8 +199,8 @@ module forte_pynq_top import forte_link_pkg::*; #(
     .s_axil_arready(s_axi_ctl_arready), .s_axil_rdata(s_axi_ctl_rdata), .s_axil_rresp(s_axi_ctl_rresp),
     .s_axil_rvalid(s_axi_ctl_rvalid), .s_axil_rready(s_axi_ctl_rready),
     .rst_n, .irq, .fault_inject, .test_mode, .scan_en, .uart_rx,
-    .io_o, .io_oe, .ready, .rvalid,
-    .io_i, .dir, .req, .wr, .clk_out, .uart_tx, .status,
+    .io_in, .ready, .rvalid,
+    .io_out, .req, .wr, .clk_out, .uart_tx, .status,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err, .mem_stat,
     .trace_stream, .trace_stream_valid, .trace_stream_pop,

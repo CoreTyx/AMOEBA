@@ -2,6 +2,13 @@
 
 **Rev 0.2 · 2026-10-28 · branch `fpga/rtl_freeze` (worktree `rtl_freeze_fpga_em`), forked from `postsynth_verif` @ `8babc55` (confirmed as the freeze base)**
 
+Rev 0.3 (2026-11-11): the freeze moves to `main` @ `890ea65` plus the F1 I$
+fix (`eb97143`, Q1). Main split the link's 16-pin tristate bus into one-way
+`io_in[7:0]` (FPGA to chip) and `io_out[7:0]` (chip to FPGA): no `dir`, no
+turnaround, a 4-byte header, a line in 20 cycles each way, 31 signal pins.
+The gateware follows (§3.1, §5.1, §5.2, §5.5, §6); main also made the
+multiplier sequential and synchronised `test_mode`.
+
 Rev 0.2: team answers folded in (§12). `fault_inject` becomes a PS-controlled
 fault-tolerance knob with a phase-aware pattern generator (§5.4.1); DFT tests
 are deferred but `fbu_scan` is still built; the split-clock build is required
@@ -9,12 +16,12 @@ are deferred but `fbu_scan` is still built; the split-clock build is required
 commands live in their own dialect, and `hvl/pin/` is not touched (§10.3).
 
 Goal: put the frozen ASIC top, `hdl/forte_top.sv`, **unmodified**, into the
-PYNQ-Z2 fabric. Surround it with gateware that talks to it **through its 32
+PYNQ-Z2 fabric. Surround it with gateware that talks to it **through its 31
 signal pins only**, exactly as the bring-up FPGA will talk to the die. Then
 stress every pin group from PS-side firmware:
 
 - the control interface (`rst_n`, `irq[1:0]`, `fault_inject`, `test_mode`, `scan_en`)
-- the data interface (`io[15:0]`, `dir`, `req`, `wr`, `ready`, `rvalid`, `clk_out`)
+- the data interface (`io_in[7:0]`, `io_out[7:0]`, `req`, `wr`, `ready`, `rvalid`, `clk_out`)
 - the console (`uart_tx`, `uart_rx`)
 - the status interface (`status`)
 
@@ -103,17 +110,17 @@ fpga/
       fbu_pin_ctl.sv          rst_n sequencer, boot gate, irq/test pins, triggers
       fbu_fi_gen.sv           fault_inject pattern generator, phase mirror of the chip's fault generator (§5.4.1)
       fbu_line_cdc.sv         async FIFO pair for the line interface (split build; the bring-up board needs it too)
-      fbu_scan.sv             test-mode driver: io[7:0] out, io[15:8] in, pattern + capture RAMs (built; tests deferred)
+      fbu_scan.sv             test-mode driver: io_in out, io_out in, pattern + capture RAMs (built; tests deferred)
       fbu_uart.sv             8N1 RX from uart_tx, TX into uart_rx, fractional baud, error injection
       fbu_status_mon.sv       status half-period meter + classifier; clk_out edge counter
       fbu_mailbox.sv          optional "magic memory" window: event log + PS-supplied read data
       fbu_regs.sv             AXI4-Lite register file for all of the above (map in §6)
-      fbu_top.sv              ties the above together; ports = the 32 chip pins + line-if + AXI-Lite
+      fbu_top.sv              ties the above together; ports = the 31 chip pins + line-if + AXI-Lite
     tb/
       tb_fbu_vs_pin.sv        fbu_top vs pin_link_agent on forte_top, trace-compared (§8.1)
   pynq/                       board-specific (Zynq-7020)
     rtl/
-      emu/emu_pads.sv         io_in / io_out / io_tri stand-ins (from hvl/pin/models/pad_behav.sv)
+      emu/emu_pads.sv         io_in / io_out stand-ins (from hvl/pin/models/pad_behav.sv)
       emu/emu_srams.sv        rf_sp_* / sram_sp_* stand-ins mapped to BRAM/LUTRAM
       emu/emu_taps.sv         EMU_TAPS only: retired/trap counters by hierarchical reference
       forte_emu_dut.sv        forte_top + in-fabric pin wiring + fbu_top
@@ -145,13 +152,13 @@ the memory backend, clocking and pin placement.
  ───────────────────────                         ─────────────────────────────────────────────────────────
  sw/forte  ── M_AXI_GP0 ──► fbu_regs (0x43C0_0000) ─┬─ fbu_pin_ctl ── rst_n, irq[1:0], fault_inject,
                                                    │                  test_mode, scan_en ───────────┐
-                                                   ├─ fbu_scan ─────── io[7:0] (test mode only) ────┤
+                                                   ├─ fbu_scan ─────── io_in (test mode only) ──────┤
                                                    ├─ fbu_uart ─────── uart_rx ─────────────────────┤
           ◄── uart RX FIFO, trace, counters ───────┤◄─────────────────── uart_tx ──────────────────┤   forte_top
                                                    ├─ fbu_status_mon ◄── status, clk_out ───────────┤   (frozen,
                                                    ├─ fbu_link_check ◄── all link pins (passive) ───┤    emu_pads,
                                                    ├─ fbu_link_trace                                │    emu_srams)
-                                                   └─ fbu_link_slave ◄─► io[15:0], dir, req, wr, ───┘
+                                                   └─ fbu_link_slave ◄─► io_in, io_out, req, wr, ──┘
                                                             │            ready, rvalid
                                                      line-if (16 B)
                                      ┌──────────────────────┴───────────────────────┐
@@ -161,22 +168,11 @@ the memory backend, clocking and pin placement.
 
 ### 3.1 The in-fabric pin boundary
 
-`forte_emu_dut.sv` instantiates `forte_top` and `fbu_top` and wires the 32 pins
-as nets:
-
-- **`io[15:0]`** is one `wire` with two tristate drivers: `forte_top`'s
-  `io_tri` stand-ins (`t = ~io_oe`, per lane, as frozen) and `fbu_top`'s
-  `assign io = fbu_io_oe ? fbu_io_o : 'z`. Vivado converts the internal
-  tristate to mux logic. This is the same construction that passed stage A/B on
-  `feature/top_level` (`amoeba_asic_wrapper.sv:233-241`). The per-lane
-  `t` is preserved, so test mode's split direction (`io[7:0]` in, `io[15:8]`
-  out) is real in the fabric.
-- All other pins are plain nets.
-- **Contention cannot be observed electrically in fabric.** The resolved mux
-  silently picks one driver. `fbu_link_check` therefore enforces the rule at
-  the pins: the FPGA drives `io` only while `dir=0`, after `TA`, with `rvalid`,
-  and in test mode only on `io[7:0]`. Any violation is a sticky error. That is
-  the same rule the bench enforces, and the same one the real board needs.
+`forte_emu_dut.sv` instantiates `forte_top` and `fbu_top` and wires the 31 pins
+as plain nets. Since the link split (rev 0.3) no pin is shared: `io_in[7:0]`
+is driven by `fbu_top` alone and `io_out[7:0]` by the chip alone, so there is
+no tristate in the fabric and no contention to check. In test mode `io_in`
+carries scan in and `io_out` scan out, with no direction override.
 
 ### 3.2 Clocking
 
@@ -281,9 +277,8 @@ and P5 builds no bitstream until it passes the SPLIT group in simulation.
 
 ### 4.1 `emu_pads.sv`
 
-Vivado defines `SYNTHESIS`, so `forte_top` instantiates `io_in`, `io_out` and
-`io_tri`. These are copies of `hvl/pin/models/pad_behav.sv` (three one-line
-modules) so the FPGA and the pin bench model the pads identically. A
+Vivado defines `SYNTHESIS`, so `forte_top` instantiates `io_in` and `io_out`.
+These are copies of `hvl/pin/models/pad_behav.sv` (two one-line modules) so the FPGA and the pin bench model the pads identically. A
 `check_frozen.sh` step diffs the two files' module bodies.
 
 ### 4.2 `emu_srams.sv`
@@ -314,7 +309,7 @@ the D$ relies on merging into), which a `USE_SRAM=0` build would not.
 
 ### 4.3 `forte_emu_dut.sv`
 
-`forte_top` + `fbu_top` + the `io` net (§3.1). Its parameters are
+`forte_top` + `fbu_top` + the pin nets (§3.1). Its parameters are
 `PERIPH_ONCHIP = 1` (admitted) and nothing else. `forte_top` does not pass
 `STATUS_*` through, so status rates are the silicon defaults, which is what we
 want.
@@ -345,19 +340,21 @@ counters, `IN_REG`) and `hvl/pin/pin_link_agent.sv` (behaviour, decisions,
 checks). **Spec:** `docs/top_level_plan.md` §3.4 and `hdl/forte_link_pkg.sv`.
 
 - **Parameters.** `BEATS = 2` (asserted against the build config at elaboration
-  via `pkg/config.vh`), `TA = 2`, `GUARD = 3`, `MEM_BASE/LIMIT =
+  via `pkg/config.vh`), `LINK_W = 8`, `ADDR_WORDS = 4`, `GUARD = 3`, `MEM_BASE/LIMIT =
   0x8000_0000/0x8FFF_FFFF`, `RESET_VEC = 0x8000_0000`, `IN_REG`
   (extra capture stage, for real pins).
-- **Header.** On `req` with `dir=1`, take `io` as `A[31:16]`, then `A[15:0]`.
+- **Header.** On `req`, take four bytes of `io_out`, most significant first.
   `wr` is sampled in header cycle 0.
-- **Write.** Collect `W = 4·BEATS = 8` words back to back (no flow control
+- **Write.** Collect `W = 8·BEATS = 16` bytes of `io_out` back to back, least
+  significant first (no flow control
   exists). Assemble the line, then commit it to the line interface **only
   when complete**. If `rst_n` falls mid-write, the partial line is
   **discarded** and counted (`LINK_RST_ABORT`). Silicon cannot finish it, and
   committing half a line is how memory gets corrupted by a reset.
-- **Read.** Issue a line read to the backend at the header. Count `TA` cycles of
-  `dir=0`. Wait for the line, then drive the 8 words LSW first with `rvalid`.
-  Release `io` after the last word.
+- **Read.** Issue a line read to the backend at the header. From the cycle
+  after the last header byte (no turnaround), wait `rd_latency`, then drive the
+  16 bytes on `io_in`, least significant first, with `rvalid`. `io_in` is 0
+  between read bytes, as the bench's default `FPGA_IO_IDLE`.
 - **Latency and gap model**, identical to `pin_link_agent` so that traces are
   comparable (§8.1):
   - xorshift64 `prng` seeded `0x9E3779B97F4A7C15 ^ seed·0x2545F4914F6CDD1D`
@@ -369,7 +366,7 @@ checks). **Spec:** `docs/top_level_plan.md` §3.4 and `hdl/forte_link_pkg.sv`.
     fixed cycles before the first word
 - **Deterministic mode (`LINK_CFG.DET=1`).** The backend's real latency must
   not perturb the cycle trace. The slave serves the first word at exactly
-  `TA + rd_latency` after the header, and requires the line to be ready by
+  `rd_latency` after the header, and requires the line to be ready by
   then; if it is not, `LAT_OVERRUN` is counted. With `rd_latency` ≥ the
   backend's worst case (BRAM: ~4; DDR: measure, expect ~40–80 at 25 MHz), the
   link trace is a pure function of the program and seed, as in simulation.
@@ -399,24 +396,29 @@ This is a synthesizable port of every check in `pin_link_agent.sv` plus
 `pin_tb.sv`'s pin monitors. Each check has a bit in `LINK_ERR` (sticky). The
 first error's code and cycle are latched, with a count per check.
 
+As built, the checks live in `fbu_link_slave` (codes in `fbu_pkg::link_err_t`,
+names in `sw/forte/regs.py`):
+
 | Bit | Check (sim origin) |
 |---|---|
-| 0 | `req` while `dir=0` |
-| 1 | `req` not exactly 2 cycles / `req` dropped after one word |
-| 2 | `req` mid-transaction (write data, read TA, read data) |
-| 3 | `wr` changed inside header or dropped during write data |
-| 4 | `dir` fell during write data / rose during read latency or data |
-| 5 | `dir` rose ≤ `TA` cycles after last `rvalid` |
-| 6 | FPGA drove `io` while `dir=1` (functional) or `io[15:8]` in test mode |
-| 7 | address outside `EXT_MEM` |
-| 8 | address not line-aligned |
-| 9 | first transaction after `rst_n` release is not a read of `0x8000_0000` |
-| 10 | `req` > `GUARD` cycles after `ready` fell (also: max distance kept in `REQ_AFTER_READY_MAX`) |
-| 11 | watchdog: transaction not finished in `WDOG` cycles (default 1000) |
-| 12 | `rvalid` word count ≠ `W` for a read (self-check of the slave) |
-| 13 | link pins not parked within 2 cycles of `rst_n` falling (`dir=1, req=0, wr=0, io=0`) |
-| 14 | `io` not 0 while chip idle and `dir=1` (`docs/top_level_plan.md` §3.3: "chip drives zeros") |
-| 15 | test mode: `io[15:8]` changed while `scan_en=0` for >1 cycle (stub chain must hold) |
+| 4 | watchdog: transaction not finished in `WDOG` cycles |
+| 5 | `req` > `GUARD` cycles after `ready` fell |
+| 6 | `req` dropped before the fourth header byte |
+| 7 | `wr` changed inside the header |
+| 8 | address outside `EXT_MEM` |
+| 9 | address not line-aligned |
+| 10 | first transaction after `rst_n` release is not a read of `0x8000_0000` |
+| 11 | `req` during write data |
+| 13 | `wr` dropped during write data |
+| 15 | `req` during read latency |
+| 17 | `req` during read data |
+| 21 | DET: line not back from the backend when its first byte was due |
+| 22 | backend request queue full on a push |
+| 23 | backend reported an error |
+
+1-3, 12, 14, 16 and 18 were the tristate link's checks (`req` while `dir=0`,
+contention, `io` mismatch, `dir` in write data, `req` in turnaround, `dir` in
+read data, `dir` within `TA` of the last `rvalid`) and stay reserved.
 
 **Lane coverage** (from `docs/impl_plan_link_clocking.md` §7.2, "controlled
 lane coverage"): four 32-bit registers, each holding `{seen1[15:0],
@@ -646,20 +648,20 @@ Registers `SCAN_*` (§6); the PS writes the pattern and reads the capture one
 entry at a time.
 
 
-- When `test_mode=1`, the slave's `io` driver is disabled. `fbu_scan` drives
-  `io[7:0]` from a 1024 × 8 pattern RAM and captures `io[15:8]` into a
+- When `test_mode=1`, `fbu_scan` drives `io_in` from a 1024 × 8 pattern RAM
+  instead of the slave and captures `io_out` into a
   1024 × 8 capture RAM, one entry per cycle, with `scan_en` from a 1024 × 1
   pattern (or constant).
-- The **directions come from `test_mode`, never from `dir`**
-  (`docs/top_level_plan.md` §3.3 point 2). `dir`/`req`/`wr` are ignored and only
-  recorded.
-- What the frozen RTL implements is the stub. `scan_q <= io[7:0]` when
-  `test_mode & scan_en & unlocked`, and `io[15:8] = scan_q`. So the expected
+- The link pins are one-way, so test mode changes no direction. `req`/`wr`
+  are ignored and only recorded. Main synchronises `test_mode` before the
+  `io_out` mux, which the scan session's latency search absorbs.
+- What the frozen RTL implements is the stub. `scan_q <= io_in` when
+  `test_mode & scan_en & unlocked`, and `io_out = scan_q`. So the expected
   capture is the input delayed one cycle while `scan_en=1`, held while
   `scan_en=0`, and the PS checks this exactly. That is a full pad-direction and
-  loopback test of all 16 `io` lanes in their test directions.
+  loopback test of all 16 link pins.
 - Locked part: the same session must show the **functional** pins instead (the
-  link stays as it was and `io[15:8]` does not follow `io[7:0]`).
+  link stays as it was and `io_out` does not follow `io_in`).
 
 ### 5.6 `fbu_uart.sv`
 
@@ -819,13 +821,20 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
       tohost, before the last UART byte). Over 188,340 reads: 95.9 % in
       12-15 cycles, 2.5 % 16-19, 1.5 % 20-23, 32 reads ≥ 24, max 29.
     - CTRL-20/21/22, STAT, scan: the fault-tolerance set as before, with and
-      without `--nodet`.
+      without `--nodet`. Board (rd_latency 64, sink): 147/147 PASS; all 138
+      CTRL-20 runs match the bench in full, trace and console (register
+      draining: 114 full, 17 cut at the trace drop, 7 short of console).
     - SYS-04: `sudo ./pynq_python.sh run_cmd.py ../images/boot.lst ../scripts/linux.cmd
       --bitstream ../forte.bit --nodet --no-trace --out runs/linux`
       (`testcode/linux/build/boot.lst`; milestones M0..M5, console from the
       sink only). `uart_fail` may repeat: the board script matches every
       pattern in software; the gate testbench gives the first to the
-      gateware matcher and the rest to its PS model.
+      gateware matcher and the rest to its PS model. Board: PASS, every
+      milestone through `AMOEBA_LINUX_BOOT_OK` in 95 s; 8,001,266 line reads
+      and 2,600,438 writes, read latency mean 13.8 and max 33 cycles, no link
+      or sink error, 7,729 console bytes.
+    - These P3 board results are for the rev 0.2 freeze (`3135391`, the
+      tristate link); the rev 0.3 build repeats them.
   - **Verification.** `make test-mem-axi-hp`: the backend against an AXI3
     model that applies a write only when it sends B (so a read issued early
     reads stale data), with random ready and latency, SLVERR lines and chip
@@ -854,7 +863,7 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x00C | SCRATCH | RW | |
 | 0x010 | SOFT_RESET | W | resets the gateware below the register file (the chip is held in reset meanwhile) |
 | 0x100 | PIN_CTRL | RW | [0] RELEASE (rst_n, resets 0), [1] FAULT_INJECT, [2] TEST_MODE, [3] SCAN_EN, [5:4] IRQ, [6] RX_FORCE_EN, [7] RX_FORCE_VAL |
-| 0x104 | PIN_IN | RO | [15:0] io, [16] dir, [17] req, [18] wr, [19] status, [20] uart_tx, [21] rst_n, [22] ready, [23] rvalid, [24] clk_out |
+| 0x104 | PIN_IN | RO | [7:0] io_out, [15:8] io_in, [16] reserved (was dir), [17] req, [18] wr, [19] status, [20] uart_tx, [21] rst_n, [22] ready, [23] rvalid, [24] clk_out |
 | 0x108 | RST_PULSE | W | hold rst_n low for N cycles |
 | 0x10C | RST_COUNT | RO | rst_n assertions |
 | 0x120 | BOOTGATE | RW | [0] EN, [1] SELFTEST, [7:4] RETRIES, [31:16] TIMEOUT (default 1000) |
@@ -921,8 +930,8 @@ side effect: FIFOs pop through their own `*_POP` register.
 | 0x600 | SCAN_CTRL | RW | W [0] start; RW [1] `scan_en` from the pattern (else PIN_CTRL[3]); R [8] running, [9] done |
 | 0x604 | SCAN_LEN | RW | session length, 0..1024 cycles |
 | 0x608 | SCAN_ADDR | RW | the pattern/capture entry the PS accesses |
-| 0x60C | SCAN_PATTERN | W | [7:0] `io[7:0]`, [8] `scan_en`; then SCAN_ADDR + 1 |
-| 0x610 | SCAN_CAPTURE | RO | `io[15:8]` captured at SCAN_ADDR |
+| 0x60C | SCAN_PATTERN | W | [7:0] `io_in`, [8] `scan_en`; then SCAN_ADDR + 1 |
+| 0x610 | SCAN_CAPTURE | RO | `io_out` captured at SCAN_ADDR |
 
 **Reserved for later stages** (offsets kept free): `0x0F0–0x0FC` split
 clock; `0x110–0x11C` RST_TRIG; `0x130–0x14C` IRQ_TRIG and latency;
@@ -970,7 +979,7 @@ settings and does not edit it.
 
 | ID | Name | Stimulus | DUT program | Pass |
 |---|---|---|---|---|
-| CTRL-01 | Reset park | Assert `rst_n` at random cycles in each link state (idle, HDR, WDATA, RD_TA, RD_DATA, RD_TA2) via `RST_TRIG at-xact-in-state`, 100× per state | any long-running (`fe_mem_march`) | check 13 (parked ≤ 2 cycles: `dir=1, req=0, wr=0, io=0`) never fires; `LINK_RST_ABORT` = number of mid-transaction resets |
+| CTRL-01 | Reset park | Assert `rst_n` at random cycles in each link state (idle, header, write_data, read_latency, read_data) via `RST_TRIG at-xact-in-state`, 100× per state | any long-running (`fe_mem_march`) | the chip parks (`req=0, wr=0, io_out=0`) within 2 cycles; `LINK_RST_ABORT` = number of mid-transaction resets |
 | CTRL-02 | First fetch after reset | After every release in CTRL-01 | — | check 9 never fires; boot gate passes every time |
 | CTRL-03 | Reset storm, then correctness | 10 000 resets at random intervals (`RST_TRIG random`), then a final clean run | `fe_reset_marker` (prints a boot counter read from the mailbox) then `tc_*` suite | final run passes; each boot printed its banner (no partial-boot hangs); memory reloaded only once (proves resets never corrupted memory via partial writes) |
 | CTRL-04 | Reset pulse width | `RST_PULSE` n = 1, 2, 3, 4, 16 cycles | `smoke` | every width produces a clean reboot (`forte_rst_sync` asserts asynchronously, so even 1 cycle must reset) |
@@ -987,7 +996,7 @@ settings and does not edit it.
 | CTRL-20 | **Always-on fault tolerance** | pin high from before release (`STATIC`), never dropped; repeated at 3 `RANDOM` link gap settings | prologue `FI_ARM=0x7F` + SYS-01 ISA suite, `baremetal_ecc`, FreeRTOS `tc_*` | every result identical to the injection-off run; counters 1/3/5/7, 9/11/13/15 and 17 stay 0; no cause 19/20 trap; status never reports stalled. Bits 4+5 together only after the §5.4.2 sim check |
 | CTRL-21 | Cache DED traps | bit 7 only (then 6+7), `SINGLE`/`BURST` at the D$ and I$ phases | `fe_cache_ded`: cause-20 handler logs `mcause`/`mtval`/`mepc` and rebuilds the line from a shadow copy; dirties known lines, also runs from clean lines and the I$ | every trap has `mcause=20` and `mtval` inside a line the program dirtied; clean-line and I$ DEDs are silent drops (counters 5/7 move, results correct, no trap); no cause-19 trap and no `PrivModeUncorrectable`; with 6+7 the DED fraction is ≈ ¼ |
 | CTRL-22 | Site targeting | `PHASE` mask selecting one site at a time (ALU0 vs ALU1, CMP0 vs CMP1, I$ vs D$) with the whole unit armed | `fe_fault_pin` | only the targeted site's detector moves; proves the replicas and caches are checked independently |
-| CTRL-14 *(deferred, DFT)* | DFT unlocked: scan stub loopback | `test_mode=1`, scan session: walking 1/0 and random on `io[7:0]` with `scan_en` patterns | none (core held or idle) | capture = input delayed 1 cycle while `scan_en=1`, held while 0; `LANE_COV_SCAN` complete; `io[7:0]` never driven by the chip |
+| CTRL-14 *(deferred, DFT)* | DFT unlocked: scan stub loopback | `test_mode=1`, scan session: walking 1/0 and random on `io_in` with `scan_en` patterns | none (core held or idle) | capture = input delayed 1 cycle while `scan_en=1`, held while 0; `LANE_COV_SCAN` complete; `io_out` equals `scan_q` |
 | CTRL-15 *(deferred, DFT)* | DFT lock blocks test mode | Program locks (writes 0 to `0x0200_F000`), prints `LOCKED`; `UART_MATCH` → `TEST_TRIG` raises `test_mode`+`scan_en` while the core keeps running memory traffic | `fe_dft_lock` | link keeps working (program completes, no checker errors); scan session shows functional pins; readback of lock = 0 |
 | CTRL-16 *(deferred, DFT)* | Lock is sticky; reset reopens | Program writes 1 after locking, reads back; PL resets; program reads again | `tcf_dft_lock` (exists) + `fe_dft_lock` phase 2 | write 1 ignored (reads 0); after `rst_n` reads 1; CTRL-14 passes again after reset |
 | CTRL-17 *(deferred, DFT)* | test_mode on an unlocked running part | Raise `test_mode` mid-run, unlocked | `fe_mem_march` | **Expected to break the link** (documents why the board must strap `test_mode` low). Pass = the checker flags it and a subsequent reset recovers fully. Not a silicon defect test, a board-contract test |
@@ -1035,7 +1044,7 @@ sim-checked (§5.5), so these tests need only scripts when they come back.
 | LINK-08 | Data patterns from the FPGA side | PS fills memory with all-0, all-1, 0x5555/0xAAAA, and random patterns before release | `fe_checksum` (sums regions and prints) | checksums match the PS's |
 | LINK-09 | Long transaction latency | rd_latency up to WDOG−50 | `smoke` | pass; the watchdog does **not** fire; then latency = WDOG+10 makes it fire (prove the watchdog) |
 | LINK-10 | DDR backend natural mode | `MEM_BACKEND=AXI`, DET=0 | full ISA + FreeRTOS + `fe_*` suites | all pass; histograms recorded |
-| LINK-11 | Checker self-test | `LINK_CFG` mutate bits (as `+FPGA_MUTATE`): corrupt reset fetch, drop a word, drive while `dir=1` | `smoke` | each mutation produces exactly its checker error. Proves the checker can fail |
+| LINK-11 | Checker self-test | `LINK_CFG` mutate bits (as `+FPGA_MUTATE`): corrupt reset fetch, wrong tohost, drop a word | `smoke` | each mutation produces exactly its checker error. Proves the checker can fail |
 
 ### 7.4 Status interface (STAT)
 
@@ -1071,7 +1080,7 @@ Each test inherits the global criteria and records `LINK_FREQ_MEAS`.
 | SPLIT-01 | Ratio sweep | link/core ∈ {0.37, 0.8, 1.6, 2.3} (`LINK_SRC=mmcm0`) × LINK-02 gap/latency corners | SYS-01 ISA suite, `fe_mem_march`, FreeRTOS `tc_*` | all pass at every ratio; transaction order matches the bench (`--order-only`) |
 | SPLIT-02 | Asynchronous drift | `link_clk` from `FCLK_CLK1` at 25.01 MHz vs `core_clk` 25.00 MHz (the phase walks through every alignment every ~100 µs), 4 h | `fe_mem_march` + `tc_link_abort` loop | 0 miscompares, 0 checker errors; the Gray-pointer crossing has seen every phase thousands of times |
 | SPLIT-03 | Reset release phase | 10 000 `RST_TRIG random` releases at random phase vs both clocks, all ratios | `fe_reset_marker` | boot gate passes every time; checks 9/13 never fire; no transaction before both domains are out of reset |
-| SPLIT-04 | Link clock pause | `LINK_PAUSE` 1..10 000 cycles at random points, including mid-header, mid-write and in TA | `fe_mem_march`, `tc_link_abort` | no checker error; every transaction completes; the core waits (abort rule respected); status may show stalled during long pauses and returns to active |
+| SPLIT-04 | Link clock pause | `LINK_PAUSE` 1..10 000 cycles at random points, including mid-header, mid-write and in read latency | `fe_mem_march`, `tc_link_abort` | no checker error; every transaction completes; the core waits (abort rule respected); status may show stalled during long pauses and returns to active |
 | SPLIT-05 | Slow link, core pressure | ratio 0.37 + BACKPRESSURE ready | `tc_link_abort`, `fe_wb_storm` | outbound FIFO fills, no lost or duplicated commands (write count = expected) |
 | SPLIT-06 | Fast link, starved FIFO | ratio 2.3 + gap 0 | `fe_mem_march` | FIFO empty edge cases: no spurious beats, `LINK_RD/WR` exact |
 | SPLIT-07 | Retune between runs | DRP steps through 8 link frequencies, held in reset between | `smoke` per step | every step boots; measured ratio within 0.1 % of the programmed one |
@@ -1159,7 +1168,7 @@ xc7z020clg400-1, 40 ns constraint:
   4 RAMB18 + 4 RAMB36). The nine `rf_sp_*` branches of `ram1p1rwe` are
   dead parameter combinations since 4f54add. The async FIFOs and the UART TX
   FIFO went to LUTRAM.
-- **`io`:** the 16 lanes' tristates were converted to logic (Synth 8-5799,
+- **`io`** (before the rev 0.3 link split): the 16 lanes' tristates were converted to logic (Synth 8-5799,
   the only critical warnings), as on `feature/top_level`.
 - **Assertions:** `prim_fifo_async`'s concurrent assertions are ignored by
   synthesis (Synth 8-2898), as expected.
@@ -1286,7 +1295,7 @@ scripts, so the cycle-exact gate never depends on a command the bench lacks.
 |---|---|
 | BRAM budget in the BRAM backend: 128 KiB memory (~32 tiles at 128-bit width) + cache macros + trace + UART FIFOs + scan RAMs; old `asic-asic-BRAM` used 113/140 | Trace 2 k records; scan RAMs in LUTRAM; P0 OOC synth reports it before any gateware is written. Fallback: `MEM_KB=64` for BRAM builds (tests with larger footprints run on AXI only) |
 | 25 MHz may not close with `forte_top`'s link domain + macros | P0 measures; 20 MHz is acceptable (only UART divisors and status wall-times change) |
-| Vivado drops or alters internal tristate on `io` | Proven pattern on `feature/top_level`; P0 inspects the post-synth netlist for the mux and P1's `tb_forte_emu` runs on the *post-synthesis* functional netlist once (`write_verilog -mode funcsim`) |
+| *(tristate link only, gone in rev 0.3)* Vivado drops or alters internal tristate on `io` | Proven pattern on `feature/top_level`; P0 inspects the post-synth netlist for the mux and P1's `tb_forte_emu` runs on the *post-synthesis* functional netlist once (`write_verilog -mode funcsim`) |
 | Trace equality fails on a cosmetic offset | §8.1 normalisation is P1's first task; mismatch triage via `bin/vcd_first_x.py`-style first-divergence report in `trace_to_pin.py` |
 | `% 100` of a 64-bit PRNG in hardware | The bench is not changed, so the gateware matches `rand64() % 100` exactly. The PRNG sequence does not depend on the data, so the next value and its remainder are computed several cycles ahead in a pipelined constant-modulus reducer, with no timing pressure |
 | Fault counters saturate within seconds under continuous injection | §5.4.2: judge long runs by results and the must-be-zero counters; `BURST` for rate checks; `EMU_TAPS` oracle |
@@ -1302,7 +1311,7 @@ scripts, so the cycle-exact gate never depends on a command the bench lacks.
 
 | # | Question | Decision |
 |---|---|---|
-| Q1 | Freeze commit | `postsynth_verif` (this branch's base, `8babc55`) |
+| Q1 | Freeze commit | `postsynth_verif` (this branch's base, `8babc55`); moved to `3135391` (`debug/icache-ecc-repair-fix`, the F1 fix) once the cache owner verified it; rev 0.3: `main` @ `890ea65` (the 8+8 link) with the F1 fix carried on top, `eb97143`, since main does not have it |
 | Q2 | Cache-uncorrectable (bit 7) behaviour | It traps: cause 20 on a dirty D$ line; clean lines and the I$ drop and refetch. CTRL-21 is the oracle. Bit 7 is never part of always-on injection |
 | Q3 | New commands in `pin_tb.sv`? | No. Separate `fbu` dialect (§10.3); `hvl/pin/` untouched |
 | Q5 | PRNG modulo | Follows from Q3: the bench is unchanged and the gateware matches `% 100` exactly (§11) |
@@ -1349,8 +1358,9 @@ Still open:
 
 ### 12.1 Findings in the frozen RTL
 
-What the FPGA tests found in the RTL as frozen (`8babc55`). The RTL does not
-change on this branch; each finding goes to its owner. F1 to F5 are defects;
+What the FPGA tests found in the RTL as frozen (`8babc55`). The RTL changes
+on this branch only by merging an owner's verified fix, which moves the freeze
+base (Q1); each finding goes to its owner. F1 to F5 are defects;
 F6 and F7 are behaviour the tests and software must allow for.
 
 **F1. An I$ ECC repair can be written to the wrong set (silent wrong code).**
@@ -1376,6 +1386,10 @@ hits it and runs another function's code, with no fault reported.
 - In silicon a real upset does the same. Likely fix: no `FlushStage` override
   of the array address while in `STATE_ECC_WRITEBACK`, or no repair write for
   a flushed I$ access.
+- Fixed by the cache owner on `debug/icache-ecc-repair-fix` (`3135391`): a
+  flushed I$ access writes no repair; the error stays correctable and the next
+  read corrects it. Merged here; the freeze base was `3135391`, and since rev
+  0.3 is `eb97143`: main @ `890ea65` with this fix replayed on top (not on main).
 
 **F2. SECDED never reports a flip of the overall parity bit** (Q10). Fix with
 a test on `debug/ecc-syndrome-fix` (pushed for review): `sec_err_o =

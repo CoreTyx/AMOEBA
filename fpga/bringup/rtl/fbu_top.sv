@@ -36,12 +36,10 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   output logic              test_mode,
   output logic              scan_en,
   output logic              uart_rx,
-  output logic [LINK_W-1:0] io_o,
-  output logic [LINK_W-1:0] io_oe,
+  output logic [LINK_W-1:0] io_in,
   output logic              ready,
   output logic              rvalid,
-  input  logic [LINK_W-1:0] io_i,
-  input  logic              dir,
+  input  logic [LINK_W-1:0] io_out,
   input  logic              req,
   input  logic              wr,
   input  logic              clk_out,
@@ -324,8 +322,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic              rec_tohost;
   logic [63:0]       rec_end_cyc;
   logic [63:0]       rec_tohost_val;
-  logic [LINK_W-1:0] slave_io_o;
-  logic              slave_io_oe;
+  logic [LINK_W-1:0] slave_io_in;
   logic [2:0]        link_state;
 
   fbu_link_slave #(.BEATS(BEATS)) link (
@@ -335,7 +332,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .cfg_mem_base(mem_base), .cfg_mem_limit(mem_limit), .cfg_reset_vec(reset_vec),
     .cfg_tohost_addr(tohost_addr),
     .prng_load(written(REG_PRNG_LOAD)), .prng_init,
-    .rst_n_pin(rst_n), .dir, .req, .wr, .io_i, .io_o(slave_io_o), .io_oe(slave_io_oe), .ready, .rvalid,
+    .rst_n_pin(rst_n), .req, .wr, .io_out, .io_in(slave_io_in), .ready, .rvalid,
     .m_req_valid, .m_req_ready, .m_req_wr, .m_req_addr, .m_req_data,
     .m_rsp_valid, .m_rsp_data, .m_rsp_err,
     .cyc(link_cyc), .state_now(link_state), .n_rd(link_rd), .n_wr(link_wr), .tohost_seen, .tohost_val, .tohost_cyc,
@@ -343,7 +340,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .rec_valid, .rec_cyc, .rec_wr, .rec_addr, .rec_line,
     .rec_tohost, .rec_tohost_cyc(rec_end_cyc), .rec_tohost_val);
 
-  // ---- test mode: fbu_scan has io instead of the link slave ----
+  // ---- test mode: fbu_scan has io_in instead of the link slave ----
   logic [7:0] scan_in;
   logic [7:0] scan_capture;
   logic       scan_running;
@@ -355,10 +352,9 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .cfg_pattern_scan_en(scan_pattern_scan_en), .cfg_scan_en(pin_ctrl[3]),
     .addr(scan_addr), .pattern_write(written(REG_SCAN_PATTERN)), .pattern_data(reg_wdata[8:0]),
     .capture_data(scan_capture),
-    .scan_out(io_i[15:8]), .scan_in, .scan_en, .running(scan_running), .done(scan_done));
+    .scan_out(io_out), .scan_in, .scan_en, .running(scan_running), .done(scan_done));
 
-  assign io_o            = test_mode ? {8'h00, scan_in} : slave_io_o;
-  assign io_oe           = test_mode ? {8'h00, 8'hFF} : {LINK_W{slave_io_oe}};
+  assign io_in           = test_mode ? scan_in : slave_io_in;
   assign link_error_seen = err_sticky != '0;
 
   // ---- control pins ----
@@ -387,7 +383,7 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
     .reset_pulse_cycles(trigger_reset ? trigger_reset_cycles : reg_wdata),
     .cfg_gate_enable(bootgate[0]), .cfg_gate_selftest(bootgate[1]),
     .cfg_gate_retries(bootgate[7:4]), .cfg_gate_timeout(bootgate[31:16]),
-    .req, .wr, .io_i, .uart_rx_from_uart,
+    .req, .wr, .io_out, .uart_rx_from_uart,
     .rst_n, .irq, .fault_inject, .test_mode, .uart_rx,
     .reset_count, .cycles_total, .gate_passes, .gate_fails, .gate_gave_up, .gate_last_header);
 
@@ -540,7 +536,8 @@ module fbu_top import forte_link_pkg::*, fbu_pkg::*; #(
   logic [31:0] pin_in;
   logic [31:0] match_words [2][MATCH_BYTES / 4];
 
-  assign pin_in = {7'd0, clk_out, rvalid, ready, rst_n, uart_tx, status, wr, req, dir, io_i};
+  // [16] was dir before the link split; reserved.
+  assign pin_in = {7'd0, clk_out, rvalid, ready, rst_n, uart_tx, status, wr, req, 1'b0, io_in, io_out};
 
   always_comb begin
     for (int m = 0; m < 2; m++)

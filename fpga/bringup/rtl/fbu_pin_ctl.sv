@@ -4,14 +4,14 @@
 //
 // Boot gate (forte_link_pkg, "no link training"): after every release of rst_n
 // the first transaction must be a read of the reset vector.  The gate watches
-// the pins for it; on a different header, or none within the timeout, it
+// the pins for its ADDR_WORDS-word header on io_out (MSB first); on a
+// different header, or none within the timeout, it
 // re-asserts rst_n for a few cycles and tries again, and after the allowed
 // retries holds the chip in reset.  Self-test inverts the verdict, so the
 // failure path runs on every build.
 ///////////////////////////////////////////////////////////////////////////////
 module fbu_pin_ctl import forte_link_pkg::*; #(
-  parameter logic [15:0] BOOT_HDR_HI = 16'h8000,
-  parameter logic [15:0] BOOT_HDR_LO = 16'h0000,
+  parameter logic [31:0] BOOT_ADDR = 32'h8000_0000,
   parameter int          GATE_RESET_CYCLES = 16
 )(
   input  logic              clk,
@@ -34,7 +34,7 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
 
   input  logic              req,
   input  logic              wr,
-  input  logic [LINK_W-1:0] io_i,
+  input  logic [LINK_W-1:0] io_out,
   input  logic              uart_rx_from_uart,
 
   output logic              rst_n,
@@ -53,8 +53,8 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
 
   typedef enum logic [2:0] {
     G_IDLE,
-    G_WAIT_HEADER_HI,
-    G_WAIT_HEADER_LO,
+    G_WAIT_HEADER,
+    G_HEADER,
     G_RESETTING,
     G_GAVE_UP
   } gate_state_t;
@@ -62,7 +62,9 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
   gate_state_t gate_state;
   logic [15:0] gate_timer;
   logic [3:0]  gate_retries_used;
-  logic [15:0] header_hi;
+  logic [31:0] header_addr;
+  logic [2:0]  header_words;
+  logic [31:0] header_addr_d;
   logic        header_wr;
   logic        gate_holds_reset;
   logic        header_is_boot_fetch;
@@ -78,7 +80,8 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
   assign gate_holds_reset  = gate_state == G_RESETTING || gate_state == G_GAVE_UP;
   assign rst_n_d           = cfg_release && !pulse_active && !reset_pulse_start && !gate_holds_reset;
   assign released          = rst_n_d && !rst_n;
-  assign header_is_boot_fetch = header_hi == BOOT_HDR_HI && io_i == BOOT_HDR_LO && !header_wr;
+  assign header_addr_d        = {header_addr[31-LINK_W:0], io_out};
+  assign header_is_boot_fetch = header_addr_d == BOOT_ADDR && !header_wr;
   assign gate_verdict_pass    = header_is_boot_fetch != cfg_gate_selftest;
 
   always_ff @(posedge clk or negedge arst_n) begin
@@ -118,7 +121,8 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
       gate_state        <= G_IDLE;
       gate_timer        <= '0;
       gate_retries_used <= '0;
-      header_hi         <= '0;
+      header_addr       <= '0;
+      header_words      <= '0;
       header_wr         <= 1'b0;
       released_by_gate  <= 1'b0;
       gate_passes       <= '0;
@@ -138,17 +142,18 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
               gate_retries_used <= '0;
             released_by_gate <= 1'b0;
             gate_timer       <= cfg_gate_timeout;
-            gate_state       <= G_WAIT_HEADER_HI;
+            gate_state       <= G_WAIT_HEADER;
           end
         end
 
-        G_WAIT_HEADER_HI: begin
+        G_WAIT_HEADER: begin
           if (!rst_n) begin
             gate_state <= G_IDLE;
           end else if (req) begin
-            header_hi  <= io_i;
-            header_wr  <= wr;
-            gate_state <= G_WAIT_HEADER_LO;
+            header_addr  <= 32'(io_out);
+            header_words <= 3'd1;
+            header_wr    <= wr;
+            gate_state   <= G_HEADER;
           end else if (gate_timer == '0) begin
             gate_fails       <= gate_fails + 16'd1;
             gate_last_header <= '1;
@@ -159,15 +164,19 @@ module fbu_pin_ctl import forte_link_pkg::*; #(
           end
         end
 
-        G_WAIT_HEADER_LO: begin
-          gate_last_header <= {header_wr, header_hi, io_i};
-          if (gate_verdict_pass) begin
-            gate_passes <= gate_passes + 16'd1;
-            gate_state  <= G_IDLE;
-          end else begin
-            gate_fails <= gate_fails + 16'd1;
-            gate_timer <= 16'(GATE_RESET_CYCLES);
-            gate_state <= G_RESETTING;
+        G_HEADER: begin
+          header_addr  <= header_addr_d;
+          header_words <= header_words + 3'd1;
+          if (header_words + 3'd1 == 3'(ADDR_WORDS)) begin
+            gate_last_header <= {header_wr, header_addr_d};
+            if (gate_verdict_pass) begin
+              gate_passes <= gate_passes + 16'd1;
+              gate_state  <= G_IDLE;
+            end else begin
+              gate_fails <= gate_fails + 16'd1;
+              gate_timer <= 16'(GATE_RESET_CYCLES);
+              gate_state <= G_RESETTING;
+            end
           end
         end
 

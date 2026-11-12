@@ -169,17 +169,17 @@ FI_SITE_PHASES = {
 
 TRIG_SRC_CYCLE, TRIG_SRC_MATCH0, TRIG_SRC_MATCH1, TRIG_SRC_STATE, TRIG_SRC_RANDOM, TRIG_SRC_ERROR = range(1, 7)
 TRIG_RESET, TRIG_IRQ_SET, TRIG_IRQ_CLEAR, TRIG_IRQ_PULSE, TRIG_FAULT = range(1, 6)
-LINK_STATES = ["idle", "header", "write_data", "read_turnaround", "read_latency", "read_data", "read_release"]
+LINK_STATES = ["idle", "header", "write_data", "read_latency", "read_data"]
 
 UART_TX_BYTE, UART_TX_BAD_STOP, UART_TX_BREAK, UART_TX_IDLE = range(4)
 
+# 1-3, 12, 14, 16 and 18 were the tristate link's checks (dir, contention,
+# turnaround); reserved since the split into io_in / io_out.
 LINK_ERRORS = {
-    1: "LE_REQ_DIR0", 2: "LE_CONTENTION", 3: "LE_IO_MISMATCH", 4: "LE_WATCHDOG",
-    5: "LE_GUARD", 6: "LE_HDR_REQ_DROP", 7: "LE_HDR_WR_CHG", 8: "LE_ADDR_RANGE",
-    9: "LE_ADDR_ALIGN", 10: "LE_FIRST_XACT", 11: "LE_WD_REQ", 12: "LE_WD_DIR",
-    13: "LE_WD_WR", 14: "LE_RTA_REQ", 15: "LE_RLAT_DIR", 16: "LE_RD_DIR",
-    17: "LE_RD_REQ", 18: "LE_REL_DIR", 21: "LE_LAT_OVERRUN", 22: "LE_REQ_OVERFLOW",
-    23: "LE_MEM_ERR",
+    4: "LE_WATCHDOG", 5: "LE_GUARD", 6: "LE_HDR_REQ_DROP", 7: "LE_HDR_WR_CHG",
+    8: "LE_ADDR_RANGE", 9: "LE_ADDR_ALIGN", 10: "LE_FIRST_XACT", 11: "LE_WD_REQ",
+    13: "LE_WD_WR", 15: "LE_RLAT_REQ", 17: "LE_RD_REQ", 21: "LE_LAT_OVERRUN",
+    22: "LE_REQ_OVERFLOW", 23: "LE_MEM_ERR",
 }
 
 # fbu_mem_bram port B: window w at w << 18; registers at 0xC0000

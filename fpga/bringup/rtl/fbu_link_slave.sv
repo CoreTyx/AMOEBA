@@ -8,6 +8,9 @@
 //
 // Chip outputs are used in the cycle the chip launched them and every output
 // here comes from a flop: the chip captures them on its link-clock negedge.
+// The link is two one-way buses: the chip sends the header and write data on
+// io_out (header MSB first, data LSB first) and this slave returns read data
+// on io_in under rvalid, from the cycle after the last header word.
 //
 // cfg_det=1 reproduces the bench exactly; a read line the backend has not
 // returned by its first word is then an error rather than a stall.
@@ -15,7 +18,7 @@
 module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   parameter int BEATS = 2,
   localparam int LINE_W     = 64 * BEATS,
-  localparam int WORDS      = 4 * BEATS,
+  localparam int WORDS      = WORDS_PER_BEAT * BEATS,
   localparam int LINE_BYTES = 8 * BEATS,
   localparam int WORD_IDX_W = $clog2(WORDS + 1)
 )(
@@ -35,12 +38,10 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   input  logic [63:0]       prng_init,
 
   input  logic              rst_n_pin,
-  input  logic              dir,
   input  logic              req,
   input  logic              wr,
-  input  logic [LINK_W-1:0] io_i,
-  output logic [LINK_W-1:0] io_o,
-  output logic              io_oe,
+  input  logic [LINK_W-1:0] io_out,
+  output logic [LINK_W-1:0] io_in,
   output logic              ready,
   output logic              rvalid,
 
@@ -80,23 +81,19 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
     S_IDLE,
     S_HEADER,
     S_WRITE_DATA,
-    S_READ_TURNAROUND,
     S_READ_LATENCY,
-    S_READ_DATA,
-    S_READ_RELEASE
+    S_READ_DATA
   } state_t;
 
   // ---- transaction state ----
   state_t                state;
   logic                  expect_boot_fetch;
   logic [3:0]            not_ready_cycles;
-  logic [15:0]           addr_hi;
+  logic [2:0]            header_words;
   logic                  transaction_is_write;
   logic [31:0]           transaction_addr;
   logic [63:0]           transaction_start_cyc;
   logic [WORD_IDX_W-1:0] word_idx;
-  logic [2:0]            turnaround_cycles;
-  logic [2:0]            release_cycles;
   logic [15:0]           latency_left;
   logic [LINE_W-1:0]     line_buf;
   logic                  read_line_ready;
@@ -109,22 +106,19 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   state_t                state_d;
   logic                  expect_boot_fetch_d;
   logic [3:0]            not_ready_cycles_d;
-  logic [15:0]           addr_hi_d;
+  logic [2:0]            header_words_d;
   logic                  transaction_is_write_d;
   logic [31:0]           transaction_addr_d;
   logic [63:0]           transaction_start_cyc_d;
   logic [63:0]           cyc_d;
   logic [WORD_IDX_W-1:0] word_idx_d;
-  logic [2:0]            turnaround_cycles_d;
-  logic [2:0]            release_cycles_d;
   logic [15:0]           latency_left_d;
   logic [LINE_W-1:0]     line_buf_d;
   logic                  read_line_ready_d;
   logic                  corrupt_read_line_d;
   logic                  ready_d;
   logic                  rvalid_d;
-  logic                  io_oe_d;
-  logic [LINK_W-1:0]     io_o_d;
+  logic [LINK_W-1:0]     io_in_d;
 
   logic                  chip_in_reset;
   logic                  draw_random;
@@ -151,6 +145,8 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   logic                  queue_full;
   logic                  queue_pop;
   logic                  queue_push;
+  logic                  queue_empty;
+  logic                  bypass;
 
   assign chip_in_reset = !rst_n_pin;
   assign state_now     = state;
@@ -173,22 +169,19 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
     state_d             = state;
     expect_boot_fetch_d = expect_boot_fetch;
     not_ready_cycles_d  = not_ready_cycles;
-    addr_hi_d           = addr_hi;
+    header_words_d      = header_words;
     transaction_is_write_d     = transaction_is_write;
     transaction_addr_d         = transaction_addr;
     transaction_start_cyc_d    = transaction_start_cyc;
     cyc_d               = cyc;
     word_idx_d          = word_idx;
-    turnaround_cycles_d = turnaround_cycles;
-    release_cycles_d    = release_cycles;
     latency_left_d      = latency_left;
     line_buf_d          = line_buf;
     read_line_ready_d   = read_line_ready;
     corrupt_read_line_d = corrupt_read_line;
     ready_d             = ready;
     rvalid_d            = 1'b0;
-    io_oe_d             = 1'b0;
-    io_o_d              = io_o;
+    io_in_d             = '0;
     err                 = '0;
     transaction_done           = 1'b0;
     tohost_write        = 1'b0;
@@ -213,13 +206,6 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
     end else begin
       cyc_d = cyc + 64'd1;
 
-      if (req && !dir)
-        err[LE_REQ_DIR0] = 1'b1;
-      if (io_oe && dir)
-        err[LE_CONTENTION] = 1'b1;
-      if (io_oe && io_i != io_o)
-        err[LE_IO_MISMATCH] = 1'b1;
-
       if (ready)
         not_ready_cycles_d = '0;
       else if (not_ready_cycles != '1)
@@ -233,10 +219,11 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
           if (req) begin
             if (not_ready_cycles_d > 4'(GUARD))
               err[LE_GUARD] = 1'b1;
-            addr_hi_d        = io_i;
+            transaction_addr_d      = 32'(io_out);
+            header_words_d          = 3'd1;
             transaction_is_write_d  = wr;
             transaction_start_cyc_d = cyc_d;
-            state_d          = S_HEADER;
+            state_d                 = S_HEADER;
           end
         end
 
@@ -245,36 +232,40 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
             err[LE_HDR_REQ_DROP] = 1'b1;
           if (wr != transaction_is_write)
             err[LE_HDR_WR_CHG] = 1'b1;
-          transaction_addr_d = {addr_hi, io_i};
-          if (transaction_addr_d < cfg_mem_base || transaction_addr_d > cfg_mem_limit)
-            err[LE_ADDR_RANGE] = 1'b1;
-          if (transaction_addr_d % LINE_BYTES != 0)
-            err[LE_ADDR_ALIGN] = 1'b1;
-          if (expect_boot_fetch && (transaction_is_write || transaction_addr_d != cfg_reset_vec))
-            err[LE_FIRST_XACT] = 1'b1;
-          expect_boot_fetch_d = 1'b0;
-          word_idx_d          = '0;
-          ready_d             = 1'b0;
-          if (transaction_is_write) begin
-            state_d = S_WRITE_DATA;
-          end else begin
-            push                = 1'b1;
-            push_addr           = transaction_addr_d;
-            read_line_ready_d   = 1'b0;
-            corrupt_read_line_d = cfg_mutate == 2'd1 && n_rd == '0;
-            turnaround_cycles_d = '0;
-            state_d             = S_READ_TURNAROUND;
+          transaction_addr_d = {transaction_addr[31-LINK_W:0], io_out};
+          header_words_d     = header_words + 3'd1;
+          ready_d            = 1'b0;
+          if (header_words_d == 3'(ADDR_WORDS)) begin
+            if (transaction_addr_d < cfg_mem_base || transaction_addr_d > cfg_mem_limit)
+              err[LE_ADDR_RANGE] = 1'b1;
+            if (transaction_addr_d % LINE_BYTES != 0)
+              err[LE_ADDR_ALIGN] = 1'b1;
+            if (expect_boot_fetch && (transaction_is_write || transaction_addr_d != cfg_reset_vec))
+              err[LE_FIRST_XACT] = 1'b1;
+            expect_boot_fetch_d = 1'b0;
+            word_idx_d          = '0;
+            if (transaction_is_write) begin
+              state_d = S_WRITE_DATA;
+            end else begin
+              push                = 1'b1;
+              push_addr           = transaction_addr_d;
+              read_line_ready_d   = 1'b0;
+              corrupt_read_line_d = cfg_mutate == 2'd1 && n_rd == '0;
+              latency_left_d      = cfg_rd_lat;
+              if (cfg_rd_lat != '0)
+                state_d = S_READ_LATENCY;
+              else
+                state_d = S_READ_DATA;
+            end
           end
         end
 
         S_WRITE_DATA: begin
           if (req)
             err[LE_WD_REQ] = 1'b1;
-          if (!dir)
-            err[LE_WD_DIR] = 1'b1;
           if (!wr)
             err[LE_WD_WR] = 1'b1;
-          line_buf_d[16 * word_idx +: 16] = io_i;
+          line_buf_d[LINK_W * word_idx +: LINK_W] = io_out;
           word_idx_d = word_idx + 1'b1;
           if (word_idx_d == WORD_IDX_W'(WORDS)) begin
             push      = 1'b1;
@@ -293,33 +284,15 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
           end
         end
 
-        S_READ_TURNAROUND: begin
-          if (req)
-            err[LE_RTA_REQ] = 1'b1;
-          if (dir)
-            turnaround_cycles_d = '0;
-          else
-            turnaround_cycles_d = turnaround_cycles + 3'd1;
-          if (turnaround_cycles_d >= 3'(TA)) begin
-            latency_left_d = cfg_rd_lat;
-            if (cfg_rd_lat != '0)
-              state_d = S_READ_LATENCY;
-            else
-              state_d = S_READ_DATA;
-          end
-        end
-
         S_READ_LATENCY: begin
-          if (dir)
-            err[LE_RLAT_DIR] = 1'b1;
+          if (req)
+            err[LE_RLAT_REQ] = 1'b1;
           latency_left_d = latency_left - 16'd1;
           if (latency_left_d == '0)
             state_d = S_READ_DATA;
         end
 
         S_READ_DATA: begin
-          if (dir)
-            err[LE_RD_DIR] = 1'b1;
           if (req)
             err[LE_RD_REQ] = 1'b1;
           if (!gap && !(cfg_mutate == 2'd3 && n_rd == 32'd10 && word_idx == WORD_IDX_W'(WORDS - 1))) begin
@@ -327,25 +300,15 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
               if (cfg_det)
                 err[LE_LAT_OVERRUN] = 1'b1;
             end else begin
-              io_oe_d    = 1'b1;
               rvalid_d   = 1'b1;
-              io_o_d     = read_line[16 * word_idx +: 16];
+              io_in_d    = read_line[LINK_W * word_idx +: LINK_W];
               word_idx_d = word_idx + 1'b1;
               if (word_idx_d == WORD_IDX_W'(WORDS)) begin
-                transaction_done        = 1'b1;
-                release_cycles_d = '0;
-                state_d          = S_READ_RELEASE;
+                transaction_done = 1'b1;
+                state_d          = S_IDLE;
               end
             end
           end
-        end
-
-        S_READ_RELEASE: begin
-          release_cycles_d = release_cycles + 3'd1;
-          if (dir && release_cycles_d <= 3'(TA))
-            err[LE_REL_DIR] = 1'b1;
-          if (release_cycles_d >= 3'(TA))
-            state_d = S_IDLE;
         end
 
         default: state_d = S_IDLE;
@@ -364,14 +327,19 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
   end
 
   // ---- two-line request queue to the backend ----
+  // A request with the queue empty goes straight to the backend in the cycle
+  // of its last header byte: read data may be due the very next cycle, and a
+  // one-cycle backend (BRAM) then meets it at rd_latency 0, as the bench does.
+  assign queue_empty = queue_count == '0;
   assign queue_full  = queue_count == 2'd2;
-  assign queue_pop   = m_req_valid && m_req_ready;
-  assign queue_push  = push && (!queue_full || queue_pop);
+  assign bypass      = queue_empty && push && m_req_ready;
+  assign queue_pop   = !queue_empty && m_req_ready;
+  assign queue_push  = push && !bypass && (!queue_full || queue_pop);
   assign queue_tail  = queue_head ^ queue_count[0];
-  assign m_req_valid = queue_count != '0;
-  assign m_req_wr    = queue_wr[queue_head];
-  assign m_req_addr  = queue_addr[queue_head];
-  assign m_req_data  = queue_data[queue_head];
+  assign m_req_valid = !queue_empty || push;
+  assign m_req_wr    = queue_empty ? push_wr   : queue_wr[queue_head];
+  assign m_req_addr  = queue_empty ? push_addr : queue_addr[queue_head];
+  assign m_req_data  = queue_empty ? push_data : queue_data[queue_head];
 
   always_ff @(posedge clk or negedge arst_n) begin
     if (!arst_n) begin
@@ -398,41 +366,35 @@ module fbu_link_slave import forte_link_pkg::*, fbu_pkg::*; #(
       state             <= S_IDLE;
       expect_boot_fetch <= 1'b1;
       not_ready_cycles  <= '0;
-      addr_hi           <= '0;
+      header_words      <= '0;
       transaction_is_write     <= 1'b0;
       transaction_addr         <= '0;
       transaction_start_cyc    <= '0;
       word_idx          <= '0;
-      turnaround_cycles <= '0;
-      release_cycles    <= '0;
       latency_left      <= '0;
       line_buf          <= '0;
       read_line_ready   <= 1'b0;
       corrupt_read_line <= 1'b0;
       ready             <= 1'b0;
       rvalid            <= 1'b0;
-      io_oe             <= 1'b0;
-      io_o              <= '0;
+      io_in             <= '0;
       cyc               <= '0;
     end else begin
       state             <= state_d;
       expect_boot_fetch <= expect_boot_fetch_d;
       not_ready_cycles  <= not_ready_cycles_d;
-      addr_hi           <= addr_hi_d;
+      header_words      <= header_words_d;
       transaction_is_write     <= transaction_is_write_d;
       transaction_addr         <= transaction_addr_d;
       transaction_start_cyc    <= transaction_start_cyc_d;
       word_idx          <= word_idx_d;
-      turnaround_cycles <= turnaround_cycles_d;
-      release_cycles    <= release_cycles_d;
       latency_left      <= latency_left_d;
       line_buf          <= line_buf_d;
       read_line_ready   <= read_line_ready_d;
       corrupt_read_line <= corrupt_read_line_d;
       ready             <= ready_d;
       rvalid            <= rvalid_d;
-      io_oe             <= io_oe_d;
-      io_o              <= io_o_d;
+      io_in             <= io_in_d;
       cyc               <= cyc_d;
     end
   end
