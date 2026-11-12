@@ -414,6 +414,147 @@ for name, b, path, reason in unavailable:
     out.append(f'  $display("%s", {json.dumps(message)});')
 out += ["end", ""]
 
+# ---- Phase S diagnostics: non-scan state -------------------------------------
+# The register file rows and a few machine CSRs are NOT on the chains; phase S
+# snapshots them around a resumable scan session to tell a clock gate forced on
+# by its test enable (every row written with the same value) from a core that
+# runs in test mode.  Found by flop-name pattern anywhere in the hierarchy, so
+# a netlist that names them differently just gets DIAG_*_OK = 0.
+netlist_text = re.sub(r"/\*.*?\*/|//[^\n]*", " ",
+                      args.netlist.read_text(), flags=re.S)
+
+
+def instance_paths(want):
+    """[(module, [instance path from top])] for every module where want(m)."""
+    found, stack = [], [(args.top, [])]
+    while stack:
+        mod, path = stack.pop()
+        if want(mod):
+            found.append((mod, path))
+        for inst, (cell_type, _) in modules.get(mod, {}).items():
+            if cell_type in modules:
+                stack.append((cell_type, path + [inst]))
+    return found
+
+
+def flop_ref(path, inst, outputs):
+    ref = args.dut + "." + ".".join(sv_ident(x) for x in path + [inst])
+    if outputs["Q"]:
+        return f"{ref}.Q"
+    return f"~{ref}.QN" if outputs["QN"] else None
+
+
+def flop_groups(regex):
+    """{module: {prefix: {key: (inst, outputs)}}} for flops matching regex."""
+    groups = defaultdict(lambda: defaultdict(dict))
+    for mod, insts in modules.items():
+        for inst, (_, outputs) in insts.items():
+            m = re.fullmatch(regex, inst)
+            if m and any(outputs.values()):
+                groups[mod][m.group("pre")][m.group("key")] = (inst, outputs)
+    return groups
+
+
+DIAG_ROWS, DIAG_W = 31, 72
+ZERO = "1'b0"
+out += sv_section("Phase S diagnostics: non-scan register file and machine CSRs",
+                  "Physical Q of non-scan flops. Values are LIVE; snapshot them.")
+rf_found = None
+for mod, by_pre in flop_groups(r"(?P<pre>.*?)rf_reg_(?P<key>\d+__\d+)_").items():
+    for pre, cells in by_pre.items():
+        keys = {tuple(map(int, k.split("__"))) for k in cells}
+        full = {(i, b) for i in range(1, DIAG_ROWS + 1) for b in range(DIAG_W)}
+        if keys == full:
+            paths = instance_paths(lambda m, mod=mod: m == mod)
+            if len(paths) == 1 and rf_found is None:
+                rf_found = (mod, pre, cells, paths[0][1])
+if rf_found:
+    mod, pre, cells, path = rf_found
+    refs = {}
+    for k, (inst, outputs) in cells.items():
+        i, b = map(int, k.split("__"))
+        refs[(i - 1) * DIAG_W + b] = flop_ref(path, inst, outputs)
+    out += ["localparam bit DIAG_RF_OK = 1;",
+            f'localparam string DIAG_RF_PATH = "{".".join([args.dut] + path)}/{pre}rf_reg_*";',
+            f"wire [{DIAG_ROWS * DIAG_W - 1}:0] diag_rf_q;  // row i bit b at (i-1)*{DIAG_W}+b"]
+    out += [f"assign diag_rf_q[{n}] = {refs[n]};" for n in sorted(refs)]
+    print(f"Phase S diagnostics: register file {'/'.join(path)} ({mod}), {len(refs)} flops")
+else:
+    out += ["localparam bit DIAG_RF_OK = 0;", 'localparam string DIAG_RF_PATH = "";',
+            f"wire [{DIAG_ROWS * DIAG_W - 1}:0] diag_rf_q = 'z;"]
+    print("Phase S diagnostics: no 31x72 rf_reg_<i>__<b>_ register file found")
+
+# Clock gates whose test enable is driven: in test mode with that pin high they
+# clock their flops on every edge, whatever the functional enable says.
+te_re = re.compile(r"\.TE\s*\(\s*([^()\s]*)\s*\)")
+module_re = re.compile(r"(?ms)^\s*module\s+(\\\S+|[A-Za-z_$][\w$]*)(.*?)^\s*endmodule\b")
+te_nets = {}
+for mm in module_re.finditer(netlist_text):
+    for stmt in mm.group(2).split(";"):
+        t = te_re.search(stmt)
+        if t:
+            inst = re.match(r"\s*\S+\s+(\\\S+|\S+)\s*\(", stmt)
+            if inst:
+                te_nets[(mm.group(1).lstrip("\\"), inst.group(1).lstrip("\\"))] = t.group(1)
+
+
+def count_gates(mod):
+    gates = [n for (m, _), n in te_nets.items() if m == mod]
+    return len(gates), sum(1 for n in gates if n and not re.fullmatch(r"1'b0|0", n)), \
+        sorted({n for n in gates if n and not re.fullmatch(r"1'b0|0", n)})
+
+
+rf_gates = count_gates(rf_found[0]) if rf_found else (0, 0, [])
+# The same over the whole chip: each module's gates times its instance count.
+uses = defaultdict(int)
+for mod, _ in instance_paths(lambda m: True):
+    uses[mod] += 1
+all_gates = all_te = 0
+for mod, n in uses.items():
+    g, te, _ = count_gates(mod)
+    all_gates += n * g
+    all_te += n * te
+print(f"Phase S diagnostics: {all_te} of {all_gates} clock gates have a driven TE "
+      f"(register file: {rf_gates[1]} of {rf_gates[0]})")
+out += [f"localparam int DIAG_ICG = {all_gates}, DIAG_ICG_TE = {all_te};",
+        f"localparam int DIAG_RF_ICG = {rf_gates[0]}, DIAG_RF_ICG_TE = {rf_gates[1]};",
+        f'localparam string DIAG_RF_TE_NET = "{",".join(rf_gates[2])}";', ""]
+
+csr_names = ("MSCRATCH", "MTVEC", "MEPC", "MCAUSE", "MTVAL")
+csr_found = {}
+for mod, by_pre in flop_groups(r"(?P<pre>(?:.*_)?(?:" + "|".join(csr_names) +
+                               r"))reg_q_reg_(?P<key>\d+)_").items():
+    for pre, cells in by_pre.items():
+        name = next(n for n in csr_names if pre.endswith(n))
+        paths = instance_paths(lambda m, mod=mod: m == mod)
+        if len(paths) == 1 and name not in csr_found:
+            csr_found[name] = (paths[0][1], cells)
+out += [f"localparam bit DIAG_CSR_OK = {int(bool(csr_found))};",
+        "val_t diag_csr_by_name[string];  // unavailable bits read 0"]
+for name, (path, cells) in sorted(csr_found.items()):
+    out += [f"wire [63:0] diag_csr_{name};"]
+    for b in range(64):
+        ref = flop_ref(path, *cells[str(b)]) if str(b) in cells else None
+        out.append(f"assign diag_csr_{name}[{b}] = {ref or ZERO};")
+if csr_found:
+    out += ["always_comb begin"]
+    out += [f'  diag_csr_by_name["{n}"] = val_t\'(diag_csr_{n});' for n in sorted(csr_found)]
+    out += ["end"]
+print(f"Phase S diagnostics: machine CSRs found: {', '.join(sorted(csr_found)) or 'none'}")
+
+# The DFT lock (forte_dft_lock.sv): once cleared the pins can no longer shift.
+lock = []
+for mod, insts in modules.items():
+    for inst, (_, outputs) in insts.items():
+        if re.fullmatch(r".*dft_?lock.*unlocked_reg(_0_)?", inst, flags=re.I) and any(outputs.values()):
+            lock += [(path, inst, outputs) for _, path in instance_paths(lambda m, mod=mod: m == mod)]
+if len(lock) == 1:
+    out += ["localparam bit DIAG_LOCK_OK = 1;", f"wire diag_dft_unlocked = {flop_ref(*lock[0])};"]
+else:
+    out += ["localparam bit DIAG_LOCK_OK = 0;", "wire diag_dft_unlocked = 1'bz;"]
+print(f"Phase S diagnostics: DFT lock flop: {'/'.join(lock[0][0] + [lock[0][1]]) if len(lock) == 1 else 'not found'}")
+out += [""]
+
 report_path = args.report or args.output.with_suffix(".report.tsv")
 with report_path.open("w", newline="", encoding="utf-8") as report:
     writer = csv.writer(report, delimiter="\t")

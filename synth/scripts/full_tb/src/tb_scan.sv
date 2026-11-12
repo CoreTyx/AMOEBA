@@ -83,6 +83,11 @@
 //                   value.
 //   R  randomized   multi-register first-edge patterns and modeled faults.
 //   I  instructions short RV64 sequences, WFI endpoint, scan-visible writes.
+//   S  session      a generated program is stopped at cycle N, the chains are
+//                   unloaded and reloaded in a HOLD session (enter_hold /
+//                   exit_hold), and the program must finish exactly as a
+//                   reference run without the session.  Not in the default
+//                   order: it needs the hold-mode RTL (src/scan_resume.svh).
 // Ends with one line per group and register that failed, the PC bits that
 // failed, then "DFT TB PASS" or "DFT TB FAIL".
 //
@@ -106,6 +111,12 @@
 // shifts.  Those are functional edges: where they follow a reset (load) they
 // change nothing; after B's stall, a functional hold or phase I they are a few
 // more cycles of the same stall, which the checks already rely on.
+//
+// HOLD MODE is chosen when test mode is entered: scan_en high on the cycles
+// before test_mode rises makes the session resumable (non-scan state frozen,
+// scan cells clock only on shift edges).  So enter_test() requires scan_en low
+// for the TM_SYNC edges before the rise (every phase but S is a legacy
+// session), and enter_hold()/exit_hold() implement the hold protocol for S.
 //
 // Test cycle as the SPF: 100 ns; inputs change at 10 ns, io_out sampled at
 // 40 ns, core_clk rises at 50 ns.
@@ -161,21 +172,26 @@ module tb_scan;
   logic [1:0]  irq;
   logic [N:1]  si;
   bit link_active = 0;
+  // Phase S: the agent is paused (frozen, not reset) while the bench owns the
+  // pins for a session in the middle of a program.
+  bit link_paused = 0;
+  wire link_drive = link_active & ~link_paused;
   wire link_ready, link_rvalid;
   wire  [N:1]  so;
   wire  [N-1:0] io_in, io_out, link_io_in;
   wire          req, wr, clk_out, uart_tx, status;
 
   // Chain k is bit k-1 of each bus.  io_in is the agent's while it runs (phase
-  // I), the bench's scan-in otherwise.
-  assign io_in = link_active ? link_io_in : si;
+  // I, S), the bench's scan-in otherwise.
+  assign io_in = link_drive ? link_io_in : si;
   assign so    = io_out;
   always_comb begin
-    ready = link_active ? link_ready : 1'b0;
-    rvalid = link_active ? link_rvalid : 1'b0;
+    ready = link_drive ? link_ready : 1'b0;
+    rvalid = link_drive ? link_rvalid : 1'b0;
   end
   // The agent sees reset whenever it is not active: no checks, no transaction
   // state, ready/rvalid low, so scan traffic on io_out is never decoded.
+  // Pausing (link_paused, link.paused) keeps its state instead.
   wire link_rst_n = rst_n & link_active;
   pin_link_agent #(.BEATS(2), .RESET_VEC(32'(`RESET_VEC))) link (
     .core_clk(clk), .clk_out, .rst_n(link_rst_n), .io_out, .io_in(link_io_in),
@@ -223,14 +239,15 @@ module tb_scan;
 
 
   // Per-phase summary: errors counts fail() calls, not individual wrong bits.
-  int phase_errors [0:10];
-  bit phase_ran [0:10];
-  int phase_skips [0:10];
-  int phase_cases [0:10];
-  bit phase_empty [0:10];
-  string phase_names [0:10] = '{"A chain lengths", "M scan map", "B reset",
+  int phase_errors [0:11];
+  bit phase_ran [0:11];
+  int phase_skips [0:11];
+  int phase_cases [0:11];
+  bit phase_empty [0:11];
+  string phase_names [0:11] = '{"A chain lengths", "M scan map", "B reset",
       "C round trip", "D base capture", "E PC", "P registers",
-      "H hardening", "F reset recovery", "R randomized", "I instruction scan"};
+      "H hardening", "F reset recovery", "R randomized", "I instruction scan",
+      "S session/resume"};
   int phase_start_errors;
   int phase_start_cases, phase_start_skips;
 
@@ -256,7 +273,7 @@ module tb_scan;
 
   task automatic phase_summary();
     $display("================ DFT PHASE SUMMARY ================");
-    for (int p = 0; p < 11; p++)
+    for (int p = 0; p < 12; p++)
       $display("PHASE: %-20s %-5s errors=%0d", phase_names[p],
                !phase_ran[p] ? "SKIP" : (phase_errors[p] != 0 ? "FAIL" :
                (phase_empty[p] ? "SKIP" : (phase_skips[p] != 0 ? "PARTIAL" : "PASS"))),
@@ -322,6 +339,13 @@ module tb_scan;
   val_t internal_raw_by_name[string];
   val_t internal_est_by_name[string];
   val_t internal_available_by_name[string];
+  // Phase S non-scan diagnostics (internal_hookups.py writes the real ones)
+  localparam bit DIAG_RF_OK = 0, DIAG_CSR_OK = 0, DIAG_LOCK_OK = 0;
+  wire diag_dft_unlocked = 1'bz;
+  localparam string DIAG_RF_PATH = "", DIAG_RF_TE_NET = "";
+  localparam int DIAG_ICG = 0, DIAG_ICG_TE = 0, DIAG_RF_ICG = 0, DIAG_RF_ICG_TE = 0;
+  wire [31*ECC_CW-1:0] diag_rf_q = 'z;
+  val_t diag_csr_by_name[string];
 `else
 `include "scan_hookups.generated.svh"
 `endif
@@ -386,13 +410,64 @@ module tb_scan;
     $display("[%0t] TRACE idle END: %0d cycles", $time, n);
   endtask
 
+  // Consecutive core_clk edges with scan_en low.
+  int se_low_edges = 0;
+  always @(posedge clk) se_low_edges = (scan_en === 1'b0) ? se_low_edges + 1 : 0;
+
   // Raise test_mode and let it through tmsync before the first shift edge.
   // Returns just after an edge with scan selected, as the callers expect.
+  // A legacy (non-hold) session: scan_en must have been low for the TM_SYNC
+  // edges before test_mode rises, or a hold-mode chip latches hold mode.
   task automatic enter_test();
+    if (test_mode !== 1'b1 && se_low_edges < TM_SYNC)
+      fail($sformatf("enter_test: scan_en low for only %0d edge(s) before test_mode rises (need %0d): the chip would enter HOLD mode",
+                     se_low_edges, TM_SYNC));
     set_se(1'b0);
     test_mode = 1'b1;
     idle(TM_SYNC);
     set_se(1'b1);
+  endtask
+
+  // HOLD session (phase S).  Arm: scan_en=1 with test_mode=0 for 3 cycles;
+  // enter: test_mode=1 and scan_en=0 together, then TM_SYNC idle cycles (two
+  // functional edges while test_mode crosses tmsync, then frozen).  Returns
+  // just after an edge, test_mode=1, scan_en=0; any scan_en=0 edge from here
+  // on must change nothing, a scan_en=1 edge only shifts.  The arm cycles put
+  // a random pattern on io_in: if the first three cells of the chains took it
+  // (internal hookups), scan_en shifted outside test mode -- shifted=1.
+  task automatic enter_hold(output bit shifted);
+    logic [N:1] arm [3], unused;
+    int avail = 0, match = 0;
+    if (test_mode !== 1'b0) fail("enter_hold: test_mode must be low before arming");
+    $display("[%0t] TRACE enter_hold: arm, scan_en=1 test_mode=0 for 3 cycles", $time);
+    set_se(1'b1);
+    for (int c = 0; c < 3; c++) begin
+      arm[c] = N'($urandom);
+      cycle(arm[c], unused);
+    end
+    for (int k = 1; k <= N; k++)
+      for (int j = 1; j <= 3 && j <= len[k]; j++) begin
+        int r = map_reg[k][j], b = map_bit[k][j];
+        if (r < 0 || r >= n_regs || !internal_available_by_name.exists(reg_name[r])) continue;
+        if (internal_available_by_name[reg_name[r]][b] !== 1'b1) continue;
+        avail++;
+        match += internal_raw_by_name[reg_name[r]][b] === (arm[3-j][k] ^ a_inv[k][j] ^ logic'(map_ph[k][j]));
+      end
+    shifted = avail >= 8 && match == avail;
+    $display("[%0t] TRACE enter_hold: arm pattern in %0d of %0d probed first cells; enter, test_mode=1 scan_en=0",
+             $time, match, avail);
+    test_mode = 1'b1;
+    set_se(1'b0);
+    idle(TM_SYNC);
+  endtask
+
+  // Leave a HOLD session: scan_en=0 and test_mode=0 together, TM_SYNC idle
+  // cycles (two more frozen edges, then functional).
+  task automatic exit_hold();
+    $display("[%0t] TRACE exit_hold", $time);
+    set_se(1'b0);
+    test_mode = 1'b0;
+    idle(TM_SYNC);
   endtask
 
   // Shift maxlen cycles: chain k takes in[k][t] at cycle t and its output is
@@ -958,16 +1033,19 @@ module tb_scan;
   // ---- D: first capture; optional longer retention experiments ----------------------------
   task automatic phase_d();
     int durations [6] = '{1, 2, 4, 8, 16, FUNC_CYC};
+    // A functional hold drops test_mode; raising it again needs TM_SYNC
+    // scan_en-low edges first (enter_test), so it is at least TM_SYNC long.
+    int func_durations [5] = '{TM_SYNC, 4, 8, 16, FUNC_CYC};
     $display("[%0t] D: baseline first capture", $time);
     n_pat = 0; n_pat_bad = 0;
     hold("D base, one capture edge", base, base);
     if (sweep_enabled) begin
       $display("[%0t] DIAGNOSTIC D: long retention assumes a persistent stall; ready=0 does not guarantee it. Mismatches fail this run.", $time);
       hold($sformatf("D base, %0d functional cycles", FUNC_CYC), base, base, FUNC_CYC);
-      foreach (durations[i]) begin
-        hold($sformatf("D sweep functional %0d", durations[i]), base, base, durations[i]);
+      foreach (func_durations[i])
+        hold($sformatf("D sweep functional %0d", func_durations[i]), base, base, func_durations[i]);
+      foreach (durations[i])
         hold($sformatf("D sweep test-mode %0d", durations[i]), base, base, durations[i], 1'b1);
-      end
     end
     $display("[%0t] D: %0d holds, %0d failed", $time, n_pat, n_pat_bad);
     $display("[%0t] TRACE task END: phase_d", $time);
@@ -1198,6 +1276,7 @@ module tb_scan;
 
 `include "scan_random.svh"
 `include "scan_exec.svh"
+`include "scan_resume.svh"
 
   // ---- summary -----------------------------------------------------------------------------
   task automatic summary();
@@ -1236,7 +1315,24 @@ module tb_scan;
     void'($value$plusargs("SCAN_SEED=%d", scan_seed));
     void'($value$plusargs("SCAN_RANDOM_ITERS=%d", random_iters));
     void'($value$plusargs("SCAN_EXEC_ITERS=%d", exec_iters));
-    if (random_iters < 1 || exec_iters < 1) $fatal(1, "iteration counts must be positive");
+    void'($value$plusargs("SCAN_RESUME_ITERS=%d", resume_progs));
+    void'($value$plusargs("SCAN_RESUME_BUDGET=%d", resume_budget));
+    begin
+      string ns;
+      if ($value$plusargs("SCAN_RESUME_N=%s", ns)) begin
+        int v = 0;
+        bit dig = 0;
+        for (int i = 0; i <= ns.len(); i++)
+          if (i < ns.len() && ns[i] inside {["0":"9"]}) begin v = v * 10 + (ns[i] - "0"); dig = 1; end
+          else if (i == ns.len() || ns[i] == ",") begin
+            if (!dig || v < 1) $fatal(1, "SCAN_RESUME_N must be a comma-separated list of positive cycle counts");
+            resume_n.push_back(v); v = 0; dig = 0;
+          end
+          else $fatal(1, "SCAN_RESUME_N must be a comma-separated list of positive cycle counts");
+      end
+    end
+    if (random_iters < 1 || exec_iters < 1 || resume_progs < 1 || resume_budget < 1)
+      $fatal(1, "iteration counts must be positive");
     if ($value$plusargs("FPGA_TCO_PS=%d", timing_ps)) launch_ns = timing_ps / 1000.0;
     if (!(launch_ns > 0 && launch_ns < 50)) $fatal(1, "FPGA_TCO_PS must be between 0 and 50000 exclusive");
     if (case_repeats < 1) $fatal(1, "SCAN_REPEAT must be positive");
@@ -1244,7 +1340,7 @@ module tb_scan;
       $fatal(1, "SCAN_OP must be capture, load, or both");
     if (`RST_LAT < 1 || `RST_LAT > MAX_LEN) $fatal(1, "invalid RST_LAT");
     for (int i = 0; i < phase_order.len(); i++)
-      if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F","R","I"}))
+      if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F","R","I","S"}))
         $fatal(1, "SCAN_PHASES contains an unknown phase: %s", phase_order.substr(i,i));
     sentinel_enabled = $test$plusargs("SCAN_SENTINEL");
     sweep_enabled = $test$plusargs("SCAN_SWEEP");
@@ -1253,8 +1349,8 @@ module tb_scan;
     unload_reset_enabled = !$test$plusargs("SCAN_UNLOAD_NO_RESET");
     seed_state = int'(scan_seed);
     seed_state = $urandom(seed_state);
-    $display("[%0t] CONFIG: phases=%s case='%s' operation=%s repeat=%0d seed=%0d TCO=%0.3f ns sentinel=%b sweep=%b unload_reset=%b random_iters=%0d exec_iters=%0d",
-             $time, phase_order, case_filter, scan_op, case_repeats, scan_seed, launch_ns, sentinel_enabled, sweep_enabled, unload_reset_enabled, random_iters, exec_iters);
+    $display("[%0t] CONFIG: phases=%s case='%s' operation=%s repeat=%0d seed=%0d TCO=%0.3f ns sentinel=%b sweep=%b unload_reset=%b random_iters=%0d exec_iters=%0d resume_iters=%0d resume_n=%p",
+             $time, phase_order, case_filter, scan_op, case_repeats, scan_seed, launch_ns, sentinel_enabled, sweep_enabled, unload_reset_enabled, random_iters, exec_iters, resume_progs, resume_n);
     rst_n = 1'bx; irq = '0; uart_rx = 1'b1;
     fault_inject = 1'b0; test_mode = 1'b0; si = '0;
     set_se(1'b0);
@@ -1295,6 +1391,7 @@ module tb_scan;
           "F": begin phase_begin(8); phase_f(); phase_end(8); end
           "R": begin phase_begin(9); phase_r(); phase_end(9); end
           "I": begin phase_begin(10); phase_i(); phase_end(10); end
+          "S": begin phase_begin(11); phase_s(); phase_end(11); end
         endcase
       end
       if (map_ok) summary();

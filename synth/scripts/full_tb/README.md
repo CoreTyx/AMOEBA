@@ -141,7 +141,8 @@ regeneration unless its inputs changed.
 
 Pin comparisons determine pass/fail; internal hookups are diagnostic only.
 A/M/B always run first. A map or constrained-baseline failure blocks dependent
-cases. The remaining default order is `CDEPHFRI`.
+cases. The remaining default order is `CDEPHFRI`; S runs only when named
+(`+SCAN_PHASES=S`): it fails until the hold-mode RTL is in.
 
 | Phase | Check |
 |---|---|
@@ -156,6 +157,7 @@ cases. The remaining default order is `CDEPHFRI`.
 | F | Load all ones, inverted baseline, or random data; reset and compare resettable bits. |
 | R | Multi-register edge/random patterns with legal MPP and valid ECC; alternate valid, SEC, DED, parity-only, and TMR cases. |
 | I | Execute short generated RV64 sequences through the link agent, then verify selected state through scan. |
+| S | Stop a generated program at cycle N, unload/reload every chain in a HOLD session, resume; the result must match a run without the session. |
 
 **`SCAN_OP` controls load verification:** `capture` (default) loads, captures,
 and reads back; `load` omits capture; `both` first checks load/readback, then
@@ -201,7 +203,89 @@ insertion periods make these expectations explicit.
 The link agent is disabled before scan takes the pins: the bench holds its
 `rst_n` low (no checks, no transaction state), forces ready/rvalid low and
 gives `io_in` back to the scan-in drive. Memory and errors persist; each next
-case resets the DUT. Destructive scanning does not support execution resumption.
+case resets the DUT. Destructive scanning does not support execution resumption;
+phase S tests the session that does.
+
+**Legacy and hold sessions.** The hold-mode RTL picks the session type when
+test mode is entered: `scan_en` high on the cycles before `test_mode` rises
+selects HOLD (non-scan state frozen, scan cells clock only on `scan_en=1`
+edges). Every phase but S is a legacy session, so `enter_test()` now fails if
+`scan_en` was not low for the `TM_SYNC` (3) edges before `test_mode` rises. For
+that reason D's `+SCAN_SWEEP` functional holds (which drop `test_mode`) are at
+least 3 cycles: 3/4/8/16/50; the test-mode holds keep 1/2/4/8/16/50.
+`enter_hold()` and `exit_hold()` in `tb_scan.sv` implement the hold protocol
+(100 ns cycle, as above):
+
+1. Arm: `scan_en=1`, `test_mode=0` for 3 cycles (`io_in` carries a random
+   pattern; see cause 4 below).
+2. Enter: `test_mode=1` and `scan_en=0` in the same cycle, 3 idle cycles (two
+   functional edges while `test_mode` crosses `tmsync`, then frozen).
+3. Shift as needed; a `scan_en=0` edge must change nothing.
+4. Exit: `scan_en=0`, `test_mode=0`, 3 idle cycles (two more frozen edges, then
+   functional).
+
+**Phase S** (`src/scan_resume.svh`). Each program (`+SCAN_RESUME_ITERS`,
+default 4) is generated in the bench with phase I's emitters: setup (mtvec to
+a trap handler, mscratch/mepc/mcause/mtval, RANDINSTRFREQ on), then 10–16
+loop iterations of ALU ops, MUL/MULHU/MULW, DIV/REMU/DIVW, loads and stores
+(byte to doubleword) over a 16 KiB region (four times the D$, so misses and
+write-backs), a data-dependent branch and CSR swaps; then x1–x31 and eight CSRs
+(mscratch, mtvec, mepc, mcause, mtval, mstatus, MSECFAULT, RANDINSTRFREQ) to a
+signature, `fence.i`, `tohost = 1`, `fence.i`, WFI. A trap writes
+`tohost = (0x400|mcause)<<1|1` and its mepc/mtval to the signature. About
+14,500–19,000 cycles each, link latency `p % 4`, no gaps (the agent's PRNG is
+not reseeded per run). Per program:
+
+- **reference**: reset, run to `tohost` (`+SCAN_RESUME_BUDGET`, default 60000
+  cycles), 256 cycles parked, then a protected readout at the WFI. Records
+  `tohost`, signature, data region, the ordered link write log and the scan state.
+- **session** at three N (20/45/70 % of the reference plus a per-program
+  offset; or `+SCAN_RESUME_N=n1,n2,...`): reset, run N cycles, quiet the link,
+  pause the agent, arm/enter, unload (zeros in), reload `encode(decode(read))`,
+  unload again (must equal the first), reload again, exit, unpause, run to
+  `tohost`, park, protected readout. Everything the reference recorded must
+  match exactly; the reload pass also checks that the unload's zeros come out
+  unchanged.
+- **tm** (middle N): the same entry and exit, but `4*maxlen` `scan_en=0` edges
+  in test mode and no shifting: separates a core that is not frozen from a
+  shift that corrupts.
+- **ctl** (middle N): only the link pause, as long as a session, no test mode.
+  It must pass on any design; if it fails the oracle is wrong, not the DFT.
+
+Default: 4 programs, 20 cases (12 session, 4 tm, 4 ctl), about 2 min on the
+FreePDK45 netlist. On the current design (2026-11-12, FreePDK45 full scope)
+every session and tm case fails and every ctl case passes; the cause lines
+name 1 (31 of 31 register-file clock gates have `TE=test_se`), 2, 3, 4 and 6.
+
+Tags are `S prog <p> N=<n> <session|tm|ctl>`, so `+SCAN_CASE=session` or
+`+SCAN_CASE=S prog 1 ` select cases. The interrupted run's budget is 1.5× the
+reference plus 2000 cycles, and it stops at the first link error.
+
+**Link pause.** `link_paused` gives `io_in` back to the bench and holds
+`ready`/`rvalid` low without resetting the agent (`link_active` still resets
+it). The agent (`hvl/pin/pin_link_agent.sv`) has two tb-set bits:
+`hold_ready` keeps `ready` low while idle (a transaction started in the guard
+band completes), and `paused` makes the sampler skip every link cycle, so it
+neither checks nor decodes scan traffic and resumes where it stopped. The bench
+waits for the agent idle with no `req` for 5 cycles under `hold_ready`, then
+pauses it.
+
+**Diagnostics.** With hookups on, `internal_hookups.py` also finds the
+register file (`rf_reg_<i>__<b>_`, 31 rows × 72-bit codewords), mscratch,
+mtvec, mepc, mcause, mtval, the DFT lock flop and every clock gate's `TE`
+connection; missing names only disable these (`DIAG_*_OK = 0`). Phase S
+snapshots them before arming, after entry and before exit, monitors `req`/`wr`
+while the agent is paused, and on a failure prints `S CAUSE:` lines:
+
+| Line | Evidence |
+|---|---|
+| cause 1: clock-gate TE forced non-scan flops | many register-file rows took one shared value while armed (≥6) or in test mode (≥2); with the count of clock gates whose `TE` is driven (`test_se`) |
+| cause 2: core not frozen in test mode | rows, CSRs or (tm) scan cells/PC changed in test mode, or the link writes differ from the reference |
+| cause 3: link not isolated | `req`/`wr` active, or agent errors, while paused |
+| cause 4: scan_en shifted outside test mode | the first three cells of every chain took the arm pattern (`scan_en` not qualified by `test_mode`) |
+| cause 5: DFT lock cleared | `dft_unlocked` fell during the session window |
+| cause 6: chains do not shift cleanly with the core live | the reload did not return the unload's zeros; per chain, wrong/length |
+
 
 ## Controls and diagnostics
 
@@ -211,10 +295,11 @@ case resets the DUT. Destructive scanning does not support execution resumption.
 | `SCAN_CASE=<substring>` | All cases; case-sensitive filter. A/M/B/C unaffected; no executable match fails. |
 | `SCAN_OP=capture|load|both` | `capture`; behavior described above. |
 | `SCAN_RANDOM_ITERS=<n>` / `SCAN_EXEC_ITERS=<n>` | `100` / `16`; positive counts. Eight I cases cover all categories. |
+| `SCAN_RESUME_ITERS=<n>` / `SCAN_RESUME_N=<n,...>` / `SCAN_RESUME_BUDGET=<n>` | `4` programs / 20, 45, 70 % of the reference / `60000` reference cycles; phase S. |
 | `SCAN_REPEAT=<n>` / `SCAN_SEED=<n>` | `1` / `1`; fresh preparation per repetition. Reproduction needs the same seed and phase order. |
 | `SCAN_SENTINEL` | Off; baseline capture before each D/E/P/H/R case; failure blocks the target. |
 | `SCAN_UNLOAD_NO_RESET` | Off; unprotected diagnostic readout. `SCAN_UNLOAD_RESET` explicitly requests the default; both flags together fail. |
-| `SCAN_SWEEP` | Off; D's 50-clock hold and 1/2/4/8/16/50 sweeps in both modes, plus E's four 50-clock holds. |
+| `SCAN_SWEEP` | Off; D's 50-clock hold, 3/4/8/16/50 functional and 1/2/4/8/16/50 test-mode sweeps, plus E's four 50-clock holds. |
 | `SCAN_TIMEOUT_NS=<n>` | `100000000`; positive watchdog duration. |
 | `FPGA_TCO_PS=<n>` | `2000`; post-rising-edge control delay, strictly between 0 and 50000 ps. |
 | `FPGA_SAMPLE_PS=<n>` | `5000`; phase-I link sampling. I sets its own latency/gap profiles. |
@@ -231,6 +316,8 @@ VCS; runtime plusargs go to simulation (`--` forces subsequent runtime args).
 ./run.sh +SCAN_PHASES=P '+SCAN_CASE=RANDINSTRFREQreg all 1' +SCAN_UNLOAD_NO_RESET
 ./regress.sh --unload-reset  # Paired protected/unprotected cases; control failures remain failures
 ./run.sh +SCAN_PHASES=D +SCAN_SWEEP
+./run.sh +SCAN_PHASES=S       # Expected failure until the hold-mode RTL lands
+./run.sh +SCAN_PHASES=S +SCAN_RESUME_ITERS=1 +SCAN_RESUME_N=4000 '+SCAN_CASE=session'
 ./run.sh +define+BREAK_SE    # Expected failure: shifting disabled
 ./run.sh +define+BREAK_MAP   # Expected failure: corrupted inversion map
 ```
@@ -270,7 +357,7 @@ map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
 
 | Path | Contents |
 |---|---|
-| `src/tb_scan.sv`, `src/scan_*.svh` | Scan tasks, directed/random tests, instruction builder/checks. |
+| `src/tb_scan.sv`, `src/scan_*.svh` | Scan tasks, directed/random tests, instruction builder/checks; `scan_resume.svh` is phase S. |
 | `src/{scan_map.awk,internal_hookups.py,set_scan_phase.py}` | Mapping generator, diagnostic generator, verified-phase editor. |
 | `run.sh`, `regress.sh` | Entry points. |
 | `paths.sh` (not in Git) | Local configuration: netlist, scandef, models. |
@@ -279,6 +366,12 @@ map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
 | `generated/` | Checked-in hookup snapshots from the old 16-bit netlist, unused by the runner. |
 
 ## Open action items
+
+- [ ] **Make phase S pass, then add it to the default order.** Needs the
+  hold-mode RTL (session type latched from `scan_en` at test-mode entry,
+  non-scan state frozen, clock-gate `TE` and `scan_en` qualified by test mode)
+  and a netlist from it; then `--regen`, `+SCAN_PHASES=S`, and add `S` to
+  `phase_order` and `regress.sh`.
 
 - [ ] **Implement the DFT-session stall and rebuild/verify the DFT flow.** Tie
   the halt to qualified `test_mode_dft` so it persists when `scan_en=0`; audit
