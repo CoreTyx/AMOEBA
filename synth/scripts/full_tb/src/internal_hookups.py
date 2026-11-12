@@ -5,6 +5,7 @@ import csv
 import json
 from collections import defaultdict
 import re
+import sys
 from pathlib import Path
 
 FULL_TB_DIR = Path(__file__).resolve().parents[1]
@@ -177,27 +178,47 @@ section = re.search(
 )
 assert section, "No SCANCHAINS section"
 
+# Tokenised exactly as scan_map.awk reads it, so both see the same cells: any
+# layout (one cell per line or several, "( OUT pin )" present or not, any pin
+# names).  "- cN" opens a chain, "+ KEYWORD" sets the mode, and only names in
+# FLOATING/ORDERED mode are cells.  "+ START ..."/"+ STOP ..." are endpoints
+# (STOP is the scan-out gate in front of io_out[k], or PIN io_out[k]).
 chains = {}
-for m in re.finditer(
-    r"(?ms)^-\s+c(\d+)\s*\n(.*?)(?=^-\s+c\d+\s*$|\Z)",
-    section.group(1)
-):
-    k = int(m.group(1)) + 1
-    entries = []
-
-    for line in m.group(2).splitlines():
-        scan = re.match(
-            r"^\s*(?:\+\s*(?:FLOATING|ORDERED)\s+)?"
-            r"(\S+)\s*\(\s*IN\s+\S+\s*\)\s*"
-            r"\(\s*OUT\s+(Q|QN)\s*\)",
-            line
-        )
-        if scan:
-            entries.append((scan.group(1), scan.group(2)))
-        # "+ STOP <component> <pin>" is the chain's endpoint (the scan-out gate
-        # in front of io_out[k], or PIN io_out[k]), never a scan cell.
-
-    chains[k] = entries
+k = None
+mode = want = None
+paren = False
+pdir = None
+for tok in re.sub(r"([();])", r" \1 ", section.group(1)).split():
+    if want == "name":
+        cm = re.fullmatch(r"c(\d+)", tok)
+        assert cm, f"Chain {tok!r} is not named cN"
+        k = int(cm.group(1)) + 1
+        assert k not in chains, f"Duplicate chain {tok}"
+        chains[k] = []
+        mode = want = None
+        continue
+    if want == "kw":
+        mode, want = tok, None
+        continue
+    if tok == "-":
+        want = "name"
+    elif tok == "+":
+        want = "kw"
+    elif tok == ";":
+        k = mode = None
+    elif tok == "(":
+        paren, pdir = True, None
+    elif tok == ")":
+        paren = False
+    elif paren:
+        if pdir is None:
+            pdir = tok
+        elif pdir == "OUT" and k is not None and chains[k] and mode in ("FLOATING", "ORDERED"):
+            # Q or QN for the probe; any other scan-out pin is left to stop_pin.
+            name, _ = chains[k][-1]
+            chains[k][-1] = (name, tok if tok in ("Q", "QN") else None)
+    elif k is not None and mode in ("FLOATING", "ORDERED"):
+        chains[k].append((tok, None))
 
 assert chains, "No chains found"
 
@@ -225,7 +246,7 @@ for k, entries in sorted(chains.items()):
                     (k, j, path, qn, pin)
                 )
         else:
-            assert qn == 2
+            # No OUT pin, or one other than Q/QN: the probe picks an output.
             if args.stop_pin != "X":
                 pin = args.stop_pin
 
@@ -241,9 +262,14 @@ for k, entries in sorted(chains.items()):
 
         by_reg[r][b] = (k, j, path, pin, ph)
 
-assert len(records) == sum(
-    len(x) for x in chains.values()
-), "Map and scandef cell counts differ"
+if len(records) != sum(len(x) for x in chains.values()):
+    map_len = defaultdict(int)
+    for kk, _ in records:
+        map_len[kk] += 1
+    for kk in sorted(set(map_len) | set(chains)):
+        print(f"internal_hookups.py: c{kk-1}: {map_len[kk]} cells in the map, "
+              f"{len(chains.get(kk, []))} read from the scandef", file=sys.stderr)
+    raise SystemExit("internal_hookups.py: map and scandef cell counts differ")
 
 # ---- Generated per-register buses --------------------------------------------
 out = [
