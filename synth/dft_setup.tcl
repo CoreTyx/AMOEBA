@@ -7,7 +7,10 @@
 #   pc    (default)  the fetch PC only: 63/64 flops, the pc_tb bench
 #   full             PC + pipeline registers + hardened CSRs (~1,600 flops),
 #                    the full_tb bench
-# Changing it needs a full re-synthesis: the attributes go into the pre-DFT ddc.
+# DFT_KEEP_ALL=1 (environment) keeps flops DC would otherwise optimize out
+# (constant, unloaded, duplicate); see where scan_regs is set below.
+# Changing either needs a full re-synthesis: the attributes go into the
+# pre-DFT ddc.
 
 set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "pc"}]
 puts "DFT setup: scope $dft_scope"
@@ -136,6 +139,23 @@ puts "DFT setup: [sizeof_collection $scan_regs] scan flops selected"
 set_dont_retime $scan_regs true
 set_scan_element false [all_registers -edge_triggered]
 set_scan_element true $scan_regs
+
+# DFT_KEEP_ALL=1 (environment, default 0): keep every selected flop as its own
+# scan cell, so a scan dump maps bit for bit onto the RTL registers.  By
+# default compile_ultra deletes flops that hold a constant (PC[0], unused
+# controlreg fields), have no load (Funct7E), or duplicate another flop, and
+# those bits are simply not on the chains.  Keeping them costs area and adds
+# no fault coverage.  Merging is turned off for the scan flops only; the two
+# variables are design-wide, so check the area report after using it.
+set dft_keep_all [expr {[info exists ::env(DFT_KEEP_ALL)] && $::env(DFT_KEEP_ALL) eq "1"}]
+if {$dft_keep_all} {
+  set_register_merging $scan_regs false
+  set compile_seqmap_propagate_constants false
+  set compile_delete_unloaded_sequential_cells false
+  puts "DFT setup: DFT_KEEP_ALL=1: constant, unloaded and duplicate flops are kept"
+}
+printvar compile_seqmap_propagate_constants
+printvar compile_delete_unloaded_sequential_cells
 
 # Flops that must never be on a chain, whatever the selection:
 #   the DFT lock      observable is bad, settable is worse (forte_dft_lock.sv)

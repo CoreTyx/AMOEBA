@@ -4,6 +4,9 @@ export REPORT_DIR			= reports
 # Scan selection read by dft_setup.tcl: pc (PC only, pc_tb) or full (full_tb).
 # make synth DFT_SCOPE=full
 export DFT_SCOPE			?= pc
+# 1 keeps flops DC would optimize out (constant, unloaded, duplicate) as scan
+# cells: make synth DFT_SCOPE=full DFT_KEEP_ALL=1
+export DFT_KEEP_ALL			?= 0
 
 .PHONY: synth
 synth: clean
