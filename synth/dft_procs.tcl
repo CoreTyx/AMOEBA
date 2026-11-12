@@ -219,13 +219,14 @@ proc dft_write_phase {scandef out_file rpt_file} {
   set rpt [open $rpt_file w]
   puts $out "# Logical phase per scan cell, written by dft_insert.tcl from [file tail $scandef]."
   puts $out "# <scandef instance path> <0|1>: 1 = the flop stores the RTL bit inverted"
-  puts $out "# (its RTL-named net is on QN; see dft_write_phase in dft_procs.tcl)."
+  puts $out "# (it has Q and QN and its RTL-named net is on QN; see dft_write_phase in dft_procs.tcl)."
   puts $rpt "DFT phase report: [file normalize $scandef]"
-  puts $rpt "rule: phase 1 = the net on QN carries a design name and the net on Q does not"
+  puts $rpt "rule: phase 1 = a cell with both Q and QN pins whose QN net carries a design name and Q net does not;"
+  puts $rpt "      a single-output cell (Q-only or QN-only) cannot be judged by net names and is written 0"
   puts $rpt ""
   puts $rpt [format "%-5s %5s %-4s %4s %4s %-5s %s" chain idx so Q QN phase cell]
 
-  set total 0; set n_qn_so 0; set n_qn_only 0; set n_noload 0; set n_ph1 0; set n_missing 0; set n_amb 0
+  set total 0; set n_qn_so 0; set n_qn_only 0; set n_noload 0; set n_ph1 0; set n_missing 0; set n_amb 0; set n_single 0
   set notes {}
   foreach {chain idx name so_pin} $cells {
     incr total
@@ -237,13 +238,14 @@ proc dft_write_phase {scandef out_file rpt_file} {
       puts $rpt [format "%-5s %5d %-4s %4s %4s %-5s %s  (NOT FOUND in the design)" $chain $idx $so_pin - - 0 $name]
       continue
     }
-    set q_loads 0; set qn_loads 0; set has_qn 0; set q_name ""; set qn_name ""
+    set q_loads 0; set qn_loads 0; set has_q 0; set has_qn 0; set q_name ""; set qn_name ""
     foreach_in_collection p [get_pins -quiet -of_objects $c -filter "direction==out"] {
       if {[dft_seq_pin_inverts $p]} {
         set has_qn 1
         incr qn_loads [dft_functional_loads $p]
         if {$qn_name eq ""} { set qn_name [dft_design_net_name $p] }
       } else {
+        set has_q 1
         incr q_loads [dft_functional_loads $p]
         if {$q_name eq ""} { set q_name [dft_design_net_name $p] }
       }
@@ -253,9 +255,15 @@ proc dft_write_phase {scandef out_file rpt_file} {
     set qn_only [expr {$has_qn && $q_loads == 0 && $qn_loads > 0}]
     if {$qn_only} { incr n_qn_only; lappend notes "QN-only functional fanout: $name" }
     if {$q_loads + $qn_loads == 0} { incr n_noload; lappend notes "no functional load: $name" }
-    set ph [expr {$qn_name ne "" && $q_name eq "" ? 1 : 0}]
+    # The rule compares the two outputs, so it needs both.  On a QN-only cell
+    # (e.g. TSMC SDFFQNX*) the empty Q name would otherwise flag every cell
+    # whose QN net is named, although the cell stores D as is.  With
+    # compile_ultra -no_seq_output_inversion such cells hold the RTL bit.
+    set single [expr {!($has_q && $has_qn)}]
+    if {$single} { incr n_single }
+    set ph [expr {!$single && $qn_name ne "" && $q_name eq "" ? 1 : 0}]
     if {$ph} { incr n_ph1; lappend notes "phase 1 (stored inverted): $name  Q net: -  QN net: $qn_name" }
-    if {$qn_name ne "" && $q_name ne ""} {
+    if {!$single && $qn_name ne "" && $q_name ne ""} {
       incr n_amb; lappend notes "AMBIGUOUS, written 0: $name  Q net: $q_name  QN net: $qn_name"
     }
     puts $out "$name $ph"
@@ -266,13 +274,14 @@ proc dft_write_phase {scandef out_file rpt_file} {
   puts $rpt "scan output from QN (scan-path inversions, from the scandef): $n_qn_so"
   puts $rpt "phase 1 written (stored inverted): $n_ph1"
   puts $rpt "ambiguous (Q and QN nets both named), written 0: $n_amb"
+  puts $rpt "single-output cells (Q-only or QN-only), written 0: $n_single"
   puts $rpt "functional fanout only from QN (information): $n_qn_only"
   puts $rpt "no functional load (constant/merged?): $n_noload"
   puts $rpt "not found in the design: $n_missing"
   foreach n $notes { puts $rpt "NOTE: $n" }
   close $out
   close $rpt
-  puts "DFT phase: $total scan cells, $n_qn_so scan-out QN, $n_ph1 stored inverted -> $out_file"
+  puts "DFT phase: $total scan cells, $n_qn_so scan-out QN, $n_single single-output, $n_ph1 stored inverted -> $out_file"
   if {$n_missing > 0} { puts "DFT phase: WARNING: $n_missing scandef cells not found in the design (see $rpt_file)" }
   if {$n_ph1 > 0} { puts "DFT phase: WARNING: $n_ph1 scan cells are stored inverted; was compile_ultra run without -no_seq_output_inversion? (see $rpt_file)" }
   if {$n_amb > 0} { puts "DFT phase: WARNING: $n_amb scan cells have named nets on both Q and QN, written 0 (see $rpt_file)" }

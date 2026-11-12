@@ -57,7 +57,8 @@ After regenerating the netlist or changing scan selection:
    RTL bit; `1` means it is inverted. `synthesis.tcl` runs `compile_ultra
    -no_seq_output_inversion`, so expect all `0`, and the DC log line
    `DFT phase: ... 0 stored inverted`. `dft_write_phase` reads each cell's
-   phase from the netlist (a cell whose RTL-named net hangs off QN is `1`) and
+   phase from the netlist (a cell with Q and QN whose RTL-named net hangs off QN
+   is `1`; single-output cells are `0`) and
    lists any such cell in `reports/dft/dft_phase.rpt`; B and F's exact reset
    values cross-check it. **Q versus QN
    scan-output selection does not establish logical phase.** Do not reuse old
@@ -225,6 +226,7 @@ Errors seen when bringing the bench up on a new machine:
 | Symptom | Cause | Fix |
 |---|---|---|
 | M: `cN is 9 cells in the scandef, 162 at the pins` (c7: 8) after A found the full chains | The cached map is the old PC-only one: the run reused `sim/` without `--regen` | `./run.sh --regen`. `run.sh` now refuses a map older than its netlist or scandef |
+| B fails on many registers, and each `INTERNAL:` line shows `raw_Q` equal to the expected value while `logical_est` is wrong | The phase file marks true-polarity cells as inverted: an older `dft_write_phase` misread QN-only TSMC cells | Re-run insertion with the current `dft_procs.tcl` (`make dft`, or `make synth DFT_SCOPE=full`), or with a netlist built with `-no_seq_output_inversion` write an all-0 phase file: `awk '!/^#/{print $1, 0}' <scandef dir>/forte_top.scan_phase.txt > scan_phase.txt`, then `--regen` |
 | A finds 63 cells (7 × 8 + 7) | The netlist was built with `DFT_SCOPE=pc` | `make synth DFT_SCOPE=full`, then `./run.sh --regen` |
 | M: `cN is n+1 cells in the scandef, n at the pins` on every chain | An old `src/scan_map.awk` that counts the scandef `STOP` entry as a cell, or a cached map from before the fix | Copy the current `src/`; `grep -c stop_seen src/scan_map.awk` must print 0; rerun with `--regen` |
 | `Error-[IND] Identifier 'TA' not declared` in `pin_link_agent.sv` | The old 16-bit link agent compiled against the new 8-bit `forte_link_pkg.sv` | Copy the current `hvl/pin/pin_link_agent.sv`, or point `LINK_AGENT` at it in `paths.sh` |
