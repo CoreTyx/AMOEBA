@@ -571,7 +571,11 @@ link
 # four DFT control nets before mapping.
 source dft_procs.tcl
 source dft_setup.tcl
-compile_ultra -scan -gate_clock -retime
+# -no_seq_output_inversion: keep every register in RTL polarity, so the scan
+# phase file is all 0 (compile_seqmap_enable_output_inversion does not reach
+# compile_ultra).  Without it DC stored 14 of the full scope's scan cells
+# inverted on FreePDK45.
+compile_ultra -scan -gate_clock -retime -no_seq_output_inversion
 
 change_names -rules verilog -hierarchy
 change_names -rules nameRules -hierarchy

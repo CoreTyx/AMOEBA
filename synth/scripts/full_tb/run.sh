@@ -18,6 +18,11 @@
 #                    next to it. Needed only for --regen: scan_map.awk creates
 #                    scan_map.generated.svh, which tells the bench which register bit each
 #                    scan cell holds.
+#   LOGICAL_PHASE    optional, --regen only: per-cell logical phase.  Default:
+#                    ./scan_phase.txt if present, else forte_top.scan_phase.txt
+#                    beside SCANDEF (written by dft_insert.tcl).
+#   LINK_PKG, LINK_AGENT  the link package and pin agent for phase I; default
+#                    the repo's hdl/forte_link_pkg.sv and hvl/pin/pin_link_agent.sv.
 # Each *_MODELS may be a file, a glob, or a folder (all the .v and .sv in it), or
 # several of those separated by spaces or as a bash array, X=(dir/*.v).  An
 # array cannot be exported: set it directly in the sourced paths file.
@@ -68,8 +73,7 @@ if [[ "${1:-}" == clean ]]; then
 fi
 
 mkdir -p "$SIM_DIR"
-for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" \
-    "$SRC_DIR/forte_link_pkg_legacy.sv" "$SRC_DIR/pin_link_agent_legacy.sv"; do
+for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh"; do
     [ -s "$source_file" ] || die "missing source: $source_file; use the complete full_tb/src directory"
 done
 
@@ -88,6 +92,16 @@ echo "run.sh: sourcing $PATHS_FILE"
 # shellcheck disable=SC1090
 source "$(realpath "$PATHS_FILE")"
 [ -z "${SDF:-}" ] || die "full_tb runs zero-delay only; use hvl/pin for SDF simulation"
+
+# Phase I talks to the chip through the same link agent as the pin bench, on
+# the current io_in/io_out protocol.  Both come from the repo unless overridden.
+REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+LINK_PKG=${LINK_PKG:-$REPO_DIR/hdl/forte_link_pkg.sv}
+LINK_AGENT=${LINK_AGENT:-$REPO_DIR/hvl/pin/pin_link_agent.sv}
+for f in "$LINK_PKG" "$LINK_AGENT"; do
+    [ -s "$f" ] || die "missing link source: $f; copy hdl/forte_link_pkg.sv and hvl/pin/pin_link_agent.sv from the repo, or set LINK_PKG/LINK_AGENT"
+done
+LINK_PKG=$(realpath "$LINK_PKG"); LINK_AGENT=$(realpath "$LINK_AGENT")
 
 # Compiler options and simulator plusargs have different destinations. A bare
 # +NAME or +NAME=value is a runtime argument; known VCS +options stay at build.
@@ -170,9 +184,12 @@ if (( REGENERATE )); then
         LOGICAL_PHASE=$(realpath "$LOGICAL_PHASE")
     elif [[ -f "$SCRIPT_DIR/scan_phase.txt" ]]; then
         LOGICAL_PHASE="$SCRIPT_DIR/scan_phase.txt"
+    elif [[ -f "$(dirname "$SCANDEF")/forte_top.scan_phase.txt" ]]; then
+        LOGICAL_PHASE="$(dirname "$SCANDEF")/forte_top.scan_phase.txt"
     else
         LOGICAL_PHASE=""
     fi
+    echo "run.sh: logical phase from ${LOGICAL_PHASE:-<none>: every cell taken as stored in true polarity>}"
     # Publish only after all requested generation steps succeed.
     awk -v LOGICAL_PHASE="$LOGICAL_PHASE" -v TOP=forte_top \
         -f "$SRC_DIR/scan_map.awk" "$SCANDEF" > "$SCAN_MAP.tmp" \
@@ -235,8 +252,7 @@ vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     +nospecify +notimingcheck ${FLAGS[@]+"${FLAGS[@]}"} \
     "${COMPILE_ARGS[@]}" \
     "+incdir+$SIM_DIR" "+incdir+$SRC_DIR" \
-    "${SRCS[@]}" "$SRC_DIR/forte_link_pkg_legacy.sv" \
-    "$SRC_DIR/pin_link_agent_legacy.sv" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
+    "${SRCS[@]}" "$LINK_PKG" "$LINK_AGENT" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
     -Mdir=csrc -top tb_scan -o simv_scan
 
 rm -f sim.log

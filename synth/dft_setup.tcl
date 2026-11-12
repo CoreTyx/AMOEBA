@@ -19,8 +19,10 @@ set_ungroup [get_cells chip] false
 set_boundary_optimization [get_cells chip] true
 
 # Never let mapping store a register inverted (D inverted, value read off QN).
-# With this false and the scan flops kept out of retiming, every scan cell
-# holds its RTL bit in true polarity, and dft_write_phase can say so.
+# This variable covers compile only: compile_ultra ignores it and needs
+# -no_seq_output_inversion, which synthesis.tcl passes.  With both, and the
+# scan flops kept out of retiming, every scan cell holds its RTL bit in true
+# polarity; dft_write_phase checks the netlist for any that do not.
 set compile_seqmap_enable_output_inversion false
 printvar compile_seqmap_enable_output_inversion
 
@@ -95,8 +97,6 @@ set scan_group_pipeline {
   */core/mdu*/*W64MReg/*
   */core/mdu*/*MDUResultWReg/*
   */core/mdu*/*divfaultreg/*
-  */core/mdu*/*PP1Reg/*
-  */core/mdu*/*PP2Reg/*
   */core/priv*/ppr/*faultregD/*
   */core/priv*/ppr/*faultregE/*
   */core/priv*/ppr/*faultregM/*

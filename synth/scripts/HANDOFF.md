@@ -10,7 +10,7 @@ In your mom
 | `dft_setup.tcl` | `synthesis.tcl`, **before** `compile_ultra` | Picks the flops to scan (`DFT_SCOPE`), keeps the four control nets, declares the existing test signals |
 | `dft_insert.tcl` | `synthesis.tcl` after compile (integrated), or `make dft` (standalone) | Declares the 8 chains `io_in[k] -> io_out[k]`, runs `insert_dft`, writes the protocol, scandef, phase file and reports |
 | `pc_tb/run.sh`, `pc_tb/scan_map.awk`, `pc_tb/tb_scan.sv` | you / VCS | The PC bench (section 10). **Ported to `io_in`/`io_out`**; the one to run with `DFT_SCOPE=pc` |
-| `full_tb/` | you / VCS | Full bench: every register on the chains (PC, pipeline, hardened CSRs). **Still on the old 16-bit `io`/`dir` netlist**; see `full_tb/README.md` |
+| `full_tb/` | you / VCS | Full bench: every register on the chains (PC, pipeline, hardened CSRs). Needs a `DFT_SCOPE=full` netlist; see `full_tb/README.md` |
 | `HANDOFF.md` | people | This file |
 
 **Generated, safe to delete:** `scan_map.svh`, `simv_scan`, `simv_scan.daidir/`, `csrc/`, `compile.log`, `sim.log`, `ucli.key`. They are written into the folder `run.sh` lives in.
@@ -56,20 +56,20 @@ Why things are in this order:
 - **`make dft` is enough:** a change to `dft_insert.tcl` only. It reads `synout/forte_top.pre_dft.ddc` (or `$DFT_PRE_DDC`) in a fresh `dc_shell` (`dft_standalone true`).
 - **Standalone runs skip `synthesis.tcl`:** so they don't apply the `set_case_analysis`. If that matters, add it to `dft_insert.tcl` after `insert_dft`.
 
-Not done: false-pathing the `io[*]` bus. It is still timed against the link `set_input_delay`/`set_output_delay` in the SDC, on its functional paths only.
+Not done: false-pathing the `io_in[*]`/`io_out[*]` buses. It is still timed against the link `set_input_delay`/`set_output_delay` in the SDC, on its functional paths only.
 
 ## 4. `dft_setup.tcl`: what gets scanned
 
 - **Scope:** run on `forte_top`. The pad ring is included; only the `chip` instance is kept as a hierarchy boundary (`set_ungroup chip false`, boundary optimisation allowed).
 - **Scope** (`DFT_SCOPE` in the environment, exported by the Makefile; `make synth DFT_SCOPE=full`):
   - `pc` (default): the `pc` group only, 63 flops after PC[0] is optimised away. The bench is `pc_tb/`.
-  - `full`: all three groups below. The bench is `full_tb/`, once it is ported to the new pins.
+  - `full`: all three groups below. The bench is `full_tb/`.
 - **Scan groups** (`scan_group_*`): one hierarchical pattern per line, matched against the elaborated, pre-compile names. `*` spans hierarchy, and only sequential cells are taken, each once.
 
   | Group | Contents |
   |---|---|
   | `pc` | `*/ifu/pcreg/q_reg*` |
-  | `pipeline` | Pipeline stage registers: IFU (`PCDReg`, `PCEReg`, `PCMReg`, `Instr*Reg`, `Compressed*Reg`, `Spill*Reg`, `AlignedInstrRawDFlop`, `PCSrcMReg`, `InstrMisalignedReg`), controller (`controlreg[DEMW]`, `Rs1EReg`, `Rs2EReg`, `Rd[EMW]Reg`), the 7 ECC datapath registers (`RD1EReg`, `RD2EReg`, `ImmExtEReg`, `SrcAMReg`, `IEUResultMReg`, `WriteDataMReg`, `IFResultWReg`), LSU (`AddressMReg`, `ReadDataMWReg`), MDU (`W64MReg`, `MDUResultWReg`, `divfaultreg`, `PP1Reg`, `PP2Reg`), priv (`faultreg[DEM]`, `CSRValWReg`, `wfiWReg`) |
+  | `pipeline` | Pipeline stage registers: IFU (`PCDReg`, `PCEReg`, `PCMReg`, `Instr*Reg`, `Compressed*Reg`, `Spill*Reg`, `AlignedInstrRawDFlop`, `PCSrcMReg`, `InstrMisalignedReg`), controller (`controlreg[DEMW]`, `Rs1EReg`, `Rs2EReg`, `Rd[EMW]Reg`), the 7 ECC datapath registers (`RD1EReg`, `RD2EReg`, `ImmExtEReg`, `SrcAMReg`, `IEUResultMReg`, `WriteDataMReg`, `IFResultWReg`), LSU (`AddressMReg`, `ReadDataMWReg`), MDU (`W64MReg`, `MDUResultWReg`, `divfaultreg`; the old `PP1Reg`/`PP2Reg` went with the shift-add multiplier), priv (`faultreg[DEM]`, `CSRValWReg`, `wfiWReg`) |
   | `hardened_csr` | privmode TMR copies `privmodereg_*`, `privchkreg_*`; `STATUS_MPP`; `MSECFAULT_REGW`; `RANDINSTRFREQreg`; `FTStatusSticky` |
 
   Not scanned: the divider iteration state, caches, TLBs and register file.
@@ -78,7 +78,7 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 - **Scan selection:** every edge-triggered register is first made non-scan, then only the groups are enabled. Two sets of flops are forced non-scan and not retimed, and the script errors if either matches nothing:
   - The DFT lock (`chip/soc/uncore/dftlock/*`). It must never be on a chain.
   - test_mode's synchroniser (`chip/tmsync/*`). Shifting it would drop test mode mid-shift.
-- **No inverted storage:** `compile_seqmap_enable_output_inversion false` (also DC's default, set and printed explicitly). With it, and with every scan flop kept out of retiming, each scan cell holds its RTL bit in true polarity. That is what lets `dft_write_phase` write phase 0.
+- **No inverted storage:** `compile_ultra -no_seq_output_inversion` in `synthesis.tcl`. The variable `compile_seqmap_enable_output_inversion false` (set in `dft_setup.tcl`) only covers `compile`; `compile_ultra` ignores it and, without the option, stored 14 of the full scope's scan cells inverted on FreePDK45 (`FTStatusSticky[6]`, `AlignedInstrRawDFlop[2,3,5..15]`). With the option, and with every scan flop kept out of retiming, each scan cell holds its RTL bit in true polarity.
 - **Preserved nets:** `chip/scan_en_dft`, `chip/test_mode_dft`, `chip/test_mode_s`, `chip/dft_unlocked`. The script errors unless all four exist.
 - **Existing test signals:**
   - `ScanClock core_clk`, timing `{45 55}`. The single `core_clk` pad feeds both `core_clk` and `link_clk`, so there is no second test clock.
@@ -106,8 +106,8 @@ Not done: false-pathing the `io[*]` bus. It is still timed against the link `set
 - **QN inversions:** by default `insert_dft` takes each cell's scan output from whichever of Q/QN has more slack, so some chains invert. The commented-out `set test_disable_find_best_scan_out true` makes it pick by availability instead; the man page says the result can still invert. The benches handle inversions either way.
   - Count them: `grep -c 'OUT QN' ../synout/forte_top.scandef`.
 - **Logical phase (`forte_top.scan_phase.txt`):** after `write_scan_def`, `dft_write_phase` writes one line per scan cell, `<scandef instance path> <0|1>`, where 1 means the flop stores its RTL bit inverted. This is the same format as `full_tb`'s `LOGICAL_PHASE`, and `pc_tb/run.sh` reads it as `SCAN_PHASE`.
-  - With output inversion off (above), every cell is 0 by construction. QN-only fanout is **not** taken as evidence of inversion, because logic that wants `~q` legitimately reads QN of a true-polarity flop.
-  - If output inversion is ever turned on, cells whose Q has no functional load and whose QN does are written 1 and marked `UNVERIFIED`. The benches' exact reset checks (B, F) then confirm or refute each one.
+  - The rule reads the netlist: DC keeps the RTL signal's name on the net that carries it, so a cell is written 1 when the net on QN has a design name and the net on Q is generated (`nNNN`) or absent. Scan-path nets (`test_si*`, `test_so*`) don't count as names. QN-only fanout alone is **not** evidence, because logic that wants `~q` legitimately reads QN of a true-polarity flop.
+  - On the netlist built without `-no_seq_output_inversion`, the rule picked exactly the 14 cells that `full_tb` phase B read inverted. With the option it should write all 0; any phase-1 cell prints a `DFT phase: WARNING` and is listed with its net names in `dft_phase.rpt`. The benches' exact reset checks (B, F) stay the independent check.
   - `reports/dft/dft_phase.rpt` lists every cell: chain, index, scan-out pin, Q/QN functional load counts, and phase. It ends with totals and notes (QN-only fanout, no functional load, cells not found).
 - **Checking DRC** (in `reports/dft/`):
 
@@ -216,9 +216,10 @@ VCS_FLAGS="+define+EXPECTED_CELLS=63"              # optional, added after the d
 
 **Pin protocol:**
 - The bench drives and reads only package pins.
-- One test cycle is 100 ns, as in the SPF: inputs change at 10 ns, `io[15:8]` is sampled at 40 ns, `core_clk` rises at 50 ns.
+- One test cycle is 100 ns, as in the SPF: inputs change at 10 ns, `io_out` is sampled at 40 ns, `core_clk` rises at 50 ns.
 - `test_mode` stays high while testing. `scan_en` high shifts; an edge with `scan_en` low is a capture.
-- The bench drives `io[7:0]` only in test mode; weak pull-downs keep the bus out of Z.
+- `test_mode` is synchronised on chip (`tmsync`), so after each rise the bench idles `TM_SYNC` = 3 cycles with `scan_en` low before shifting.
+- The bench drives `io_in` with scan-in (0 when idle), except in phase I, where the link agent drives it.
 - `ready` and `rvalid` stay 0, `irq` 0, `uart_rx` 1, `fault_inject` 0.
 
 **State model:**
@@ -256,7 +257,7 @@ VCS_FLAGS="+define+EXPECTED_CELLS=63"              # optional, added after the d
 - Only the first 50 errors are printed in full; the summary covers all of them.
 
 **Limits and constants:**
-- `MAX_LEN` 1024 cells per chain; `MAX_REGS` 256; `MAX_W` 256 bits per register (the widest is PP1/PP2 at 128).
+- `MAX_LEN` 1024 cells per chain; `MAX_REGS` 256; `MAX_W` 256 bits per register (the widest is an ECC codeword at 72).
 - ECC: 64 data + 7 Hamming + 1 parity = 72 bits, laid out as `{data, parity, hamming}`.
 - MSECFAULT bits: 0 TMR correctable, 1 MPP reserved, 3 TMR uncorrectable, 4 ECC SEC, 5 ECC DED.
 - Timeout 100 ms of simulated time. A full run is about 150k test cycles (≈16 ms) with ≈200-cell chains. At gate level, expect it to take a long time in wall-clock terms.
@@ -278,26 +279,36 @@ The PC-focused bench. It is the first bench to run on a new netlist, and the one
 
 ## 11. Status
 
-- **Ported to the 8-in/8-out link (this revision):** `dft_setup.tcl`, `dft_insert.tcl`, the new `dft_procs.tcl`, the SDC block and the DFT calls in `synthesis.tcl`, and `pc_tb/`. `dft_setup_full.tcl` and `dft_insert_full.tcl` were merged into `DFT_SCOPE`, and the old below-pad `dft.tcl` was removed.
-- **Files to copy to the IP VM:** `synth/{synthesis.tcl,dft_procs.tcl,dft_setup.tcl,dft_insert.tcl,Makefile}` and `synth/scripts/pc_tb/{run.sh,scan_map.awk,tb_scan.sv}`, plus `hdl/` and `pkg/` if the VM's copy predates the `io_in`/`io_out` RTL. The VM's `io_drivers/` needs only `io_in.sv` and `io_out.sv`.
+- **Ported to the 8-in/8-out link (this revision):** `dft_setup.tcl`, `dft_insert.tcl`, the new `dft_procs.tcl`, the SDC block and the DFT calls in `synthesis.tcl`, `pc_tb/` and `full_tb/`. `dft_setup_full.tcl` and `dft_insert_full.tcl` were merged into `DFT_SCOPE`, and the old below-pad `dft.tcl` was removed.
+- **Files to copy to the IP VM:** `synth/{synthesis.tcl,dft_procs.tcl,dft_setup.tcl,dft_insert.tcl,Makefile}`, `synth/scripts/pc_tb/{run.sh,scan_map.awk,tb_scan.sv}` and `synth/scripts/full_tb/` (all of it except `sim/` and `regressions/`), plus `hdl/forte_link_pkg.sv` and `hvl/pin/pin_link_agent.sv` for full_tb's phase I (or set `LINK_PKG`/`LINK_AGENT` in `paths.sh`), plus `hdl/` and `pkg/` if the VM's copy predates the `io_in`/`io_out` RTL. The VM's `io_drivers/` needs only `io_in.sv` and `io_out.sv`.
 - **Verified locally on EWS (2026-11-11), with FreePDK45 in place of TSMC:**
   - Setup: DC W-2024.09, the real `synthesis.tcl` (`DFT_SCOPE=pc`), behavioural pads, SRAMs as black boxes. FreePDK45's `stdcells.db` has no `test_cell` models, so a copy with `test_cell` added to the `SDFF*` cells was used.
   - Integrated run: 16 min. Post-insertion DRC had 0 errors and 0 fatals. 8 chains, 63 PC cells (c0–c6 have 8, c7 has 7), 55 scan out of QN.
   - Hookups: DC drove `test_mode_s` from **`tmsync/q_reg/QN`**. The tracer put the Constant on that QN pin with active state 1. A hard-coded Q pin would have been wrong there.
-  - `scan_phase.txt` is all 0. Standalone `make dft`-style insertion from the checkpoint gives the same result in about 1 min.
+  - `scan_phase.txt` is all 0 for the PC cells. Standalone `make dft`-style insertion from the checkpoint gives the same result in about 1 min.
   - `pc_tb` passes on both netlists: B reads `PC = 0x8000_0000`, E passes 155/155, F passes 8/8. `BREAK_SE` and `BREAK_MAP` fail, and `run.sh` now exits non-zero on a FAIL.
   - Local-only quirk: FreePDK45's `stdcells.v` drives its own `RN`/`SN` input nets through `ng_xbuf` unless `+define+TETRAMAX` is given. Without it, `rst_n` reads X. The TSMC models on the VM don't need this.
-- **Scandef STOP:** this DC writes `+ STOP U8 B`: the input pin of the scan-out mux in front of `io_out[k]`, not `PIN io_out[k]`. A STOP is a chain endpoint, never a scan cell. `pc_tb/scan_map.awk` and `dft_procs.tcl` now ignore it; before this, they counted it as a ninth cell per chain. `full_tb/src/scan_map.awk` still has the old STOP handling and needs the same fix when it is ported.
+- **Scandef STOP:** this DC writes `+ STOP U8 B`: the input pin of the scan-out mux in front of `io_out[k]`, not `PIN io_out[k]`. A STOP is a chain endpoint, never a scan cell. `pc_tb/scan_map.awk` and `dft_procs.tcl` now ignore it; before this, they counted it as a ninth cell per chain. `full_tb/src/scan_map.awk` and `internal_hookups.py` have the same fix.
+- **Full scope (`DFT_SCOPE=full`) verified locally on EWS (2026-11-11), same setup:**
+  - 1,347 flops selected (pc 64, pipeline 1,217, hardened_csr 66); 1,298 scan cells after DC merged or removed constant bits; 8 chains of 162–163; post-insertion DRC 0 errors and 0 fatals.
+  - **Inverted storage found and fixed.** The first full run used plain `compile_ultra`, which ignores `compile_seqmap_enable_output_inversion` and stored 14 scan cells inverted (`FTStatusSticky[6]`, `AlignedInstrRawDFlop[2,3,5..15]`). full_tb phase B caught them, and an RTL simulation of the same reset-and-stall confirmed the RTL values. `synthesis.tcl` now passes `-no_seq_output_inversion`: 0 cells stored inverted, cell area +0.46%, same setup slack. `dft_write_phase` now reads the polarity from the netlist instead of assuming it (section 5); on the inverted netlist it found exactly those 14.
+  - `full_tb`, `./run.sh --regen +SCAN_OP=both`: every phase A, M, B, C, D, E, P, H, F, R, I passes, 419 cases, `DFT TB PASS`, on both netlists (the inverted one with the phase file from the rule). Phase I ran all 16 programs through the link agent to their WFI, 40–52 line reads each, with no link errors. `BREAK_SE` and `BREAK_MAP` fail. A full suite takes about 9 min of simulation.
+  - Not on the chains: `PCSrcMReg` and `InstrMisalignedReg` (no cell matches their table rows; DC optimised them away or renamed them), and the multiplier's old `PP1Reg`/`PP2Reg`, which no longer exist.
 - **Earlier result, on the old 16-bit-link netlist:** PC-only passed. 63 PC flops: c0–c6 had 8 cells each and c7 had 7; c0 and c7 inverted. `DFT TB PASS`, and post-insertion DRC had 0 errors and 0 fatals.
-- **Widened selection: not yet run on a real netlist.** This is the pc, pipeline and hardened_csr selection described above. The full bench has only been run in VCS W-2024.09 against a behavioural stand-in for the chip (275 cells, built with the real `ecc_secded_enc/dec` RTL):
+- **Earlier full-bench checks, before a real netlist existed:** VCS W-2024.09 against a behavioural stand-in for the chip (275 cells, built with the real `ecc_secded_enc/dec` RTL):
   - The clean run passes.
   - `BREAK_SE` and `BREAK_MAP` fail as they should.
   - Four injected faults each failed in the expected phase and named the right register and bit: no ECC repair (H), a stuck capture bit (P), a wrong reset value (B, F), and an unknown cell name (M).
 - **Next steps on ece-427-02:**
-  1. Re-synthesise with the current `dft_setup.tcl`.
-  2. Check the per-group flop counts and `WARNING` lines in the DC log, and the DRC reports.
+  1. Re-synthesise with the current scripts (`make synth`, or `make synth DFT_SCOPE=full` for full_tb).
+  2. Check the per-group flop counts, the `DFT hookup:` lines, `DFT phase: ... 0 stored inverted`, any `WARNING` lines in the DC log, and the DRC reports.
   3. Check timing at 400 MHz.
-  4. Run `pc_tb/` first, then the full bench.
+  4. Run `pc_tb/` on the pc netlist, or `full_tb/run.sh --regen` on the full one.
+- **Bring-up errors seen on the VM** (fixes in `full_tb/README.md`, Troubleshooting):
+  - Phase A found 63 cells: the netlist was the `pc` scope; `full_tb` needs `DFT_SCOPE=full`.
+  - Phase M reported one more cell per chain in the scandef than at the pins: a stale `full_tb/src/scan_map.awk` (counts the `STOP` entry) or a cached map; copy the current `src/` and use `--regen`.
+  - `Identifier 'TA' not declared`: the old 16-bit `pin_link_agent.sv` on the VM.
+  - `XMRE` in `scan_hookups.generated.svh`: the TSMC netlist's flattened instance names (`chip.soc_core_...`) do not match the paths `internal_hookups.py` generates. Run with `SCAN_HOOKUPS=0` until the generator is fixed for that netlist; the hookups are diagnostics only.
 
 ## 12. Known issues and risks
 
@@ -305,14 +316,14 @@ The PC-focused bench. It is the first bench to run on a new netlist, and the one
   - The stand-in chip can't show this effect.
   - Fixes are in the hardware or the selection (take the control registers off the chain), not in the bench.
 - **ECC parity-bit errors are never detected.** `hdl/core/generic/ecc/ecc_secded_dec.sv` raises SEC/DED only when the syndrome is non-zero. A flip in the overall-parity bit (codeword bit 7) is therefore neither flagged nor repaired: it stays latent until a second error makes it a DED. Phase H doesn't inject there. This is an RTL issue, not a bench issue.
-- **Timing.** About 1,600 flops are excluded from retiming. If 400 MHz no longer closes, remove `PP1Reg`/`PP2Reg` (256 flops) from the `pipeline` group first, then re-synthesise.
+- **Timing.** The full scope keeps 1,347 flops out of retiming. If 400 MHz no longer closes, trim the `pipeline` group first, then re-synthesise.
 - **Merged or constant flops.** `compile_ultra` removes constant flops and merges identical ones. PC[0] is gone; ImmExtE's sign-extended data bits are likely merged. Phase M lists such bits as notices.
   - The bench compares only cells that exist.
   - For an ECC register with missing cells, it loads only all-0/all-1 data and puts injected errors in the Hamming bits.
 - **Shift-path hold timing isn't checked.** `set_case_analysis 0` on `test_mode`/`scan_en` removes Q→SI paths from timing. Shift is slow, so setup doesn't matter, but a real hold violation would break a chain on silicon. Check hold in a separate test-mode timing run.
 - **Cell names must survive.** The awk table matches post-`change_names` names. If the `nameRules` rules or the RTL hierarchy change names, phase M reports `UNKNOWN` registers or unmatched rows; update the table.
 - **The DFT lock is not tested.** The benches leave it unlocked.
-- **Runtime.** Chains are about 25× longer than the PC-only ones, so expect hours at gate level.
+- **Runtime.** Chains are about 25× longer than the PC-only ones. The full `full_tb` suite took about 9 min of zero-delay gate simulation on the FreePDK45 netlist; TSMC cell models and SDF timing will be slower.
 
 ## 13. How-tos
 

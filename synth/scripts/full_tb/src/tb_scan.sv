@@ -4,8 +4,8 @@
 //
 // Pass/fail uses the package pins; internal hookups are diagnostic only.
 // The chains are the ones
-// dft_insert.tcl declares: c0..c7, scan in on io[k], scan out on io[k+8].
-// Below, chain k = 1..8 is c(k-1): io[k-1] -> io[k+7].  Chain lengths and
+// dft_insert.tcl declares: c0..c7, scan in on io_in[k], scan out on io_out[k].
+// Below, chain k = 1..8 is c(k-1): io_in[k-1] -> io_out[k-1].  Chain lengths and
 // inversions are discovered from the pins.  Which register bit each cell holds
 // comes from the scandef: run.sh turns it into scan_map.svh (scan_map.awk),
 // whose table also gives each register's group, kind and reset value.
@@ -44,7 +44,7 @@
 // the way out, so a check also fails if loading one register disturbs another.
 //
 //   A  lengths      shift zeros and read each scan-out: that is inv[k].  Then
-//                   one 1 into every io[7:0]; the cycle io[k+8] first differs
+//                   one 1 into every io_in; the cycle io_out[k] first differs
 //                   from inv[k] is that chain's length.  With
 //                   +define+EXPECTED_CELLS=n the total must be n.  Then a 0011
 //                   flush through every chain.
@@ -93,13 +93,21 @@
 // a self-test.
 //
 // Pins follow docs/top_level_plan.md s3: test_mode static for the session,
-// scan enable toggled per cycle on scan_en.  In test mode the chip drives
-// io[15:8] and listens on io[7:0]; the bench drives io[7:0] only then, and
-// otherwise releases the bus, as the post-synthesis pin bench does.
+// scan enable toggled per cycle on scan_en.  The link is two one-way buses, so
+// no pad changes direction: io_in carries scan-in (the bench's si) except while
+// the link agent runs phase I, and io_out carries scan-out in test mode.
 // The DFT lock resets to unlocked, so it does not get in the way here; it is
 // not tested.
 //
-// Test cycle as the SPF: 100 ns; inputs change at 10 ns, io[15:8] sampled at
+// TEST_MODE IS SYNCHRONISED in forte_chip (tmsync, two core_clk flops), so
+// test_mode_dft -- which selects what io_out carries -- follows the pin two
+// edges late; scan_en is not synchronised.  Every time test_mode rises the
+// bench holds scan_en low and idles TM_SYNC cycles (enter_test) before it
+// shifts.  Those are functional edges: where they follow a reset (load) they
+// change nothing; after B's stall, a functional hold or phase I they are a few
+// more cycles of the same stall, which the checks already rely on.
+//
+// Test cycle as the SPF: 100 ns; inputs change at 10 ns, io_out sampled at
 // 40 ns, core_clk rises at 50 ns.
 
 `timescale 1ns/1ps
@@ -134,10 +142,11 @@ module tb_scan;
   end
 `endif
 
-  localparam int N        = 8;     // chains c0..c7: io[7:0] in, io[15:8] out
+  localparam int N        = 8;     // chains c0..c7: io_in[k] in, io_out[k] out
+  localparam int TM_SYNC  = 3;     // cycles for test_mode through tmsync (2 flops) + 1
   localparam int MAX_LEN  = `SCAN_MAX_LEN; // maximum discoverable chain length
   localparam int MAX_REGS = 256;
-  localparam int MAX_W    = 256;   // widest register (PP1Reg/PP2Reg: 128)
+  localparam int MAX_W    = 256;   // widest register (an ECC codeword: 72)
   localparam int ECC_DW   = 64;    // the ECC registers: XLEN data bits,
   localparam int ECC_R    = 7;     // 7 Hamming bits and an overall parity:
   localparam int ECC_CW   = 72;    // {data, parity, hamming} (ecc_secded_enc.sv)
@@ -154,22 +163,26 @@ module tb_scan;
   bit link_active = 0;
   wire link_ready, link_rvalid;
   wire  [N:1]  so;
-  wire  [15:0] io;
-  wire         dir, req, wr, clk_out, uart_tx, status;
+  wire  [N-1:0] io_in, io_out, link_io_in;
+  wire          req, wr, clk_out, uart_tx, status;
 
-  // Scan in on io[7:0], driven only in test mode; scan out read from io[15:8].
-  assign io[7:0] = test_mode ? si : 'z;
-  assign so = io[15:8];
+  // Chain k is bit k-1 of each bus.  io_in is the agent's while it runs (phase
+  // I), the bench's scan-in otherwise.
+  assign io_in = link_active ? link_io_in : si;
+  assign so    = io_out;
   always_comb begin
     ready = link_active ? link_ready : 1'b0;
     rvalid = link_active ? link_rvalid : 1'b0;
   end
+  // The agent sees reset whenever it is not active: no checks, no transaction
+  // state, ready/rvalid low, so scan traffic on io_out is never decoded.
+  wire link_rst_n = rst_n & link_active;
   pin_link_agent #(.BEATS(2), .RESET_VEC(32'(`RESET_VEC))) link (
-    .core_clk(clk), .clk_out, .rst_n, .io, .dir, .req, .wr,
-    .ready(link_ready), .rvalid(link_rvalid), .enable(link_active));
+    .core_clk(clk), .clk_out, .rst_n(link_rst_n), .io_out, .io_in(link_io_in),
+    .req, .wr, .ready(link_ready), .rvalid(link_rvalid));
 
   forte_top dut (
-    .core_clk(clk), .rst_n, .io, .dir, .req, .clk_out, .wr, .ready, .rvalid,
+    .core_clk(clk), .rst_n, .io_in, .io_out, .req, .clk_out, .wr, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .fault_inject, .status);
 
   always #50 clk = ~clk;            // rises at 50, 150, ...
@@ -373,9 +386,18 @@ module tb_scan;
     $display("[%0t] TRACE idle END: %0d cycles", $time, n);
   endtask
 
+  // Raise test_mode and let it through tmsync before the first shift edge.
+  // Returns just after an edge with scan selected, as the callers expect.
+  task automatic enter_test();
+    set_se(1'b0);
+    test_mode = 1'b1;
+    idle(TM_SYNC);
+    set_se(1'b1);
+  endtask
+
   // Shift maxlen cycles: chain k takes in[k][t] at cycle t and its output is
   // returned in out[k][t].  The first bit out of a chain is the one next to
-  // its io[k+8]; after the shift, chain k holds in[k][maxlen-len[k] .. maxlen-1],
+  // its io_out; after the shift, chain k holds in[k][maxlen-len[k] .. maxlen-1],
   // cell j holding in[k][maxlen-j].
   task automatic shift(input bits_t in, output bits_t out);
     logic [N:1] i_b, o_b;
@@ -507,8 +529,8 @@ module tb_scan;
       lim = len[k];
       if (lim < 0) lim = 0;
       if (lim > MAX_LEN) lim = MAX_LEN;
-      $display("[%0t] SCAN DUMP c%0d io[%0d]->io[%0d], length=%0d inversion=%b",
-               $time, k-1, k-1, k+7, len[k], inv[k]);
+      $display("[%0t] SCAN DUMP c%0d io_in[%0d]->io_out[%0d], length=%0d inversion=%b",
+               $time, k-1, k-1, k-1, len[k], inv[k]);
       for (int first = 1; first <= lim; first += 64) begin
         actual_s = ""; expect_s = ""; bad_s = "";
         for (int j = first; j <= lim && j < first+64; j++) begin
@@ -570,8 +592,7 @@ module tb_scan;
     set_se(1'b0);
     test_mode = 1'b0;
     idle(20);
-    test_mode = 1'b1;
-    set_se(1'b1);
+    enter_test();                   // still in reset: the settle edges change nothing
   endtask
 
   task automatic load_in_reset(input st_t s);
@@ -638,7 +659,8 @@ module tb_scan;
       if (!keep_test_mode) test_mode = 1'b0;
       $display("[%0t] TRACE hold: test_mode=%b", $time, test_mode);
       idle(func_cyc);
-      test_mode = 1'b1;
+      // Dropping test_mode costs TM_SYNC more functional edges to raise it.
+      if (!keep_test_mode) enter_test();
       $display("[%0t] TRACE hold: test_mode=1", $time);
     end
     set_se(1'b1);
@@ -698,8 +720,8 @@ module tb_scan;
     rst_n = 1'b1;
     $display("[%0t] TRACE reset_stalled: deassert reset, wait 200 clocks without memory responses", $time);
     idle(200);
-    test_mode = 1'b1; set_se(1'b1);
-    $display("[%0t] TRACE reset_stalled END", $time);                   // just after an edge: no extra shift
+    enter_test();                   // TM_SYNC more stalled edges; ends just after one
+    $display("[%0t] TRACE reset_stalled END", $time);
   endtask
 
   task automatic unload(output st_t s);
@@ -726,7 +748,7 @@ module tb_scan;
     logic [N:1] got;
     int total = 0;
     $display("[%0t] A: chain lengths", $time);
-    test_mode = 1'b1; set_se(1'b1);
+    enter_test();
     idle(MAX_LEN);                                    // flush to zeros
     foreach (len[k]) len[k] = -1;
     for (int t = 0; t <= MAX_LEN; t++) begin
@@ -734,7 +756,7 @@ module tb_scan;
       for (int k = 1; k <= N; k++) begin
         if ($isunknown(got[k])) begin
           if (len[k] != 0)
-            fail($sformatf("A: c%0d: io[%0d] is X after a zero flush (chain broken?)", k-1, k+7));
+            fail($sformatf("A: c%0d: io_out[%0d] is X after a zero flush (chain broken?)", k-1, k-1));
           len[k] = 0;
         end
         // t = 0 is strobed before the 1 is clocked in: the flushed value
@@ -744,10 +766,10 @@ module tb_scan;
     end
     for (int k = 1; k <= N; k++) begin
       if (len[k] <= 0) begin
-        fail($sformatf("A: c%0d: the 1 from io[%0d] never reached io[%0d]", k-1, k-1, k+7));
+        fail($sformatf("A: c%0d: the 1 from io_in[%0d] never reached io_out[%0d]", k-1, k-1, k-1));
         len[k] = 0;
       end
-      $display("[%0t] A: c%0d (io[%0d] -> io[%0d]) length %0d%s", $time, k-1, k-1, k+7, len[k],
+      $display("[%0t] A: c%0d (io_in[%0d] -> io_out[%0d]) length %0d%s", $time, k-1, k-1, k-1, len[k],
                string'(inv[k] === 1'b1 ? ", inverting" : ""));
       total += len[k];
       if (len[k] > maxlen) maxlen = len[k];

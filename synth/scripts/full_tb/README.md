@@ -6,9 +6,18 @@
 regression. It is local configuration and is not included in Git.** Run the
 commands below from `synth/scripts/full_tb/` with VCS available.
 
-The bench targets the existing DFT netlist's **16-bit bidirectional `io`/`dir`
-interface**. Current `hdl/` uses separate 8-bit input/output buses; porting DFT
-to that interface is still an action item.
+The bench targets the current pins: eight chains `c<k>`, scan in on `io_in[k]`
+and out on `io_out[k]`, from a netlist synthesised with `DFT_SCOPE=full`
+(`make synth DFT_SCOPE=full`; the default `pc` scope puts only the PC on the
+chains, and then only A/M/B/E have anything to test). `test_mode` goes through
+a two-flop synchroniser in `forte_chip`, so each time the bench raises it, it
+idles `TM_SYNC` (3) cycles with `scan_en` low before shifting. Phase I uses the
+repo's current link agent (`hvl/pin/pin_link_agent.sv`, `hdl/forte_link_pkg.sv`).
+
+Verified on EWS (2026-11-11) against a FreePDK45 `DFT_SCOPE=full` netlist
+(1,298 cells, 8 chains of 162–163): `./run.sh --regen +SCAN_OP=both` passes
+every phase (419 cases, about 9 min); `BREAK_SE` and `BREAK_MAP` fail. See
+`../HANDOFF.md` section 11.
 
 ### 1. Configure paths
 
@@ -20,8 +29,13 @@ STDCELL_MODELS=(/path/to/cells/*.v)
 SRAM_MODELS=(/path/to/srams/*.v)
 PAD_MODELS=(/path/to/pads.v)
 VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
-# Optional: verified logical-phase file; otherwise use ./scan_phase.txt if present
-# LOGICAL_PHASE=/path/to/verified/scan_phase.txt
+# Optional: logical-phase file; otherwise ./scan_phase.txt if present, else
+# forte_top.scan_phase.txt beside SCANDEF (written by dft_insert.tcl)
+# LOGICAL_PHASE=/path/to/scan_phase.txt
+# Optional: link sources for phase I if the repo's hdl/ and hvl/ are not
+# three levels up from full_tb (as on a VM with only synth/ copied)
+# LINK_PKG=/path/to/hdl/forte_link_pkg.sv
+# LINK_AGENT=/path/to/hvl/pin/pin_link_agent.sv
 # SCAN_HOOKUPS=0  # Disable internal diagnostics; default is 1
 ```
 
@@ -36,12 +50,18 @@ After regenerating the netlist or changing scan selection:
 
 1. Point `paths.sh` at the new netlist/scandef pair. Update the register table
    in `src/scan_map.awk` for changed names, classifications, and reset values.
-2. Create or review `scan_phase.txt` against the new netlist. Each entry is
+2. Review the logical phase. `dft_insert.tcl` writes `forte_top.scan_phase.txt`
+   beside the scandef, and `--regen` uses it unless `LOGICAL_PHASE` or a local
+   `scan_phase.txt` overrides it. Each entry is
    `<full scandef instance path> <0|1>`: `0` means physical Q matches the logical
-   RTL bit; `1` means it is inverted. Establish this independently from the
-   implemented logic/reference values. **Q versus QN scan-output selection does
-   not establish logical phase.** Missing entries default to zero correction,
-   which is not proof of polarity. Do not blindly reuse old instance paths.
+   RTL bit; `1` means it is inverted. `synthesis.tcl` runs `compile_ultra
+   -no_seq_output_inversion`, so expect all `0`, and the DC log line
+   `DFT phase: ... 0 stored inverted`. `dft_write_phase` reads each cell's
+   phase from the netlist (a cell whose RTL-named net hangs off QN is `1`) and
+   lists any such cell in `reports/dft/dft_phase.rpt`; B and F's exact reset
+   values cross-check it. **Q versus QN
+   scan-output selection does not establish logical phase.** Do not reuse old
+   instance paths.
 3. Regenerate metadata and run a baseline check:
 
 ```bash
@@ -110,7 +130,7 @@ cases. The remaining default order is `CDEPHFRI`.
 | H | Inject ECC/privilege-copy faults or reserved MPP; check repair, stored values, and MSECFAULT flags. |
 | F | Load all ones, inverted baseline, or random data; reset and compare resettable bits. |
 | R | Multi-register edge/random patterns with legal MPP and valid ECC; alternate valid, SEC, DED, parity-only, and TMR cases. |
-| I | Execute short generated RV64 sequences through the legacy link, then verify selected state through scan. |
+| I | Execute short generated RV64 sequences through the link agent, then verify selected state through scan. |
 
 **`SCAN_OP` controls load verification:** `capture` (default) loads, captures,
 and reads back; `load` omits capture; `both` first checks load/readback, then
@@ -153,10 +173,10 @@ window, with at least two completed instruction reads and no memory writes.
 Other dynamic cells are unconstrained. Operand-settling NOPs and controlled
 insertion periods make these expectations explicit.
 
-The legacy agent is disabled before scan takes the pins: it releases `io`,
-forces ready/rvalid low, discards the transaction/pending drives, and suppresses
-protocol checks. Memory and errors persist; each next case resets the DUT.
-Destructive scanning does not support execution resumption.
+The link agent is disabled before scan takes the pins: the bench holds its
+`rst_n` low (no checks, no transaction state), forces ready/rvalid low and
+gives `io_in` back to the scan-in drive. Memory and errors persist; each next
+case resets the DUT. Destructive scanning does not support execution resumption.
 
 ## Controls and diagnostics
 
@@ -197,16 +217,29 @@ mapping order/polarity, complete ECC/TMR behavior, general CPU correctness,
 or ATPG fault/timing coverage. External fault injection, memory ECC, DFT-lock
 transitions, and delayed/corner simulations remain outside current coverage.
 
+## Troubleshooting
+
+Errors seen when bringing the bench up on a new machine:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A finds 63 cells (7 × 8 + 7) | The netlist was built with `DFT_SCOPE=pc` | `make synth DFT_SCOPE=full`, then `./run.sh --regen` |
+| M: `cN is n+1 cells in the scandef, n at the pins` on every chain | An old `src/scan_map.awk` that counts the scandef `STOP` entry as a cell, or a cached map from before the fix | Copy the current `src/`; `grep -c stop_seen src/scan_map.awk` must print 0; rerun with `--regen` |
+| `Error-[IND] Identifier 'TA' not declared` in `pin_link_agent.sv` | The old 16-bit link agent compiled against the new 8-bit `forte_link_pkg.sv` | Copy the current `hvl/pin/pin_link_agent.sv`, or point `LINK_AGENT` at it in `paths.sh` |
+| `Error-[XMRE]` on `dut.chip.soc_core_..._reg_N_.Q` in `scan_hookups.generated.svh` | The netlist flattens `soc` into `chip` differently from the one `internal_hookups.py` was checked on, so the generated hierarchical paths do not resolve | Set `SCAN_HOOKUPS=0` in `paths.sh`. The hookups only add diagnostics; every check still runs without them |
+
+Normal runs reuse `sim/` metadata without checking that it is fresh: after
+copying new scripts or a new netlist, always run once with `--regen`.
+
 ## Files
 
 | Path | Contents |
 |---|---|
 | `src/tb_scan.sv`, `src/scan_*.svh` | Scan tasks, directed/random tests, instruction builder/checks. |
-| `src/*_legacy.sv` | Matching 16-bit protocol package and agent; normal pin verification uses current `hdl/`/`hvl/pin/` sources instead. |
 | `src/{scan_map.awk,internal_hookups.py,set_scan_phase.py}` | Mapping generator, diagnostic generator, verified-phase editor. |
 | `run.sh`, `regress.sh`, `paths.sh`, `scan_phase.txt` | Entry points, local configuration, verified phase input. |
 | `sim/`, `regressions/` | Current metadata/build/logs; archived runs. |
-| `generated/` | Checked-in hookup snapshots, unused by the runner. |
+| `generated/` | Checked-in hookup snapshots from the old 16-bit netlist, unused by the runner. |
 
 ## Open action items
 
@@ -217,14 +250,10 @@ transitions, and delayed/corner simulations remain outside current coverage.
   remap/reverify logical phase, and verify capture/retention plus scan priority
   with the new netlist. Define intentional ECC/fault updates and any separate
   halt release needed for advancing functional capture.
-- [ ] **Port the testbench/DFT interface to the new I/O.** Replace the legacy
-  16-bit bidirectional link with separate 8-bit `io_in`/`io_out`, update agent
-  serialization, pad/scan declarations and constraints, and validate phase I
-  and scan readout against the corresponding DFT netlist.
-  The DFT tcl side is done: chains are `io_in[k] -> io_out[k]`, and
-  `dft_insert.tcl` now writes `forte_top.scan_phase.txt` beside the scandef,
-  in this bench's `LOGICAL_PHASE` format (set `LOGICAL_PHASE` to it). The
-  `pc_tb/tb_scan.sv` port shows the pin and test_mode-synchroniser changes.
+- [x] **Port the testbench/DFT interface to the new I/O.** Chains are
+  `io_in[k] -> io_out[k]`; phase I uses the current link agent; the bench waits
+  out the test_mode synchroniser; scan_map.awk and internal_hookups.py treat the
+  scandef STOP entry as the chain endpoint, not a cell.
 - [ ] **Explain and fix unprotected readout corruption.** Compare matched
   protected/unprotected cases at the first divergence; inspect effective scan
   enable, DFT lock, pad mux, clocks/resets, and unscanned activity. Keep protected

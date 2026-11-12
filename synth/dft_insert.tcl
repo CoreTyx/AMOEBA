@@ -28,7 +28,9 @@ if {$dft_standalone} {
   read_ddc $pre_ddc
   current_design $design_toplevel
   link
-  # Same guarantee as synthesis: no inverted-storage remapping during insertion.
+  # No inverted-storage remapping during insertion.  The checkpoint's own
+  # polarity comes from compile_ultra -no_seq_output_inversion in synthesis;
+  # dft_write_phase below reports any cell stored inverted either way.
   set compile_seqmap_enable_output_inversion false
 }
 # Integrated mode inherits forte_top from synthesis.tcl; no scope change is

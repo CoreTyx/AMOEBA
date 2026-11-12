@@ -182,41 +182,50 @@ proc dft_functional_loads {pin} {
   return $n
 }
 
+# Name of the net on an output pin, or "" when the net is DC-generated
+# (n123, N123), unconnected, or part of the scan path (test_si*/test_so*,
+# the ports insert_dft adds to carry a chain across a hierarchy boundary).
+proc dft_design_net_name {pin} {
+  set net [get_nets -quiet -of_objects $pin]
+  if {[sizeof_collection $net] == 0} { return "" }
+  set name [get_attribute $net name]
+  if {[regexp {^([nN][0-9]+|SYNOPSYS_UNCONNECTED.*|\*Logic[01]\*|test_s[io][0-9]*)$} $name]} { return "" }
+  return $name
+}
+
 # Write the per-cell logical phase for the benches, and a report.
 #
-# HOW PHASE IS DECIDED.  A flop stores the RTL bit inverted only when mapping
-# inverts its D input and takes the RTL output from QN.  DC does that during
-# sequential mapping only when compile_seqmap_enable_output_inversion is true
-# (dft_setup.tcl forces it false), and retiming can do it, which dft_setup.tcl
-# blocks on every scan flop.  Under those two conditions every scan cell is
-# phase 0, and that is what is written.  QN-only fanout is NOT used as
-# evidence: logic that wants ~q legitimately reads QN of a non-inverted flop.
+# HOW PHASE IS DECIDED.  A flop stores its RTL bit inverted when mapping
+# inverts its D input and takes the RTL signal from QN.  compile_ultra does
+# this freely unless it is run with -no_seq_output_inversion (synthesis.tcl
+# passes it; the compile_seqmap_enable_output_inversion variable does NOT stop
+# compile_ultra).  DC keeps the RTL signal's name on the net that carries it,
+# so the netlist shows the inversion: the RTL-named net hangs off QN and the
+# net on Q, if any, is a generated nN.  That is the rule used here:
+#   phase 1  the net on QN has a design name and the net on Q does not
+#   phase 0  otherwise (Q named, both generated, or no QN)
+# QN fanout alone is NOT evidence: logic that wants ~q legitimately reads QN of
+# a true flop, and then the QN net is a generated name.  Checked on FreePDK45:
+# without -no_seq_output_inversion this rule picked exactly the 14 cells whose
+# reset values full_tb's phase B read inverted, and no others.  B and F remain
+# the independent check.
 #
-# If output inversion is enabled anyway, the only netlist-visible sign is used
-# as a fallback -- a cell whose Q has no functional load and whose QN does is
-# written 1 -- and every such cell is listed as UNVERIFIED in the report.  The
-# bench's reset-value phases (B, F) then confirm or refute each one.
-#
-# The report also lists, for information only, cells whose functional logic is
-# read only from QN and cells with no functional load at all.
+# The report lists every phase-1 cell with both net names, cells whose Q and QN
+# nets are both named (ambiguous: written 0), and, for information, cells read
+# only from QN and cells with no functional load.
 proc dft_write_phase {scandef out_file rpt_file} {
-  set inv_on 0
-  if {![catch {get_app_var compile_seqmap_enable_output_inversion} v] && [string is true -strict $v]} {
-    set inv_on 1
-  }
-
   set cells [dft_scandef_cells $scandef]
   set out [open $out_file w]
   set rpt [open $rpt_file w]
   puts $out "# Logical phase per scan cell, written by dft_insert.tcl from [file tail $scandef]."
-  puts $out "# <scandef instance path> <0|1>: 1 = the flop stores the RTL bit inverted."
-  puts $out "# compile_seqmap_enable_output_inversion=[expr {$inv_on ? "true (fallback rule, UNVERIFIED)" : "false (all 0 by construction)"}]"
+  puts $out "# <scandef instance path> <0|1>: 1 = the flop stores the RTL bit inverted"
+  puts $out "# (its RTL-named net is on QN; see dft_write_phase in dft_procs.tcl)."
   puts $rpt "DFT phase report: [file normalize $scandef]"
-  puts $rpt "compile_seqmap_enable_output_inversion: [expr {$inv_on ? "true" : "false"}]"
+  puts $rpt "rule: phase 1 = the net on QN carries a design name and the net on Q does not"
   puts $rpt ""
   puts $rpt [format "%-5s %5s %-4s %4s %4s %-5s %s" chain idx so Q QN phase cell]
 
-  set total 0; set n_qn_so 0; set n_qn_only 0; set n_noload 0; set n_ph1 0; set n_missing 0
+  set total 0; set n_qn_so 0; set n_qn_only 0; set n_noload 0; set n_ph1 0; set n_missing 0; set n_amb 0
   set notes {}
   foreach {chain idx name so_pin} $cells {
     incr total
@@ -228,13 +237,15 @@ proc dft_write_phase {scandef out_file rpt_file} {
       puts $rpt [format "%-5s %5d %-4s %4s %4s %-5s %s  (NOT FOUND in the design)" $chain $idx $so_pin - - 0 $name]
       continue
     }
-    set q_loads 0; set qn_loads 0; set has_qn 0
+    set q_loads 0; set qn_loads 0; set has_qn 0; set q_name ""; set qn_name ""
     foreach_in_collection p [get_pins -quiet -of_objects $c -filter "direction==out"] {
       if {[dft_seq_pin_inverts $p]} {
         set has_qn 1
         incr qn_loads [dft_functional_loads $p]
+        if {$qn_name eq ""} { set qn_name [dft_design_net_name $p] }
       } else {
         incr q_loads [dft_functional_loads $p]
+        if {$q_name eq ""} { set q_name [dft_design_net_name $p] }
       }
     }
     # The last cell's scan-out pin also feeds the scan-out gate in front of
@@ -242,22 +253,27 @@ proc dft_write_phase {scandef out_file rpt_file} {
     set qn_only [expr {$has_qn && $q_loads == 0 && $qn_loads > 0}]
     if {$qn_only} { incr n_qn_only; lappend notes "QN-only functional fanout: $name" }
     if {$q_loads + $qn_loads == 0} { incr n_noload; lappend notes "no functional load: $name" }
-    set ph [expr {$inv_on && $qn_only ? 1 : 0}]
-    if {$ph} { incr n_ph1; lappend notes "UNVERIFIED phase 1 (output inversion enabled): $name" }
+    set ph [expr {$qn_name ne "" && $q_name eq "" ? 1 : 0}]
+    if {$ph} { incr n_ph1; lappend notes "phase 1 (stored inverted): $name  Q net: -  QN net: $qn_name" }
+    if {$qn_name ne "" && $q_name ne ""} {
+      incr n_amb; lappend notes "AMBIGUOUS, written 0: $name  Q net: $q_name  QN net: $qn_name"
+    }
     puts $out "$name $ph"
     puts $rpt [format "%-5s %5d %-4s %4d %4d %-5d %s" $chain $idx $so_pin $q_loads $qn_loads $ph $name]
   }
   puts $rpt ""
   puts $rpt "scan cells: $total"
   puts $rpt "scan output from QN (scan-path inversions, from the scandef): $n_qn_so"
+  puts $rpt "phase 1 written (stored inverted): $n_ph1"
+  puts $rpt "ambiguous (Q and QN nets both named), written 0: $n_amb"
   puts $rpt "functional fanout only from QN (information): $n_qn_only"
   puts $rpt "no functional load (constant/merged?): $n_noload"
-  puts $rpt "phase 1 written: $n_ph1"
   puts $rpt "not found in the design: $n_missing"
   foreach n $notes { puts $rpt "NOTE: $n" }
   close $out
   close $rpt
-  puts "DFT phase: $total scan cells, $n_qn_so scan-out QN, $n_ph1 phase-1 written -> $out_file"
+  puts "DFT phase: $total scan cells, $n_qn_so scan-out QN, $n_ph1 stored inverted -> $out_file"
   if {$n_missing > 0} { puts "DFT phase: WARNING: $n_missing scandef cells not found in the design (see $rpt_file)" }
-  if {$n_ph1 > 0} { puts "DFT phase: WARNING: $n_ph1 cells written phase 1 by the fallback rule (see $rpt_file)" }
+  if {$n_ph1 > 0} { puts "DFT phase: WARNING: $n_ph1 scan cells are stored inverted; was compile_ultra run without -no_seq_output_inversion? (see $rpt_file)" }
+  if {$n_amb > 0} { puts "DFT phase: WARNING: $n_amb scan cells have named nets on both Q and QN, written 0 (see $rpt_file)" }
 }

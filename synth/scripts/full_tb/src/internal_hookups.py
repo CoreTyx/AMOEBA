@@ -194,14 +194,8 @@ for m in re.finditer(
         )
         if scan:
             entries.append((scan.group(1), scan.group(2)))
-            continue
-
-        stop = re.match(
-            r"^\s*\+\s*STOP\s+(\S+)\s+\S+\s*;",
-            line
-        )
-        if stop:
-            entries.append((stop.group(1), None))
+        # "+ STOP <component> <pin>" is the chain's endpoint (the scan-out gate
+        # in front of io_out[k], or PIN io_out[k]), never a scan cell.
 
     chains[k] = entries
 
@@ -334,8 +328,8 @@ for r in sorted(reg_names):
         assignments[rawname].append(f"assign {rawname}[{b}] = {raw_expr}; // c{k-1}[{j}]")
         assignments[sym].append(f"assign {sym}[{b}] = {rawname}[{b}]" + (" ^ 1'b1;" if ph else ";"))
 
-        # The scandef identifies a preferred scan-out pin, but STOP cells do
-        # not specify one. For STOP cells, use Q when present, else QN.
+        # The scandef identifies a preferred scan-out pin; a cell without one
+        # uses Q when present, else QN.
         selected = pin if pin is not None else ("Q" if available["Q"] else "QN")
         other = "QN" if selected == "Q" else "Q"
         pin_expr = (f"{ref}.{selected}" if available[selected]
@@ -344,7 +338,7 @@ for r in sorted(reg_names):
     for dest, description in (
         (rawname, "Physical Q: .Q or ~.QN; no logical polarity correction."),
         (sym, "Logical estimate: physical Q XOR map_ph; unavailable bits stay Z."),
-        (pinname, "Scan output pin: scandef Q/QN selection; STOP uses an available output."),
+        (pinname, "Scan output pin: scandef Q/QN selection; no OUT pin uses an available output."),
         (rawname + "_available", "Availability mask: 1 = physical Q can be probed; 0 = unavailable."),
     ):
         out += [f"// ---- {dest} ----", "// " + description, *assignments[dest], ""]
@@ -415,7 +409,7 @@ print(
 )
 
 print(
-    f"STOP pins without a scandef pin: {len(unresolved)} "
+    f"Cells without a scandef OUT pin: {len(unresolved)} "
     f"(netlist output selection attempted; see per-bit report for availability)"
 )
 for k, j, path, name, b in unresolved:

@@ -1,4 +1,4 @@
-// Small instruction streams using the post-synthesis pin-link driver. No ELF,
+// Small instruction streams using the post-synthesis pin-link agent (hvl/pin). No ELF,
 // internal force, or program reference model is involved in the verdict.
 localparam logic [31:0] EXEC_NOP = 32'h00000013, EXEC_WFI = 32'h10500073;
 localparam logic [31:0] EXEC_ADD = 32'h00628033; // add x0,x5,x6
@@ -182,8 +182,9 @@ task automatic phase_i();
       // inferred from elapsed time or a lack of link traffic.
       idle(4096 + (i % 32));
       // This task returns in the post-edge launch slot. Disable the agent
-      // BEFORE remapping the bus, select scan before any further rising edge.
-      link_active = 0; test_mode = 1; set_se(1);
+      // (it then holds ready/rvalid low), then select scan: TM_SYNC more
+      // stalled edges at the WFI while test_mode settles, then the readout.
+      link_active = 0; enter_test();
       snapshot_internal(tag);
       scan_readout(tag, raw); got = decode(raw);
       ex = '{default:'{default:1'bx}};
