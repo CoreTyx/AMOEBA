@@ -459,12 +459,14 @@ that `hvl/pin/pin.sh compare` accepts unchanged.
   Verified by `make test-dma-sink` (wrapping, full rings, a slow and an eager
   reader, clear, a bad BRESP; four planted bugs caught) and `make
   test-fbu-sink`: the DDR gate with the bitstream's 2048-record FIFO and every
-  run through the rings (271/271). Through the sink, `tc_link_abort` (24,446
+  run through the rings (270/270 at rev 0.3). Through the sink, `tc_link_abort` (24,446
   records, 214 console bytes, all five link knobs) and Linux to the OpenSBI
   banner (`linux_m0.cmd`, 18,969 records, rd_latency 64) match the pin bench
-  in full, where register draining drops past record ~2070.
+  in full, where register draining drops past record ~2070; both proofs
+  repeated at rev 0.3 with the same counts.
 - **Bitstreams with the sink** (25 MHz, post-route WNS): BRAM +6.7 ns, AXI
-  +4.7 ns; HP2 mapped to `0x0000_0000`–`0x0FFF_FFFF`.
+  +4.7 ns at rev 0.2; BRAM +8.3 ns, AXI +7.1 ns at rev 0.3; HP2 mapped to
+  `0x0000_0000`–`0x0FFF_FFFF`.
 
 ### 5.4 `fbu_pin_ctl.sv`: the control interface driver
 
@@ -835,6 +837,13 @@ line_wr(addr[31:0], data[127:0]) -> line_wr_ack            one outstanding; orde
       or sink error, 7,729 console bytes.
     - These P3 board results are for the rev 0.2 freeze (`3135391`, the
       tristate link); the rev 0.3 build repeats them.
+  - **Rev 0.3 simulation** (`eb97143`, the 8+8 link). Every gate passes:
+    `fbu_vs_pin.sh` 270/270 on the RTL, BRAM, DDR (rd_latency 64) and sink
+    builds; the sink proofs above; `test-mem-axi-hp`, `test-dma-sink`, and
+    `tb_fbu_scan_top` on the RTL and the post-synthesis netlist;
+    `check_frozen.sh` clean. `fe_fault_site` arms unit 2
+    for 4096 cycles like unit 3: in 256 cycles its site fired 4 times with
+    BRAM, once with DDR and never with the sink.
   - **Verification.** `make test-mem-axi-hp`: the backend against an AXI3
     model that applies a write only when it sends B (so a read issued early
     reads stale data), with random ready and latency, SLVERR lines and chip
