@@ -20,7 +20,11 @@ MILESTONES = [
     ("M3", "Memory map parsed", "Initmem setup node 0"),
     ("M4", "Init memory freed", "Freeing unused kernel image"),
     ("M5", "Userspace reached", "AMOEBA_LINUX_BOOT_OK"),
+    ("M6", "User programs pass", "AMOEBA_LINUX_PROGS_OK"),
 ]
+
+# Lines /init prints as each user program finishes (testcode/linux/userland).
+PROG_EXIT_RE = re.compile(r"PROG_EXIT (\S+) (.*)")
 
 UART_RE = re.compile(r"\[UART @(\d+)\]\s?(.*)")
 
@@ -78,6 +82,20 @@ def main():
         prev = hit
     for mid, desc, _ in missing:
         print(f"{mid:<5} {desc:<24} {'not reached':>14} {'':>14}")
+
+    # Per-program cost: from the previous PROG_EXIT (or AMOEBA_LINUX_BOOT_OK
+    # for the first) to this one, so it includes fork, execve and wait4.
+    start = next((c for c, t in lines if "AMOEBA_LINUX_BOOT_OK" in t), None)
+    progs = [(c, m.group(1), m.group(2)) for c, t in lines
+             for m in [PROG_EXIT_RE.search(t)] if m]
+    if start is not None and progs:
+        print()
+        print(f"{'program':<12} {'exit':>8} {'cycle':>14} {'cost':>14}")
+        prev = start
+        for cyc, name, code in progs:
+            print(f"{name:<12} {code:>8} {cyc:>14,} {cyc - prev:>14,}")
+            prev = cyc
+        print(f"{'(total)':<12} {'':>8} {'':>14} {prev - start:>14,}")
 
     return 0 if status == "PASS" else 1
 
