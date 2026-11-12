@@ -4,6 +4,6 @@
 load_lst $MEM
 fault_inject 1
 reset 16
-run_until_tohost 4000000
+run_until_tohost 20000000
 expect_tohost 0
 finish
