@@ -212,13 +212,17 @@ Standalone mode writes the complete Verilog and DDC; integrated mode returns to 
 
 ## Running and iterating
 
-### Generate the checkpoint once
+### The usual run
 
-Run the established synthesis flow with the required Synopsys/TSMC environment and output directories configured. `synthesis.tcl` performs setup, compilation, checkpoint saving, and integrated insertion.
+From `synth/` on the TSMC VM:
 
-A checkpoint from the previous below-pad setup must be regenerated once with the top-level setup.
+```bash
+make synth DFT_SCOPE=full && make dft
+```
 
-The previous `forte_top.gate.ddc` is not a substitute for the prepared `forte_top.pre_dft.ddc` unless it was saved with the required DFT setup. Changing this setup requires a new synthesis run.
+`make synth` runs `make clean` (deleting `synout/` and `reports/`), then `synthesis.tcl`: setup, compilation, the checkpoint, integrated insertion, and the normal outputs in `synout/`. `make dft` then repeats insertion from the checkpoint into `synout/dft/`, which is what `scripts/full_tb` reads. Both insertions start from the same checkpoint with the same script. The `synout/` netlist, with its SDF and SDC, is the one for place-and-route.
+
+Leave out `DFT_SCOPE=full` for the PC-only selection (`scripts/pc_tb`). The previous `forte_top.gate.ddc` is not a substitute for `forte_top.pre_dft.ddc`.
 
 ### Repeat insertion
 
@@ -254,9 +258,9 @@ It does not invoke synthesis or its clean target. Every invocation starts from t
 | Internal signal hookups or preserved boundaries | No |
 | RTL or synthesis/library configuration | Regenerate the checkpoint for a consistent comparison |
 
-## Standalone artifacts
+## Artifacts
 
-Paths below are relative to the repository root when using `make -C synth dft`.
+Paths below are relative to the repository root. The `synth/synout/dft/` and `synth/reports/dft/dft.log` entries come from `make dft`; `make synth` writes the same kinds of files to `synth/synout/` (plus `.gate.sdf` and `.gate.sdc`) and its log to `synth/reports/synthesis.log`. Both write the reports in `synth/reports/dft/`; the last run wins.
 
 | Path | Contents |
 |---|---|
@@ -276,11 +280,15 @@ Paths below are relative to the repository root when using `make -C synth dft`.
 
 ## Validation status
 
-Verified on EWS (2026-11-11) with DC W-2024.09 and FreePDK45 standing in for TSMC (a copy of `stdcells.db` with `test_cell` added to the `SDFF*` cells; behavioural pads; SRAMs as black boxes):
+| Where | Scope | Result | Bench |
+|---|---|---|---|
+| TSMC 65nm, ece-427-02 (2026-11-12) | `full` | 1,297 scan cells, 8 chains of 162–163, all single-output cells, 0 stored inverted (`synout/dft/` from `make dft`) | `full_tb ./run.sh --regen +SCAN_OP=both`: every phase passes, 419 cases; `BREAK_SE` (17 errors) and `BREAK_MAP` (1) fail |
+
+The local runs below used EWS with DC W-2024.09 and FreePDK45 standing in for TSMC (a copy of `stdcells.db` with `test_cell` added to the `SDFF*` cells; behavioural pads; SRAMs as black boxes):
 
 | Scope | Result | Bench |
 |---|---|---|
 | `pc` | 63 cells, 8 chains (7 × 8 + 7), post-insertion DRC 0 errors / 0 fatals, phase file all 0 | `pc_tb`: `DFT TB PASS`; `BREAK_SE` and `BREAK_MAP` fail |
 | `full` | 1,347 flops selected, 1,298 scan cells, 8 chains of 162–163, DRC 0 errors / 0 fatals, 0 stored inverted | `full_tb ./run.sh --regen +SCAN_OP=both`: every phase passes (419 cases, about 9 min); `BREAK_SE` and `BREAK_MAP` fail |
 
-On the TSMC VM, check after each run: the per-group flop counts, the `DFT hookup:` lines (Q or QN, active state), `DFT phase: ... 0 stored inverted`, `reports/dft/dft_drc_post.rpt` (0 errors, 0 fatals), and `dft_preview.rpt` (8 chains, `io_in[k] -> io_out[k]`). Then run the bench that matches the scope. Fault coverage and test-mode hold timing still need separate work.
+On the TSMC VM, check after each run: the per-group flop counts, the `DFT hookup:` lines (Q or QN, active state), `DFT phase: ... 0 stored inverted`, `reports/dft/dft_drc_post.rpt` (0 errors, 0 fatals), and `dft_preview.rpt` (8 chains, `io_in[k] -> io_out[k]`). Then run the bench that matches the scope: `full_tb` for `full`, `pc_tb` for `pc` (pc_tb fails D/E on a full netlist). Still open: 400 MHz timing with the full scope, fault coverage, and test-mode hold timing.

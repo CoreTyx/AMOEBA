@@ -1,5 +1,19 @@
 # Full scan testbench
 
+Gate-level check of the scan chains from the package pins: every scanned
+register (PC, pipeline, hardened CSRs) is loaded, captured, reset and read back
+through the eight chains. For the DC side and the overall flow see
+`../HANDOFF.md` (section 1 is the quick start) and `../../DFT_FLOW.md`.
+
+**Typical run on ece-427-02:**
+
+```bash
+cd /groups/ece427-group4/dft_testing/synth
+make synth DFT_SCOPE=full && make dft          # netlist + scandef + phase file in synout/dft/
+cd scripts/full_tb
+./run.sh --regen +SCAN_OP=both         # must end "DFT TB PASS"
+```
+
 ## Run flow
 
 **Create `full_tb/paths.sh`, beside `run.sh`, before running the testbench or
@@ -14,17 +28,23 @@ a two-flop synchroniser in `forte_chip`, so each time the bench raises it, it
 idles `TM_SYNC` (3) cycles with `scan_en` low before shifting. Phase I uses the
 repo's current link agent (`hvl/pin/pin_link_agent.sv`, `hdl/forte_link_pkg.sv`).
 
-Verified on EWS (2026-11-11) against a FreePDK45 `DFT_SCOPE=full` netlist
-(1,298 cells, 8 chains of 162–163): `./run.sh --regen +SCAN_OP=both` passes
-every phase (419 cases, about 9 min); `BREAK_SE` and `BREAK_MAP` fail. See
-`../HANDOFF.md` section 11.
+Verified results (`./run.sh --regen +SCAN_OP=both`, every phase passes, 419
+cases):
+- TSMC 65nm on ece-427-02 (2026-11-12): 1,297 cells, 8 chains of 162–163,
+  netlist from `make dft` (`synout/dft/`); `BREAK_SE` (17 errors) and
+  `BREAK_MAP` (1) fail as they should.
+- FreePDK45 on EWS (2026-11-11): 1,298 cells, about 9 min;
+  `BREAK_SE` and `BREAK_MAP` fail as they should.
+
+See `../HANDOFF.md` section 11.
 
 ### 1. Configure paths
 
 ```bash
 # full_tb/paths.sh — ordinary Bash assignments; no export needed
-NETLIST=/path/to/forte_top.gate.v
-SCANDEF=/path/to/forte_top.scandef
+# Use the make dft outputs: netlist, scandef and phase file from one run.
+NETLIST=/groups/ece427-group4/dft_testing/synth/synout/dft/forte_top.gate.v
+SCANDEF=/groups/ece427-group4/dft_testing/synth/synout/dft/forte_top.scandef
 STDCELL_MODELS=(/path/to/cells/*.v)
 SRAM_MODELS=(/path/to/srams/*.v)
 PAD_MODELS=(/path/to/pads.v)
@@ -39,7 +59,10 @@ VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
 # SCAN_HOOKUPS=0  # Disable internal diagnostics; default is 1
 ```
 
-Use matching netlist, scandef, and cell/SRAM/pad models. Model settings accept
+Use a matching netlist, scandef and phase file, all from the same DC run:
+`synout/dft/` after `make dft`, or `synout/` after `make synth` alone. Mixing
+them (for example a `synout/dft/` netlist with the `synout/` phase file) gives
+wrong results without any error. Use matching cell/SRAM/pad models. Model settings accept
 files, directories, or arrays of paths/globs. Relative paths resolve from the
 caller's directory. `SCANDEF` defaults to `forte_top.scandef` beside the netlist.
 Simulation is zero-delay: nonempty `SDF` is rejected; `SDF_CORNER` has no effect.
@@ -227,12 +250,21 @@ Errors seen when bringing the bench up on a new machine:
 |---|---|---|
 | M: `cN is 9 cells in the scandef, 162 at the pins` (c7: 8) after A found the full chains | The cached map is the old PC-only one: the run reused `sim/` without `--regen` | `./run.sh --regen`. `run.sh` now refuses a map older than its netlist or scandef |
 | B fails on many registers, and each `INTERNAL:` line shows `raw_Q` equal to the expected value while `logical_est` is wrong | The phase file marks true-polarity cells as inverted: an older `dft_write_phase` misread QN-only TSMC cells | Re-run insertion with the current `dft_procs.tcl` (`make dft`, or `make synth DFT_SCOPE=full`), or with a netlist built with `-no_seq_output_inversion` write an all-0 phase file: `awk '!/^#/{print $1, 0}' <scandef dir>/forte_top.scan_phase.txt > scan_phase.txt`, then `--regen` |
+| B fails as above, but `make dft` printed `0 stored inverted` | `paths.sh` still points at `synout/`, so the bench read the old phase file there; `make dft` writes to `synout/dft/` | Point `NETLIST` and `SCANDEF` at `synout/dft/`; check that the run prints `logical phase from .../synout/dft/forte_top.scan_phase.txt` |
+| `internal_hookups.py: map and scandef cell counts differ` (old versions: `AssertionError: Map and scandef cell counts differ`) | An old `internal_hookups.py` whose line-based parser missed cells in the TSMC scandef | Copy the current `src/internal_hookups.py`; it reads the scandef the same way as `scan_map.awk`, and prints per-chain counts if they still differ |
+| `Error-[VFS_SDB_ERROR] ... tdc.sdb ... is corrupted` | Two runs building in the same `sim/`, or an interrupted compile | `./run.sh clean`, then rerun. If `clean` reports permission errors, the files belong to another user: have them delete `sim/`, or run from your own copy of `full_tb/` |
 | A finds 63 cells (7 × 8 + 7) | The netlist was built with `DFT_SCOPE=pc` | `make synth DFT_SCOPE=full`, then `./run.sh --regen` |
 | M: `cN is n+1 cells in the scandef, n at the pins` on every chain | An old `src/scan_map.awk` that counts the scandef `STOP` entry as a cell, or a cached map from before the fix | Copy the current `src/`; `grep -c stop_seen src/scan_map.awk` must print 0; rerun with `--regen` |
 | `Error-[IND] Identifier 'TA' not declared` in `pin_link_agent.sv` | The old 16-bit link agent compiled against the new 8-bit `forte_link_pkg.sv` | Copy the current `hvl/pin/pin_link_agent.sv`, or point `LINK_AGENT` at it in `paths.sh` |
-| `Error-[XMRE]` on `dut.chip.soc_core_..._reg_N_.Q` in `scan_hookups.generated.svh` | The netlist flattens `soc` into `chip` differently from the one `internal_hookups.py` was checked on, so the generated hierarchical paths do not resolve | Set `SCAN_HOOKUPS=0` in `paths.sh`. The hookups only add diagnostics; every check still runs without them |
+| `Error-[XMRE]` on `dut.chip.soc_core_..._reg_N_.Q` in `scan_hookups.generated.svh` | Seen with an older copy of the scripts; the current ones compile on the TSMC netlist | Copy the current `src/` and `--regen`. Fallback: `SCAN_HOOKUPS=0` in `paths.sh`; the hookups only add diagnostics, every check still runs without them |
+| `INTERNAL UNAVAILABLE: <reg>[n] ... no_scan_map_entry` lines at the start | Information only: RTL bits DC removed as constant or merged (PC[0], unused control bits); phase M lists the same bits | None |
 
 After copying new scripts or a new netlist, run once with `--regen`.
+
+**Reading a phase-B failure:** under each `ERROR`, the `INTERNAL:` line shows
+the flop outputs probed directly (`raw_Q`) next to what the bench decoded from
+the pins. If `raw_Q` equals the expected value, the hardware is right and the
+map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
 
 ## Files
 
@@ -240,7 +272,9 @@ After copying new scripts or a new netlist, run once with `--regen`.
 |---|---|
 | `src/tb_scan.sv`, `src/scan_*.svh` | Scan tasks, directed/random tests, instruction builder/checks. |
 | `src/{scan_map.awk,internal_hookups.py,set_scan_phase.py}` | Mapping generator, diagnostic generator, verified-phase editor. |
-| `run.sh`, `regress.sh`, `paths.sh`, `scan_phase.txt` | Entry points, local configuration, verified phase input. |
+| `run.sh`, `regress.sh` | Entry points. |
+| `paths.sh` (not in Git) | Local configuration: netlist, scandef, models. |
+| `scan_phase.txt` (optional, not in Git) | A local phase file; overrides the one beside the scandef. Delete it once DC writes a correct one. |
 | `sim/`, `regressions/` | Current metadata/build/logs; archived runs. |
 | `generated/` | Checked-in hookup snapshots from the old 16-bit netlist, unused by the runner. |
 
