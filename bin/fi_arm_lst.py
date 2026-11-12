@@ -2,7 +2,7 @@
 """fi_arm_lst.py -- the FI_ARM prologue, patched into a built memory image
 (hvl/pin/fi_always.sh).
 
-    fi_arm_lst.py <in.lst> <out.lst> <fi_control>
+    fi_arm_lst.py <in.lst> <out.lst> <fi_control> [stub address]
 
 FI_CONTROL resets to 0, so a test runs with injection only if something
 arms it first.  This replaces the image's first 8 bytes (at the reset
@@ -10,7 +10,11 @@ vector) with a jump to a stub in the tohost window, past the tohost line,
 that writes FI_CONTROL, runs the 8 displaced bytes and jumps back.  The
 image is otherwise untouched, so any test runs armed without a rebuild.
 The jump and the stub use t0 and t1, which the core does not reset.
-The displaced instructions must not depend on their address.
+The displaced instructions must not depend on their address, and the jump
+back uses whichever of t0 and t1 they do not write (Linux's shim starts
+building its jump target in t0).  An image
+that fills the tohost window (Linux) takes the stub address as a fourth
+argument, anywhere free within 2 GiB of the reset vector.
 """
 import sys
 
@@ -63,10 +67,30 @@ def hi_lo(offset):
     return (offset - lo) >> 12, lo
 
 
-def far_jump(pc, target):
-    """auipc t0 / jalr x0: 8 bytes from pc to target."""
+def far_jump(pc, target, reg=T0):
+    """auipc reg / jalr x0: 8 bytes from pc to target."""
     hi, lo = hi_lo(target - pc)
-    return [u_type(0x17, T0, hi), i_type(0x67, 0, 0, T0, lo)]
+    return [u_type(0x17, reg, hi), i_type(0x67, 0, 0, reg, lo)]
+
+
+def written_registers(code):
+    """The x registers the instructions in code may write.  Compressed forms
+    whose rd is x8..x15 only are left out: t0 and t1 are not among them."""
+    written = set()
+    i = 0
+    while i < len(code):
+        half = int.from_bytes(code[i:i + 2], "little")
+        if half & 3 == 3:
+            word = int.from_bytes(code[i:i + 4], "little")
+            if word & 0x7F not in (0x23, 0x27, 0x63):     # stores, branches
+                written.add(word >> 7 & 0x1F)
+            i += 4
+        else:
+            quadrant, funct3 = half & 3, half >> 13
+            if (quadrant == 1 and funct3 <= 3) or (quadrant == 2 and funct3 in (0, 2, 3, 4)):
+                written.add(half >> 7 & 0x1F)
+            i += 2
+    return written
 
 
 def address_independent(code):
@@ -93,14 +117,18 @@ def address_independent(code):
 
 def main():
     src, dst, arm = sys.argv[1], sys.argv[2], int(sys.argv[3], 0)
+    stub_addr = int(sys.argv[4], 0) if len(sys.argv) > 4 else STUB
     words = read_lst(src)
     if RESET_VECTOR not in words:
         sys.exit(f"{src}: nothing at the reset vector {RESET_VECTOR:#x}")
-    if any(STUB <= a < STUB + 64 for a in words):
-        sys.exit(f"{src}: the image already uses the stub's place {STUB:#x}")
+    if any(stub_addr <= a < stub_addr + 64 for a in words):
+        sys.exit(f"{src}: the image already uses the stub's place {stub_addr:#x}")
     displaced = words[RESET_VECTOR].to_bytes(8, "little")
     if not address_independent(displaced):
         sys.exit(f"{src}: the first 8 bytes ({displaced.hex()}) depend on their address")
+    free = [r for r in (T0, T1) if r not in written_registers(displaced)]
+    if not free:
+        sys.exit(f"{src}: the first 8 bytes ({displaced.hex()}) write both t0 and t1")
 
     hi, lo = hi_lo(FI_CONTROL)
     stub = [
@@ -110,12 +138,12 @@ def main():
         0x0FF0000F,                              # fence iorw, iorw
     ]
     code = b"".join(w.to_bytes(4, "little") for w in stub) + displaced
-    back = STUB + len(code)
-    code += b"".join(w.to_bytes(4, "little") for w in far_jump(back, RESET_VECTOR + 8))
+    back = stub_addr + len(code)
+    code += b"".join(w.to_bytes(4, "little") for w in far_jump(back, RESET_VECTOR + 8, free[0]))
     code += bytes(-len(code) % 8)
     for i in range(0, len(code), 8):
-        words[STUB + i] = int.from_bytes(code[i:i + 8], "little")
-    jump = far_jump(RESET_VECTOR, STUB)
+        words[stub_addr + i] = int.from_bytes(code[i:i + 8], "little")
+    jump = far_jump(RESET_VECTOR, stub_addr)
     words[RESET_VECTOR] = jump[0] | jump[1] << 32
     write_lst(dst, words)
 
