@@ -49,7 +49,7 @@ Setup and insertion both operate on `forte_top`. The scan endpoints are package 
 
 ### 2. Preserve the control nets and lock-state interface
 
-`scan_en_dft`, `test_mode_dft`, `test_mode_s` (test_mode after the two-flop `tmsync` synchroniser), and the one-bit `dft_unlocked` net receive `dont_touch` attributes during compilation. The `tmsync` flops, like the lock, are kept non-scan and out of retiming. The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
+`scan_en_dft`, `test_mode_dft`, `test_mode_s` (test_mode after the two-flop `tmsync` synchroniser), the one-bit `dft_unlocked` net and `hold_mode` receive `dont_touch` attributes during compilation. The `tmsync`, `sesync`, `hold_mode` and `holdlinksync` flops, like the lock, are kept non-scan and out of retiming, and the script errors if any of them matches nothing. It also errors unless the two RTL clock gates `chip/cg_ns` and `chip/cg_scan` exist (see [Hold-mode clock split](#hold-mode-clock-split)). The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
 
 This preservation is targeted. It does not freeze the whole processor or prevent mapping of the surrounding logic.
 
@@ -82,7 +82,7 @@ The external `core_clk` pad feeds both clock inputs of `forte_chip`. Only the pa
 
 ### 5. Model the unlocked test condition
 
-After mapping, `dft_bind_hookups` (`dft_procs.tcl`) declares `dft_unlocked` and `test_mode_s` constant high for DFT analysis. For each net, it traces back from the net's driver through buffers and inverters to the flop that drives it. It places the constant on that flop's Q or QN pin, with `-active_state` flipped once per inverter crossed, so a net that DC drives from QN still gets the correct value. This lets DRC analyze scan operation with the lock permitting access and with test mode already through the synchroniser.
+After mapping, `dft_bind_hookups` (`dft_procs.tcl`) declares `dft_unlocked` and `test_mode_s` constant high, and `hold_mode` constant low, for DFT analysis. For each net, it traces back from the net's driver through buffers and inverters to the flop that drives it. It places the constant on that flop's Q or QN pin, with `-active_state` flipped once per inverter crossed, so a net that DC drives from QN still gets the correct value. This lets DRC analyze scan operation with the lock permitting access and with test mode already through the synchroniser.
 
 The declaration does not alter the hardware lock. A real test must initialize the lock through the reset/clock sequence. DRC accepting an unlocked assumption is not proof that the physical initialization sequence works.
 
@@ -210,6 +210,70 @@ The script applies Verilog naming rules at `forte_top`, then writes the final ch
 
 Standalone mode writes the complete Verilog and DDC; integrated mode returns to the synthesis script instead of exiting the process.
 
+## Hold-mode clock split
+
+### What the RTL does
+
+`hdl/forte_chip.sv` splits `core_clk` through two instances of `hdl/forte_clk_gate.sv` (a latch, transparent while the clock is low, and an AND):
+
+| Instance | `en` | `te` | Clocks |
+|---|---|---|---|
+| `cg_ns` | `~hold` | `1'b0` | every non-scan register, `forte_soc` included |
+| `cg_scan` | `~hold` | `scan_en_dft` | exactly the scan-selected registers |
+
+`hold = test_mode_dft & hold_mode`. `hold_mode` is `scan_en` (through the two-flop `sesync`) sampled while `test_mode_s` is low, so it freezes when test mode is entered: raise `scan_en` before `test_mode` for hold mode, keep it low for legacy test mode. `scan_en_dft` is now `scan_en & test_mode_dft`. `holdlinksync` carries `hold` into the `link_clk` domain. `tmsync`, `sesync`, `hold_mode` and the reset synchronisers stay on the ungated clocks.
+
+| Mode | `hold` | `cg_ns` | `cg_scan` |
+|---|---|---|---|
+| Functional (`test_mode=0`) | 0 | passes | passes |
+| Legacy test (`hold_mode=0`) | 0 | passes | passes (as before the split) |
+| Hold (`hold_mode=1`) | 1 | stopped | passes only while `scan_en=1` |
+
+In hold mode a shift clocks the chains and nothing else, so a scan dump no longer loads functional data into the register file, CSRs, UART and the rest. Capture is not possible in hold mode; ATPG and DRC use legacy test mode.
+
+### What the scripts do
+
+| Where | Step |
+|---|---|
+| `dft_setup.tcl` | Preserves `hold_mode` with the other control nets; keeps `sesync`, `hold_mode`, `holdlinksync` non-scan and out of retiming; errors if `chip/cg_ns` or `chip/cg_scan` is missing; keeps both as hierarchy (`set_ungroup false`, no boundary optimisation, no retiming) so their `gclk` pins survive mapping |
+| `synthesis.tcl` | Analyses `forte_clk_gate.sv` before `forte_chip.sv` (with `FORTE_ICG_TECH` defined and `../io_drivers/forte_icg_tech.sv` analysed when that wrapper exists) |
+| `synthesis.tcl`, after compile | `dft_check_clock_split chip`: every scan-selected flop is clocked through `chip/cg_scan`, and every flop under `cg_scan` is scan-selected. A mismatch lists the flops and stops synthesis (the second kind is only a warning with `DFT_SCOPE=pc`, which scans only the PC while `cg_scan` clocks the full-scope set). Then `dft_rtl_clock_gate_checks chip` logs what each gate became and adds `set_clock_gating_check -setup 0 -hold 0` on a discrete AND |
+| `dft_bind_hookups` | `hold_mode`: `existing_dft Constant`, net value 0, traced Q/QN-aware like `test_mode_s` |
+| `dft_insert.tcl`, before DRC | `dft_cg_exclusions chip`: sorts every integrated clock gate (ICG) into *rtl* (inside `cg_ns`/`cg_scan`), *hooked* (on the clock path of a scan-selected flop) and *excluded* (gates none), and passes rtl + excluded + the two gate instances to `set_dft_clock_gating_configuration -exclude_elements`. Errors if any scan flop is clocked through an excluded ICG. Logs `DFT cg: N ICGs hooked, M excluded (...), K inside chip/cg_ns and chip/cg_scan` |
+| `dft_insert.tcl`, after `insert_dft` | `dft_check_cg_hookups`: hooked ICGs now have their test pin driven, excluded ones are still tied, the RTL gates' test pins are as before. Errors otherwise |
+| `dft_insert.tcl`, after the scandef | `dft_check_clock_split` again, against the cells actually on the chains |
+
+Clock tracing uses `all_fanout -flat -endpoints_only` / `all_fanin -flat -only_cells`, which cross buffers, the RTL gate's AND and an ICG's CK→GCK arc and stop at a register clock pin. ICGs are the leaf cells with `is_icg == true`; their test pin is the one whose library pin has `clock_gate_test_pin`.
+
+### DC options (W-2024.09) and why these
+
+- `set_dft_clock_gating_configuration [-exclude_elements object_list] [-dont_connect_cgs_of cell_list]` is all this release has (no `-control_signal`/`-depth`). `-exclude_elements` takes clock-gating cells, hierarchical instances containing them, lib cells or clocks, and leaves the excluded test pins as they are (tied stays tied, an existing connection stays). It overrides `-dont_connect_cgs_of`, which excludes the upstream gates of the listed registers only if they drive no valid scan cell. `set_dft_connect` has priority over both.
+- The scripts compute the list and use `-exclude_elements` so the decision is explicit, logged and checked after insertion. On the trial design `-dont_connect_cgs_of <all non-scan flops>` gave the same hookups.
+- `set_dft_configuration -connect_clock_gating disable` would leave every ICG unhooked, including those in front of scan flops, which then can't shift in legacy mode when their enable is low.
+- `set_clock_gating_style -control_signal test_mode` would make the inferred ICGs transparent for the whole of test mode: the non-scan registers would again be clocked on every shift.
+- `set_dft_clock_gating_pin` declares the test pin of a non-Power-Compiler gate so insert_dft hooks it; it is not needed (the RTL wires `cg_scan`'s `te` itself).
+- Excluded ICGs keep `TE=0` in every mode: their registers load only on their own enable, also in legacy test mode. They are non-scan, so this costs no coverage of the chains; DRC reports them as nonscan cells disturbed during shift (`S19`) as before.
+
+### How the RTL gate maps
+
+Checked on FreePDK45 with a small model of the split (scratch, not in the repo):
+
+| Form | Result after `compile_ultra -scan -gate_clock` | insert_dft without the exclusions |
+|---|---|---|
+| Behavioural latch + AND (as written) | `DLL` latch + `AND2` (+ `OR2` for `cg_scan`'s `en \| te`); not a clock gate to DC | nothing to hook; DRC passes the clock (latch constant 1 with `hold_mode=0`) |
+| Same, plus `replace_clock_gates -global` before compile | the AND becomes a library ICG with its own `TE` tied 0; the RTL latch stays in front (two latches) | hooks that `TE` to scan enable in both gates: `cg_ns` would pass the clock on every shift |
+| Library ICG instantiated (`ifdef`, directly or through a wrapper) | the ICG as written, `TE` tied 0 (`cg_ns`) or on `scan_en_dft` (`cg_scan`) | leaves both alone (no Power Compiler attributes); excluded anyway |
+
+In every form insert_dft without the exclusions also hooked every inferred ICG, the non-scan ones included (today's behaviour). With the scripts, all forms gave the same result: only the ICG in front of the scan flops hooked, the others tied, the RTL gates unchanged, DRC 0 errors before and after insertion, the same DRC warnings as without the exclusions, and a slightly higher coverage estimate. Two cautions for the behavioural form: DC infers **no** clock-gating check on the discrete AND (the latch → AND → flop path is unconstrained), hence `dft_rtl_clock_gate_checks`; and the clock root is two loose cells for CTS. The preferred form for tape-out is a library ICG behind `ifdef FORTE_ICG_TECH` in `forte_clk_gate.sv`, through a one-cell wrapper `io_drivers/forte_icg_tech.sv` (pin names differ per library). `replace_clock_gates` is not used: it keeps the RTL latch and touches every manual clock gate in the design.
+
+To list the library's ICG cells: `get_lib_cells */* -filter "defined(clock_gating_integrated_cell)"`.
+
+### Open points
+
+- Timing of `hold` → latch/ICG enable and of `scan_en` → `cg_scan` `te` (scan_en is a pin with input delay) is now on the clock path; check it in the scan-mode reports.
+- With `DFT_SCOPE=pc` the pipeline registers sit under `cg_scan` but are not scanned: a hold-mode shift still loads them.
+- The benches (`pc_tb`, `full_tb`) need a hold-mode entry sequence (scan_en before test_mode) to exercise it.
+
 ## Running and iterating
 
 ### The usual run
@@ -267,6 +331,7 @@ Paths below are relative to the repository root. The `synth/synout/dft/` and `sy
 | `synth/synout/forte_top.pre_dft.ddc` | Input checkpoint; not overwritten by insertion |
 | `synth/reports/dft/dft.log` | DC console log |
 | `synth/reports/dft/dft_signals.rpt` | Restored signal specifications |
+| `synth/reports/dft/dft_cg_config.rpt` | Clock-gate exclusions passed to insert_dft |
 | `synth/reports/dft/dft_drc_pre.rpt` | Pre-insertion DRC |
 | `synth/reports/dft/dft_preview.rpt` | Proposed architecture |
 | `synth/reports/dft/dft_drc_post.rpt` | Post-insertion DRC and coverage estimate |

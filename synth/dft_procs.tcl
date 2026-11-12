@@ -96,18 +96,24 @@ proc dft_trace_driver {net_name want} {
   return [list $drv $active $kind]
 }
 
-# Bind the four preserved chip nets after mapping and change_names.  Run once,
+# Bind the five preserved chip nets after mapping and change_names.  Run once,
 # from synthesis.tcl, before the pre-DFT checkpoint is written: the bindings
 # are saved in the .ddc with the design.
-#   dft_unlocked   existing_dft Constant   the DFT lock flop, 1 out of reset
-#   test_mode_s    existing_dft Constant   test_mode after the tmsync flops;
+#   dft_unlocked   existing_dft Constant 1 the DFT lock flop, 1 out of reset
+#   test_mode_s    existing_dft Constant 1 test_mode after the tmsync flops;
 #                                          DRC cannot carry the port constant
 #                                          through two non-scan flops
-#   scan_en_dft    spec ScanEnable         scan_en & dft_unlocked
+#   hold_mode      existing_dft Constant 0 the hold-mode select flop.  DRC and
+#                                          ATPG see legacy test mode: hold = 0,
+#                                          so both RTL clock gates (cg_ns,
+#                                          cg_scan) pass core_clk.  Hold mode
+#                                          (1) is a debug-dump mode the benches
+#                                          exercise, not an ATPG mode.
+#   scan_en_dft    spec ScanEnable         scan_en & test_mode_dft
 #   test_mode_dft  spec TestMode           test_mode_s & dft_unlocked
 proc dft_bind_hookups {{chip chip}} {
-  foreach net {dft_unlocked test_mode_s} {
-    lassign [dft_trace_driver $chip/$net 1] pin active kind
+  foreach {net want} {dft_unlocked 1 test_mode_s 1 hold_mode 0} {
+    lassign [dft_trace_driver $chip/$net $want] pin active kind
     set_dft_signal -view existing_dft -type Constant -hookup_pin $pin -active_state $active
   }
   # Gate outputs with the net's own polarity: hook at the net's driver, so the
@@ -118,7 +124,231 @@ proc dft_bind_hookups {{chip chip}} {
     set_dft_signal -view spec -type $type -port $port -hookup_pin $drv -active_state 1
   }
   # Insertion may now add loads and optimise the control distribution.
-  set_dont_touch [get_nets [list $chip/scan_en_dft $chip/test_mode_dft $chip/test_mode_s $chip/dft_unlocked]] false
+  set_dont_touch [get_nets [list $chip/scan_en_dft $chip/test_mode_dft $chip/test_mode_s $chip/dft_unlocked $chip/hold_mode]] false
+}
+
+# ---- The clock split (hdl/forte_chip.sv: cg_ns, cg_scan) -------------------
+#
+# core_clk reaches the registers through two RTL clock gates (forte_clk_gate):
+# cg_ns (test pin tied 0) clocks every non-scan register, cg_scan (test pin =
+# scan_en_dft) clocks exactly the scan-selected ones.  Both pass the clock
+# unless hold = test_mode_dft & hold_mode.  compile_ultra -gate_clock then
+# infers integrated clock gates (ICGs) below them, and insert_dft would hook
+# the test pin of every one of those to scan enable.  The procs here keep that
+# hookup to the ICGs that gate scan flops and check the split itself.
+#
+# Clock tracing uses all_fanout/all_fanin -flat on the mapped netlist.  They
+# follow timing arcs, so they cross buffers, inverters, the RTL gates' AND and
+# an ICG's CK->GCK arc, and stop at a register's clock pin.
+
+# Remove b from a, tolerating empty collections on either side.
+proc dft_coll_minus {a b} {
+  if {[sizeof_collection $a] == 0} { return {} }
+  if {[sizeof_collection $b] == 0} { return $a }
+  return [remove_from_collection $a $b]
+}
+
+# Leaf registers (sequential, not an ICG) whose clock pin is in the clock
+# fanout of pin.
+proc dft_clocked_regs {pin} {
+  set ck [filter_collection [all_fanout -from $pin -flat -endpoints_only] "is_clock_pin==true"]
+  if {[sizeof_collection $ck] == 0} { return {} }
+  return [filter_collection [get_cells -of_objects $ck] "is_sequential==true && is_icg!=true"]
+}
+
+# Integrated clock-gating cells: leaf cells whose library cell carries
+# clock_gating_integrated_cell (DC's is_icg).  These are the gates
+# compile_ultra -gate_clock infers, plus any library ICG put in by the RTL or
+# by replace_clock_gates.
+proc dft_icg_cells {} {
+  return [get_cells -hier * -quiet -filter "is_hierarchical==false && is_icg==true"]
+}
+
+# The pin of an ICG with library attribute clock_gate_<kind>_pin (kind: test,
+# out, clock, enable), or "" if it has none.
+proc dft_icg_pin {icg kind} {
+  foreach_in_collection p [get_pins -quiet -of_objects $icg] {
+    if {[get_attribute -quiet [get_lib_pins -quiet -of_objects $p] clock_gate_${kind}_pin] eq "true"} { return $p }
+  }
+  return ""
+}
+
+# 1 if a pin is tied off: unconnected, or its net has no driver, or the driver
+# is a constant (DC's **logic_0**/**logic_1**, or a tie cell).
+proc dft_pin_is_tied {pin} {
+  set net [get_nets -quiet -of_objects $pin]
+  if {[sizeof_collection $net] == 0} { return 1 }
+  if {[regexp {\*Logic[01]\*} [get_object_name $net]]} { return 1 }
+  set drv [get_pins -quiet -leaf -of_objects $net -filter "direction==out"]
+  if {[sizeof_collection $drv] == 0} {
+    return [expr {[sizeof_collection [get_ports -quiet -of_objects $net]] == 0}]
+  }
+  set ref [get_attribute [get_cells -of_objects [index_collection $drv 0]] ref_name]
+  return [regexp -nocase {^\*\*logic_[01]\*\*$|^TIE|^LOGIC[01]} $ref]
+}
+
+# Scan-selected registers: dft_setup.tcl's scan_element attribute.
+proc dft_selected_scan_regs {} {
+  return [get_cells -hier * -quiet -filter "is_hierarchical==false && is_sequential==true && is_icg!=true && scan_element==true"]
+}
+
+# Print up to max object names, sorted, one per line with a prefix.
+proc dft_list_cells {prefix coll {max 50}} {
+  set names [lsort [get_object_name $coll]]
+  foreach n [lrange $names 0 [expr {$max - 1}]] { puts "$prefix$n" }
+  if {[llength $names] > $max} { puts "$prefix... and [expr {[llength $names] - $max}] more" }
+}
+
+# Cross-check the clock split:
+#   - every scan flop is clocked through chip/cg_scan
+#   - every flop clocked through chip/cg_scan is a scan flop
+# A scan flop on cg_ns (or on the ungated core_clk/link_clk) would not shift
+# in hold mode; a non-scan flop on cg_scan would load its functional D on every
+# hold-mode shift, which is what the split is there to stop.
+# scan: the scan flops; default the scan-selected registers (run after compile,
+# before insertion).  After insertion pass the cells on the chains.
+# strict 0 reports the second kind instead of failing: DFT_SCOPE=pc scans only
+# the PC while cg_scan clocks the whole full-scope set.  The first kind is
+# always an error.
+proc dft_check_clock_split {{chip chip} {strict 1} {scan ""} {what "scan-selected"}} {
+  foreach g {cg_ns cg_scan} {
+    if {[sizeof_collection [get_pins -quiet $chip/$g/gclk]] != 1} {
+      error "DFT clock split: no pin $chip/$g/gclk; is hdl/forte_chip.sv the clock-split RTL?"
+    }
+  }
+  set on_scan [dft_clocked_regs [get_pins $chip/cg_scan/gclk]]
+  set on_ns   [dft_clocked_regs [get_pins $chip/cg_ns/gclk]]
+  if {$scan eq ""} { set scan [dft_selected_scan_regs] }
+  set missing [dft_coll_minus $scan $on_scan]
+  set extra   [dft_coll_minus $on_scan $scan]
+  set n_missing [sizeof_collection $missing]
+  set n_extra   [sizeof_collection $extra]
+  puts "DFT clock split: cg_scan clocks [sizeof_collection $on_scan] flops, cg_ns [sizeof_collection $on_ns]; [sizeof_collection $scan] $what"
+  puts "DFT clock split: $n_missing $what flops not under cg_scan, $n_extra flops under cg_scan not $what"
+  if {$n_missing > 0} {
+    puts "DFT clock split: ERROR: $what flops not clocked through $chip/cg_scan (would not shift in hold mode):"
+    dft_list_cells "DFT clock split:   " $missing
+  }
+  if {$n_extra > 0} {
+    set tag [expr {$strict ? "ERROR" : "WARNING"}]
+    puts "DFT clock split: $tag: flops clocked through $chip/cg_scan that are not $what (they load functional data on every hold-mode shift):"
+    dft_list_cells "DFT clock split:   " $extra
+  }
+  if {$n_missing > 0 || ($strict && $n_extra > 0)} {
+    error "DFT clock split: cg_scan does not clock exactly the $what flops ($n_missing missing, $n_extra extra); see the log"
+  }
+}
+
+# The gating cell of an RTL clock gate: from the driver of net_name back
+# through single-input cells (buffers, inverters) to the first cell with more
+# than one input (the AND of the behavioural model, or the ICG).
+proc dft_clock_gate_cell {net_name} {
+  set drv [dft_net_driver $net_name]
+  for {set hop 0} {$hop < 16} {incr hop} {
+    set cell [get_cells -of_objects $drv]
+    set ins [get_pins -quiet -of_objects $cell -filter "direction==in"]
+    if {[sizeof_collection $ins] != 1} break
+    set up [get_pins -quiet -leaf -of_objects [get_nets -quiet -of_objects $ins] -filter "direction==out"]
+    if {[sizeof_collection $up] != 1} break
+    set drv $up
+  }
+  return $cell
+}
+
+# Report what chip/cg_ns and chip/cg_scan became after compile.  A library ICG
+# carries its own clock-gating check.  The behavioural latch + AND does not:
+# DC infers no check on that AND (FreePDK45 trial: the latch -> AND -> flop CK
+# path was reported unconstrained), so the enable is not timed against the
+# clock.  Give the AND one, -setup 0 -hold 0 (clock uncertainty supplies the
+# margin); it is saved in the checkpoint and written to the gate-level SDC.
+proc dft_rtl_clock_gate_checks {{chip chip}} {
+  foreach g {cg_ns cg_scan} {
+    set cell [dft_clock_gate_cell $chip/$g/gclk]
+    set ref [get_attribute $cell ref_name]
+    if {[get_attribute -quiet $cell is_icg] eq "true"} {
+      puts "DFT clock gates: $chip/$g -> [get_object_name $cell] ($ref, integrated clock gate)"
+    } else {
+      set_clock_gating_check -setup 0 -hold 0 $cell
+      puts "DFT clock gates: $chip/$g -> [get_object_name $cell] ($ref, discrete gate; clock-gating check added)"
+    }
+  }
+}
+
+# Decide which ICGs insert_dft may hook to scan enable, and tell it.  Run
+# before dft_drc/insert_dft.  Each ICG is one of:
+#   rtl       inside chip/cg_ns or chip/cg_scan: the RTL clock gates, whose
+#             test pins are wired in RTL.  Never hooked.
+#   hooked    on the clock path of at least one scan-selected flop: test pin
+#             to scan enable, as before the split
+#   excluded  gates no scan-selected flop: test pin stays tied 0.  Its flops
+#             then load only when their own enable is true, in every mode.
+# set_dft_clock_gating_configuration -exclude_elements takes the rtl and
+# excluded ICGs plus the two RTL gate instances themselves.  Guard: no scan
+# flop may be clocked through an excluded ICG (checked forward from each one,
+# independently of how the sets were built).
+# Returns {hooked_names excluded_names rtl_names} for dft_check_cg_hookups.
+proc dft_cg_exclusions {{chip chip}} {
+  set icgs [dft_icg_cells]
+  set scan [dft_selected_scan_regs]
+  set rtl  [filter_collection $icgs "full_name=~$chip/cg_ns/* || full_name=~$chip/cg_scan/*"]
+  set upstream {}
+  if {[sizeof_collection $scan] > 0} {
+    set scan_ck [filter_collection [get_pins -of_objects $scan] "is_clock_pin==true"]
+    set upstream [filter_collection [all_fanin -to $scan_ck -flat -only_cells] "is_hierarchical==false && is_icg==true"]
+  }
+  set hooked   [dft_coll_minus $upstream $rtl]
+  set excluded [dft_coll_minus [dft_coll_minus $icgs $hooked] $rtl]
+  set bad {}
+  foreach_in_collection g $excluded {
+    set out [dft_icg_pin $g out]
+    if {$out eq ""} { error "DFT cg: [get_object_name $g] has no clock_gate_out_pin in its library cell" }
+    set regs [dft_clocked_regs $out]
+    set s [expr {[sizeof_collection $regs] ? [filter_collection $regs "scan_element==true"] : {}}]
+    if {[sizeof_collection $s] > 0} { lappend bad "[get_object_name $g]: [lsort [get_object_name $s]]" }
+  }
+  if {[llength $bad] > 0} {
+    foreach b $bad { puts "DFT cg: ERROR: scan flops behind excluded clock gate $b" }
+    error "DFT cg: [llength $bad] excluded clock gates clock scan flops"
+  }
+  # Hierarchical SNPS_CLOCK_GATE* cells without an ICG inside are discrete
+  # (latch + gate) clock gates; this proc does not see them, insert_dft would
+  # hook them all.  Only happens with a library that has no ICG cells.
+  set discrete 0
+  foreach_in_collection h [get_cells -hier * -quiet -filter "is_hierarchical==true && ref_name=~SNPS_CLOCK_GATE*"] {
+    if {[sizeof_collection [get_cells -quiet [get_object_name $h]/* -filter "is_icg==true"]] == 0} { incr discrete }
+  }
+  if {$discrete > 0} { puts "DFT cg: WARNING: $discrete clock gates are not integrated cells; their test pins are not managed here" }
+
+  set excl [get_cells [list $chip/cg_ns $chip/cg_scan]]
+  if {[sizeof_collection $rtl] > 0}      { set excl [add_to_collection $excl $rtl] }
+  if {[sizeof_collection $excluded] > 0} { set excl [add_to_collection $excl $excluded] }
+  set_dft_clock_gating_configuration -exclude_elements $excl
+  puts "DFT cg: [sizeof_collection $hooked] ICGs hooked, [sizeof_collection $excluded] excluded (gate no scan flop), [sizeof_collection $rtl] inside $chip/cg_ns and $chip/cg_scan (RTL wiring kept)"
+  return [list [get_object_name $hooked] [get_object_name $excluded] [get_object_name $rtl]]
+}
+
+# After insert_dft: check that exactly the planned ICGs had their test pin
+# connected.  hooked: test pin driven (scan enable); excluded: still tied;
+# rtl: whatever the RTL left (tied for cg_ns, driven for cg_scan), recorded
+# by dft_cg_te_states before insertion.
+proc dft_cg_te_states {names} {
+  set st {}
+  foreach n $names {
+    set te [dft_icg_pin [get_cells $n] test]
+    lappend st $n [expr {$te eq "" ? "none" : ([dft_pin_is_tied $te] ? "tied" : "driven")}]
+  }
+  return $st
+}
+proc dft_check_cg_hookups {plan rtl_before} {
+  lassign $plan hooked excluded rtl
+  set errs {}
+  foreach {n st} [dft_cg_te_states $hooked]   { if {$st ne "driven"} { lappend errs "$n: test pin $st, expected hooked to scan enable" } }
+  foreach {n st} [dft_cg_te_states $excluded] { if {$st ne "tied"}   { lappend errs "$n: test pin $st, expected left tied (excluded)" } }
+  set now [dft_cg_te_states $rtl]
+  foreach {n st} $rtl_before { if {[dict get $now $n] ne $st} { lappend errs "$n: test pin was $st before insert_dft, now [dict get $now $n]" } }
+  foreach e $errs { puts "DFT cg: ERROR: $e" }
+  if {[llength $errs] > 0} { error "DFT cg: [llength $errs] clock-gate test pins not as planned" }
+  puts "DFT cg: after insert_dft: [llength $hooked] test pins on scan enable, [llength $excluded] tied, [llength $rtl] RTL gate pins unchanged"
 }
 
 # Scan cells from a scandef's SCANCHAINS section, in chain order from scan-in,

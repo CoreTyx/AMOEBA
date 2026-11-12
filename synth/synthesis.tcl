@@ -518,6 +518,21 @@ analyze -library WORK -format sverilog ../hdl/forte_link_phy.sv
 analyze -library WORK -format sverilog ../hdl/forte_rst_sync.sv
 analyze -library WORK -format sverilog ../hdl/forte_uncore.sv
 analyze -library WORK -format sverilog ../hdl/forte_soc.sv
+# The two clock gates of the DFT hold-mode clock split (cg_ns, cg_scan).
+# With a technology wrapper ../io_drivers/forte_icg_tech.sv (module
+# forte_icg_tech: clk, en, te in, gclk out, one library ICG cell inside; like
+# the pad wrappers it lives with the library), forte_clk_gate is analysed with
+# FORTE_ICG_TECH defined and instantiates it.  Without one, the behavioural
+# latch + AND maps to discrete cells.  DFT_FLOW.md, "Hold-mode clock split".
+set forte_icg_tech ../io_drivers/forte_icg_tech.sv
+if {[file exists $forte_icg_tech]} {
+  analyze -library WORK -format sverilog $forte_icg_tech
+  analyze -library WORK -format sverilog -define FORTE_ICG_TECH ../hdl/forte_clk_gate.sv
+  puts "DFT clock gates: forte_clk_gate uses $forte_icg_tech"
+} else {
+  analyze -library WORK -format sverilog ../hdl/forte_clk_gate.sv
+  puts "DFT clock gates: no $forte_icg_tech; forte_clk_gate is the behavioural latch + AND"
+}
 analyze -library WORK -format sverilog ../hdl/forte_chip.sv
 analyze -library WORK -format sverilog ../hdl/forte_top.sv
 
@@ -579,6 +594,15 @@ compile_ultra -scan -gate_clock -retime -no_seq_output_inversion
 
 change_names -rules verilog -hierarchy
 change_names -rules nameRules -hierarchy
+
+# The DFT clock split (dft_procs.tcl): every scan-selected flop is clocked
+# through chip/cg_scan and, with DFT_SCOPE=full, every flop under cg_scan is
+# scan-selected.  Stops here, before the checkpoint, if the RTL split and the
+# dft_setup.tcl groups disagree.
+dft_check_clock_split chip [expr {$dft_scope eq "full"}]
+# What each RTL clock gate became; a discrete latch + AND gets the clock-gating
+# check DC does not infer for it (dft_procs.tcl, dft_rtl_clock_gate_checks).
+dft_rtl_clock_gate_checks chip
 
 # CHANGED: moved dir variables up and create output dirs (redirects fail if a dir is missing)
 set report_dir  [getenv REPORT_DIR]
