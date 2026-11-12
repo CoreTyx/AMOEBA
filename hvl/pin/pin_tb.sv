@@ -39,7 +39,11 @@
 //   irq        <0|1> <0|1>          drive irq[i]
 //   fault_inject <0|1>              the master enable pin
 //   dump_mem   <hexaddr> <nbytes> <path>
-//   dft ...                         STUB: DFT/scan is not yet testable
+//   dft_hold   <cycles>             a DFT hold session of <cycles> frozen
+//                                   cycles (see "DFT hold" below); the
+//                                   program must then finish as if untouched
+//   dft ...                         STUB: scan shifting is tested at gate
+//                                   level (synth/scripts/full_tb on dft)
 //   finish
 // Without +CMD the bench runs: load_lst +MEMLST, reset 16,
 // run_until_tohost +TIMEOUT, expect_tohost 0.
@@ -69,7 +73,13 @@ module pin_tb;
   // ---- pins -----------------------------------------------------------------
   wire  [LINK_W-1:0] io_in, io_out;
   wire               req, wr, clk_out, uart_tx, status;
-  logic              ready, rvalid, uart_rx;
+  wire               ready, rvalid;
+  logic              link_ready, link_rvalid, uart_rx;
+  // dft_hold pauses the link the way the tester must: ready first (no new
+  // transaction), then rvalid once the agent is idle.  The agent is not reset.
+  bit                link_hold_ready = 0, link_hold_rvalid = 0;
+  assign ready  = link_hold_ready  ? 1'b0 : link_ready;
+  assign rvalid = link_hold_rvalid ? 1'b0 : link_rvalid;
   // rst_n starts X and FALLS to 0 at 0.5 ns, before the first clock edge.  A
   // declaration initialiser (`= 1'b0`) is applied before any process starts
   // (IEEE 1800 6.8), so it produces no negedge: every asynchronous reset in the
@@ -86,7 +96,7 @@ module pin_tb;
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .fault_inject, .status);
 
   pin_link_agent #(.BEATS(BEATS)) link (
-    .core_clk, .clk_out, .rst_n, .io_out, .io_in, .req, .wr, .ready, .rvalid);
+    .core_clk, .clk_out, .rst_n, .io_out, .io_in, .req, .wr, .ready(link_ready), .rvalid(link_rvalid));
 
   pin_uart_agent uart (.core_clk, .rst_n, .uart_tx, .uart_rx);
 
@@ -229,6 +239,69 @@ module pin_tb;
     repeat (n) @(posedge core_clk);
   endtask
 
+  // ---- DFT hold ---------------------------------------------------------------------
+  // A hold session as the tester runs it (hdl/forte_chip.sv, "DFT HOLD"), with
+  // no shifting: the RTL has no scan chains (DFT insertion builds them), and a
+  // scan_en=1 edge in a hold clocks the scan registers' FUNCTIONAL D here, where
+  // silicon would shift.  Shifting and reload are tested at gate level by
+  // full_tb's phase S on the dft branch.  What this checks is the freeze: with
+  // core_clk running for <cycles>, nothing in the core-clock domain may move,
+  // and after the hold the program finishes exactly as an uninterrupted run
+  // (compare the pin traces with `pin.sh compare --no-cycles`).
+  //   1. link quiet: hold ready low, wait for the agent and the pins to be idle
+  //      for 8 cycles, then hold rvalid low too
+  //   2. arm: scan_en=1 for 3 cycles (test_mode low: no effect)
+  //   3. enter: test_mode=1, scan_en=0, 3 cycles (2 functional, then frozen)
+  //   4. <cycles> frozen cycles; req/wr must stay low
+  //   5. exit: test_mode=0, 3 cycles (2 frozen, then functional); release link
+  // Under PIN_TB_RTL it also compares the fetch PC, the register file and
+  // MTIME before and after step 4.
+  int dft_holds = 0;
+  task automatic dft_hold(input longint n);
+    int quiet = 0;
+`ifdef PIN_TB_RTL
+    logic [63:0] pc0, mt0;
+    logic [$bits(dut.chip.soc.core.ieu.dp.regf.rf[1])-1:0] rf0 [1:$size(dut.chip.soc.core.ieu.dp.regf.rf)];
+    int  nrf = $size(dut.chip.soc.core.ieu.dp.regf.rf);
+`endif
+    @(posedge core_clk); #(tco_ns);
+    link_hold_ready = 1;
+    while (quiet < 8) begin
+      @(posedge core_clk);
+      quiet = (int'(link.st) == 0 && req !== 1'b1 && link_rvalid !== 1'b1) ? quiet + 1 : 0;
+    end
+    #(tco_ns);
+    link_hold_rvalid = 1;
+    scan_en = 1'b1;
+    run_cycles(3); #(tco_ns);
+    test_mode = 1'b1; scan_en = 1'b0;
+    run_cycles(3);
+`ifdef PIN_TB_RTL
+    pc0 = dut.chip.soc.core.ifu.PCF;
+    mt0 = dut.chip.soc.uncore.clint.MTIME;
+    for (int i = 1; i <= nrf; i++) rf0[i] = dut.chip.soc.core.ieu.dp.regf.rf[i];
+`endif
+    for (longint c = 0; c < n; c++) begin
+      @(negedge core_clk);
+      if (req !== 1'b0 || wr !== 1'b0) err($sformatf("dft_hold: req=%b wr=%b during the hold", req, wr));
+    end
+`ifdef PIN_TB_RTL
+    if (dut.chip.soc.core.ifu.PCF !== pc0)
+      err($sformatf("dft_hold: fetch PC moved during the hold: %h -> %h", pc0, dut.chip.soc.core.ifu.PCF));
+    if (dut.chip.soc.uncore.clint.MTIME !== mt0)
+      err($sformatf("dft_hold: MTIME moved during the hold: %0d -> %0d", mt0, dut.chip.soc.uncore.clint.MTIME));
+    for (int i = 1; i <= nrf; i++)
+      if (dut.chip.soc.core.ieu.dp.regf.rf[i] !== rf0[i])
+        err($sformatf("dft_hold: x%0d changed during the hold: %h -> %h", i, rf0[i], dut.chip.soc.core.ieu.dp.regf.rf[i]));
+`endif
+    @(posedge core_clk); #(tco_ns);
+    test_mode = 1'b0;
+    run_cycles(3); #(tco_ns);
+    link_hold_ready = 0; link_hold_rvalid = 0;
+    dft_holds++;
+    $display("[PIN_TB] dft_hold %0d: %0d frozen cycles", dft_holds, n);
+  endtask
+
   // ---- the command interpreter ----------------------------------------------------
   int  exit_code = -1;
 
@@ -310,7 +383,8 @@ module pin_tb;
         void'($sscanf(a1, "%h", addr)); void'($sscanf(a2, "%d", v));
         if (link.dump(addr, int'(v), a3) != 0) err($sformatf("dump_mem: cannot write %s", a3));
       end
-      "dft":    err("dft: DFT/scan testing is a stub until the DFT flow lands");
+      "dft_hold": begin void'($sscanf(a1, "%d", t)); dft_hold(t); end
+      "dft":    err("dft: scan shifting is tested at gate level (synth/scripts/full_tb on the dft branch)");
       "finish": verdict(1, "");
       default:  err($sformatf("line %0d: unknown command '%s'", lineno, cmd));
     endcase
