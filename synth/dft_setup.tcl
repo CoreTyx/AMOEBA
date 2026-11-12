@@ -30,19 +30,39 @@ set compile_seqmap_enable_output_inversion false
 printvar compile_seqmap_enable_output_inversion
 
 # Preserve the DFT control nets through mapping (hdl/forte_chip.sv):
-#   scan_en_dft    = scan_en & dft_unlocked
+#   scan_en_dft    = scan_en & test_mode_dft
 #   test_mode_dft  = test_mode_s & dft_unlocked
 #   test_mode_s    test_mode after the two tmsync flops
 #   dft_unlocked   the DFT lock register's output
+#   hold_mode      scan_en (through sesync) sampled while test_mode_s is low
 # synthesis.tcl binds them to their mapped drivers, then releases them.
 # Ordinary dont_touch can be ignored on nets attached to unmapped cells, so
 # enable DC's net-preservation behaviour first.
 set enable_keep_signal_dt_net true
-set dft_ctrl_nets [get_nets {chip/scan_en_dft chip/test_mode_dft chip/test_mode_s chip/dft_unlocked}]
-if {[sizeof_collection $dft_ctrl_nets] != 4} {
-  error "DFT: expected 4 control nets in chip (scan_en_dft test_mode_dft test_mode_s dft_unlocked); found [sizeof_collection $dft_ctrl_nets]"
+set dft_ctrl_nets [get_nets -quiet {chip/scan_en_dft chip/test_mode_dft chip/test_mode_s chip/dft_unlocked chip/hold_mode}]
+if {[sizeof_collection $dft_ctrl_nets] != 5} {
+  error "DFT: expected 5 control nets in chip (scan_en_dft test_mode_dft test_mode_s dft_unlocked hold_mode); found [sizeof_collection $dft_ctrl_nets]: [get_object_name $dft_ctrl_nets]"
 }
 set_dont_touch $dft_ctrl_nets true
+
+# The clock split (hdl/forte_chip.sv, hdl/forte_clk_gate.sv).  core_clk feeds
+# two RTL clock gates, both enabled by ~hold (hold = test_mode_dft & hold_mode):
+#   cg_ns    te = 0             every non-scan register, forte_soc included
+#   cg_scan  te = scan_en_dft   exactly the scan-selected registers
+# In hold mode a shift clocks only the chains, so a scan dump does not disturb
+# the register file, CSRs, UART, ...  Their test pins are wired in RTL and must
+# stay that way: dft_insert.tcl excludes both from insert_dft's clock-gate
+# hookup, and dft_check_clock_split (synthesis.tcl, after compile) checks that
+# cg_scan clocks exactly the scan selection.  Both are kept as hierarchy, so
+# their gclk pins can be found after mapping, without boundary optimisation,
+# so nothing is pushed into or out of them, and out of retiming.
+set dft_clock_gates [get_cells -quiet {chip/cg_ns chip/cg_scan}]
+if {[sizeof_collection $dft_clock_gates] != 2} {
+  error "DFT: expected the RTL clock gates chip/cg_ns and chip/cg_scan (forte_clk_gate); found [get_object_name $dft_clock_gates]"
+}
+set_ungroup $dft_clock_gates false
+set_boundary_optimization $dft_clock_gates false
+set_dont_retime $dft_clock_gates true
 
 # Scan registers, by group. One hierarchical pattern per line, matched against
 # the elaborated (pre-compile) names under chip/soc/core; "*" spans hierarchy,
@@ -161,7 +181,20 @@ printvar compile_delete_unloaded_sequential_cells
 #   the DFT lock      observable is bad, settable is worse (forte_dft_lock.sv)
 #   tmsync            shifting test_mode's synchroniser would drop test mode
 #                     mid-shift; DRC is told it holds 1 (dft_bind_hookups)
-foreach {what pattern} {lock chip/soc/uncore/dftlock/* tmsync chip/tmsync/*} {
+#   sesync, hold_mode the hold-mode select: scan_en through two flops, sampled
+#                     while test_mode_s is low and frozen in test mode.  On a
+#                     chain it would change mid-shift; DRC is told it holds 0
+#                     (legacy test mode: both clock gates pass the clock)
+#   holdlinksync      hold carried into the link_clk domain
+# All but the lock sit on the ungated core_clk/link_clk, outside both RTL
+# gates; the lock is in forte_soc, under cg_ns.
+foreach {what pattern} {
+  lock         chip/soc/uncore/dftlock/*
+  tmsync       chip/tmsync/*
+  sesync       chip/sesync/*
+  hold_mode    chip/hold_mode*
+  holdlinksync chip/holdlinksync/*
+} {
   set regs [filter_collection $all_seq "full_name=~$pattern"]
   if {[sizeof_collection $regs] == 0} { error "DFT: no $what flops matched $pattern before compile" }
   puts "DFT setup: $what: [sizeof_collection $regs] flops kept non-scan"
