@@ -27,7 +27,6 @@ cd scripts/full_tb
 ./run.sh +define+BREAK_MAP           # self-test: must FAIL
 ```
 
-- **`io_drivers/forte_icg_tech.sv` (VM only, like the pad wrappers)** must exist for a hold-capable build: a one-cell wrapper `module forte_icg_tech(input clk, en, te, output gclk)` around the library's integrated clock gate. `synthesis.tcl` then analyses `hdl/forte_clk_gate.sv` with `FORTE_ICG_TECH` and both root gates (`cg_ns`, `cg_scan`) become that cell; without it they are a discrete latch + AND (works, but two loose cells at the clock root). Find the TSMC cell with `get_lib_cells */* -filter "defined(clock_gating_integrated_cell)"` (section 6a). The log must show `DFT clock gates: chip/cg_* -> ... (<cell>, integrated clock gate)`.
 - **`full_tb/paths.sh`** points `NETLIST` and `SCANDEF` at `synth/synout/dft/`. `make synth` deletes all of `synout/` first, so if the `dft` step is skipped the bench stops with `NETLIST: no such file` rather than testing an old build.
 - **Two netlists come out.** `synout/forte_top.gate.v` (with SDF/SDC) is the one for place-and-route; `synout/dft/forte_top.gate.v` is the same checkpoint put through the same insertion, and is what `full_tb` checks. Before sign-off, point `full_tb` at `synout/` once, or confirm the two scandefs match.
 - **Change only insertion** (`dft_insert.tcl`, `dft_procs.tcl`): `make dft` is enough; it reuses `synout/forte_top.pre_dft.ddc`.
@@ -46,9 +45,7 @@ cd scripts/full_tb
 | `Makefile` | you | `make synth` (exports `DFT_SCOPE`, default `pc`), `make dft` (insertion only, into `synout/dft/`) |
 | `full_tb/` | you / VCS | The main bench: every register on the chains (PC, pipeline, hardened CSRs). Needs a `DFT_SCOPE=full` netlist; see `full_tb/README.md` |
 | `pc_tb/run.sh`, `pc_tb/scan_map.awk`, `pc_tb/tb_scan.sv` | you / VCS | The PC-only bench (section 10), for `DFT_SCOPE=pc` builds only |
-| `../DFT_FLOW.md` | people | The DC flow, command by command; "Hold-mode clock split" covers the clock-gate configuration |
-| `../../hdl/forte_clk_gate.sv` | RTL | The two root clock gates of the DFT hold (section 6a) |
-| `../../io_drivers/forte_icg_tech.sv` | `synthesis.tcl` (VM only) | One-cell wrapper around the library ICG for `forte_clk_gate` |
+| `../DFT_FLOW.md` | people | The DC flow, command by command; "DFT hold" covers the hold and the clock-gate configuration |
 | `HANDOFF.md` | people | This file |
 
 **Generated, safe to delete:** `pc_tb/`: `scan_map.svh`, `simv_scan`, `simv_scan.daidir/`, `csrc/`, `compile.log`, `sim.log`, `ucli.key`. `full_tb/`: everything under `sim/` (`./run.sh clean` keeps the generated map).
@@ -172,7 +169,7 @@ Not done: false-pathing the `io_in[*]`/`io_out[*]` buses. It is still timed agai
   - `scan_en_dft = scan_en & test_mode_dft`. Not synchronised: the tester toggles it per cycle. Qualified by test mode, so `scan_en` in functional mode does nothing (before the hold change it shifted the chains under a running core).
   - `hold_mode`: a flop that samples `scan_en` (through its own 2-flop `synchronizer sesync`) while `test_mode_s` is 0, frozen while it is 1. It records whether `scan_en` was high when `test_mode` rose.
   - `hold = test_mode_dft & hold_mode`. With the lock clear there is no hold and no scan.
-- **Clock split (the DFT hold, section 6a):** two RTL clock gates. `cg_ns` (en `~hold`, te 0) clocks everything that is not on a chain, uncore and SRAMs included; `cg_scan` (en `~hold`, te `scan_en_dft`) clocks only the scan-selected registers (a `clk_scan` port threaded through `wallypipelinedcore`). Outside a hold both pass every edge. `dft_insert.tcl` keeps their TE wiring and leaves the TE of every inferred clock gate that gates no scan flop tied off.
+- **DFT hold (section 6a):** one clock. `hold` stalls the pipeline (`ExternalStall`) and, as `DFTHold`, gates every other non-scan register's enable/next-state (traps, flushes, regfile write, caches, bus, TLB/walker, MDU/FT, LFSRs, CLINT/PLIC/fault counters, link core) and masks PSEL and the FIFO core ports. `dft_insert.tcl` leaves the TE of every inferred clock gate that gates no scan flop tied off; `dft_check_hold_coverage` checks after compile that every non-scan register depends on the hold.
 - **Link pads:** two one-way 8-bit buses, `io_in` (FPGA→ASIC) and `io_out` (ASIC→FPGA). There is no `dir` pin and no tristate. In test mode `io_out` carries `scan_q` (`io_o = test_mode_dft ? scan_q : lm_io_o`), and `insert_dft` adds its scan-out mux in front of each `io_out` pad.
 - **Chain stubs:** the RTL holds an 8-flop `scan_q` stub that reserves the structure. `insert_dft` builds the real chains.
 - **DFT lock:** `hdl/forte_dft_lock.sv` is an APB register in the uncore.
@@ -185,7 +182,7 @@ Not done: false-pathing the `io_in[*]`/`io_out[*]` buses. It is still timed agai
 A **hold session** stops a running program, unloads every chain, loads the same bits back and resumes; the program finishes with exactly the results of a run that was never interrupted (full_tb phase S checks this; `hvl/pin` `dft_hold` checks the freeze at RTL). A **legacy session** (scan_en low when test_mode rises) is unchanged: a `scan_en=0` edge is a functional capture, which phases D/E/P/H/R and ATPG rely on.
 
 **What a hold does.** From the third edge after `test_mode` rises until two edges after it falls:
-- nothing that is not on a chain gets a clock edge: register file, CSRs, caches and their SRAMs, MDU/FT state, CLINT `mtime`, UART, PLIC, the AHB side of the link, the FIFOs' core ports;
+- nothing that is not on a chain changes: register file, CSRs, caches and their SRAMs, MDU/FT state, CLINT `mtime`, PLIC, the AHB side of the link, the FIFOs' core ports (each holds through its enable; the UART keeps running but sees no access);
 - the scan cells clock only on `scan_en=1` edges (shift). A `scan_en=0` edge changes nothing on `core_clk` except `tmsync`, `sesync` and `hold_mode`; no capture, no ECC self-repair;
 - the link phy (link clock, not frozen) treats `ready` and `rvalid` as 0, so it cannot start a transaction or take `io_in`, and `req`/`wr` stay low. Its status heartbeat keeps running.
 
@@ -366,12 +363,13 @@ The PC-focused bench, for `DFT_SCOPE=pc` netlists only.
 
 ## 11. Status
 
-- **DFT hold, verified locally on EWS with FreePDK45 (2026-11-12), not yet on TSMC:**
-  - RTL from branch `dft-hold` (off `main`; `hdl/` identical on `dft`). Integrated `DFT_SCOPE=full` run with an `io_drivers/forte_icg_tech.sv` around `CLKGATETST_X1`: `DFT hold select: chip/hold_mode_reg/D <- chip/sesync/...`; `DFT clock split: cg_scan clocks 1298 flops ... 0 ... 0`; `DFT cg: 14 ICGs hooked, 333 excluded, 2 inside chip/cg_ns and chip/cg_scan`; 1,298 scan cells, 0 stored inverted; post-insertion DRC 0 errors.
-  - `full_tb ./run.sh --regen +SCAN_OP=both` (now `CDEPHFRIS`): every phase passes, 439 cases, 0 errors, `DFT TB PASS` (about 10 min; 80 ms of the 100 ms watchdog). Phase S: 4 programs, 12 hold sessions at different N plus 4 `scan_en=0`-only sessions and 4 link-pause controls, all match the uninterrupted run (tohost, signature, memory, final WFI scan); no non-scan state changes from hold engaged to hold released. `BREAK_SE` fails (17), `BREAK_MAP` fails (1).
+- **DFT hold (single clock), verified locally on EWS with FreePDK45 (2026-11-13), not yet on TSMC:**
+  - RTL from branch `dft-hold` (off `main`; the same commit is on `dft`). Integrated `DFT_SCOPE=full` run: `DFT hold select: chip/hold_mode_reg/D <- chip/sesync/...`; `DFT cg mixing: 0 ICGs clock scan registers`; `DFT hold coverage: ... 0 without a hold dependence`; `DFT cg: 0 ICGs hooked, 337 excluded`; 1,299 scan cells, 0 stored inverted; post-insertion DRC 0 errors.
+  - `full_tb ./run.sh --regen +SCAN_OP=both` (`CDEPHFRIS`): every phase passes, 439 cases, `DFT TB PASS` (about 10 min). Phase S: 4 programs, 12 hold sessions at different N plus 4 `scan_en=0`-only sessions and 4 link-pause controls, all match the uninterrupted run (tohost, signature, memory, final WFI scan). `BREAK_SE` fails (17), `BREAK_MAP` fails (1).
   - The same bench on the pre-hold netlist: S fails (536 errors) with causes 1 (clock-gate TE forced non-scan flops), 2 (core not frozen), 3 (link not isolated), 4 (scan_en shifted outside test mode).
-  - Area 146,858 vs 146,622 before (+0.16%). At the flow's 4 ns both meet with the same 0.155 ns worst slack (an input path). Both netlists re-timed at 2.5 ns (400 MHz) on FreePDK45: same WNS (-1.50 ns; this library at a 4 ns compile does not make 400 MHz either way), TNS -5,762 vs -6,224; the root gates' clock-gating checks meet with 1.39 ns. The TSMC run on the VM is the real 400 MHz check.
-  - **To run it on the VM:** copy `hdl/` (`forte_chip.sv`, new `forte_clk_gate.sv`, `forte_soc.sv`, `forte_link_phy.sv` and the core modules with the `clk_scan` port, from `dft-hold`), the `synth/` tcl, `synth/scripts/full_tb/`, `hvl/pin/pin_link_agent.sv` (phase S pauses it without a reset), and **write `io_drivers/forte_icg_tech.sv` for the TSMC ICG** (section 1). Then `make synth DFT_SCOPE=full && make dft`, check the `DFT hold select`, `DFT clock split` and `DFT cg` lines, and `./run.sh --regen +SCAN_OP=both`.
+  - What the first single-clock run taught: `-gate_clock` shared ICGs between scan and non-scan registers (the page walker's gate also clocked 752 retimed registers), so a hold-mode shift clocked those non-scan registers and S failed 8 of 20. Scan registers are now excluded from clock gating (`dft_setup.tcl`) and `dft_check_cg_mixing` guards it.
+  - Area 149,673 vs 146,622 before (+2.1%: scan registers carry enable muxes instead of shared clock gates, plus the hold gating). At the flow's 4 ns the worst slack is unchanged (0.155 ns, an input path). Re-timed at 2.5 ns (400 MHz) on FreePDK45 the earlier single-clock netlist had WNS -1.66 ns vs -1.50 before (this library at a 4 ns compile does not make 400 MHz either way), worst path from `tmsync` through `hold` to the FIFO write mask: the hold fans out chip-wide. It only switches at session entry and exit, so it can be timed as a multicycle or false path if the tester runs the session at a slow clock; that is a decision still to make. The TSMC run on the VM is the real 400 MHz check.
+  - **To run it on the VM:** copy `hdl/` from `dft`, the `synth/` tcl, `synth/scripts/full_tb/` and `hvl/pin/pin_link_agent.sv`. Then `make synth DFT_SCOPE=full && make dft`, check the `DFT hold select`, `DFT cg mixing`, `DFT hold coverage` and `DFT cg` lines, and `./run.sh --regen +SCAN_OP=both`.
 - **Verified on TSMC 65nm, ece-427-02 (2026-11-12):** `make synth DFT_SCOPE=full` then `make dft`; `full_tb ./run.sh --regen +SCAN_OP=both` passes every phase (A, M, B, C, D, E, P, H, F, R, I), 419 cases, 0 errors, `DFT TB PASS`. The self-tests fail as they must: `BREAK_SE` with 17 errors, `BREAK_MAP` with 1.
   - 1,297 scan cells on 8 chains (c0 163, c1–c7 162); c0, c1, c3, c4, c5, c7 invert. `DFT phase: 1297 scan cells, 168 scan-out QN, 1297 single-output, 0 stored inverted`.
   - Every TSMC scan flop is single-output (Q-only `SDFFQX*`/`SDFFRPQX*`/…, or QN-only `SDFFQNX*`/`SDFFRPQNX*`/`SDFFSQNX*`). The first VM run used a `dft_write_phase` that read a missing Q pin as an unnamed net and flagged 166 cells as stored inverted; phase B then failed on 14 registers whose flop values were correct (section 5).
@@ -412,7 +410,7 @@ The PC-focused bench, for `DFT_SCOPE=pc` netlists only.
 ## 12. Known issues and risks
 
 - **Non-scan state can change during a LEGACY shift.** In a legacy session the core runs: while data shifts through the control registers, logic that isn't scanned can act on the passing values (a CSR write, a flush, a bus request). Use a hold session (section 6a) whenever the state must survive; legacy sessions are for capture tests that reset afterwards.
-  - The 14 inferred clock gates that gate scan flops still get TE = scan enable; the other ~333 keep TE tied, so in legacy mode their flops load only on their own functional enable.
+  - No inferred clock gate gates a scan register (they are excluded from clock gating), so every inferred clock gate keeps TE tied: in legacy mode non-scan flops load only on their own functional enable.
 - **ECC parity-bit errors are never detected.** `hdl/core/generic/ecc/ecc_secded_dec.sv` raises SEC/DED only when the syndrome is non-zero. A flip in the overall-parity bit (codeword bit 7) is therefore neither flagged nor repaired: it stays latent until a second error makes it a DED. Phase H doesn't inject there. This is an RTL issue, not a bench issue.
 - **Timing.** The full scope keeps 1,347 flops out of retiming. If 400 MHz no longer closes, trim the `pipeline` group first, then re-synthesise.
 - **Merged or constant flops.** `compile_ultra` removes constant flops and merges identical ones. PC[0] is gone; ImmExtE's sign-extended data bits are likely merged. Phase M lists such bits as notices.

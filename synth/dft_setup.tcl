@@ -45,24 +45,11 @@ if {[sizeof_collection $dft_ctrl_nets] != 5} {
 }
 set_dont_touch $dft_ctrl_nets true
 
-# The clock split (hdl/forte_chip.sv, hdl/forte_clk_gate.sv).  core_clk feeds
-# two RTL clock gates, both enabled by ~hold (hold = test_mode_dft & hold_mode):
-#   cg_ns    te = 0             every non-scan register, forte_soc included
-#   cg_scan  te = scan_en_dft   exactly the scan-selected registers
-# In hold mode a shift clocks only the chains, so a scan dump does not disturb
-# the register file, CSRs, UART, ...  Their test pins are wired in RTL and must
-# stay that way: dft_insert.tcl excludes both from insert_dft's clock-gate
-# hookup, and dft_check_clock_split (synthesis.tcl, after compile) checks that
-# cg_scan clocks exactly the scan selection.  Both are kept as hierarchy, so
-# their gclk pins can be found after mapping, without boundary optimisation,
-# so nothing is pushed into or out of them, and out of retiming.
-set dft_clock_gates [get_cells -quiet {chip/cg_ns chip/cg_scan}]
-if {[sizeof_collection $dft_clock_gates] != 2} {
-  error "DFT: expected the RTL clock gates chip/cg_ns and chip/cg_scan (forte_clk_gate); found [get_object_name $dft_clock_gates]"
-}
-set_ungroup $dft_clock_gates false
-set_boundary_optimization $dft_clock_gates false
-set_dont_retime $dft_clock_gates true
+# The DFT hold (hdl/forte_chip.sv, "DFT HOLD") is one clock: the pipeline
+# stalls and every other non-scan register has the hold in its enable or
+# next-state.  dft_check_hold_coverage (synthesis.tcl, after compile) checks
+# that structurally; dft_insert.tcl keeps insert_dft from tying a non-scan
+# register's clock gate on during shift.
 
 # Scan registers, by group. One hierarchical pattern per line, matched against
 # the elaborated (pre-compile) names under chip/soc/core; "*" spans hierarchy,
@@ -159,6 +146,15 @@ puts "DFT setup: [sizeof_collection $scan_regs] scan flops selected"
 set_dont_retime $scan_regs true
 set_scan_element false [all_registers -edge_triggered]
 set_scan_element true $scan_regs
+# No inferred clock gate on a scan register.  insert_dft must hook the test pin
+# of any ICG in front of a scan flop to scan enable so the chain can shift, and
+# compile_ultra -gate_clock happily shares one ICG between scan and non-scan
+# registers with the same enable (on a FreePDK45 run: the page walker's gate
+# also clocked 752 retimed registers, CSRValWReg's PCWReg, the divider's
+# result register).  Those non-scan registers then clocked on every hold-mode
+# shift and loaded scan data.  Scan registers keep their enables as hold muxes
+# instead; dft_check_cg_mixing (synthesis.tcl) checks the result.
+set_clock_gating_objects -exclude $scan_regs
 
 # DFT_KEEP_ALL=1 (environment, default 0): keep every selected flop as its own
 # scan cell, so a scan dump maps bit for bit onto the RTL registers.  By
@@ -186,8 +182,7 @@ printvar compile_delete_unloaded_sequential_cells
 #                     chain it would change mid-shift; DRC is told it holds 0
 #                     (legacy test mode: both clock gates pass the clock)
 #   holdlinksync      hold carried into the link_clk domain
-# All but the lock sit on the ungated core_clk/link_clk, outside both RTL
-# gates; the lock is in forte_soc, under cg_ns.
+# All are outside forte_soc, so the hold does not reach them.
 foreach {what pattern} {
   lock         chip/soc/uncore/dftlock/*
   tmsync       chip/tmsync/*

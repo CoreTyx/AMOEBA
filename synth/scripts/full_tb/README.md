@@ -370,14 +370,14 @@ map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
 ## Open action items
 
 - [x] **Make phase S pass, then add it to the default order.** Done with the
-  hold-mode RTL (`dft-hold`: clock split `cg_ns`/`cg_scan`, hold mode latched
-  from `scan_en` at test-mode entry, `scan_en` qualified by test mode) and the
-  flow's clock-gate exclusions. FreePDK45 full scope (2026-11-12): all phases
-  incl. S pass (20 S cases), BREAK_SE/BREAK_MAP fail; on the pre-hold netlist
-  S fails with causes 1-4. TSMC run still to do.
+  hold-mode RTL (`dft-hold`: one clock, pipeline stall plus DFTHold gating,
+  hold mode latched from `scan_en` at test-mode entry, `scan_en` qualified by
+  test mode) and the flow's clock-gate exclusions. FreePDK45 full scope
+  (2026-11-13): all phases incl. S pass (20 S cases), BREAK_SE/BREAK_MAP fail;
+  on the pre-hold netlist S fails with causes 1-4. TSMC run still to do.
 - [x] **Implement the DFT-session stall and rebuild/verify the DFT flow.**
-  Superseded by the hold (a clock split rather than a stall: a stall cannot
-  freeze traps, flushes, the regfile write, cache/bus/MDU/FT FSMs or MTIME).
+  Done as the hold: the stall plus DFTHold gating of everything a stall does
+  not freeze (traps, flushes, the regfile write, cache/bus/MDU/FT FSMs, MTIME).
   Legacy test mode keeps functional capture edges; see `HANDOFF.md` 6a.
 - [x] **Port the testbench/DFT interface to the new I/O.** Chains are
   `io_in[k] -> io_out[k]`; phase I uses the current link agent; the bench waits

@@ -49,7 +49,7 @@ Setup and insertion both operate on `forte_top`. The scan endpoints are package 
 
 ### 2. Preserve the control nets and lock-state interface
 
-`scan_en_dft`, `test_mode_dft`, `test_mode_s` (test_mode after the two-flop `tmsync` synchroniser), the one-bit `dft_unlocked` net and `hold_mode` receive `dont_touch` attributes during compilation. The `tmsync`, `sesync`, `hold_mode` and `holdlinksync` flops, like the lock, are kept non-scan and out of retiming, and the script errors if any of them matches nothing. It also errors unless the two RTL clock gates `chip/cg_ns` and `chip/cg_scan` exist (see [Hold-mode clock split](#hold-mode-clock-split)). The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
+`scan_en_dft`, `test_mode_dft`, `test_mode_s` (test_mode after the two-flop `tmsync` synchroniser), the one-bit `dft_unlocked` net and `hold_mode` receive `dont_touch` attributes during compilation. The `tmsync`, `sesync`, `hold_mode` and `holdlinksync` flops, like the lock, are kept non-scan and out of retiming, and the script errors if any of them matches nothing. See [DFT hold](#dft-hold-resumable-scan-session). The lock observation point is the driving leaf pin of `dft_unlocked`, resolved before mapping, rather than a module port that would require preserving the SoC hierarchy.
 
 This preservation is targeted. It does not freeze the whole processor or prevent mapping of the surrounding logic.
 
@@ -210,70 +210,63 @@ The script applies Verilog naming rules at `forte_top`, then writes the final ch
 
 Standalone mode writes the complete Verilog and DDC; integrated mode returns to the synthesis script instead of exiting the process.
 
-## Hold-mode clock split
+## DFT hold (resumable scan session)
 
 ### What the RTL does
 
-`hdl/forte_chip.sv` splits `core_clk` through two instances of `hdl/forte_clk_gate.sv` (a latch, transparent while the clock is low, and an AND):
+`hdl/forte_chip.sv` ("DFT HOLD") freezes the chip on one clock. `hold = test_mode_dft & hold_mode`. `hold_mode` is `scan_en` (through the two-flop `sesync`) sampled while `test_mode_s` is low, so it freezes when test mode is entered: raise `scan_en` before `test_mode` for hold mode, keep it low for legacy test mode. `scan_en_dft` is `scan_en & test_mode_dft`.
 
-| Instance | `en` | `te` | Clocks |
-|---|---|---|---|
-| `cg_ns` | `~hold` | `1'b0` | every non-scan register, `forte_soc` included |
-| `cg_scan` | `~hold` | `scan_en_dft` | exactly the scan-selected registers |
+- **The pipeline:** `hold` drives `ExternalStall`, which stalls every stage.
+- **Everything a stall does not freeze:** `hold` also reaches forte_soc as `DFTHold`, and from there each place that would otherwise move gets a `DFTHold` term in its enable or next-state:
+  - traps (`trap.sv`) and flushes (`hazard.sv`);
+  - the register-file write;
+  - the caches (`CacheEn`, FSMs), the bus FSMs, the TLBs and page walker;
+  - the MDU and FT state machines, LFSRs, and the free-running "Q" registers;
+  - in the uncore: the APB bridge, CLINT (MTIME), PLIC, fault counters and the link core.
+- **Masks:** PSEL to the peripherals and the FIFO core-side push/pop are masked. The UART is not frozen; it just sees no access.
+- **Scan cells:** they hold on `scan_en=0` edges, because their enables are the stall or are gated, and ECC registers don't self-repair. They shift on `scan_en=1` edges, where the scan mux takes SI whatever the enable says.
+- **Link phy:** `holdlinksync` carries `hold` into `link_clk` for the phy's ready/rvalid mask.
 
-`hold = test_mode_dft & hold_mode`. `hold_mode` is `scan_en` (through the two-flop `sesync`) sampled while `test_mode_s` is low, so it freezes when test mode is entered: raise `scan_en` before `test_mode` for hold mode, keep it low for legacy test mode. `scan_en_dft` is now `scan_en & test_mode_dft`. `holdlinksync` carries `hold` into the `link_clk` domain. `tmsync`, `sesync`, `hold_mode` and the reset synchronisers stay on the ungated clocks.
+| Mode | `hold` | Effect |
+|---|---|---|
+| Functional (`test_mode=0`) | 0 | none |
+| Legacy test (`hold_mode=0`) | 0 | none: a `scan_en=0` edge is a functional capture, as before |
+| Hold (`hold_mode=1`) | 1 | non-scan state frozen; the chains shift on `scan_en=1` and hold otherwise |
 
-| Mode | `hold` | `cg_ns` | `cg_scan` |
-|---|---|---|---|
-| Functional (`test_mode=0`) | 0 | passes | passes |
-| Legacy test (`hold_mode=0`) | 0 | passes | passes (as before the split) |
-| Hold (`hold_mode=1`) | 1 | stopped | passes only while `scan_en=1` |
-
-In hold mode a shift clocks the chains and nothing else, so a scan dump no longer loads functional data into the register file, CSRs, UART and the rest. Capture is not possible in hold mode; ATPG and DRC use legacy test mode.
+**What insertion must not do: force a non-scan register's clock on during shift.** `compile_ultra -gate_clock` turns many of those enables into integrated clock gates (ICGs), and insert_dft by default ties every ICG's test pin to scan enable, which would clock those registers on every shift whatever their enable says. That is what made a scan dump destructive before (the register file's ICGs had TE = `test_se`). A gate shared by scan and non-scan registers is just as bad: its test pin must be hooked so the scan flops shift, and then its non-scan registers clock too. On the first single-clock FreePDK45 run, `-gate_clock` had done exactly that (the page walker's gate also clocked 752 retimed registers, plus `CSRValWReg`/`PCWReg` and the divider's result register), and full_tb phase S failed 8 of 20 cases. So scan registers are kept out of clock gating altogether: they implement their enables as hold muxes, no ICG gates a scan flop, and every ICG's test pin stays tied.
 
 ### What the scripts do
 
 | Where | Step |
 |---|---|
-| `dft_setup.tcl` | Keeps `chip/sesync` as its own hierarchy with no boundary optimisation (see the note below); preserves `hold_mode` with the other control nets; keeps `sesync`, `hold_mode`, `holdlinksync` non-scan and out of retiming; errors if `chip/cg_ns` or `chip/cg_scan` is missing; keeps both as hierarchy (`set_ungroup false`, no boundary optimisation, no retiming) so their `gclk` pins survive mapping |
-| `synthesis.tcl` | Analyses `forte_clk_gate.sv` before `forte_chip.sv` (with `FORTE_ICG_TECH` defined and `../io_drivers/forte_icg_tech.sv` analysed when that wrapper exists) |
-| `synthesis.tcl`, after compile | `dft_check_hold_select chip`: `hold_mode_reg/D` must still be fed from `chip/sesync`, else stop (`DFT hold select: ...` in the log). `dft_check_clock_split chip`: every scan-selected flop is clocked through `chip/cg_scan`, and every flop under `cg_scan` is scan-selected. A mismatch lists the flops and stops synthesis (the second kind is only a warning with `DFT_SCOPE=pc`, which scans only the PC while `cg_scan` clocks the full-scope set). Then `dft_rtl_clock_gate_checks chip` logs what each gate became and adds `set_clock_gating_check -setup 0 -hold 0` on a discrete AND |
+| `dft_setup.tcl` | `set_clock_gating_objects -exclude $scan_regs`: no inferred clock gate on a scan register. Keeps `chip/sesync` as its own hierarchy with no boundary optimisation (see the note below). Preserves `hold_mode` with the other control nets. Keeps `sesync`, `hold_mode` and `holdlinksync` non-scan and out of retiming |
+| `synthesis.tcl`, after compile | `dft_check_cg_mixing`: errors if any ICG clocks both scan and non-scan registers (`DFT cg mixing: ...`). `dft_check_hold_select chip`: `hold_mode_reg/D` must still be fed from `chip/sesync`, else stop (`DFT hold select: ...` in the log). `dft_check_hold_coverage chip`: every non-scan register under `chip/soc` and `chip/linkcore` must have the hold in the fanin of its D pin or of its ICG's enable. A miss lists the registers and stops synthesis with `DFT_SCOPE=full` (`DFT_HOLD_COVERAGE=warn` reports instead). Exempt by design: the UART, `soc/resetsync*`, the caches' `resetDelay` flops. It is structural, not proof: phase S in full_tb is the behavioural check |
 | `dft_bind_hookups` | `hold_mode`: `existing_dft Constant`, net value 0, traced Q/QN-aware like `test_mode_s` |
-| `dft_insert.tcl`, before DRC | `dft_cg_exclusions chip`: sorts every integrated clock gate (ICG) into *rtl* (inside `cg_ns`/`cg_scan`), *hooked* (on the clock path of a scan-selected flop) and *excluded* (gates none), and passes rtl + excluded + the two gate instances to `set_dft_clock_gating_configuration -exclude_elements`. Errors if any scan flop is clocked through an excluded ICG. Logs `DFT cg: N ICGs hooked, M excluded (...), K inside chip/cg_ns and chip/cg_scan` |
-| `dft_insert.tcl`, after `insert_dft` | `dft_check_cg_hookups`: hooked ICGs now have their test pin driven, excluded ones are still tied, the RTL gates' test pins are as before. Errors otherwise |
-| `dft_insert.tcl`, after the scandef | `dft_check_clock_split` again, against the cells actually on the chains |
+| `dft_insert.tcl`, before DRC | `dft_cg_exclusions chip`: sorts every ICG into *hooked* (on the clock path of a scan-selected flop) and *excluded* (gates none), and passes the excluded ones to `set_dft_clock_gating_configuration -exclude_elements`. Errors if any scan flop is clocked through an excluded ICG. Logs `DFT cg: N ICGs hooked, M excluded` |
+| `dft_insert.tcl`, after `insert_dft` | `dft_check_cg_hookups`: hooked ICGs now have their test pin driven, excluded ones are still tied. Errors otherwise |
 
-Clock tracing uses `all_fanout -flat -endpoints_only` / `all_fanin -flat -only_cells`, which cross buffers, the RTL gate's AND and an ICG's CK→GCK arc and stop at a register clock pin. ICGs are the leaf cells with `is_icg == true`; their test pin is the one whose library pin has `clock_gate_test_pin`.
+Clock tracing uses `all_fanout -flat -endpoints_only` / `all_fanin -flat -only_cells`, which cross buffers and an ICG's CK→GCK arc and stop at a register clock pin. ICGs are the leaf cells with `is_icg == true`; their test pin is the one whose library pin has `clock_gate_test_pin`.
 
-**`sesync` and the ScanEnable declaration.** `dft_setup.tcl` declares `scan_en` as the ScanEnable port before compile, and test-ready compile then treats that port as inactive in functional logic. `scan_en`'s only functional load is `sesync`, so the first full-scope run (FreePDK45, 2026-11-12) folded `sesync` away and tied `hold_mode_reg/D` to 0: hold mode could never be selected, every session was a legacy one, and full_tb phase S caught it (no chain shifted under a hold). Keeping `chip/sesync` as a hierarchy without boundary optimisation stops the constant at its boundary; removing the pre-compile ScanEnable declaration also worked on the small model but changes more. `dft_check_hold_select` guards it.
+**`sesync` and the ScanEnable declaration.** `dft_setup.tcl` declares `scan_en` as the ScanEnable port before compile. Test-ready compile then treats that port as inactive in functional logic.
+- **What went wrong:** `scan_en`'s only functional load is `sesync`, so the first full-scope run (FreePDK45, 2026-11-12) folded `sesync` away and tied `hold_mode_reg/D` to 0. Hold mode could never be selected, and every session was a legacy one. full_tb phase S caught it: no chain shifted under a hold.
+- **Fix:** keeping `chip/sesync` as a hierarchy without boundary optimisation stops the constant at its boundary. `dft_check_hold_select` guards it.
+- **Alternative:** removing the pre-compile ScanEnable declaration also worked on a small model, but it changes more.
 
 ### DC options (W-2024.09) and why these
 
-- `set_dft_clock_gating_configuration [-exclude_elements object_list] [-dont_connect_cgs_of cell_list]` is all this release has (no `-control_signal`/`-depth`). `-exclude_elements` takes clock-gating cells, hierarchical instances containing them, lib cells or clocks, and leaves the excluded test pins as they are (tied stays tied, an existing connection stays). It overrides `-dont_connect_cgs_of`, which excludes the upstream gates of the listed registers only if they drive no valid scan cell. `set_dft_connect` has priority over both.
-- The scripts compute the list and use `-exclude_elements` so the decision is explicit, logged and checked after insertion. On the trial design `-dont_connect_cgs_of <all non-scan flops>` gave the same hookups.
-- `set_dft_configuration -connect_clock_gating disable` would leave every ICG unhooked, including those in front of scan flops, which then can't shift in legacy mode when their enable is low.
-- `set_clock_gating_style -control_signal test_mode` would make the inferred ICGs transparent for the whole of test mode: the non-scan registers would again be clocked on every shift.
-- `set_dft_clock_gating_pin` declares the test pin of a non-Power-Compiler gate so insert_dft hooks it; it is not needed (the RTL wires `cg_scan`'s `te` itself).
-- Excluded ICGs keep `TE=0` in every mode: their registers load only on their own enable, also in legacy test mode. They are non-scan, so this costs no coverage of the chains; DRC reports them as nonscan cells disturbed during shift (`S19`) as before.
-
-### How the RTL gate maps
-
-Checked on FreePDK45 with a small model of the split (scratch, not in the repo):
-
-| Form | Result after `compile_ultra -scan -gate_clock` | insert_dft without the exclusions |
-|---|---|---|
-| Behavioural latch + AND (as written) | `DLL` latch + `AND2` (+ `OR2` for `cg_scan`'s `en \| te`); not a clock gate to DC | nothing to hook; DRC passes the clock (latch constant 1 with `hold_mode=0`) |
-| Same, plus `replace_clock_gates -global` before compile | the AND becomes a library ICG with its own `TE` tied 0; the RTL latch stays in front (two latches) | hooks that `TE` to scan enable in both gates: `cg_ns` would pass the clock on every shift |
-| Library ICG instantiated (`ifdef`, directly or through a wrapper) | the ICG as written, `TE` tied 0 (`cg_ns`) or on `scan_en_dft` (`cg_scan`) | leaves both alone (no Power Compiler attributes); excluded anyway |
-
-In every form insert_dft without the exclusions also hooked every inferred ICG, the non-scan ones included (today's behaviour). With the scripts, all forms gave the same result: only the ICG in front of the scan flops hooked, the others tied, the RTL gates unchanged, DRC 0 errors before and after insertion, the same DRC warnings as without the exclusions, and a slightly higher coverage estimate. Two cautions for the behavioural form: DC infers **no** clock-gating check on the discrete AND (the latch → AND → flop path is unconstrained), hence `dft_rtl_clock_gate_checks`; and the clock root is two loose cells for CTS. The preferred form for tape-out is a library ICG behind `ifdef FORTE_ICG_TECH` in `forte_clk_gate.sv`, through a one-cell wrapper `io_drivers/forte_icg_tech.sv` (pin names differ per library). `replace_clock_gates` is not used: it keeps the RTL latch and touches every manual clock gate in the design.
-
-To list the library's ICG cells: `get_lib_cells */* -filter "defined(clock_gating_integrated_cell)"`.
+- **`set_dft_clock_gating_configuration [-exclude_elements object_list] [-dont_connect_cgs_of cell_list]`** is all this release has (no `-control_signal`/`-depth`).
+  - `-exclude_elements` takes clock-gating cells, hierarchical instances containing them, lib cells or clocks. It leaves the excluded test pins as they are (tied stays tied, an existing connection stays).
+  - It overrides `-dont_connect_cgs_of`, which excludes the upstream gates of the listed registers only if they drive no valid scan cell. `set_dft_connect` has priority over both.
+- **Why `-exclude_elements` with a computed list:** the decision is explicit, logged and checked after insertion. On a small model `-dont_connect_cgs_of <all non-scan flops>` gave the same hookups.
+- **Rejected options:**
+  - `set_dft_configuration -connect_clock_gating disable` would leave every ICG unhooked, including those in front of scan flops, which then could not shift in legacy mode when their enable is low.
+  - `set_clock_gating_style -control_signal test_mode` would make the inferred ICGs transparent for the whole of test mode: the non-scan registers would be clocked on every shift again.
+- **Cost of excluding:** excluded ICGs keep `TE=0` in every mode, so their registers load only on their own enable, also in legacy test mode. They are non-scan, so this costs no chain coverage; DRC reports them as nonscan cells disturbed during shift (`S19`), as before.
 
 ### Open points
 
-- Timing of `hold` → latch/ICG enable and of `scan_en` → `cg_scan` `te` (scan_en is a pin with input delay) is now on the clock path; check it in the scan-mode reports.
-- With `DFT_SCOPE=pc` the pipeline registers sit under `cg_scan` but are not scanned: a hold-mode shift still loads them.
+- Timing of the `DFTHold` terms: they land on enable and next-state paths, including the caches' `CacheEn` (SRAM CE). Check them in the timing reports.
+- With `DFT_SCOPE=pc` only the PC is scanned. The rest of the pipeline registers are then non-scan, frozen by the stall, and checked by `dft_check_hold_coverage` only as a warning.
 - `full_tb` exercises hold mode in phase S (`enter_hold`/`exit_hold`); `pc_tb` has no hold-mode test.
 
 ## Running and iterating
