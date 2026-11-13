@@ -28,7 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module privpiperegs (
-  input  logic         clk, clk_scan, reset,
+  input  logic         clk, reset,
   input  logic         StallD, StallE, StallM,
   input  logic         FlushD, FlushE, FlushM,
   input  logic         InstrPageFaultF, InstrAccessFaultF,  // instruction faults
@@ -47,13 +47,13 @@ module privpiperegs (
   logic                IllegalIEUFPUInstrE;
 
   // pipeline fault signals
-  flopenrc #(4) faultregD(clk_scan, reset, FlushD, ~StallD,
+  flopenrc #(4) faultregD(clk, reset, FlushD, ~StallD,
                   {InstrPageFaultF, InstrAccessFaultF, HPTWInstrAccessFaultF, HPTWInstrPageFaultF},
                   {InstrPageFaultD, InstrAccessFaultD, HPTWInstrAccessFaultD, HPTWInstrPageFaultD});
-  flopenrc #(5) faultregE(clk_scan, reset, FlushE, ~StallE,
+  flopenrc #(5) faultregE(clk, reset, FlushE, ~StallE,
                   {IllegalIEUFPUInstrD, InstrPageFaultD, InstrAccessFaultD, HPTWInstrAccessFaultD, HPTWInstrPageFaultD},
                   {IllegalIEUFPUInstrE, InstrPageFaultE, InstrAccessFaultE, HPTWInstrAccessFaultE, HPTWInstrPageFaultE});
-  flopenrc #(5) faultregM(clk_scan, reset, FlushM, ~StallM,
+  flopenrc #(5) faultregM(clk, reset, FlushM, ~StallM,
                   {IllegalIEUFPUInstrE, InstrPageFaultE, InstrAccessFaultE, HPTWInstrAccessFaultE, HPTWInstrPageFaultE},
                   {IllegalIEUFPUInstrM, InstrPageFaultM, InstrAccessFaultM, HPTWInstrAccessFaultM, HPTWInstrPageFaultM});
 endmodule

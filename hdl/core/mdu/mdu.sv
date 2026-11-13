@@ -28,7 +28,8 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
-  input  logic              clk, clk_scan, reset,
+  input  logic              clk, reset,
+  input  logic              DFTHold,      // DFT hold (forte_chip.sv)
   // Per-unit enables from the core; each injector selects bit and kind locally.
   input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
   input  logic [15:0]       FaultLfsr,                      // shared fault-injection generator (ft_fault_gen)
@@ -64,7 +65,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // DIV retries the held E-stage transaction by restarting the divider FSM;
   // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
-  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
+  ft_mul #(P) ftmul(.clk, .reset, .DFTHold, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product bits before the M-stage check.
     .fi_enable(fault_inject_mul), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
@@ -85,7 +86,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     logic DivUnresolvedE;
     // Corrupt selected result bits before the E-stage completion check.
     // The resulting fault status is registered into M.
-    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .RemE(Funct3E[1]),
+    ft_div #(P) ftdiv(.clk, .reset, .DFTHold, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .RemE(Funct3E[1]),
         .W64E, .IntDivE, .ForwardedSrcAE, .ForwardedSrcBE,
         .fi_enable(fault_inject_div), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
         .DivBusyE, .DivResultM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
@@ -93,7 +94,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     assign ResidueUnresolved[1] = DivUnresolvedE;
     // Division completes in E. Carry its terminal fault through the same
     // E->M enable/flush as its instruction and PC before requesting a trap.
-    flopenrc #(1) divfaultreg(clk_scan, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
+    flopenrc #(1) divfaultreg(clk, reset, FlushM, ~StallM, DivUnresolvedE, DivUnresolvedM);
   end
 
   assign FTStallM      = MulFTStallM | DivFTStallM;
@@ -109,7 +110,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   assign PrelimResultM = Funct3M[2] ? DivResultM : ProdM;
 
   // Handle sign extension for W-type instructions
-  flopenrc #(1) W64MReg(clk_scan, reset, FlushM, ~StallM, W64E, W64M);
+  flopenrc #(1) W64MReg(clk, reset, FlushM, ~StallM, W64E, W64M);
   if (P.XLEN == 64) begin : resmux // RV64 has W-type instructions
     assign MDUResultM = W64M ? {{32{PrelimResultM[31]}}, PrelimResultM[31:0]} : PrelimResultM;
   end else begin : resmux // RV32 has no W-type instructions
@@ -117,5 +118,5 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   end
 
   // Writeback stage pipeline register
-  flopenrc #(P.XLEN) MDUResultWReg(clk_scan, reset, FlushW, ~StallW, MDUResultM, MDUResultW);
+  flopenrc #(P.XLEN) MDUResultWReg(clk, reset, FlushW, ~StallW, MDUResultM, MDUResultW);
 endmodule // mdu

@@ -30,6 +30,7 @@
 module mmu import cvw::*;  #(parameter cvw_t P,
                              parameter TLB_ENTRIES = 8, IMMU = 0) (
   input  logic                 clk, reset,
+  input  logic                 DFTHold,      // DFT hold (forte_chip.sv)
   input  logic [P.XLEN-1:0]    SATP_REGW,          // Current value of satp CSR (from privileged unit)
   input  logic                 STATUS_MXR,         // Status CSR: make executable page readable
   input  logic                 STATUS_SUM,         // Status CSR: Supervisor access to user memory
@@ -88,7 +89,7 @@ module mmu import cvw::*;  #(parameter cvw_t P,
     assign ReadAccess = ExecuteAccessF | ReadAccessM; // execute also acts as a TLB read.  Execute and Read are never active for the same MMU, so safe to mix pipestages
     assign WriteAccess = WriteAccessM;
     tlb #(.P(P), .TLB_ENTRIES(TLB_ENTRIES), .ITLB(IMMU)) tlb(
-          .clk, .reset,
+          .clk, .reset, .DFTHold,
           .SATP_MODE(SATP_REGW[P.XLEN-1:P.XLEN-P.SVMODE_BITS]),
           .SATP_ASID(SATP_REGW[P.ASID_BASE+P.ASID_BITS-1:P.ASID_BASE]),
           .VAdr(VAdr[P.XLEN-1:0]), .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .ENVCFG_PBMTE, .ENVCFG_ADUE,
@@ -121,7 +122,7 @@ module mmu import cvw::*;  #(parameter cvw_t P,
     .PMAInstrAccessFaultF, .PMALoadAccessFaultM, .PMAStoreAmoAccessFaultM);
 
   if (P.PMP_ENTRIES > 0) begin : pmp
-    pmpchecker #(.P(P), .MATCH_REG(IMMU)) pmpchecker(.clk, .reset, .PhysicalAddress, .EffectivePrivilegeModeW,
+    pmpchecker #(.P(P), .MATCH_REG(IMMU)) pmpchecker(.clk, .reset, .DFTHold, .PhysicalAddress, .EffectivePrivilegeModeW,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,
       .ExecuteAccessF, .WriteAccessM, .ReadAccessM, .Size, .CMOpM,
       .PMPInstrAccessFaultF, .PMPLoadAccessFaultM, .PMPStoreAmoAccessFaultM);
@@ -161,7 +162,7 @@ module mmu import cvw::*;  #(parameter cvw_t P,
   // (ifu.sv, fetch check cycle).
   if (IMMU) begin : instrfault
     logic PMAInstrAccessFaultQ, TLBMissQ;
-    flopr #(2) latefaultreg(clk, reset, {PMAInstrAccessFaultF, TLBMiss}, {PMAInstrAccessFaultQ, TLBMissQ});
+    flopenr #(2) latefaultreg(clk, reset, ~DFTHold, {PMAInstrAccessFaultF, TLBMiss}, {PMAInstrAccessFaultQ, TLBMissQ});
     assign InstrAccessFaultF  = (PMAInstrAccessFaultQ    | PMPInstrAccessFaultF)    & ~TLBMissQ;
   end else begin : instrfault
     assign InstrAccessFaultF  = (PMAInstrAccessFaultF    | PMPInstrAccessFaultF)    & ~TLBMiss;

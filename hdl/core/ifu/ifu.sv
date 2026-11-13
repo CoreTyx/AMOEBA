@@ -27,7 +27,8 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module ifu import cvw::*;  #(parameter cvw_t P) (
-  input  logic                 clk, clk_scan, reset,
+  input  logic                 clk, reset,
+  input  logic                 DFTHold,     // DFT hold (forte_chip.sv)
   // Cache fault injection: unit enables and the core's shared generator (ft_fault_gen)
   input  logic                 FaultInjectCacheSec, FaultInjectCacheDed,
   input  logic [15:0]          FaultLfsr,
@@ -173,12 +174,12 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     // InvalidateICacheM withholds the fetch request (CacheRWF/BusRW below), so neither the I$ nor the
     // bus reports a stall and InstrRawF is not a real read.  The spill logic must wait it out too, or a
     // PC at the end of a line right after FENCE.I latches that value as the instruction's first half.
-    spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
+    spill #(P) spill(.clk, .reset, .DFTHold, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF(CacheableFQ),
       .IFUCacheBusStallF(IFUCacheBusStallF | InvalidateICacheM), .ITLBMissOrUpdateAF(ITLBMissOrUpdateAFRaw), .PCSpillNextF, .PCSpillF, .SelSpillNextF, .SelSpillF, .SpillStateHoldsF,
       .PostSpillInstrRawF, .CompressedF);
-    flopenr #(1) SpillDReg(clk_scan, reset, ~StallD, SelSpillF, SelSpillD);
-    flopenr #(1) SpillEReg(clk_scan, reset, ~StallE, SelSpillD, SelSpillE);
-    flopenr #(1) SpillMReg(clk_scan, reset, ~StallM, SelSpillE, SelSpillM);
+    flopenr #(1) SpillDReg(clk, reset, ~StallD, SelSpillF, SelSpillD);
+    flopenr #(1) SpillEReg(clk, reset, ~StallE, SelSpillD, SelSpillE);
+    flopenr #(1) SpillMReg(clk, reset, ~StallM, SelSpillE, SelSpillM);
     assign PCIncrM = PCM + 'd2;
     mux2 #(P.XLEN) pcspillmmux(PCM, PCIncrM, SelSpillM, PCSpillM);
 
@@ -205,11 +206,11 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     // the tlbwrite would never take place after the pagetable walk. by adding in ~StallMQ, we are able to drop itlbflush
     // after a cycle AND pulse it for another cycle on any further back-to-back sfences.
     logic StallMQ, TLBFlush;
-    flopr #(1) StallMReg(.clk, .reset, .d(StallM), .q(StallMQ));
+    flopenr #(1) StallMReg(.clk, .reset, .en(~DFTHold), .d(StallM), .q(StallMQ));
     assign TLBFlush = sfencevmaM & ~StallMQ;
 
     mmu #(.P(P), .TLB_ENTRIES(P.ITLB_ENTRIES), .IMMU(1))
-    immu(.clk, .reset, .SATP_REGW, .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .ENVCFG_PBMTE, .ENVCFG_ADUE,
+    immu(.clk, .reset, .DFTHold, .SATP_REGW, .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .ENVCFG_PBMTE, .ENVCFG_ADUE,
          .PrivilegeModeW, .DisableTranslation(1'b0),
          .VAdr(PCFExt),
          .Size(2'b10),
@@ -277,7 +278,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
               .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1),
               .FI_PHASE(9'h13E))
-      icache(.clk, .reset, .FlushStage(FlushD), .Stall(GatedStallD),
+      icache(.clk, .reset, .DFTHold, .FlushStage(FlushD), .Stall(GatedStallD),
              .FaultInjectSec(FaultInjectCacheSec), .FaultInjectDed(FaultInjectCacheDed), .FaultLfsr, .FaultCount,
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
              .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF), .CacheBusy(ICacheBusyF),
@@ -297,7 +298,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .EccDedDirtyFaultAdr(UnusedICacheEccDedDirtyFaultAdr));
 
       ahbcacheinterface #(P, BEATSPERLINE, AHBWLOGBWPL, LINELEN, LLENPOVERAHBW, 1)
-      ahbcacheinterface(.HCLK(clk), .HRESETn(~reset),
+      ahbcacheinterface(.HCLK(clk), .HRESETn(~reset), .DFTHold,
             .HRDATA,
             .Flush(FlushD), .CacheBusRW, .BusCMOZero(1'b0), .HSIZE(IFUHSIZE), .HBURST(IFUHBURST), .HTRANS(IFUHTRANS), .HWSTRB(),
             .Funct3(3'b010), .HADDR(IFUHADDR), .HREADY(IFUHREADY), .HWRITE(IFUHWRITE), .CacheBusAdr(ICacheBusAdr),
@@ -356,19 +357,21 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // line or page, or the same PC once a page walk has filled the TLB or a flush or an I$
   // invalidate has restarted the fetch.
   /////////////////////////////////////////////////////////////////////////////////////////////
-  flopr #(1) fetchcheckedreg(clk, reset,
+  // DFT hold: these registers recapture from scanned state every cycle, so
+  // they hold explicitly.
+  flopenr #(1) fetchcheckedreg(clk, reset, ~DFTHold,
     StallF & ~FlushD & SpillStateHoldsF & ~ITLBMissOrUpdateAFRaw & ~InvalidateICacheM, FetchCheckedQ);
   // The page walker is asked to walk a cycle after the ITLB misses, from a register, so that
   // its stall and flush do not hang off the TLB lookup.  The request stands only if the fetch
   // address is still the one that missed: the pipeline was held (a fetch that misses is in its
   // check cycle, which holds it), nothing was flushed, and the spill FSM stayed on the same half.
-  flopr #(1) itlbmissreg(clk, reset,
+  flopenr #(1) itlbmissreg(clk, reset, ~DFTHold,
     ITLBMissOrUpdateAFRaw & StallF & ~FlushD & SpillStateHoldsF, ITLBMissOrUpdateAF);
-  flop #(2) fetchwherereg(clk, {CacheableF, ~ITLBMissF & ~CacheableF & ~SelIROM}, {CacheableFQ, UncachedFQ});
+  flopen #(2) fetchwherereg(clk, ~DFTHold, {CacheableF, ~ITLBMissF & ~CacheableF & ~SelIROM}, {CacheableFQ, UncachedFQ});
   // The faults are captured into Decode when the fetch completes, which is at least a cycle
   // after its check cycle, so Decode is given last cycle's answer.  The page fault is
   // registered here; the access fault already comes out of the MMU a cycle late (mmu.sv).
-  flopr #(1) fetchfaultreg(clk, reset, InstrPageFaultRawF, InstrPageFaultF);
+  flopenr #(1) fetchfaultreg(clk, reset, ~DFTHold, InstrPageFaultRawF, InstrPageFaultF);
 
   // "The fetch is not finished": in the middle of a cache or bus access, or still in its check
   // cycle.  (ICacheStallF also covers the cycle a request is first seen, from the live request.)
@@ -381,7 +384,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   assign IFUStallF = IFUCacheBusStallF | SelSpillNextF | InvalidateICacheM;
   assign GatedStallD = StallD & ~SelSpillNextF;
 
-  flopenl #(32) AlignedInstrRawDFlop(clk_scan, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);
+  flopenl #(32) AlignedInstrRawDFlop(clk, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // PCNextF logic
@@ -393,7 +396,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, UnalignedPCNextF);
   mux2 #(P.XLEN) pcresetmux({UnalignedPCNextF[P.XLEN-1:1], 1'b0}, P.RESET_VECTOR[P.XLEN-1:0], reset, PCNextF);
-  flopen #(P.XLEN) pcreg(clk_scan, ~StallF | reset, PCNextF, PCF);
+  flopen #(P.XLEN) pcreg(clk, ~StallF | reset, PCNextF, PCF);
 
   // pcadder
   // add 2 or 4 to the PC, based on whether the instruction is 16 bits or 32
@@ -435,7 +438,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       .BTBCallF(1'b0), .BTBReturnF(1'b0), .BTBJumpF(1'b0),
       .BTBBranchF(1'b0), .BPCallF(), .BPReturnF(), .BPJumpF(), .BPBranchF(), .IClassWrongM,
       .BPReturnWrongD());
-    flopenrc #(1) PCSrcMReg(clk_scan, reset, FlushM, ~StallM, PCSrcE, BPWrongM);
+    flopenrc #(1) PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcE, BPWrongM);
     assign RASPredPCWrongM = 1'b0;
     assign BPDirWrongM = BPWrongM;
     assign BTAWrongM = BPWrongM;
@@ -448,7 +451,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   ////////////////////////////////////////////////////////////////////////////////////////////////
 
   // Decode stage pipeline register and logic
-  flopenrc #(P.XLEN) PCDReg(clk_scan, reset, FlushD, ~StallD, PCF, PCD);
+  flopenrc #(P.XLEN) PCDReg(clk, reset, FlushD, ~StallD, PCF, PCD);
 
   // expand 16-bit compressed instructions to 32 bits
   if (P.ZCA_SUPPORTED) begin : decomp
@@ -472,28 +475,28 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Spec 3.1.14
   // Traps: Can’t happen.  The bottom two bits of MTVEC are ignored so the trap always is to a multiple of 4.  See 3.1.7 of the privileged spec.
   assign InstrMisalignedFaultE = (IEUAdrE[1] & ~P.ZCA_SUPPORTED) & PCSrcE;
-  flopenr #(1) InstrMisalignedReg(clk_scan, reset, ~StallM, InstrMisalignedFaultE, InstrMisalignedFaultM);
+  flopenr #(1) InstrMisalignedReg(clk, reset, ~StallM, InstrMisalignedFaultE, InstrMisalignedFaultM);
 
   // Instruction and PC pipeline registers flush to NOP, not zero
   mux2    #(32)     FlushInstrEMux(InstrD, nop, FlushE, NextInstrD);
-  flopenr #(32)     InstrEReg(clk_scan, reset, ~StallE, NextInstrD, InstrE);
-  flopenr #(P.XLEN) PCEReg(clk_scan, reset, ~StallE, PCD, PCE);
+  flopenr #(32)     InstrEReg(clk, reset, ~StallE, NextInstrD, InstrE);
+  flopenr #(P.XLEN) PCEReg(clk, reset, ~StallE, PCD, PCE);
 
   // InstrM is only needed with CSRs or atomic operations
   if (P.ZICSR_SUPPORTED | P.ZAAMO_SUPPORTED | P.ZALRSC_SUPPORTED) begin
     mux2    #(32)     FlushInstrMMux(InstrE, nop, FlushM, NextInstrE);
-    flopenr #(32)     InstrMReg(clk_scan, reset, ~StallM, NextInstrE, InstrM);
+    flopenr #(32)     InstrMReg(clk, reset, ~StallM, NextInstrE, InstrM);
   end else assign InstrM = '0;
   // PCM is only needed with CSRs or branch prediction
   if (P.ZICSR_SUPPORTED | P.BPRED_SUPPORTED)
-    flopenr #(P.XLEN) PCMReg(clk_scan, reset, ~StallM, PCE, PCM);
+    flopenr #(P.XLEN) PCMReg(clk, reset, ~StallM, PCE, PCM);
   else assign PCM = '0;
 
   // If compressed instructions are supported, increment PCLink by 2 or 4 for a jal.  Otherwise, just by 4
   if (P.ZCA_SUPPORTED) begin
     logic CompressedD;  // instruction is compressed
-    flopenrc #(1) CompressedDReg(clk_scan, reset, FlushD, ~StallD, CompressedF, CompressedD);
-    flopenrc #(1) CompressedEReg(clk_scan, reset, FlushE, ~StallE, CompressedD, CompressedE);
+    flopenrc #(1) CompressedDReg(clk, reset, FlushD, ~StallD, CompressedF, CompressedD);
+    flopenrc #(1) CompressedEReg(clk, reset, FlushE, ~StallE, CompressedD, CompressedE);
     assign PCLinkE = PCE + (CompressedE ? 'd2 : 'd4); // 'd4 means 4 but stops Design Compiler complaining about signed to unsigned conversion
   end else begin
     assign CompressedE = 1'b0;
@@ -503,9 +506,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // pipeline original compressed instruction in case it is needed for MTVAL on an illegal instruction exception
   if (P.ZICSR_SUPPORTED & P.ZCA_SUPPORTED | 1) begin
     logic CompressedM; // instruction is compressed
-    flopenrc #(16) InstrRawEReg(clk_scan, reset, FlushE, ~StallE, InstrRawD[15:0], InstrRawE);
-    flopenrc #(16) InstrRawMReg(clk_scan, reset, FlushM, ~StallM, InstrRawE, InstrRawM);
-    flopenrc #(1)  CompressedMReg(clk_scan, reset, FlushM, ~StallM, CompressedE, CompressedM);
+    flopenrc #(16) InstrRawEReg(clk, reset, FlushE, ~StallE, InstrRawD[15:0], InstrRawE);
+    flopenrc #(16) InstrRawMReg(clk, reset, FlushM, ~StallM, InstrRawE, InstrRawM);
+    flopenrc #(1)  CompressedMReg(clk, reset, FlushM, ~StallM, CompressedE, CompressedM);
     mux2     #(32) InstrOrigMux(InstrM, {16'b0, InstrRawM}, CompressedM, InstrOrigM);
   end else
     assign InstrOrigM = InstrM;

@@ -34,6 +34,7 @@
 
 module ebu import cvw::*;  #(parameter cvw_t P) (
   input  logic                clk, reset,
+  input  logic                DFTHold,   // DFT hold (forte_chip.sv)
   // Signals from IFU
   input  logic [1:0]          IFUHTRANS, // IFU AHB transaction request
   input  logic [2:0]          IFUHSIZE,  // IFU AHB transaction size
@@ -97,7 +98,7 @@ module ebu import cvw::*;  #(parameter cvw_t P) (
   // input stages and muxing for IFU and LSU
   ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  controllerinput #(P.PA_BITS) IFUInput(.HCLK, .HRESETn, .Save(IFUSave), .Restore(IFURestore), .Disable(IFUDisable),
+  controllerinput #(P.PA_BITS) IFUInput(.HCLK, .HRESETn, .Save(IFUSave & ~DFTHold), .Restore(IFURestore), .Disable(IFUDisable),
     .Request(IFUReq),
     .HWRITEIn(1'b0), .HSIZEIn(IFUHSIZE), .HBURSTIn(IFUHBURST), .HTRANSIn(IFUHTRANS), .HADDRIn(IFUHADDR),
     .HWRITEOut(IFUHWRITEOut), .HSIZEOut(IFUHSIZEOut), .HBURSTOut(IFUHBURSTOut), .HREADYOut(IFUHREADY),
@@ -124,7 +125,7 @@ module ebu import cvw::*;  #(parameter cvw_t P) (
   assign HWSTRB = LSUHWSTRB;
   // HRDATA is sent to all controllers at the core level.
 
-  ebufsmarb ebufsmarb(.HCLK, .HRESETn, .HBURST, .HREADY, .LSUReq, .IFUReq, .IFUSave,
+  ebufsmarb ebufsmarb(.HCLK, .HRESETn, .DFTHold, .HBURST, .HREADY, .LSUReq, .IFUReq, .IFUSave,
           .IFURestore, .IFUDisable, .IFUSelect, .LSUDisable, .LSUSelect);
 
 endmodule

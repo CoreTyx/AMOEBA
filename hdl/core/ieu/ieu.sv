@@ -28,7 +28,8 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module ieu import cvw::*;  #(parameter cvw_t P) (
-  input  logic              clk, clk_scan, reset,
+  input  logic              clk, reset,
+  input  logic              DFTHold,      // DFT hold (forte_chip.sv)
   // Per-unit injection enables after the core applies the software mask and master pin.
   input  logic              fault_inject_alu, fault_inject_cmp,
   input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
@@ -136,7 +137,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [1:0] CZeroE;                                        // {czero.nez, czero.eqz} instructions active
 
   controller #(P) c(
-    .clk, .clk_scan, .reset, .StallD, .FlushD, .InstrD(InstrDMux), .STATUS_FS, .ENVCFG_CBE, .ImmSrcD,
+    .clk, .reset, .StallD, .FlushD, .InstrD(InstrDMux), .STATUS_FS, .ENVCFG_CBE, .ImmSrcD,
     .InjectD, .DummySelD, .DummyW, .DummySelW,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
@@ -151,7 +152,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW, .RdE, .RdM);
 
   datapath #(P) dp(
-    .clk, .clk_scan, .reset, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline, .FaultLfsr, .FaultCount,
+    .clk, .reset, .DFTHold, .fault_inject_alu, .fault_inject_cmp, .fault_inject_regfile, .fault_inject_pipeline, .FaultLfsr, .FaultCount,
     .ImmSrcD, .InstrD(InstrDMux), .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
     .InjectD, .DummyW, .DummySelW,
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,

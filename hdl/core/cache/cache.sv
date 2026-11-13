@@ -36,6 +36,7 @@ module cache import cvw::*; #(parameter cvw_t P,
                               parameter logic [FI_COUNT_BITS-1:0] FI_PHASE = '0) (  // this cache's event phase on the shared generator
   input  logic                   clk,
   input  logic                   reset,
+  input  logic                   DFTHold,  // DFT hold (forte_chip.sv)
   // Runtime fault injection (cachefi.sv): unit enables and the core's shared generator
   input  logic                   FaultInjectSec, FaultInjectDed,
   input  logic [15:0]            FaultLfsr,
@@ -219,7 +220,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   // Per-way state: valid, dirty, the way's lookup results, and way selection
   cacheway #(.NUMSETS(NUMSETS), .READ_ONLY_CACHE(READ_ONLY_CACHE)) CacheWays[NUMWAYS-1:0](
-    .clk, .reset, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag,
+    .clk, .reset, .DFTHold, .CacheEn(CacheEnArray), .CacheSetData, .CacheSetTag,
     .SetValid, .ClearValid, .ScrubInvalidate, .SetDirty, .ClearDirty, .VictimWay,
     .FlushWay, .FlushCache, .SelVictim,
     .SelScrub(ScrubOwnsWaySelect), .ScrubWay,
@@ -233,7 +234,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // Select victim way for associative caches
   if (NUMWAYS > 1) begin : vict
     cacheLRU #(NUMWAYS, SETLEN, NUMSETS) cacheLRU(
-      .clk, .reset, .CacheEn, .HitWay, .ValidWay, .VictimWay, .VictimWayEnc, .LRUWriteEn,
+      .clk, .reset, .DFTHold, .CacheEn, .HitWay, .ValidWay, .VictimWay, .VictimWayEnc, .LRUWriteEn,
       .SetValid, .PAdr(PAdr[SETTOP-1:OFFSETLEN]), .InvalidateCache, .InvalidateFlushStage);
   end else begin : vict
     assign VictimWay = 1'b1; // one hot.
@@ -276,7 +277,7 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   cachearray #(.P(P), .NUMWAYS(NUMWAYS), .NUMSETS(NUMSETS), .TAGLEN(TAGLEN), .LINELEN(LINELEN),
                .TAGCHECKR(TAGCHECKR), .LINECHECKR(LINECHECKR), .TAG_ECC_SUPPORTED(TAG_ECC_SUPPORTED)) CacheArray(
-    .clk, .reset, .CacheEn(CacheEnArray), .RowWay, .CacheSetTag, .CacheSetData, .TagWe, .DataWe,
+    .clk, .reset, .DFTHold, .CacheEn(CacheEnArray), .RowWay, .CacheSetTag, .CacheSetData, .TagWe, .DataWe,
     .TagStoreWrite, .LineWriteFinal, .LineCheckWriteFinal, .PAdrTag(PAdr[PA_BITS-1:SETTOP]), .ScanArrive,
     .ReadWayQ, .TagReadQ, .TagMatchLive, .TagSecErrLive, .TagDedErrLive,
     .Tag, .CorrectedLine, .DataSecErr(DataSecErrQ), .DataDedErr(DataDedErrQ));
@@ -418,7 +419,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [TAGLEN-1:0]             TagFlip;
   logic [LINELEN-1:0]            LineFlip;
   cachefi #(.TAGLEN(TAGLEN), .TAGR(TAGCHECKR), .LINELEN(LINELEN), .LINER(LINECHECKR), .PHASE(FI_PHASE)) faultinject(
-    .clk, .reset, .FaultInjectSec, .FaultInjectDed, .FaultLfsr, .FaultCount,
+    .clk, .reset, .DFTHold, .FaultInjectSec, .FaultInjectDed, .FaultLfsr, .FaultCount,
     .TagWrite((SetValid & ~FlushStage) | SelCorrectTag),
     .LineWrite(((SetValid | SetDirty) & ~FlushStage) | SelCorrectData),
     .TagFlip, .LineFlip);
@@ -503,7 +504,7 @@ module cache import cvw::*; #(parameter cvw_t P,
   // Cache FSM
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .CacheBusRW, .CacheBusAck,
+  cachefsm #(READ_ONLY_CACHE) cachefsm(.clk, .reset, .DFTHold, .CacheBusRW, .CacheBusAck,
     .FlushStage, .InvalidateFlushStage, .CacheRW, .Stall,
     .Hit, .LineDirty, .HitLineDirty, .CacheStall, .CacheBusy(CacheBusyFsm), .CacheCommitted,
     .CacheMiss, .CacheAccess, .SelAdrData, .SelAdrTag, .SelVictim,

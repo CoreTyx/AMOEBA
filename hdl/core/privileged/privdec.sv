@@ -29,7 +29,8 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module privdec import cvw::*;  #(parameter cvw_t P) (
-  input  logic         clk, clk_scan, reset,
+  input  logic         clk, reset,
+  input  logic         DFTHold,          // DFT hold: WFI counter stops (forte_chip.sv)
   input  logic         StallW, FlushW,
   input  logic [31:7 ] InstrM,                              // privileged instruction function field
   input  logic         PrivilegedM,                         // is this a privileged instruction (from IEU controller)
@@ -93,7 +94,7 @@ module privdec import cvw::*;  #(parameter cvw_t P) (
     // Clear counter when reset or when trap is taken
     assign WFICountRst = reset | TrapM;
     // Stop incrementing the counter once reach the timeout limit
-    assign WFICountEn = ~WFITimeoutM;
+    assign WFICountEn = ~WFITimeoutM & ~DFTHold;
     assign WFICountPlus1 = wfiM ? WFICount + 1 : '0; // Count while WFI
     flopenr #(P.WFI_TIMEOUT_BIT+1) wficountreg(clk, WFICountRst, WFICountEn, WFICountPlus1, WFICount);
   // coverage off -item e 1 -fecexprrow 1
@@ -102,7 +103,7 @@ module privdec import cvw::*;  #(parameter cvw_t P) (
   // coverage on
   end else assign WFITimeoutM = 1'b0;
 
-  flopenrc #(1) wfiWReg(clk_scan, reset, FlushW, ~StallW, wfiM, wfiW);
+  flopenrc #(1) wfiWReg(clk, reset, FlushW, ~StallW, wfiM, wfiW);
 
   ///////////////////////////////////////////
   // Extract exceptions by name and handle them

@@ -42,6 +42,7 @@
 
 module plic_apb import cvw::*;  #(parameter cvw_t P) (
   input  logic                PCLK, PRESETn,
+  input  logic                DFTHold,      // DFT hold: freeze (forte_chip.sv)
   input  logic                PSEL,
   input  logic [27:0]         PADDR,
   input  logic [P.XLEN-1:0]   PWDATA,
@@ -124,8 +125,9 @@ module plic_apb import cvw::*;  #(parameter cvw_t P) (
       intEn         <= '0;
       intThreshold  <= '0;
       intInProgress <= '0;
-    // writing
-    end else begin
+    // writing; nothing moves in a DFT hold (Dout too: a claim caught in its
+    // access phase keeps its ID)
+    end else if (~DFTHold) begin
       if (memwrite)
         casez(entry)
           24'h0000??:          intPriority[entry[7:2]] <= Din[2:0];
@@ -183,7 +185,7 @@ module plic_apb import cvw::*;  #(parameter cvw_t P) (
 
   // pending interrupt request
   assign nextIntPending = (intPending | requests) & ~intInProgress;
-  flopr #(P.PLIC_NUM_SRC) intPendingFlop(PCLK,~PRESETn,nextIntPending,intPending);
+  flopenr #(P.PLIC_NUM_SRC) intPendingFlop(PCLK,~PRESETn,~DFTHold,nextIntPending,intPending);
 
   // context-dependent signals
   genvar ctx;

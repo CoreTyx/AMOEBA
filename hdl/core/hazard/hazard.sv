@@ -28,6 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module hazard (
+  input  logic  DFTHold,                          // DFT hold: no flush (forte_chip.sv)
   input  logic  BPWrongE, CSRWriteFenceM, RetM, TrapM,
   input  logic  StructuralStallD,
   input  logic  LSUStallM, IFUStallF,
@@ -119,8 +120,10 @@ module hazard (
   assign LatestUnstalledW = ~StallW & StallM;
 
   // Each stage flushes if the previous stage is the last one stalled (for cause) or the system has reason to flush
-  assign FlushD = LatestUnstalledD | FlushDCause; // coverage tag: LatestUnstalledD always 0
-  assign FlushE = LatestUnstalledE | FlushECause;
-  assign FlushM = LatestUnstalledM | FlushMCause;
-  assign FlushW = LatestUnstalledW | FlushWCause;
+  // A DFT hold stalls every stage (ExternalStall) and must not flush either:
+  // the flush causes come from scanned registers that change while they shift.
+  assign FlushD = (LatestUnstalledD | FlushDCause) & ~DFTHold; // coverage tag: LatestUnstalledD always 0
+  assign FlushE = (LatestUnstalledE | FlushECause) & ~DFTHold;
+  assign FlushM = (LatestUnstalledM | FlushMCause) & ~DFTHold;
+  assign FlushW = (LatestUnstalledW | FlushWCause) & ~DFTHold;
 endmodule

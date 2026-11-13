@@ -63,6 +63,7 @@ module flopenrc_ecc #(
                     (WIDTH <= 120) ? 7 : 8
 ) (
   input  logic             clk, reset, clear, en,
+  input  logic             DFTHold,      // to flopenrc_cw
   input  logic [WIDTH+R:0] flip_mask,  // one-hot on an injection cycle, else zero (ecc_flip_mask)
   input  logic [WIDTH-1:0] d,
   output logic [WIDTH-1:0] q,          // corrected data
@@ -76,7 +77,7 @@ module flopenrc_ecc #(
   ecc_secded_enc #(.DATA_WIDTH(WIDTH)) enc (.data_i(d), .codeword_o(cw_enc));
 
   flopenrc_cw #(.WIDTH(WIDTH)) store (
-    .clk, .reset, .clear, .en, .flip_mask,
+    .clk, .reset, .DFTHold, .clear, .en, .flip_mask,
     .cw(cw_enc), .q, .sec_err_o, .ded_err_o, .q_raw
   );
 

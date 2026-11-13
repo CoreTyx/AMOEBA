@@ -29,7 +29,8 @@
 ///////////////////////////////////////////
 
 module privileged import cvw::*;  #(parameter cvw_t P) (
-  input  logic              clk, clk_scan, reset,
+  input  logic              clk, reset,
+  input  logic              DFTHold,         // DFT hold (forte_chip.sv)
   input  logic              StallD, StallE, StallM, StallW,
   input  logic              FlushD, FlushE, FlushM, FlushW,
   // CSR Reads and Writes, and values needed for traps
@@ -141,18 +142,18 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   logic                     wfiW;
 
   // track the current privilege level
-  privmode #(P) privmode(.clk, .clk_scan, .reset, .StallW, .TrapM, .mretM, .sretM, .DelegateM,
+  privmode #(P) privmode(.clk, .reset, .StallW, .TrapM, .mretM, .sretM, .DelegateM,
     .STATUS_MPP, .STATUS_SPP, .NextPrivilegeModeM, .PrivilegeModeW,
     .PrivModeSecFaultW, .PrivModeUncorrectableFaultW);
 
   // decode privileged instructions
-  privdec #(P) pmd(.clk, .clk_scan, .reset, .StallW, .FlushW, .InstrM(InstrM[31:7]),
+  privdec #(P) pmd(.clk, .reset, .DFTHold, .StallW, .FlushW, .InstrM(InstrM[31:7]),
     .PrivilegedM, .IllegalIEUFPUInstrM, .IllegalCSRAccessM,
     .PrivilegeModeW, .STATUS_TSR, .STATUS_TVM, .STATUS_TW, .TrapM, .IllegalInstrFaultM,
     .EcallFaultM, .BreakpointFaultM, .sretM, .mretM, .RetM, .wfiM, .wfiW, .sfencevmaM);
 
   // Control and Status Registers
-  csr #(P) csr(.clk, .clk_scan, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
+  csr #(P) csr(.clk, .reset, .DFTHold, .FlushM, .FlushW, .StallE, .StallM, .StallW,
     .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
     .FTStatus,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
@@ -174,12 +175,12 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .CSRReadValW, .IllegalCSRAccessM, .BigEndianM, .RAND_INSTR_INSERT_FREQ_REGW);
 
   // pipeline early-arriving trap sources
-  privpiperegs ppr(.clk, .clk_scan, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
+  privpiperegs ppr(.clk, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
     .InstrPageFaultF, .InstrAccessFaultF, .HPTWInstrAccessFaultF, .HPTWInstrPageFaultF, .IllegalIEUFPUInstrD,
     .InstrPageFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalIEUFPUInstrM);
 
   // trap logic
-  trap #(P) trap(.reset,
+  trap #(P) trap(.reset, .DFTHold,
     .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM, .FTUnresolvedFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,

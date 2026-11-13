@@ -32,6 +32,9 @@
 module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   input  logic       clk,
   input  logic       reset,
+  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): the FSM and everything it
+  // enables hold; it outranks FlushStage, which can come from scanned state.
+  input  logic       DFTHold,
   // hazard and privilege unit
   input  logic       Stall,             // Stall the cache, preventing new accesses. In-flight access finished but does not return to READY
   input  logic       FlushStage,        // Pipeline flush of second stage (prevent writes and bus operations)
@@ -138,7 +141,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   // access is in flight, and it arrives late (whether an address is cacheable comes out of the
   // MMU), so every state after ACCESS uses this copy.  ACCESS itself has to use the live one.
   logic [1:0] CacheRWQ;
-  flopen #(2) cacherwreg(clk, CurrState == STATE_ACCESS, CacheRW, CacheRWQ);
+  flopen #(2) cacherwreg(clk, (CurrState == STATE_ACCESS) & ~DFTHold, CacheRW, CacheRWQ);
 
   // AnyMiss/AnyUpdateHit/AnyHit/CMOWriteback/CMOZeroNoEviction are evaluated once the array read
   // that STATE_ACCESS issued has been decoded (during STATE_DATA_DECODE), using the corrected
@@ -167,7 +170,8 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                           (CurrState == STATE_AMO_WRITE);
   assign StoreRepairsData = UpdateHitWrite & DataSecErr & Hit;
   always_ff @(posedge clk)
-    if (reset | FlushStage) WroteLineQ <= 1'b0;
+    if (reset | FlushStage & ~DFTHold) WroteLineQ <= 1'b0;
+    else if (DFTHold) ;
     else if ((CurrState == STATE_DATA_DECODE) | (CurrState == STATE_AMO_WRITE)) WroteLineQ <= UpdateHitWrite;
 
   // outputs for the performance counters. CacheAccess/CacheMiss now fire out of STATE_DATA_DECODE
@@ -183,11 +187,12 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   flop #(1) resetDelayReg(.clk, .d(reset), .q(resetDelay));
 
   always_ff @(posedge clk)
-    if (reset | FlushStage)    CurrState <= STATE_ACCESS;
-    else CurrState <= NextState;
+    if (reset | FlushStage & ~DFTHold) CurrState <= STATE_ACCESS;
+    else if (~DFTHold) CurrState <= NextState;
 
   always_ff @(posedge clk)
-    if (reset | FlushStage) FillBufferReturn <= 1'b0;
+    if (reset | FlushStage & ~DFTHold) FillBufferReturn <= 1'b0;
+    else if (DFTHold) ;
     else if (CurrState == STATE_WRITE_LINE) FillBufferReturn <= 1'b1;
     else if (CurrState == STATE_ADDRESS_SETUP & ~Stall) FillBufferReturn <= 1'b0;
 
@@ -196,14 +201,15 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   // which point the array already returns the new contents -- so an AMO would hand back its own
   // result instead of the old value. The word is latched in DATA_DECODE and returned from there.
   always_ff @(posedge clk)
-    if (reset | FlushStage) HitReturn <= 1'b0;
+    if (reset | FlushStage & ~DFTHold) HitReturn <= 1'b0;
+    else if (DFTHold) ;
     else if (CurrState == STATE_DATA_DECODE)
       HitReturn <= AnyHit & ((NextState == STATE_ADDRESS_SETUP) | (NextState == STATE_ECC_WRITEBACK) | (NextState == STATE_AMO_WRITE));
     else if (CurrState == STATE_ECC_WRITEBACK) HitReturn <= HitReturn;
     else if (CurrState == STATE_AMO_WRITE) HitReturn <= HitReturn;
     else if (CurrState == STATE_ADDRESS_SETUP & Stall) HitReturn <= HitReturn;
     else HitReturn <= 1'b0;
-  assign LatchHitWord = (CurrState == STATE_DATA_DECODE);
+  assign LatchHitWord = (CurrState == STATE_DATA_DECODE) & ~DFTHold;
   assign SelHitWord   = (CurrState == STATE_ADDRESS_SETUP) & HitReturn;
 
   always_comb begin
@@ -301,10 +307,10 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   // (cache.sv reads the next line in the same cycle FlushCntEn is set), so a cycle that invalidates
   // the current flush line must not also advance the counter, or the write would land on the next
   // line. Hence ~TagDedDirty here and FlushSkipQ (one cycle late) for data DED.
-  assign FlushCntEn = (CurrState == STATE_FLUSH & ~LineDirtyLive & ~TagDedDirty) |
-             (CurrState == STATE_FLUSH_WRITEBACK & FlushWbDone);
-  assign FlushCntRst = (CurrState == STATE_FLUSH & FlushFlag & ~LineDirtyLive & ~TagDedDirty) |
-              (CurrState == STATE_FLUSH_WRITEBACK & FlushFlag & FlushWbDone);
+  assign FlushCntEn = ((CurrState == STATE_FLUSH & ~LineDirtyLive & ~TagDedDirty) |
+             (CurrState == STATE_FLUSH_WRITEBACK & FlushWbDone)) & ~DFTHold;
+  assign FlushCntRst = ((CurrState == STATE_FLUSH & FlushFlag & ~LineDirtyLive & ~TagDedDirty) |
+              (CurrState == STATE_FLUSH_WRITEBACK & FlushFlag & FlushWbDone)) & ~DFTHold;
   // exclusion-tag-end: icache flushdirtycontrols
   // Bus interface controls
   assign CacheBusRW[1] = (CurrState == STATE_DATA_DECODE & AnyMiss & ~EvictDirty) | // exclusion-tag: icache CacheBusRCauses
@@ -344,12 +350,13 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
                   resetDelay;
   assign SelFetchBuffer = CurrState == STATE_WRITE_LINE |
                           (CurrState == STATE_ADDRESS_SETUP & FillBufferReturn);
-  assign CacheEn = (~Stall | StallConditions) | (CurrState != STATE_ACCESS) | reset | InvalidateCache; // exclusion-tag: dcache CacheEn
+  // DFT hold: one gate for every array, valid/dirty and LRU write.
+  assign CacheEn = ((~Stall | StallConditions) | (CurrState != STATE_ACCESS) | reset | InvalidateCache) & ~DFTHold; // exclusion-tag: dcache CacheEn
 
   // The lookup.  It starts at way 0, which is also what the arrays read while no access is in
   // flight (RowIdle): if the arrays are not enabled in ACCESS, the row they hold is still way 0 of
   // the access's set, read with NextSet the cycle before.
-  assign ScanStart  = (CurrState == STATE_ACCESS) & (NextState == STATE_TAG_SCAN);
+  assign ScanStart  = (CurrState == STATE_ACCESS) & (NextState == STATE_TAG_SCAN) & ~DFTHold;
   assign ScanArrive = (CurrState == STATE_TAG_SCAN);
   assign ScanIssue  = (CurrState == STATE_TAG_SCAN) & ~ScanLast;
   assign RowIdle    = (CurrState == STATE_ACCESS) | (CurrState == STATE_ADDRESS_SETUP);
@@ -365,8 +372,8 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign EvictDirty = LineDirty & ~VictimDed;
   assign FlushDedHit = (CurrState == STATE_FLUSH_WRITEBACK) & DataDedErr & ~FlushSkipQ & ~READ_ONLY_CACHE;
   always_ff @(posedge clk)
-    if (reset | FlushStage) FlushSkipQ <= 1'b0;
-    else FlushSkipQ <= FlushDedHit;
+    if (reset | FlushStage & ~DFTHold) FlushSkipQ <= 1'b0;
+    else if (~DFTHold) FlushSkipQ <= FlushDedHit;
   assign FlushWbDone = CacheBusAck | FlushSkipQ;
   assign EccDedLostLine = ((CurrState == STATE_DATA_DECODE) & VictimDed) | FlushDedHit;
 
