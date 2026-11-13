@@ -34,21 +34,53 @@ static unsigned long pattern(unsigned long idx, unsigned long seed)
     return x ^ (x >> 32);
 }
 
+/* Fill [base, base+len) with the pattern, then verify it.  On a mismatch,
+ * print one diagnostic FAIL line and return 1.  The line says which word
+ * first failed, what was read, what was expected, what a second read of the
+ * same word returns, and how many words were bad in total -- enough to tell a
+ * lost store (got 0: still the zero page), an aliased page (got another
+ * word's pattern) and a transient read (reread correct) apart without having
+ * to repeat a multi-hour boot. */
 static int fill_and_check(unsigned long base, unsigned long len,
-                          unsigned long seed, unsigned long *sum)
+                          unsigned long seed, unsigned long *sum,
+                          const char *what)
 {
     volatile unsigned long *p = (volatile unsigned long *)base;
     unsigned long n = len / sizeof(unsigned long);
+    unsigned long bad = 0, first = 0, got = 0;
 
     for (unsigned long i = 0; i < n; i++)
         p[i] = pattern(i, seed);
     for (unsigned long i = 0; i < n; i++) {
         unsigned long v = p[i];
-        if (v != pattern(i, seed))
-            return 1;
+        if (v != pattern(i, seed)) {
+            if (!bad++) {
+                first = i;
+                got = v;
+            }
+            continue;
+        }
         *sum += v;
     }
-    return 0;
+    if (!bad)
+        return 0;
+
+    out_str("PROG mem FAIL ");
+    out_str(what);
+    out_str(" word ");
+    out_dec(first);
+    out_str(" page ");
+    out_dec(first * sizeof(unsigned long) / PAGE);
+    out_str(" got ");
+    out_hex(got);
+    out_str(" want ");
+    out_hex(pattern(first, seed));
+    out_str(" reread ");
+    out_hex(p[first]);
+    out_str(" bad ");
+    out_dec(bad);
+    out_str("\n");
+    return 1;
 }
 
 int main(void)
@@ -62,8 +94,8 @@ int main(void)
     long top = sys_brk((void *)(cur + BRK_LEN));
     if (top != cur + (long)BRK_LEN)
         return prog_fail(name, "brk-grow");
-    if (fill_and_check(cur, BRK_LEN, 0x1111, &sum))
-        return prog_fail(name, "brk-pattern");
+    if (fill_and_check(cur, BRK_LEN, 0x1111, &sum, "brk-pattern"))
+        return 1;
     if (sys_brk((void *)cur) != cur)
         return prog_fail(name, "brk-shrink");
 
@@ -83,8 +115,9 @@ int main(void)
             if (*(volatile unsigned long *)(m + off) != 0)
                 return prog_fail(name, "mmap-not-zero");
 
-        if (fill_and_check(m, MMAP_LEN, 0x2222 + round, &sum))
-            return prog_fail(name, "mmap-pattern");
+        if (fill_and_check(m, MMAP_LEN, 0x2222 + round, &sum,
+                           round ? "mmap-pattern r1" : "mmap-pattern r0"))
+            return 1;
 
         /* Sub-word stores into the last page, then check the merge. */
         volatile unsigned char  *b = (volatile unsigned char *)(m + MMAP_LEN - PAGE);

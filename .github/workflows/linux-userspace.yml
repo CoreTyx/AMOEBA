@@ -5,9 +5,9 @@
 # requires it to print AMOEBA_LINUX_PROGS_OK.  /init still prints
 # AMOEBA_LINUX_BOOT_OK first, so the boot nightly is unaffected.
 #
-# OVERLAP: this job repeats the whole ~350M-cycle boot that linux-boot.yml
-# already pays for; the programs themselves add only a few million cycles on
-# top.  Once this tier has a track record it can be folded into the boot
+# OVERLAP: this job repeats the whole boot that linux-boot.yml already pays
+# for (~420M cycles to AMOEBA_LINUX_BOOT_OK on the first local run); the
+# programs add a few tens of millions on top (6-8M each, mostly fork/execve).  Once this tier has a track record it can be folded into the boot
 # nightly by moving that job's default milestone from AMOEBA_LINUX_BOOT_OK to
 # AMOEBA_LINUX_PROGS_OK and adding AMOEBA_PROG_FAIL to its LINUX_FAIL, after
 # which this file can be deleted.  It is separate for now so a userspace
@@ -103,8 +103,9 @@ jobs:
             LINUX_MEMLST=$PWD/testcode/linux/build/uart_smoke.lst \
             LINUX_PASS=AMOEBA_UART_OK LINUX_TIMEOUT=400000
 
-      # Same 800M-cycle budget as the boot nightly: the boot is ~353M cycles
-      # and the programs add a few million, so this is still >2x headroom.
+      # Same 800M-cycle budget as the boot nightly.  Measured locally: boot to
+      # AMOEBA_LINUX_BOOT_OK at ~421M cycles, each program 6-8M after that, so
+      # a passing run should end around 450-460M -- ~1.7x headroom.
       # LINUX_FAIL is sim/Makefile's default list plus /init's failure line, so
       # a failing program ends the run immediately instead of at the timeout.
       - name: Boot Linux and run user programs
