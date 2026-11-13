@@ -105,7 +105,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   // AHB -> APB bridge
   // APB slots: 0 GPIO, 1 CLINT, 2 PLIC, 3 UART, 4 SPI, 5 SDC, 6 ECC counters, 7 FI_CONTROL.
   ahbapbbridge #(P, 8) ahbapbbridge (
-    .HCLK, .HRESETn, .HSEL({HSELFI, HSELECC, HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY, .DFTHold(1'b0),
+    .HCLK, .HRESETn, .HSEL({HSELFI, HSELECC, HSELSDC, HSELSPI, HSELUART, HSELPLIC, HSELCLINT, HSELGPIO}), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
     .HRDATA(HREADBRIDGE), .HRESP(HRESPBRIDGE), .HREADYOUT(HREADYBRIDGE),
     .PCLK, .PRESETn, .PSEL, .PWRITE, .PENABLE, .PADDR, .PWDATA, .PSTRB, .PREADY, .PRDATA);
   assign HSELBRIDGE = HSELGPIO | HSELCLINT | HSELPLIC | HSELUART | HSELSPI | HSELSDC | HSELECC | HSELFI; // if any of the bridge signals are selected
@@ -128,7 +128,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
 
   // memory-mapped I/O peripherals
   if (P.CLINT_SUPPORTED == 1) begin : clint
-    clint_apb #(P) clint(.PCLK, .PRESETn, .DFTHold(1'b0), .PSEL(PSEL[1]), .PADDR(PADDR[15:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    clint_apb #(P) clint(.PCLK, .PRESETn, .PSEL(PSEL[1]), .PADDR(PADDR[15:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
       .PRDATA(PRDATA[1]), .PREADY(PREADY[1]), .MTIME(MTIME_CLINT), .MTimerInt, .MSwInt);
   end else begin : clint
     assign MTIME_CLINT = '0;
@@ -137,7 +137,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   end
 
   if (P.PLIC_SUPPORTED == 1) begin : plic
-    plic_apb #(P) plic(.PCLK, .PRESETn, .DFTHold(1'b0), .PSEL(PSEL[2]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    plic_apb #(P) plic(.PCLK, .PRESETn, .PSEL(PSEL[2]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
       .PRDATA(PRDATA[2]), .PREADY(PREADY[2]), .UARTIntr, .GPIOIntr, .SDCIntr, .SPIIntr, .MExtInt, .SExtInt);
   end else begin : plic
     assign MExtInt = 1'b0;
@@ -188,7 +188,7 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
   end
 
   // Read-only fault counters at ECC_COUNTER_BASE (faultcount_apb.sv).
-  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold(1'b0), .PADDR(PADDR[6:2]),
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .PADDR(PADDR[6:2]),
     .PRDATA(PRDATA[6]), .PREADY(PREADY[6]), .FaultEvents);
 
 

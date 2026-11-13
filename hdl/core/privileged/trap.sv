@@ -29,7 +29,6 @@
 
 module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 reset,
-  input  logic                 DFTHold,                                         // DFT hold: no trap (forte_chip.sv)
   input  logic                 InstrMisalignedFaultM, InstrAccessFaultM, HPTWInstrAccessFaultM, HPTWInstrPageFaultM, IllegalInstrFaultM,
   input  logic                 FTUnresolvedFaultM,                              // unresolved shadow result
   input  logic                 BreakpointFaultM, LoadMisalignedFaultM, StoreAmoMisalignedFaultM,
@@ -100,10 +99,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
                       LoadAccessFaultM | StoreAmoAccessFaultM |
                       HardwareErrorFaultM | DCacheEccDedFaultM;
   // coverage on
-  // No trap in a DFT hold: the fault causes come from scanned registers that
-  // change while they shift.  Gated here, at the source, so the CSR trap
-  // writes and the ECC/D$ DED trap-taken signals are gated with it.
-  assign TrapM = ((ExceptionM & ~CommittedF) | InterruptM) & ~DFTHold;
+  assign TrapM = (ExceptionM & ~CommittedF) | InterruptM;
   assign HardwareErrorTrapM = TrapM & ~InterruptM & (CauseM == 5'd19);
   assign DCacheEccDedTrapTakenM = TrapM & ~InterruptM & (CauseM == 5'd20);
 

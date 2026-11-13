@@ -29,9 +29,6 @@
 
 module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
    input  logic                  clk, reset,
-   // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): with ExternalStall, freezes all
-   // core state that is not on a scan chain.  Tie to 0 where there is no DFT.
-   input  logic                  DFTHold,
    // Shared runtime enable for ECC and ft_*; injectors select bit/kind locally.
    input  logic                  fault_inject, // external master enable
    input  logic [FI_UNITS-1:0]   FaultInjectMask, // APB unit enables: ALU/CMP/MUL/DIV/regfile ECC/pipeline ECC/cache SEC/cache DED
@@ -112,12 +109,12 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // register's) delay. A change on the pin or the mask takes effect one cycle
   // later. No reset: the injectors gate themselves off during reset, and the
   // value is resampled every cycle.
-  flopen #(FI_UNITS) faultinjectreg(clk, ~DFTHold, {FI_UNITS{fault_inject}} & FaultInjectMask, FaultInjectUnits);
+  flop #(FI_UNITS) faultinjectreg(clk, {FI_UNITS{fault_inject}} & FaultInjectMask, FaultInjectUnits);
   // One random source for every injection site; each site fires at its own phase
   // and corrupts only while its own unit is enabled.
   logic [15:0]                   FaultLfsr;
   logic [FI_COUNT_BITS-1:0]      FaultCount;
-  ft_fault_gen faultgen(.clk, .reset, .DFTHold, .lfsr(FaultLfsr), .count(FaultCount));
+  ft_fault_gen faultgen(.clk, .reset, .lfsr(FaultLfsr), .count(FaultCount));
   // Fault flags for the fault counters, from the units that detect them (faultcount_apb)
   logic [1:0]                    RegfileSec, RegfileDed, FTDetect, FTUnresolved, ResidueDetect, ResidueUnresolved;
   logic [4:0]                    PipeSec, PipeDed;
@@ -236,7 +233,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // until that writeback has completed.
   always_ff @(posedge clk)
     if (reset) FenceIWaitDCache <= 1'b0;
-    else if (DFTHold) ;                       // InvalidateICacheM is scanned
     else if (InvalidateICacheM) FenceIWaitDCache <= 1'b1;
     else if (FenceIWaitDCache & ~LSUStallM) FenceIWaitDCache <= 1'b0;
 
@@ -244,7 +240,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign FlushDCacheF = FlushDCacheM | FenceIWaitDCache;
 
   // instruction fetch unit: PC, branch prediction, instruction cache
-  ifu #(P) ifu(.clk, .reset, .DFTHold,
+  ifu #(P) ifu(.clk, .reset,
     .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
     .FaultLfsr, .FaultCount,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
@@ -270,7 +266,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PMPCFG_ARRAY_REGW,  .PMPADDR_ARRAY_REGW, .InstrAccessFaultF);
 
   // integer execution unit: integer register file, datapath and controller
-  ieu #(P) ieu(.clk, .reset, .DFTHold,
+  ieu #(P) ieu(.clk, .reset,
      .RegfileSec, .RegfileDed, .PipeSec, .PipeDed, .FTDetect, .FTUnresolved,
      .FTUnresolvedM,
      .fault_inject_alu(FaultInjectUnits[FI_ALU]), .fault_inject_cmp(FaultInjectUnits[FI_CMP]),
@@ -316,13 +312,13 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // bubble that would have been inserted anyway costs no performance.
   assign InsertOkD = ~DivBusyE & ~FDivBusyE & ~StallM & ~RetM & ~CSRWriteFenceM;
 
-  dummygen dummygen(.clk, .reset, .DFTHold,
+  dummygen dummygen(.clk, .reset,
     .FreqW(RAND_INSTR_INSERT_FREQ_REGW),
     .InstrD, .InstrValidD, .InsertOkD,
     .InjectReqD, .InjectD, .DummyInstrD, .DummySelD);
 
   lsu #(P) lsu(
-    .clk, .reset, .DFTHold,
+    .clk, .reset,
     .FaultInjectCacheSec(FaultInjectUnits[FI_CACHE_SEC]), .FaultInjectCacheDed(FaultInjectUnits[FI_CACHE_DED]),
     .FaultLfsr, .FaultCount,
     .StallM, .FlushM, .StallW, .FlushW,
@@ -362,7 +358,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections
-      .clk, .reset, .DFTHold,
+      .clk, .reset,
       // IFU interface
       .IFUHADDR, .IFUHBURST, .IFUHTRANS, .IFUHREADY, .IFUHSIZE,
       // LSU interface
@@ -396,13 +392,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // Sticky status survives the transient checker pulse and is read via CSR.
   always_ff @(posedge clk) begin
     if (reset) FTStatusSticky <= '0;
-    // Scanned, but not stall-enabled: hold it explicitly in a DFT hold.
-    else if (~DFTHold) FTStatusSticky <= FTStatusSticky | FTStatus;
+    else       FTStatusSticky <= FTStatusSticky | FTStatus;
   end
 
   // global stall and flush control
   hazard hzu(
-    .DFTHold,
     // Untrusted E results must not flush the instruction being diagnosed.
     .BPWrongE(BPWrongE & ~FTStall & ~FTUnresolvedE & ~FTUnresolvedM),
     .CSRWriteFenceM, .RetM, .TrapM,
@@ -419,7 +413,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // privileged unit
   if (P.ZICSR_SUPPORTED) begin : priv
     privileged #(P) priv(
-      .clk, .reset, .DFTHold,
+      .clk, .reset,
       .FlushD, .FlushE, .FlushM, .FlushW, .StallD, .StallE, .StallM, .StallW,
       .CSRReadM, .CSRWriteM, .SrcAM, .PCM, .PCSpillM,
       .InstrM, .InstrOrigM, .CSRReadValW, .EPCM, .TrapVectorM,
@@ -470,7 +464,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       EccDedFaultM      <= 1'b0;
       EccDedFaultEPCM   <= '0;
       EccDedFaultMtvalM <= '0;
-    end else if (DFTHold) begin               // RegEccDedErrW comes from scanned registers
     end else if (EccDedTrapTakenM) begin
       EccDedFaultM <= 1'b0;
     end else if (!EccDedFaultM && RegEccDedErrW) begin
@@ -483,7 +476,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // DED fault is sticky: once a double-bit error is seen it holds until reset
   always_ff @(posedge clk)
     if (reset) RegEccDedErrSticky <= 1'b0;
-    else if (~DFTHold) RegEccDedErrSticky <= RegEccDedErrSticky | RegEccDedErrW;
+    else       RegEccDedErrSticky <= RegEccDedErrSticky | RegEccDedErrW;
 
   // D$ dirty-line uncorrectable data error: independent capture chain from the IEU one above (own
   // cause, not shared with cause 19 -- see privileged.sv/trap.sv). Same combinational-feedback-
@@ -494,7 +487,6 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       DCacheEccDedFaultM      <= 1'b0;
       DCacheEccDedFaultEPCM   <= '0;
       DCacheEccDedFaultMtvalM <= '0;
-    end else if (DFTHold) begin
     end else if (DCacheEccDedTrapTakenM) begin
       DCacheEccDedFaultM <= 1'b0;
     end else if (!DCacheEccDedFaultM && DCacheEccDedDirtyFaultM) begin
@@ -509,7 +501,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
-    mdu #(P) mdu(.clk, .reset, .DFTHold, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
+    mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
       .fault_inject_mul(FaultInjectUnits[FI_MUL]), .fault_inject_div(FaultInjectUnits[FI_DIV]),
       .FaultLfsr, .FaultCount,
       .ForwardedSrcAE, .ForwardedSrcBE,
@@ -533,7 +525,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // paths they come from
   always_ff @(posedge clk)
     if (reset) FaultEvents <= '0;
-    else if (~DFTHold) FaultEvents <= '{RegfileSec: RegfileSec, RegfileDed: RegfileDed, PipeSec: PipeSec, PipeDed: PipeDed,
+    else       FaultEvents <= '{RegfileSec: RegfileSec, RegfileDed: RegfileDed, PipeSec: PipeSec, PipeDed: PipeDed,
                                 ICacheSec: ICacheSec, ICacheDed: ICacheDed, DCacheSec: DCacheSec, DCacheDed: DCacheDed,
                                 FTDetect: FTDetect, FTUnresolved: FTUnresolved,
                                 ResidueDetect: ResidueDetect, ResidueUnresolved: ResidueUnresolved,

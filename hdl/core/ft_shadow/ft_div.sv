@@ -26,7 +26,6 @@ module ft_div import cvw::*; #(
   parameter int TE_THRESHOLD = 3 // must be >= 1
 ) (
   input  logic              clk, reset,
-  input  logic              DFTHold,     // DFT hold: freeze (forte_chip.sv)
   input  logic              StallM, FlushE, FlushM,
   input  logic              IntDivE, DivSignedE, RemE, W64E,
   input  logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE,
@@ -114,7 +113,7 @@ module ft_div import cvw::*; #(
   /* verilator lint_on UNSIGNED */
 
   div #(P) primary(
-    .clk, .reset, .DFTHold, .StallM(internal_stall_m), .FlushE(FlushE | (retry_reset & ~DFTHold)),
+    .clk, .reset, .StallM(internal_stall_m), .FlushE(FlushE | retry_reset),
     .IntDivE, .DivSignedE(operand_signed), .RemE(operand_rem), .W64E(operand_w64),
     .ForwardedSrcAE(operand_a), .ForwardedSrcBE(operand_b),
     .DivBusyE, .DivDoneE(div_done), .ResultM(result_raw),
@@ -132,7 +131,7 @@ module ft_div import cvw::*; #(
   assign check = (phase == COMPARE);
   always_ff @(posedge clk)
     if (reset | FlushE) phase <= WAIT;
-    else if (~DFTHold) case (phase)
+    else case (phase)
       WAIT:    if (result_valid) phase <= COMPARE;
       COMPARE: phase <= retry_reset ? WAIT : DONE;   // a retry restarts the divider
       DONE:    if (~StallM) phase <= WAIT;           // the instruction leaves Execute
@@ -164,12 +163,12 @@ module ft_div import cvw::*; #(
 
   // No reset: nothing reads these before a divide has written them.
   always_ff @(posedge clk)
-    if (div_first & ~DFTHold) begin
+    if (div_first) begin
       res_x_q  <= res_a;
       res_nd_q <= res_b;
     end
   always_ff @(posedge clk)
-    if ((phase == WAIT) & result_valid & ~DFTHold) begin
+    if ((phase == WAIT) & result_valid) begin
       result_q   <= result;
       res_q_q    <= res_a;
       res_r_q    <= res_b;
@@ -203,7 +202,7 @@ module ft_div import cvw::*; #(
     if (reset | FlushE) begin
       state          <= NORMAL;
       mismatch_count <= '0;
-    end else if (~DFTHold) begin
+    end else begin
       case (state)
         NORMAL: if (check) begin
           mismatch_count <= '0;

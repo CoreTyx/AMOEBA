@@ -25,7 +25,6 @@ module cachefi import cvw::*; #(
   parameter logic [FI_COUNT_BITS-1:0] PHASE
 ) (
   input  logic                     clk, reset,
-  input  logic                     DFTHold,     // DFT hold: freeze (forte_chip.sv)
   input  logic                     FaultInjectSec, FaultInjectDed,
   input  logic [15:0]              FaultLfsr,        // shared generator
   input  logic [FI_COUNT_BITS-1:0] FaultCount,
@@ -59,13 +58,13 @@ module cachefi import cvw::*; #(
     if (reset) begin
       TagPend  <= 1'b0;
       LinePend <= 1'b0;
-    end else if (~DFTHold) begin
+    end else begin
       TagPend  <= Event | (TagPend & ~TagWrite);
       LinePend <= Event | (LinePend & ~LineWrite);
     end
   // With both enabled, a quarter of the events are uncorrectable. No reset: read only while pending.
   always_ff @(posedge clk)
-    if (Event & ~DFTHold) begin
+    if (Event) begin
       Sel <= FaultLfsr[1:0];
       Ded <= FaultInjectDed & (~FaultInjectSec | (FaultLfsr[15:14] == 2'b11));
     end

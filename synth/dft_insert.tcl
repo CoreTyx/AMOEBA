@@ -59,16 +59,6 @@ for {set k 0} {$k < $dft_chains} {incr k} {
 # and the test_mode synchroniser.
 set_dft_insertion_configuration -preserve_design_name true -synthesis_optimization all -unscan true
 
-# Clock-gate test pins (dft_procs.tcl, dft_cg_exclusions).  insert_dft hooks
-# the test pin of every clock gate to scan enable unless told otherwise.  Hook
-# the ICGs that gate scan flops and leave the rest tied 0, so a hold-mode shift
-# clocks the chains and nothing else.  Errors if a scan flop sits behind an
-# excluded gate.  Must precede dft_drc: excluded gates are not reported as
-# TEST-130.
-set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "pc"}]
-set dft_cg_plan [dft_cg_exclusions chip]
-report_dft_clock_gating_configuration > $rpt/dft_cg_config.rpt
-
 # insert_dft picks each cell's scan output (Q or QN) by slack.  Either is
 # fine: the scandef records it and the benches account for it.
 # set test_disable_find_best_scan_out true
@@ -81,8 +71,6 @@ create_test_protocol
 dft_drc -verbose > $rpt/dft_drc_pre.rpt
 preview_dft -show all > $rpt/dft_preview.rpt
 insert_dft
-# Exactly the planned clock-gate test pins were connected (dft_procs.tcl).
-dft_check_cg_hookups $dft_cg_plan
 dft_drc -verbose -coverage_estimate > $rpt/dft_drc_post.rpt
 
 # Finish naming before protocol/report export so standalone and integrated

@@ -35,7 +35,6 @@
 
 module hptw import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  input  logic              DFTHold,      // DFT hold: the walker holds (forte_chip.sv)
   input  logic [P.XLEN-1:0] SATP_REGW,              // includes SATP.MODE to determine number of levels in page table
   input  logic [P.XLEN-1:0] PCSpillF,               // addresses to translate
   input  logic [P.XLEN+1:0] IEUAdrExtM,             // addresses to translate
@@ -146,7 +145,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   // The address and the access type are the same in every cycle of one read or update state,
   // and two such states are never adjacent, so "an access last cycle" means "this access".
   assign WalkerAccess = |HPTWRW;
-  flopenr #(2) accesscheckreg(clk, reset | FlushW, ~DFTHold, {WalkerAccess, LSUAccessFaultM}, {AccessCheckedQ, LSUAccessFaultQ});
+  flopr #(2) accesscheckreg(clk, reset | FlushW, {WalkerAccess, LSUAccessFaultM}, {AccessCheckedQ, LSUAccessFaultQ});
   assign HPTWAccessChecked  = WalkerAccess & AccessCheckedQ;
   assign WalkerAccessFaultM = HPTWAccessChecked & LSUAccessFaultQ;
   assign AccessStallM       = DCacheBusStallM | ~AccessCheckedQ;
@@ -159,7 +158,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   assign HPTWStoreAmoPageFault   = PBMTOrDAUFaultM & DTLBWalk & (MemRWM[0] | (|CMOpM));
   assign HPTWInstrPageFault      = PBMTOrDAUFaultM & ~DTLBWalk;
 
-  flopenr #(6) HPTWAccesFaultReg(clk, reset, ~DFTHold, {HPTWLoadAccessFault, HPTWStoreAmoAccessFault, HPTWInstrAccessFault,
+  flopr #(6) HPTWAccesFaultReg(clk, reset, {HPTWLoadAccessFault, HPTWStoreAmoAccessFault, HPTWInstrAccessFault,
                                             HPTWLoadPageFault, HPTWStoreAmoPageFault, HPTWInstrPageFault},
                                {HPTWLoadAccessFaultDelay, HPTWStoreAmoAccessFaultDelay, HPTWInstrAccessFaultDelay,
                                 HPTWLoadPageFaultDelay, HPTWStoreAmoPageFaultDelay, HPTWInstrPageFaultDelay});
@@ -182,7 +181,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   // DTLBMissOrUpdateDAM is qualified in lsu.sv, which also knows that no walk was under way;
   // ITLBMissOrUpdateAF is qualified in ifu.sv and has that added here, so that the miss seen in
   // the cycle a walk fills the TLB does not start the walk again.
-  flopenr #(1) wasidlereg(clk, reset, ~DFTHold, WalkerState == IDLE, WalkerWasIdleQ);
+  flopr #(1) wasidlereg(clk, reset, WalkerState == IDLE, WalkerWasIdleQ);
   assign TLBMissOrUpdateDA = DTLBMissOrUpdateDAM | (ITLBMissOrUpdateAF & WalkerWasIdleQ);
 
   // Determine which address to translate
@@ -190,10 +189,10 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   assign CurrentPPN = PTE[P.PPN_BITS+9:10];
 
   // State flops
-  flopenr #(1) TLBMissMReg(clk, reset, StartWalk & ~DFTHold, DTLBMissOrUpdateDAM, DTLBWalk); // when walk begins, record whether it was for DTLB (or record 0 for ITLB)
+  flopenr #(1) TLBMissMReg(clk, reset, StartWalk, DTLBMissOrUpdateDAM, DTLBWalk); // when walk begins, record whether it was for DTLB (or record 0 for ITLB)
   assign PRegEn = HPTWRW[1] & ~AccessStallM | UpdatePTE | (NextWalkerState == IDLE);
   assign NextPTE2 = (NextWalkerState == IDLE) ? '0 : NextPTE;
-  flopenr #(P.XLEN) PTEReg(clk, reset, PRegEn & ~DFTHold, NextPTE2, PTE); // Capture page table entry from data cache
+  flopenr #(P.XLEN) PTEReg(clk, reset, PRegEn, NextPTE2, PTE); // Capture page table entry from data cache
 
   // Assign PTE descriptors common across all XLEN values
   // For non-leaf PTEs, D, A, U bits are reserved and ignored.  They do not cause faults while walking the page table
@@ -273,7 +272,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   assign ITLBWriteF = (WalkerState == LEAF & ~HPTWUpdateDA) & ~DTLBWalk;
 
   // FSM to track PageType based on the levels of the page table traversed
-  flopenr #(3) PageTypeReg(clk, reset, ~DFTHold, NextPageType, PageType);
+  flopr #(3) PageTypeReg(clk, reset, NextPageType, PageType);
   always_comb
     case (WalkerState)
       L4_RD:  NextPageType = 3'b100; // petapage
@@ -331,7 +330,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   end
 
   // Page Table Walker FSM
-  flopenl #(.TYPE(statetype)) WalkerStateReg(clk, reset | FlushW, ~DFTHold, NextWalkerState, IDLE, WalkerState);
+  flopenl #(.TYPE(statetype)) WalkerStateReg(clk, reset | FlushW, 1'b1, NextWalkerState, IDLE, WalkerState);
   always_comb
     case (WalkerState)
       IDLE:       if (TLBMissOrUpdateDA)                              NextWalkerState = InitialWalkerState;

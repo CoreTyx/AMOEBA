@@ -30,7 +30,6 @@
 
 module privileged import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  input  logic              DFTHold,         // DFT hold (forte_chip.sv)
   input  logic              StallD, StallE, StallM, StallW,
   input  logic              FlushD, FlushE, FlushM, FlushW,
   // CSR Reads and Writes, and values needed for traps
@@ -147,13 +146,13 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .PrivModeSecFaultW, .PrivModeUncorrectableFaultW);
 
   // decode privileged instructions
-  privdec #(P) pmd(.clk, .reset, .DFTHold, .StallW, .FlushW, .InstrM(InstrM[31:7]),
+  privdec #(P) pmd(.clk, .reset, .StallW, .FlushW, .InstrM(InstrM[31:7]),
     .PrivilegedM, .IllegalIEUFPUInstrM, .IllegalCSRAccessM,
     .PrivilegeModeW, .STATUS_TSR, .STATUS_TVM, .STATUS_TW, .TrapM, .IllegalInstrFaultM,
     .EcallFaultM, .BreakpointFaultM, .sretM, .mretM, .RetM, .wfiM, .wfiW, .sfencevmaM);
 
   // Control and Status Registers
-  csr #(P) csr(.clk, .reset, .DFTHold, .FlushM, .FlushW, .StallE, .StallM, .StallW,
+  csr #(P) csr(.clk, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
     .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
     .FTStatus,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
@@ -180,7 +179,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .InstrPageFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalIEUFPUInstrM);
 
   // trap logic
-  trap #(P) trap(.reset, .DFTHold,
+  trap #(P) trap(.reset,
     .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM, .FTUnresolvedFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,

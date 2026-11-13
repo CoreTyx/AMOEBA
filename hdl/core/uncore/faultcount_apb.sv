@@ -11,7 +11,6 @@ module faultcount_apb import cvw::*; #(
   parameter int XLEN = 64
 ) (
   input  logic            PCLK, PRESETn,
-  input  logic            DFTHold,      // DFT hold: no counting (forte_chip.sv)
   input  logic [6:2]      PADDR,
   output logic [XLEN-1:0] PRDATA,
   output logic            PREADY,
@@ -29,7 +28,7 @@ module faultcount_apb import cvw::*; #(
   logic       TmrCorrectedQ, TmrUncorrectableQ;
   always_ff @(posedge PCLK)
     if (!PRESETn) {FTUnresolvedQ, ResidueUnresolvedQ, TmrCorrectedQ, TmrUncorrectableQ} <= '0;
-    else if (~DFTHold) {FTUnresolvedQ, ResidueUnresolvedQ, TmrCorrectedQ, TmrUncorrectableQ} <=
+    else          {FTUnresolvedQ, ResidueUnresolvedQ, TmrCorrectedQ, TmrUncorrectableQ} <=
                   {FaultEvents.FTUnresolved, FaultEvents.ResidueUnresolved, FaultEvents.TmrCorrected, FaultEvents.TmrUncorrectable};
 
   logic [FAULT_COUNTERS-1:0][2:0] Inc;
@@ -61,7 +60,7 @@ module faultcount_apb import cvw::*; #(
     assign Sum = {1'b0, Count[i]} + (W+1)'(Inc[i]);
     always_ff @(posedge PCLK)
       if (!PRESETn) Count[i] <= '0;
-      else if (~DFTHold) Count[i] <= Sum[W] ? '1 : Sum[W-1:0];
+      else          Count[i] <= Sum[W] ? '1 : Sum[W-1:0];
   end
 
   logic [31:0] ReadWord;

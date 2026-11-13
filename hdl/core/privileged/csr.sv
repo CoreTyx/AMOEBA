@@ -31,7 +31,6 @@
 
 module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic                     clk, reset,
-  input  logic                     DFTHold,
   input  logic                     FlushM, FlushW,
   input  logic                     StallE, StallM, StallW,
   input  logic [31:0]              InstrM,                    // current instruction
@@ -257,7 +256,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
     .STATUS_MIE, .STATUS_SIE, .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_TVM,
     .STATUS_FS, .BigEndianM);
 
-  csrm #(P) csrm(.clk, .reset, .DFTHold,
+  csrm #(P) csrm(.clk, .reset,
     .UngatedCSRMWriteM, .CSRMWriteM, .MTrapM, .CSRAdrM,
     .NextEPCM, .NextCauseM, .NextMtvalM, .MSTATUS_REGW, .MSTATUSH_REGW,
     .CSRWriteValM, .FTStatus, .CSRMReadValM, .MTVEC_REGW,

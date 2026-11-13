@@ -73,7 +73,7 @@ if [[ "${1:-}" == clean ]]; then
 fi
 
 mkdir -p "$SIM_DIR"
-for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" "$SRC_DIR/scan_resume.svh"; do
+for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh"; do
     [ -s "$source_file" ] || die "missing source: $source_file; use the complete full_tb/src directory"
 done
 
@@ -220,8 +220,6 @@ else
     done
     if [[ "${SCAN_HOOKUPS:-1}" == 1 ]]; then
         [ -s "$SCAN_HOOKUP_FILE" ] || die "no cached hookups at $SCAN_HOOKUP_FILE; run ./run.sh --regen"
-        [[ "$SRC_DIR/internal_hookups.py" -nt "$SCAN_HOOKUP_FILE" ]] \
-            && die "cached hookups are older than src/internal_hookups.py; run ./run.sh --regen"
     fi
     echo "run.sh: reusing generated map/hookups; use --regen after netlist, scandef, or phase changes"
 fi

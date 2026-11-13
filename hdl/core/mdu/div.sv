@@ -30,7 +30,6 @@
 module div import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk,
   input  logic              reset,
-  input  logic              DFTHold,     // DFT hold: freeze (forte_chip.sv)
   input  logic              StallM,
   input  logic              FlushE,
   input  logic              IntDivE,                        // integer division/remainder instruction of any type
@@ -75,7 +74,7 @@ module div import cvw::*;  #(parameter cvw_t P) (
   //////////////////////////////
 
   // Divider control signals
-  assign DivStartE = IntDivE & (state == IDLE) & ~StallM & ~DFTHold;
+  assign DivStartE = IntDivE & (state == IDLE) & ~StallM;
   assign DivBusyE = (state == BUSY) | DivStartE;
   assign DivDoneE = (state == DONE);
 
@@ -109,8 +108,8 @@ module div import cvw::*;  #(parameter cvw_t P) (
   mux2 #(P.XLEN) xmux(XQ[P.IDIV_BITSPERCYCLE], XInitE, DivStartE, XQNext);
 
   // registers before division steps
-  flopen #(P.XLEN) wreg(clk, DivBusyE & ~DFTHold, WNext, W[0]);
-  flopen #(P.XLEN) xreg(clk, DivBusyE & ~DFTHold, XQNext, XQ[0]);
+  flopen #(P.XLEN) wreg(clk, DivBusyE, WNext, W[0]);
+  flopen #(P.XLEN) xreg(clk, DivBusyE, XQNext, XQ[0]);
   flopen #(P.XLEN) dabsreg(clk, DivStartE, DAbsBE, DAbsB);
 
   // one copy of divstep for each bit produced per cycle
@@ -146,7 +145,6 @@ module div import cvw::*;  #(parameter cvw_t P) (
  always_ff @(posedge clk)
     if (reset | FlushE) begin
         state <= IDLE;
-    end else if (DFTHold) begin
     end else if (DivStartE) begin
         step <= 1;
         if (Div0E) state <= DONE;

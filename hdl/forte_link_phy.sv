@@ -77,12 +77,7 @@ module forte_link_phy import forte_link_pkg::*; #(
   // High whenever a transaction is on the wire.  Only consumer is the status
   // pin, which needs to tell "nothing is happening" from "something started and
   // never finished" -- the two look identical from txn_done alone.
-  output logic               busy,
-  // DFT hold, synchronised into link_clk (hdl/forte_chip.sv, "DFT HOLD").  The
-  // tester only holds the chip while the link is quiet; as a guard, ready and
-  // rvalid read as 0 while it is set, so the phy cannot start a transaction or
-  // take io_i -- which carries scan data during a hold -- and req/wr stay low.
-  input  logic               hold
+  output logic               busy
 );
 
   // Words on the wire per transaction, and the widths needed to index them.
@@ -96,7 +91,7 @@ module forte_link_phy import forte_link_pkg::*; #(
   logic [LINK_W-1:0] io_n, io_s;
   logic              ready_n, ready_s, rvalid_n, rvalid_s;
   always_ff @(negedge link_clk) {io_n, ready_n, rvalid_n} <= {io_i, ready, rvalid};
-  always_ff @(posedge link_clk) {io_s, ready_s, rvalid_s} <= {io_n, ready_n & ~hold, rvalid_n & ~hold};
+  always_ff @(posedge link_clk) {io_s, ready_s, rvalid_s} <= {io_n, ready_n, rvalid_n};
 
   // ---- state ----------------------------------------------------------------
   link_st_t st;                        // states in hdl/forte_link_pkg.sv

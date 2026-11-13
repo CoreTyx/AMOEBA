@@ -69,7 +69,6 @@
 
 module mul #(parameter XLEN) (
   input  logic                clk, reset,
-  input  logic                DFTHold,                       // DFT hold: freeze (forte_chip.sv)
   input  logic                Start,                         // load next cycle, then XLEN steps
   input  logic [XLEN-1:0]     A, B,                          // multiplicand, multiplier; held until Done
   input  logic [2:0]          Funct3,                        // type of multiply; held until Done
@@ -104,7 +103,6 @@ module mul #(parameter XLEN) (
     if (reset) begin
       Loading <= 1'b0;
       Busy    <= 1'b0;
-    end else if (DFTHold) begin
     end else if (Start) begin
       Loading <= 1'b1;
       Busy    <= 1'b0;
@@ -121,8 +119,7 @@ module mul #(parameter XLEN) (
 
   // The datapath registers need no reset: nothing reads them before a multiply has written them.
   always_ff @(posedge clk)
-    if (DFTHold) ;
-    else if (Loading) begin
+    if (Loading) begin
       Acc <= '0;
       MQ  <= B;
     end else if (Busy) begin

@@ -580,15 +580,6 @@ compile_ultra -scan -gate_clock -retime -no_seq_output_inversion
 change_names -rules verilog -hierarchy
 change_names -rules nameRules -hierarchy
 
-# hold_mode must still sample scan_en through sesync (dft_setup.tcl).
-dft_check_hold_select chip
-# Every non-scan register in forte_soc and the link core depends on the DFT
-# hold (dft_procs.tcl).  Stops here, before the checkpoint, on a forgotten
-# gate with DFT_SCOPE=full; DFT_HOLD_COVERAGE=warn reports instead.
-# No inferred clock gate shared by scan and non-scan registers (dft_procs.tcl).
-dft_check_cg_mixing
-dft_check_hold_coverage chip [expr {$dft_scope eq "full" && !([info exists ::env(DFT_HOLD_COVERAGE)] && $::env(DFT_HOLD_COVERAGE) eq "warn")}]
-
 # CHANGED: moved dir variables up and create output dirs (redirects fail if a dir is missing)
 set report_dir  [getenv REPORT_DIR]
 set syn_out_dir [getenv SYN_OUT_DIR]

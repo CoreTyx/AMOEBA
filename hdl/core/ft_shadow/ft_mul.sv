@@ -24,7 +24,6 @@ module ft_mul import cvw::*; #(
   parameter int TE_THRESHOLD = 3
 ) (
   input  logic                clk, reset,
-  input  logic                DFTHold,     // DFT hold: freeze (forte_chip.sv)
   input  logic                StallM, FlushM,
   input  logic [P.XLEN-1:0]   ForwardedSrcAE, ForwardedSrcBE,
   input  logic [2:0]          Funct3E,
@@ -75,7 +74,7 @@ module ft_mul import cvw::*; #(
   assign check = (phase == COMPARE);
   always_ff @(posedge clk)
     if (reset | ~StallM) phase <= RUN;
-    else if (~DFTHold) case (phase)
+    else case (phase)
       RUN:     if (mul_done) phase <= COMPARE;
       COMPARE: phase <= retry ? RUN : DONE;
       DONE:    phase <= DONE;
@@ -84,9 +83,9 @@ module ft_mul import cvw::*; #(
 
   // The multiplier starts on the edge a multiply enters Memory, which is the
   // edge saved_* load, and again on the edge a failed check sends it back.
-  assign mul_start = ((MulActiveE & ~StallM) | (check & retry)) & ~DFTHold;
-  assign capture   = (phase == RUN) & mul_done & ~DFTHold;
-  mul #(P.XLEN) primary(.clk, .reset, .DFTHold, .Start(mul_start), .A(saved_a), .B(saved_b), .Funct3(saved_funct3),
+  assign mul_start = (MulActiveE & ~StallM) | (check & retry);
+  assign capture   = (phase == RUN) & mul_done;
+  mul #(P.XLEN) primary(.clk, .reset, .Start(mul_start), .A(saved_a), .B(saved_b), .Funct3(saved_funct3),
     .Load(capture), .PIn(prod), .Done(mul_done), .Prod(prod_raw));
   // Fault-injection endpoint: the completed product passes through it once, into
   // the product register, before the check reads it.
@@ -116,7 +115,7 @@ module ft_mul import cvw::*; #(
   // expected residue is pipelined: the operand residues are registered every
   // cycle, and their product is captured with the result.
   // No reset: nothing reads these before the capture has written res_ab_q.
-  always_ff @(posedge clk) if (~DFTHold) begin
+  always_ff @(posedge clk) begin
     res_a_q <= res_a;
     res_b_q <= res_b;
   end
@@ -134,7 +133,7 @@ module ft_mul import cvw::*; #(
   // that flush only when the architectural M-stage register accepts it too.
   /* verilator lint_off PINCONNECTEMPTY */
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) ctrl(
-    .clk, .reset, .DFTHold, .flush(FlushM & ~StallM), .valid(mul_active_m), .check,
+    .clk, .reset, .flush(FlushM & ~StallM), .valid(mul_active_m), .check,
     .advance(~StallM & (phase == DONE)), .mismatch,
     .recompute_supported(1'b0), .recompute_primary_ok(1'b0), .recompute_shadow_ok(1'b0),
     .recompute_mode(), .capture_normal(), .stall_req(retry), .unresolved, .isolated(), .use_shadow(),

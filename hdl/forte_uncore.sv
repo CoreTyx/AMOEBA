@@ -55,10 +55,7 @@ module forte_uncore import cvw::*; #(
   output logic                 UARTSout,
   input  logic [1:0]           ExtIrq,        // PLIC sources PLIC_GPIO_ID, PLIC_SPI_ID
   // external interrupt lines (PERIPH_ONCHIP=0)
-  input  logic                 MExtIntIn, SExtIntIn,
-  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): bridge, CLINT, PLIC, fault
-  // counters and hseldelayreg hold; no APB access reaches a peripheral.
-  input  logic                 DFTHold
+  input  logic                 MExtIntIn, SExtIntIn
 );
 
   localparam PERIPHS = 6;   // CLINT, PLIC, UART, DFT lock, fault injection, fault counters
@@ -105,39 +102,32 @@ module forte_uncore import cvw::*; #(
                                  : {HSELRegions[12], HSELRegions[13], HSELDFTLOCK, 2'b00,            HSELCLINTQ};
 
   ahbapbbridge #(P, PERIPHS) ahbapbbridge (
-    .HCLK, .HRESETn, .HSEL(HSELAPB), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY, .DFTHold,
+    .HCLK, .HRESETn, .HSEL(HSELAPB), .HADDR, .HWDATA, .HWSTRB, .HWRITE, .HTRANS, .HREADY,
     .HRDATA(HREADBRIDGE), .HRESP(HRESPBRIDGE), .HREADYOUT(HREADYBRIDGE),
     .PCLK, .PRESETn, .PSEL, .PWRITE, .PENABLE, .PADDR, .PWDATA, .PSTRB, .PREADY, .PRDATA);
   assign HSELBRIDGE = |HSELAPB;
 
-  // DFT hold: the bridge is frozen, possibly mid-access, so its PSEL would
-  // repeat the access on every held cycle (a UART RBR read pops its FIFO, a
-  // PLIC claim claims again).  Mask PSEL, not PENABLE: the PLIC's claim read is
-  // in the setup phase.  The bridge keeps its own PSEL for the PRDATA mux.
-  logic [PERIPHS-1:0] PSELP;
-  assign PSELP = PSEL & {PERIPHS{~DFTHold}};
-
-  clint_apb #(P) clint(.PCLK, .PRESETn, .DFTHold, .PSEL(PSELP[0]), .PADDR(PADDR[15:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+  clint_apb #(P) clint(.PCLK, .PRESETn, .PSEL(PSEL[0]), .PADDR(PADDR[15:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[0]), .PREADY(PREADY[0]), .MTIME(MTIME_CLINT), .MTimerInt, .MSwInt);
 
   // Present whether or not the peripherals are on the die: the DFT pins exist
   // either way, so the thing that disables them has to exist either way.
-  forte_dft_lock #(P) dftlock(.PCLK, .PRESETn, .PSEL(PSELP[3]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+  forte_dft_lock #(P) dftlock(.PCLK, .PRESETn, .PSEL(PSEL[3]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[3]), .PREADY(PREADY[3]), .unlocked(dft_unlocked));
 
-  fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSELP[4]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+  fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSEL[4]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[4]), .PREADY(PREADY[4]), .FaultInjectMask);
 
-  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold, .PADDR(PADDR[6:2]),
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .PADDR(PADDR[6:2]),
     .PRDATA(PRDATA[5]), .PREADY(PREADY[5]), .FaultEvents);
 
   if (PERIPH_ONCHIP) begin : onchip
-    plic_apb #(P) plic(.PCLK, .PRESETn, .DFTHold, .PSEL(PSELP[1]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+    plic_apb #(P) plic(.PCLK, .PRESETn, .PSEL(PSEL[1]), .PADDR(PADDR[27:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
       .PRDATA(PRDATA[1]), .PREADY(PREADY[1]),
       .UARTIntr, .GPIOIntr(ExtIrq[0]), .SDCIntr(1'b0), .SPIIntr(ExtIrq[1]), .MExtInt, .SExtInt);
 
     uart_apb #(P) uart(
-      .PCLK, .PRESETn, .PSEL(PSELP[2]), .PADDR(PADDR[2:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
+      .PCLK, .PRESETn, .PSEL(PSEL[2]), .PADDR(PADDR[2:0]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
       .PRDATA(PRDATA[2]), .PREADY(PREADY[2]),
       .SIN(UARTSin), .DSRb(1'b1), .DCDb(1'b1), .CTSb(1'b0), .RIb(1'b1),
       .SOUT(UARTSout), .RTSb(), .DTRb(),
@@ -165,7 +155,7 @@ module forte_uncore import cvw::*; #(
   // Address-phase select delayed into the data phase, held while the slave
   // inserts wait states (AHB spec figure 4-2).  None selected on reset.
   logic [2:0] hseld;
-  flopenl #(3) hseldelayreg(HCLK, ~HRESETn, HREADY & ~DFTHold, {HSELBRIDGE, HSELEXT, ~(HSELBRIDGE | HSELEXT)}, 3'b001, hseld);
+  flopenl #(3) hseldelayreg(HCLK, ~HRESETn, HREADY, {HSELBRIDGE, HSELEXT, ~(HSELBRIDGE | HSELEXT)}, 3'b001, hseld);
   assign {HSELBRIDGED, HSELEXTD, HSELNoneD} = hseld;
 
 endmodule

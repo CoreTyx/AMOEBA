@@ -67,7 +67,7 @@ module ft_recompute_fault_tb #(
   // The core's shared injection generator, driving every injector here.
   logic [15:0] fault_lfsr;
   logic [FI_COUNT_BITS-1:0] fault_count;
-  ft_fault_gen gen(.clk, .reset, .DFTHold(1'b0), .lfsr(fault_lfsr), .count(fault_count));
+  ft_fault_gen gen(.clk, .reset, .lfsr(fault_lfsr), .count(fault_count));
 
   // These injectors run without forces to check the production stimulus source.
   logic random_enable = 0;
@@ -78,7 +78,7 @@ module ft_recompute_fault_tb #(
     .reset, .lfsr(fault_lfsr), .count(fault_count), .fi_enable(random_enable), .data_i(random_input), .data_o(random_out1));
 
     ft_alu #(.P(TP), .TE_THRESHOLD(THRESHOLD)) dut(
-    .clk, .reset, .DFTHold(1'b0), .flush, .valid,
+    .clk, .reset, .flush, .valid,
     .advance, .load, .hold(1'b0), .A(a), .B(b), .cmp_a(ca), .cmp_b(cb), .cmp_sgnd(signed_cmp),
     .W64(w64), .UW64(uw64), .SubArith(sub), .ALUSelect(select_op), .BSelect(bselect),
     .ZBBSelect(zbbselect), .Funct3(funct3), .BALUControl(balu), .Funct7(7'b0), .Rs2E(5'b0),
@@ -86,12 +86,12 @@ module ft_recompute_fault_tb #(
     .ALUResult(result), .Sum(sum), .flags,
     .stall_req(stall), .unresolved, .pe_primary, .pe_shadow, .cmp_pe_primary, .cmp_pe_shadow);
     ft_mul #(.P(TP), .TE_THRESHOLD(THRESHOLD)) mul_dut(
-    .clk, .reset, .DFTHold(1'b0), .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
+    .clk, .reset, .StallM(mul_stall), .FlushM(mul_flush), .ForwardedSrcAE(mul_a),
     .ForwardedSrcBE(mul_b), .Funct3E(mul_funct3), .MulActiveE(mul_active),
     .fi_enable(mul_fi_enable), .fi_lfsr(fault_lfsr), .fi_count(fault_count),
     .ProdM(mul_prod), .stall_req(mul_stall), .unresolved(mul_unresolved));
     ft_div #(.P(TP), .TE_THRESHOLD(THRESHOLD)) div_dut(
-    .clk, .reset, .DFTHold(1'b0), .StallM(div_stall), .FlushE(flush), .FlushM(flush), .IntDivE(div_active), .DivSignedE(div_signed),
+    .clk, .reset, .StallM(div_stall), .FlushE(flush), .FlushM(flush), .IntDivE(div_active), .DivSignedE(div_signed),
     .RemE(div_channel), .W64E(div_w64), .ForwardedSrcAE(div_a), .ForwardedSrcBE(div_b), .fi_enable(div_fi_enable),
     .fi_lfsr(fault_lfsr), .fi_count(fault_count),
     .DivBusyE(div_busy), .DivResultM(div_result), .stall_req(div_stall), .unresolved(div_unresolved));

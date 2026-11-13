@@ -17,7 +17,6 @@
 
 module ft_fault_gen import cvw::*; (
   input  logic                     clk, reset,
-  input  logic                     DFTHold,   // DFT hold: stop (forte_chip.sv)
   output logic [15:0]              lfsr,
   output logic [FI_COUNT_BITS-1:0] count
 );
@@ -25,7 +24,7 @@ module ft_fault_gen import cvw::*; (
     if (reset) begin
       lfsr  <= FI_LFSR_SEED;
       count <= '0;
-    end else if (~DFTHold) begin
+    end else begin
       lfsr  <= fi_lfsr_next(lfsr);
       count <= count + 1'b1;
     end

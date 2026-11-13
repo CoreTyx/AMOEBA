@@ -36,7 +36,6 @@ module ft_alu import cvw::*; #(
   parameter int TE_THRESHOLD = 3
 ) (
   input  logic              clk, reset, flush, valid, advance,
-  input  logic              DFTHold,     // DFT hold: freeze (forte_chip.sv)
   input  logic              load,                     // Execute takes its next instruction at this clock edge
   input  logic              hold,                     // the operands cannot be used this cycle: do not capture from them
   input  logic [P.XLEN-1:0] A, B,
@@ -138,7 +137,7 @@ module ft_alu import cvw::*; #(
     assign result_pre_fi[i] = shift_operation ? shift_result(shift_live[i], shift_recompute, W64) : result_raw[i];
     // No reset: nothing reads these before a COMPUTE cycle has written them.
     always_ff @(posedge clk)
-      if (phase == COMPUTE & ~DFTHold) begin
+      if (phase == COMPUTE) begin
         result_q[i] <= result_live[i];
         arith_q[i]  <= arith_live[i];
         shift_q[i]  <= shift_live[i];
@@ -166,7 +165,7 @@ module ft_alu import cvw::*; #(
         normal_arith[i] <= '0;
         normal_shift[i] <= '0;
         normal_cmp[i] <= '0;
-      end else if (~DFTHold) begin
+      end else begin
         if (alu_capture_normal) begin
           normal_result[i] <= result_q[i];
           normal_arith[i] <= arith_q[i];
@@ -187,7 +186,7 @@ module ft_alu import cvw::*; #(
   assign accepted = advance & (phase == DONE);
   always_ff @(posedge clk)
     if (reset | flush | load) phase <= COMPUTE;
-    else if (~DFTHold) case (phase)
+    else case (phase)
       COMPUTE: if (~hold) phase <= COMPARE;
       COMPARE: phase <= retry ? COMPUTE : DONE;
       DONE:    phase <= DONE;
@@ -198,13 +197,13 @@ module ft_alu import cvw::*; #(
                        ((result_q[0] != result_q[1]) | (arith_q[0] != arith_q[1]));
   assign cmp_mismatch = valid & ~cmp_recompute & ~cmp_isolated & (cmp_q[0] != cmp_q[1]);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) alu_ctrl(
-    .clk, .reset, .flush, .DFTHold, .valid, .check, .advance(accepted), .mismatch(alu_mismatch), .recompute_supported(alu_supported),
+    .clk, .reset, .flush, .valid, .check, .advance(accepted), .mismatch(alu_mismatch), .recompute_supported(alu_supported),
     .recompute_primary_ok(alu_ok[0]), .recompute_shadow_ok(alu_ok[1]),
     .recompute_mode(alu_recompute), .capture_normal(alu_capture_normal),
     .stall_req(alu_stall), .unresolved(alu_unresolved), .isolated(alu_isolated),
     .use_shadow(alu_use_shadow), .pe_primary, .pe_shadow);
   ft_shadow_ctrl #(.TE_THRESHOLD(TE_THRESHOLD)) cmp_ctrl(
-    .clk, .reset, .flush, .DFTHold, .valid, .check, .advance(accepted), .mismatch(cmp_mismatch), .recompute_supported(1'b1),
+    .clk, .reset, .flush, .valid, .check, .advance(accepted), .mismatch(cmp_mismatch), .recompute_supported(1'b1),
     .recompute_primary_ok(cmp_ok[0]), .recompute_shadow_ok(cmp_ok[1]),
     .recompute_mode(cmp_recompute), .capture_normal(cmp_capture_normal),
     .stall_req(cmp_stall), .unresolved(cmp_unresolved), .isolated(cmp_isolated),

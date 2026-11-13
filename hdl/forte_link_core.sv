@@ -62,9 +62,6 @@ module forte_link_core import forte_link_pkg::*; #(
   parameter BEATS   = 8
 )(
   input  logic                HCLK, HRESETn,
-  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): every register here keeps its
-  // value; forte_chip masks the FIFO push/pop to match.
-  input  logic                DFTHold,
 
   // AHB-Lite slave (external port of forte_soc)
   input  logic                HSEL,
@@ -110,7 +107,7 @@ module forte_link_core import forte_link_pkg::*; #(
   logic [BCNT_W-1:0] bcnt;             // beat within the transaction
   logic        aborted;
   logic [1:0]  htrans_q;
-  always_ff @(posedge HCLK) if (~DFTHold) htrans_q <= HTRANS;
+  always_ff @(posedge HCLK) htrans_q <= HTRANS;
 
   logic last_beat, beat_ok, accept, wpush, rpop;
 
@@ -174,7 +171,7 @@ module forte_link_core import forte_link_pkg::*; #(
       st <= LC_IDLE;
       nxt_addr <= '0; nxt_wr <= 1'b0; pending <= 1'b0;
       bcnt <= '0; aborted <= 1'b0;
-    end else if (~DFTHold) begin
+    end else begin
       case (st)
         LC_IDLE: begin
           aborted <= 1'b0;
@@ -228,19 +225,17 @@ module forte_link_core import forte_link_pkg::*; #(
   // evaluates the body anyway, and the HADDR check fired at the first edge on
   // the VM.  === is never X.  (forte_link_phy gates on `armed` instead.)
   logic was_idle;
-  // Held cycles are skipped: in a DFT hold the combinational accept/wpush can
-  // show values the frozen FSM never acts on.
-  always_ff @(posedge HCLK) if (~DFTHold) was_idle <= (st == LC_IDLE);
-  always @(posedge HCLK) if ((HRESETn & ~DFTHold & st == LC_RDATA & was_idle & ibeat_valid) === 1'b1)
+  always_ff @(posedge HCLK) was_idle <= (st == LC_IDLE);
+  always @(posedge HCLK) if ((HRESETn & st == LC_RDATA & was_idle & ibeat_valid) === 1'b1)
     $fatal(1, "link core: stale beat in the inbound FIFO at the start of a read -- the two halves disagree about the beat count");
 
   // The pending slot is single: a second accept while one is pending would mean
   // the pending one's data phase did not stall, which the uncore's HREADY mux
   // makes impossible.
-  always_ff @(posedge HCLK) if ((HRESETn & ~DFTHold & accept & pending & st != LC_IDLE) === 1'b1)
+  always_ff @(posedge HCLK) if ((HRESETn & accept & pending & st != LC_IDLE) === 1'b1)
     $fatal(1, "link core: second pipelined accept");
   // The address goes over whole, so 32 bits is the only constraint left.
-  always_ff @(posedge HCLK) if ((HRESETn & ~DFTHold & accept) === 1'b1) begin
+  always_ff @(posedge HCLK) if ((HRESETn & accept) === 1'b1) begin
     assert (HADDR[HADDR_W-1:32] == '0) else $fatal(1, "link core: HADDR above 4 GB: %h", HADDR);
     // The two sides' idea of the burst length, compared.  A line resize that
     // nobody propagated here lands on this line instead of hanging the DUT.
@@ -252,7 +247,7 @@ module forte_link_core import forte_link_pkg::*; #(
   end
   // Writes are never aborted (the D-cache's Flush is tied low); if that changes,
   // junk goes to memory and this is the first thing to fire.
-  always_ff @(posedge HCLK) if ((HRESETn & ~DFTHold & wpush & ~beat_ok) === 1'b1)
+  always_ff @(posedge HCLK) if ((HRESETn & wpush & ~beat_ok) === 1'b1)
     $fatal(1, "link core: write burst abandoned by the master at beat %0d", bcnt);
 
   // BEATS=1 would be a one-beat "burst", which on the wire is indistinguishable

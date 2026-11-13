@@ -25,7 +25,6 @@
 
 module dummygen (
   input  logic        clk, reset,
-  input  logic        DFTHold,      // DFT hold: freeze (forte_chip.sv)
   input  logic [31:0] FreqW,        // rand_instr_insert_freq CSR; 0 disables insertion
   input  logic [31:0] InstrD,       // real decode-stage instruction, after decompression
   input  logic        InstrValidD,  // decode stage holds a valid instruction
@@ -47,9 +46,7 @@ module dummygen (
   // Programmable divider.  Held clear while disabled so enabling starts a fresh period.
   assign Enabled = |FreqW;
   always_ff @(posedge clk)
-    if (reset)                 DivCntr <= '0;
-    else if (DFTHold)          ;        // FreqW is a scanned register
-    else if (~Enabled)         DivCntr <= '0;
+    if (reset | ~Enabled)      DivCntr <= '0;
     else if (DivCntr == '0)    DivCntr <= FreqW - 32'd1;
     else                       DivCntr <= DivCntr - 32'd1;
 
@@ -59,7 +56,7 @@ module dummygen (
   // the insertion pattern does not correlate with when the feature was enabled.
   always_ff @(posedge clk)
     if (reset) LFSR <= 32'h1;
-    else if (~DFTHold) LFSR <= {LFSR[30:0], LFSR[31] ^ LFSR[21] ^ LFSR[1] ^ LFSR[0]};
+    else       LFSR <= {LFSR[30:0], LFSR[31] ^ LFSR[21] ^ LFSR[1] ^ LFSR[0]};
 
   // Capture filter: ALU-class only.  Excluding the M extension keeps every dummy
   // single-cycle, so an insertion never stalls the pipeline for a divide.
@@ -92,7 +89,6 @@ module dummygen (
     if (reset) begin
       DummyInstrReg <= '0;
       DummyValid    <= 1'b0;
-    end else if (DFTHold) begin             // InstrD/InstrValidD are scanned
     end else if (CaptureD) begin
       DummyInstrReg <= InstrD;
       DummyValid    <= 1'b1;

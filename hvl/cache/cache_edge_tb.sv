@@ -79,7 +79,7 @@ module cache_edge_tb;
   cache #(.P(P), .PA_BITS(PA_BITS), .LINELEN(LINELEN), .NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS),
           .LOGBWPL(LOGBWPL), .WORDLEN(WORDLEN), .MUXINTERVAL(MUXINTERVAL), .READ_ONLY_CACHE(0),
           .SCRUBBER_ENABLED(1'b0), .SCRUB_INTERVAL_CYCLES(0)) dut (
-    .clk, .reset, .DFTHold(1'b0), .Stall, .FlushStage, .InvalidateFlushStage,
+    .clk, .reset, .Stall, .FlushStage, .InvalidateFlushStage,
     .FaultInjectSec(fi_sec), .FaultInjectDed(fi_ded), .FaultLfsr(fi_lfsr), .FaultCount(fi_count),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,

@@ -37,7 +37,6 @@ module ahbcacheinterface import cvw::*; #(
   parameter READ_ONLY_CACHE
 )(
   input  logic                HCLK, HRESETn,
-  input  logic                DFTHold,      // DFT hold (forte_chip.sv)
   // bus interface controls
   input  logic                HREADY,                  // AHB peripheral ready
   output logic [1:0]          HTRANS,                  // AHB transaction type, 00: IDLE, 10 NON_SEQ, 11 SEQ
@@ -112,7 +111,7 @@ module ahbcacheinterface import cvw::*; #(
 
   mux2 #(P.AHBW) HWDATAMux(.d0(CacheReadDataWordAHB), .d1(WriteDataM[P.AHBW-1:0]),
     .s(~(CacheableOrFlushCacheM)), .y(PreHWDATA));
-  flopen #(P.AHBW) wdreg(HCLK, HREADY & ~DFTHold, PreHWDATA, HWDATA); // delay HWDATA by 1 cycle per spec
+  flopen #(P.AHBW) wdreg(HCLK, HREADY, PreHWDATA, HWDATA); // delay HWDATA by 1 cycle per spec
 
   if (READ_ONLY_CACHE) begin
     assign HWSTRB = '0;
@@ -120,11 +119,11 @@ module ahbcacheinterface import cvw::*; #(
     logic [P.AHBW/8-1:0]          BusByteMaskM;                           // Byte enables within a word. For cache request all 1s
 
     swbytemask #(P.AHBW) busswbytemask(.Size(HSIZE), .Adr(HADDR[$clog2(P.AHBW/8)-1:0]), .ByteMask(BusByteMaskM), .ByteMaskExtended());
-    flopen #(P.AHBW/8) HWSTRBReg(HCLK, HREADY & ~DFTHold, BusByteMaskM[P.AHBW/8-1:0], HWSTRB);
+    flopen #(P.AHBW/8) HWSTRBReg(HCLK, HREADY, BusByteMaskM[P.AHBW/8-1:0], HWSTRB);
   end
 
   buscachefsm #(BeatCountThreshold, AHBWLOGBWPL, READ_ONLY_CACHE, P.BURST_EN) AHBBuscachefsm(
-    .HCLK, .HRESETn, .DFTHold, .Flush, .BusRW, .BusAtomic, .Stall, .BusCommitted, .BusStall, .CaptureEn, .SelBusBeat,
+    .HCLK, .HRESETn, .Flush, .BusRW, .BusAtomic, .Stall, .BusCommitted, .BusStall, .CaptureEn, .SelBusBeat,
     .CacheBusRW, .BusCMOZero, .CacheBusAck, .BeatCount, .BeatCountDelayed,
     .HREADY, .HTRANS, .HWRITE, .HBURST);
 endmodule

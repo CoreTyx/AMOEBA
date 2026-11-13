@@ -30,26 +30,19 @@ set compile_seqmap_enable_output_inversion false
 printvar compile_seqmap_enable_output_inversion
 
 # Preserve the DFT control nets through mapping (hdl/forte_chip.sv):
-#   scan_en_dft    = scan_en & test_mode_dft
+#   scan_en_dft    = scan_en & dft_unlocked
 #   test_mode_dft  = test_mode_s & dft_unlocked
 #   test_mode_s    test_mode after the two tmsync flops
 #   dft_unlocked   the DFT lock register's output
-#   hold_mode      scan_en (through sesync) sampled while test_mode_s is low
 # synthesis.tcl binds them to their mapped drivers, then releases them.
 # Ordinary dont_touch can be ignored on nets attached to unmapped cells, so
 # enable DC's net-preservation behaviour first.
 set enable_keep_signal_dt_net true
-set dft_ctrl_nets [get_nets -quiet {chip/scan_en_dft chip/test_mode_dft chip/test_mode_s chip/dft_unlocked chip/hold_mode}]
-if {[sizeof_collection $dft_ctrl_nets] != 5} {
-  error "DFT: expected 5 control nets in chip (scan_en_dft test_mode_dft test_mode_s dft_unlocked hold_mode); found [sizeof_collection $dft_ctrl_nets]: [get_object_name $dft_ctrl_nets]"
+set dft_ctrl_nets [get_nets {chip/scan_en_dft chip/test_mode_dft chip/test_mode_s chip/dft_unlocked}]
+if {[sizeof_collection $dft_ctrl_nets] != 4} {
+  error "DFT: expected 4 control nets in chip (scan_en_dft test_mode_dft test_mode_s dft_unlocked); found [sizeof_collection $dft_ctrl_nets]"
 }
 set_dont_touch $dft_ctrl_nets true
-
-# The DFT hold (hdl/forte_chip.sv, "DFT HOLD") is one clock: the pipeline
-# stalls and every other non-scan register has the hold in its enable or
-# next-state.  dft_check_hold_coverage (synthesis.tcl, after compile) checks
-# that structurally; dft_insert.tcl keeps insert_dft from tying a non-scan
-# register's clock gate on during shift.
 
 # Scan registers, by group. One hierarchical pattern per line, matched against
 # the elaborated (pre-compile) names under chip/soc/core; "*" spans hierarchy,
@@ -146,15 +139,6 @@ puts "DFT setup: [sizeof_collection $scan_regs] scan flops selected"
 set_dont_retime $scan_regs true
 set_scan_element false [all_registers -edge_triggered]
 set_scan_element true $scan_regs
-# No inferred clock gate on a scan register.  insert_dft must hook the test pin
-# of any ICG in front of a scan flop to scan enable so the chain can shift, and
-# compile_ultra -gate_clock happily shares one ICG between scan and non-scan
-# registers with the same enable (on a FreePDK45 run: the page walker's gate
-# also clocked 752 retimed registers, CSRValWReg's PCWReg, the divider's
-# result register).  Those non-scan registers then clocked on every hold-mode
-# shift and loaded scan data.  Scan registers keep their enables as hold muxes
-# instead; dft_check_cg_mixing (synthesis.tcl) checks the result.
-set_clock_gating_objects -exclude $scan_regs
 
 # DFT_KEEP_ALL=1 (environment, default 0): keep every selected flop as its own
 # scan cell, so a scan dump maps bit for bit onto the RTL registers.  By
@@ -177,35 +161,13 @@ printvar compile_delete_unloaded_sequential_cells
 #   the DFT lock      observable is bad, settable is worse (forte_dft_lock.sv)
 #   tmsync            shifting test_mode's synchroniser would drop test mode
 #                     mid-shift; DRC is told it holds 1 (dft_bind_hookups)
-#   sesync, hold_mode the hold-mode select: scan_en through two flops, sampled
-#                     while test_mode_s is low and frozen in test mode.  On a
-#                     chain it would change mid-shift; DRC is told it holds 0
-#                     (legacy test mode: both clock gates pass the clock)
-#   holdlinksync      hold carried into the link_clk domain
-# All are outside forte_soc, so the hold does not reach them.
-foreach {what pattern} {
-  lock         chip/soc/uncore/dftlock/*
-  tmsync       chip/tmsync/*
-  sesync       chip/sesync/*
-  hold_mode    chip/hold_mode*
-  holdlinksync chip/holdlinksync/*
-} {
+foreach {what pattern} {lock chip/soc/uncore/dftlock/* tmsync chip/tmsync/*} {
   set regs [filter_collection $all_seq "full_name=~$pattern"]
   if {[sizeof_collection $regs] == 0} { error "DFT: no $what flops matched $pattern before compile" }
   puts "DFT setup: $what: [sizeof_collection $regs] flops kept non-scan"
   set_scan_element false $regs
   set_dont_retime $regs true
 }
-
-# scan_en's one functional load.  Declaring scan_en as the ScanEnable port
-# (below) makes test-ready compile treat it as inactive in functional logic,
-# and without this compile_ultra folded sesync away and tied hold_mode's D to
-# 0: hold mode could never be selected and every session was a legacy one
-# (found by full_tb phase S on a FreePDK45 run, 2026-11-12).  A separate
-# boundary with no boundary optimisation keeps that constant out of sesync;
-# dft_check_hold_select (dft_procs.tcl) checks the result after compile.
-set_ungroup [get_cells chip/sesync] false
-set_boundary_optimization [get_cells chip/sesync] false
 
 # Existing tester controls at the package pins. The single core_clk pad feeds
 # both core_clk and link_clk inside chip; there is no second test clock.

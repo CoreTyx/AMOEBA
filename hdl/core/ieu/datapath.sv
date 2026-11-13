@@ -34,7 +34,6 @@
 
 module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  input  logic              DFTHold,      // DFT hold (forte_chip.sv)
   // Per-unit injection enables after the core applies the software mask and master pin.
   input  logic              fault_inject_alu, fault_inject_cmp,
   input  logic              fault_inject_regfile, fault_inject_pipeline, // independent ECC groups
@@ -142,8 +141,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Decode stage
   regfile #(P.XLEN, P.E_SUPPORTED) regf(
     .clk, .reset,
-    .we3(RegWriteW & ~DFTHold),           // RegWriteW/RdW are scanned: no write in a DFT hold
-    .a1(Rs1D), .a2(Rs2D), .a3(RdW),
+    .we3(RegWriteW), .a1(Rs1D), .a2(Rs2D), .a3(RdW),
     .wd3(ResultW),
     .DummyW, .DummySelW,
     .rd1(R1DRaw), .rd2(R2DRaw),
@@ -155,7 +153,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // codeword -- masking the data bits alone would look like a burst error and
   // would spray sec/ded reports on every injection.
   dummymask #(P.XLEN) dmask(
-    .clk, .reset, .DFTHold, .InjectD,
+    .clk, .reset, .InjectD,
     .Rd1D(R1DRaw), .Rd2D(R2DRaw),
     .Rd1MaskedD(R1D), .Rd2MaskedD(R2D)
   );
@@ -180,14 +178,14 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // period counter and enable), so the same bit of every register flips in the
   // same cycle either way.
   logic [ECC_CW-1:0] PipeFlipMask;
-  ecc_flip_mask #(.CW_WIDTH(ECC_CW)) pipeflipmask(.clk, .reset, .DFTHold,
+  ecc_flip_mask #(.CW_WIDTH(ECC_CW)) pipeflipmask(.clk, .reset,
     .inject_en(fault_inject_pipeline), .lfsr(FaultLfsr), .count(FaultCount), .mask(PipeFlipMask));
 
-  flopenrc_cw #(P.XLEN) RD1EReg(.clk, .reset, .DFTHold, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
+  flopenrc_cw #(P.XLEN) RD1EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
     .cw(R1D), .q(), .q_raw(R1E), .sec_err_o(sec_rd1e), .ded_err_o(ded_rd1e));
-  flopenrc_cw #(P.XLEN) RD2EReg(.clk, .reset, .DFTHold, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
+  flopenrc_cw #(P.XLEN) RD2EReg(.clk, .reset, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
     .cw(R2D), .q(), .q_raw(R2E), .sec_err_o(sec_rd2e), .ded_err_o(ded_rd2e));
-  flopenrc_ecc #(P.XLEN) ImmExtEReg(.clk, .reset, .DFTHold, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
+  flopenrc_ecc #(P.XLEN) ImmExtEReg(.clk, .reset, .clear(FlushE), .en(~StallE), .flip_mask(PipeFlipMask),
     .d(ImmExtD), .q(), .q_raw(ImmExtE), .sec_err_o(sec_imme), .ded_err_o(ded_imme));
 
   mux3  #(P.XLEN)  faemux(R1E, ResultRawW, IFResultRawM, ForwardAE, ForwardedSrcAE);
@@ -196,7 +194,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
   // ALU drives both the architectural result and LSU address.
   ft_alu #(P) ftalu(
-    .clk, .reset, .DFTHold, .flush(FlushE), .valid(InstrValidE), .advance(~StallM),
+    .clk, .reset, .flush(FlushE), .valid(InstrValidE), .advance(~StallM),
     .load(~StallE), .hold(EccStallE), .A(SrcAE), .B(SrcBE),
     .cmp_a(ForwardedSrcAE), .cmp_b(ForwardedSrcBE), .cmp_sgnd(BranchSignedE), .flags(FlagsE),
     .W64(W64E), .UW64(UW64E), .SubArith(SubArithE), .ALUSelect(ALUSelectE),
@@ -209,15 +207,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
   // Memory stage pipeline registers (ECC-protected)
-  flopenrc_ecc #(P.XLEN) SrcAMReg(.clk, .reset, .DFTHold, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
+  flopenrc_ecc #(P.XLEN) SrcAMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
     .d(SrcAE), .q(SrcAM), .q_raw(), .sec_err_o(sec_srcam), .ded_err_o(ded_srcam));
-  flopenrc_ecc #(P.XLEN) IEUResultMReg(.clk, .reset, .DFTHold, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
+  flopenrc_ecc #(P.XLEN) IEUResultMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
     .d(IEUResultE), .q(IEUResultM), .q_raw(IEUResultRawM), .sec_err_o(sec_ieumm), .ded_err_o(ded_ieumm));
-  flopenrc_ecc #(P.XLEN) WriteDataMReg(.clk, .reset, .DFTHold, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
+  flopenrc_ecc #(P.XLEN) WriteDataMReg(.clk, .reset, .clear(FlushM), .en(~StallM), .flip_mask(PipeFlipMask),
     .d(ForwardedSrcBE), .q(WriteDataM), .q_raw(), .sec_err_o(sec_wdm), .ded_err_o(ded_wdm));
 
   // Writeback stage pipeline register (ECC-protected)
-  flopenrc_ecc #(P.XLEN) IFResultWReg(.clk, .reset, .DFTHold, .clear(FlushW), .en(~StallW), .flip_mask(PipeFlipMask),
+  flopenrc_ecc #(P.XLEN) IFResultWReg(.clk, .reset, .clear(FlushW), .en(~StallW), .flip_mask(PipeFlipMask),
     .d(IFResultM), .q(IFResultW), .q_raw(IFResultRawW), .sec_err_o(sec_ifrw), .ded_err_o(ded_ifrw));
 
   // The registers Execute reads uncorrected.  SrcAM and WriteDataM are not among

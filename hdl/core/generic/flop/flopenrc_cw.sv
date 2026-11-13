@@ -47,7 +47,6 @@ module flopenrc_cw #(
                     (WIDTH <= 120) ? 7 : 8
 ) (
   input  logic             clk, reset, clear, en,
-  input  logic             DFTHold,      // DFT hold: no self-repair (forte_chip.sv)
   input  logic [WIDTH+R:0] flip_mask,  // one-hot on an injection cycle, else zero (ecc_flip_mask)
   input  logic [WIDTH+R:0] cw,         // codeword to store: {data, overall parity, R Hamming bits}
   output logic [WIDTH-1:0] q,          // corrected data
@@ -67,8 +66,7 @@ module flopenrc_cw #(
     else if (en)
       if (clear)        cw_stored <= '0;
       else              cw_stored <= cw;
-    // Not in a DFT hold: the stored word may be scan data mid-shift.
-    else if (sec_err_o & ~DFTHold) cw_stored <= cw_repair;
+    else if (sec_err_o) cw_stored <= cw_repair;
 
   // ── Error injection ──────────────────────────────────────────────────────────
   // The flip mask comes from a register (ecc_flip_mask): cw_stored is a register

@@ -82,7 +82,7 @@ module wallypipelinedsoc import cvw::*; #(parameter cvw_t P)  (
   synchronizer resetsync(.clk, .d(reset_ext), .q(reset));
 
   // instantiate processor and internal memories
-  wallypipelinedcore #(P) core(.clk, .reset, .DFTHold(1'b0),
+  wallypipelinedcore #(P) core(.clk, .reset,
     .fault_inject, .FaultInjectMask,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,

@@ -37,9 +37,6 @@ module buscachefsm #(
 )(
   input  logic                   HCLK,
   input  logic                   HRESETn,
-  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): the bus FSM holds, mid-transfer
-  // too; it outranks Flush, which can come from scanned state.
-  input  logic                   DFTHold,
 
   // IEU interface
   input  logic                   Stall,              // Core pipeline is stalled
@@ -85,8 +82,8 @@ module buscachefsm #(
   assign BusWrite = (CacheBusRW[0] | BusCMOZero) & ~READ_ONLY_CACHE;
 
   always_ff @(posedge HCLK)
-    if (~HRESETn | Flush & ~DFTHold) CurrState <= ADR_PHASE;
-    else if (~DFTHold)               CurrState <= NextState;
+    if (~HRESETn | Flush) CurrState <= ADR_PHASE;
+    else                  CurrState <= NextState;
 
   always_comb begin
       case(CurrState)
@@ -124,10 +121,10 @@ module buscachefsm #(
 
   assign FinalBeatCount = BeatCountDelayed == BeatCountThreshold[AHBWLOGBWPL-1:0];
   assign BeatCntEn = (((NextState == CACHE_WRITEBACK | NextState == CACHE_FETCH) & HREADY & ~Flush) |
-                     (NextState == ADR_PHASE & |CacheBusRW & HREADY)) & ~Flush & ~DFTHold;
-  assign BeatCntReset = (NextState == ADR_PHASE) & ~DFTHold;
+                     (NextState == ADR_PHASE & |CacheBusRW & HREADY)) & ~Flush;
+  assign BeatCntReset = NextState == ADR_PHASE;
 
-  assign CaptureEn = ((CurrState == DATA_PHASE & BusRW[1] & ~Flush) | (CurrState == CACHE_FETCH & HREADY)) & ~DFTHold;
+  assign CaptureEn = (CurrState == DATA_PHASE & BusRW[1] & ~Flush) | (CurrState == CACHE_FETCH & HREADY);
   assign CacheAccess = CurrState == CACHE_FETCH | CurrState == CACHE_WRITEBACK;
 
   assign BusStall = (CurrState == ADR_PHASE & ((|BusRW) | (|CacheBusRW) | BusCMOZero)) |

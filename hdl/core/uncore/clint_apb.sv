@@ -30,7 +30,6 @@
 
 module clint_apb import cvw::*;  #(parameter cvw_t P) (
   input  logic                PCLK, PRESETn,
-  input  logic                DFTHold,      // DFT hold: MTIME and PRDATA stop (forte_chip.sv)
   input  logic                PSEL,
   input  logic [15:0]         PADDR,
   input  logic [P.XLEN-1:0]   PWDATA,
@@ -69,9 +68,7 @@ module clint_apb import cvw::*;  #(parameter cvw_t P) (
 
   // register access
   if (P.XLEN==64) begin : clint // 64-bit
-    // PRDATA holds through a DFT hold, so a read caught in its access phase
-    // returns the pre-hold value.
-    always_ff @(posedge PCLK) if (~DFTHold) begin
+    always_ff @(posedge PCLK) begin
       case(entry)
         CLINT_MSIP:     PRDATA <= {63'b0, MSIP};
         CLINT_MTIMECMP: PRDATA <= MTIMECMP;
@@ -103,9 +100,9 @@ module clint_apb import cvw::*;  #(parameter cvw_t P) (
         for(j=0;j<P.XLEN/8;j++)
           if(PSTRB[j])
             MTIME[j*8 +: 8] <= PWDATA[j*8 +: 8];
-      end else if (~DFTHold) MTIME <= MTIME + 1;
+      end else MTIME <= MTIME + 1;
   end else begin : clint // 32-bit
-    always_ff @(posedge PCLK) if (~DFTHold) begin
+    always_ff @(posedge PCLK) begin
       case(entry)
         16'h0000: PRDATA <= {31'b0, MSIP};
         16'h4000: PRDATA <= MTIMECMP[31:0];
@@ -147,7 +144,7 @@ module clint_apb import cvw::*;  #(parameter cvw_t P) (
         for(i=0;i<P.XLEN/8;i++)
           if(PSTRB[i])
             MTIME[32 + i*8 +: 8]<= PWDATA[i*8 +: 8];
-      end else if (~DFTHold) MTIME <= MTIME + 1;
+      end else MTIME <= MTIME + 1;
   end
 
   // Software interrupt when MSIP is set

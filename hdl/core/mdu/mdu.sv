@@ -29,7 +29,6 @@
 
 module mdu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
-  input  logic              DFTHold,      // DFT hold (forte_chip.sv)
   // Per-unit enables from the core; each injector selects bit and kind locally.
   input  logic              fault_inject_mul, fault_inject_div, // independent software-selected injection enables
   input  logic [15:0]       FaultLfsr,                      // shared fault-injection generator (ft_fault_gen)
@@ -65,7 +64,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
   // DIV retries the held E-stage transaction by restarting the divider FSM;
   // its terminal fault is registered into M alongside the instruction.
   assign MulActiveE = MDUActiveE & ~IntDivE;
-  ft_mul #(P) ftmul(.clk, .reset, .DFTHold, .StallM, .FlushM,
+  ft_mul #(P) ftmul(.clk, .reset, .StallM, .FlushM,
     .ForwardedSrcAE, .ForwardedSrcBE, .Funct3E, .MulActiveE,
     // Corrupt selected product bits before the M-stage check.
     .fi_enable(fault_inject_mul), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
@@ -86,7 +85,7 @@ module mdu import cvw::*;  #(parameter cvw_t P) (
     logic DivUnresolvedE;
     // Corrupt selected result bits before the E-stage completion check.
     // The resulting fault status is registered into M.
-    ft_div #(P) ftdiv(.clk, .reset, .DFTHold, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .RemE(Funct3E[1]),
+    ft_div #(P) ftdiv(.clk, .reset, .StallM, .FlushE, .FlushM, .DivSignedE(~Funct3E[0]), .RemE(Funct3E[1]),
         .W64E, .IntDivE, .ForwardedSrcAE, .ForwardedSrcBE,
         .fi_enable(fault_inject_div), .fi_lfsr(FaultLfsr), .fi_count(FaultCount),
         .DivBusyE, .DivResultM, .stall_req(DivFTStallM), .unresolved(DivUnresolvedE),
