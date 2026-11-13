@@ -102,36 +102,38 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   forte_rst_sync rstsync    (.clk(core_clk), .rst_n_in(rst_n), .rst_n_out(rst_n_s));
   forte_rst_sync linkrstsync(.clk(link_clk), .rst_n_in(rst_n), .rst_n_out(link_rst_n_s));
 
-  // ---- DFT HOLD: test-mode control and the two root clock gates -------------
+  // ---- DFT HOLD: test-mode control ------------------------------------------
   // A DFT session can stop the chip anywhere in a running program, unload every
   // scan chain on io_out, load the same bits back on io_in, leave test mode and
-  // let the program carry on as if nothing had happened.  For that, test mode
-  // has to freeze EVERY piece of state that is not on a scan chain, and the
-  // scan cells must move only when they shift.  A pipeline stall cannot do it:
-  // traps, flushes, the regfile write port, the cache and bus FSMs, the
-  // divider, the FT checkers, LFSRs, MTIME and the UART all keep running while
-  // the pipeline is stalled, and synthesis adds clock gates whose test enable
-  // forces their flops to clock on every shift cycle.  That is why
-  // ExternalStall stays tied off below.  The hold is a CLOCK SPLIT instead:
+  // let the program carry on as if nothing had happened.  For that, a HOLD has
+  // to keep every piece of state that is not on a scan chain where it was, on
+  // one clock, while the chains shift through it.  `hold` is that freeze:
   //
-  //   core_clk -+- tmsync, sesync, hold_mode, the reset synchronisers
-  //             |    (ungated; never on a chain)
-  //             +- cg_ns   (en ~hold, te 0)           -> clk_ns
-  //             |    everything else in the core-clock domain: forte_soc
-  //             |    (core, caches and their SRAMs, regfile, CSRs, uncore),
-  //             |    the AHB side of the link, the FIFOs' core-side ports,
-  //             |    the irq/uart/fault_inject synchronisers
-  //             +- cg_scan (en ~hold, te scan_en_dft) -> clk_scan
-  //                  only the scan-selected registers (synth/dft_setup.tcl's
-  //                  groups on the dft branch; that list and the clk_scan
-  //                  wiring in hdl/core must match, and the DFT flow checks it)
+  //   - ExternalStall: stalls every pipeline stage, which holds the stage
+  //     registers, CSR writes, privilege mode and the branch predictor.
+  //   - DFTHold into the core (wallypipelinedcore, then a Hold port where it is
+  //     needed): a stall is not enough on its own.  While the chains shift, the
+  //     scanned control and data registers take passing values, and logic
+  //     around them would act: traps and flushes, the register-file write,
+  //     cache SRAM/valid/dirty/LRU writes and the cache and bus FSMs, the TLBs
+  //     and page walker, the divider, multiplier and FT checkers, LFSRs, and the
+  //     free-running "Q" copies the IFU/LSU/MMU keep of their own inputs.  Each
+  //     is gated at its source (search for DFTHold/Hold); the DFT flow checks
+  //     on the dft branch that every non-scan flop depends on the hold.
+  //   - DFTHold into the uncore: the AHB-APB bridge, CLINT (MTIME stops), PLIC,
+  //     the fault counters and the AHB side of the link hold, and PSEL to the
+  //     peripherals is masked, so an APB access caught mid-flight completes
+  //     exactly once, on resume.  The UART is NOT frozen: it sees no access,
+  //     but keeps receiving and transmitting (its interrupt reaches the frozen
+  //     PLIC when the hold ends).
+  //   - The FIFOs' core-side ports: no push, no pop (masks below).
   //
-  // Outside a hold both gates pass every edge, so functional behaviour, and
-  // legacy test mode, are exactly what they were.  Inside a hold, clk_ns has no
-  // edges at all, so nothing that is not on a chain can change whatever the
-  // chains hold, and clk_scan pulses only on scan_en=1 edges, so the scan cells
-  // shift and otherwise hold (no capture, no ECC self-repair).  A scan_en=0
-  // edge in a hold changes nothing on core_clk except the ungated flops above.
+  // The scan cells themselves hold on scan_en=0 edges (their enables are the
+  // stall, or gated as above; ECC registers do not self-repair) and shift on
+  // scan_en=1 edges, where the scan mux takes SI whatever the enable says.
+  // Synthesis must not force a non-scan flop's clock gate on during shift:
+  // the DFT flow ties the test enable of every inferred clock gate that gates
+  // no scan flop.
   //
   // HOLD MODE IS CHOSEN AT ENTRY, BY SCAN_EN.  Existing test-mode users (the
   // full_tb capture phases, ATPG) need a scan_en=0 edge to be a functional
@@ -160,19 +162,18 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   // carries scan data) and req/wr stay low; its status heartbeat keeps running
   // by design.  A hold that catches a transaction in flight breaks it.
   //
-  // WHAT IS STRETCHED, NOT FROZEN.  Pins keep their last value: a UART byte in
-  // flight on uart_tx is stretched (the receiver sees a framing error), and an
-  // irq or uart_rx edge during the hold is seen when it ends.  MTIME stops, so
-  // the session is invisible to software that reads time.
+  // NOT FROZEN, BY DESIGN: the UART (above), the irq/uart_rx/fault_inject
+  // synchronisers (an input edge during the hold is seen when it ends), the
+  // reset synchronisers, and the flops below.  MTIME stops, so the session is
+  // invisible to software that reads time.
   //
   // DFT: tmsync, sesync, hold_mode and holdlinksync must stay OFF the chains,
   // and DRC is told hold_mode is 0 in test (legacy protocol), as test_mode_s and
-  // dft_unlocked are told they are 1.  cg_ns/cg_scan keep their TE wiring.
+  // dft_unlocked are told they are 1.
   logic dft_unlocked;
   logic test_mode_s, scan_en_s;
   logic test_mode_dft, scan_en_dft;
   logic hold_mode, hold, hold_link;
-  logic clk_ns, clk_scan;
 
   synchronizer tmsync(.clk(core_clk), .d(test_mode), .q(test_mode_s));
   synchronizer sesync(.clk(core_clk), .d(scan_en),   .q(scan_en_s));
@@ -187,10 +188,8 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   always_ff @(posedge core_clk)
     if (!test_mode_s) hold_mode <= scan_en_s;
 
+  // An AND of three flops, so glitch-free on core_clk.
   assign hold = test_mode_dft & hold_mode;
-
-  forte_clk_gate cg_ns  (.clk(core_clk), .en(~hold), .te(1'b0),        .gclk(clk_ns));
-  forte_clk_gate cg_scan(.clk(core_clk), .en(~hold), .te(scan_en_dft), .gclk(clk_scan));
 
   prim_flop_2sync #(.Width(1)) holdlinksync(
     .clk_i(link_clk), .rst_ni(link_rst_n_s), .d_i(hold), .q_o(hold_link));
@@ -214,16 +213,17 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
 
   assign reset_ext = ~rst_n_s;
 
-  synchronizer irq0sync(.clk(clk_ns), .d(irq[0]),  .q(irq_s[0]));
-  synchronizer irq1sync(.clk(clk_ns), .d(irq[1]),  .q(irq_s[1]));
-  synchronizer rxsync  (.clk(clk_ns), .d(uart_rx), .q(uart_rx_s));
+  synchronizer irq0sync(.clk(core_clk), .d(irq[0]),  .q(irq_s[0]));
+  synchronizer irq1sync(.clk(core_clk), .d(irq[1]),  .q(irq_s[1]));
+  synchronizer rxsync  (.clk(core_clk), .d(uart_rx), .q(uart_rx_s));
   // fault_inject is a board-level strap with no timing relationship to
   // core_clk, and it gates logic on every protected datapath in the core.
-  synchronizer fisync  (.clk(clk_ns), .d(fault_inject), .q(fault_inject_s));
+  synchronizer fisync  (.clk(core_clk), .d(fault_inject), .q(fault_inject_s));
 
-  // ExternalStall stays tied off: a stall is not a hold (see DFT HOLD above).
+  // The hold stalls the pipeline and, through DFTHold, freezes the rest
+  // (DFT HOLD above).
   forte_soc #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) soc(
-    .core_clk(clk_ns), .clk_scan, .reset_ext, .reset(reset_soc), .ExternalStall(1'b0),
+    .core_clk, .reset_ext, .reset(reset_soc), .ExternalStall(hold), .DFTHold(hold),
     .fault_inject(fault_inject_s),
     .dft_unlocked,
     .HRDATAEXT, .HREADYEXT, .HRESPEXT, .HSELEXT, .HCLK, .HRESETn,
@@ -259,23 +259,25 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   assign op_depth_w = DEPTH_W'(op_depth);
 
   forte_link_core #(.HADDR_W(P.PA_BITS), .BEATS(LINK_BEATS)) linkcore(
-    .HCLK, .HRESETn,
+    .HCLK, .HRESETn, .DFTHold(hold),
     .HSEL(HSELEXT), .HADDR, .HTRANS, .HWRITE, .HSIZE, .HBURST, .HWDATA, .HREADY,
     .HRDATA(HRDATAEXT), .HREADYOUT(HREADYEXT), .HRESP(HRESPEXT),
     .ocmd_valid(oc_valid), .ocmd_ready(oc_ready), .ocmd_data(oc_data),
     .ibeat_valid(ic_valid), .ibeat_ready(ic_ready), .ibeat_data(ic_data));
 
   prim_fifo_async #(.Width(FLIT_W), .Depth(LINK_FIFO_D)) ofifo(
-    .clk_wr_i(clk_ns), .rst_wr_ni(rst_n_s),
-    .wvalid_i(oc_valid), .wready_o(oc_ready), .wdata_i(oc_data), .wdepth_o(oc_depth_unused),
+    .clk_wr_i(core_clk), .rst_wr_ni(rst_n_s),
+    // DFT hold: no push from the frozen link core (DFT HOLD above).
+    .wvalid_i(oc_valid & ~hold), .wready_o(oc_ready), .wdata_i(oc_data), .wdepth_o(oc_depth_unused),
     .clk_rd_i(link_clk), .rst_rd_ni(link_rst_n_s),
     .rvalid_o(op_valid), .rready_i(op_ready), .rdata_o(op_data), .rdepth_o(op_depth));
 
   prim_fifo_async #(.Width(64), .Depth(LINK_FIFO_D)) ififo(
     .clk_wr_i(link_clk), .rst_wr_ni(link_rst_n_s),
     .wvalid_i(ip_valid), .wready_o(ip_ready), .wdata_i(ip_data), .wdepth_o(ip_depth_unused),
-    .clk_rd_i(clk_ns), .rst_rd_ni(rst_n_s),
-    .rvalid_o(ic_valid), .rready_i(ic_ready), .rdata_o(ic_data), .rdepth_o(ic_depth_unused));
+    .clk_rd_i(core_clk), .rst_rd_ni(rst_n_s),
+    // DFT hold: no pop into the frozen link core.
+    .rvalid_o(ic_valid), .rready_i(ic_ready & ~hold), .rdata_o(ic_data), .rdepth_o(ic_depth_unused));
 
   logic txn_done, lm_busy;
   forte_link_phy #(.BEATS(LINK_BEATS)) phy(

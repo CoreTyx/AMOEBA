@@ -14,14 +14,12 @@ module forte_soc import cvw::*; #(
   parameter logic   PERIPH_ONCHIP = 1'b1
 )(
   input  logic                  core_clk,
-  // The scan-selected registers' clock (hdl/forte_chip.sv, "DFT HOLD"): the
-  // same edges as core_clk except in a DFT hold session, where it pulses only
-  // on shift cycles while core_clk is stopped.  Everything else here, uncore
-  // included, runs on core_clk.
-  input  logic                  clk_scan,
   input  logic                  reset_ext,        // external asynchronous reset
   output logic                  reset,            // reset synchronised to core_clk
   input  logic                  ExternalStall,
+  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): freezes the core and uncore
+  // state a stall does not.  ExternalStall carries the same hold.
+  input  logic                  DFTHold,
 // Master fault-injection pin; the core ANDs it with the per-unit APB mask.
   input  logic                  fault_inject,
   // external AHB-Lite port
@@ -60,10 +58,10 @@ module forte_soc import cvw::*; #(
   // As wallypipelinedsoc: two-flop synchroniser on the asynchronous reset.
   synchronizer resetsync(.clk(core_clk), .d(reset_ext), .q(reset));
 
-  wallypipelinedcore #(P) core(.clk(core_clk), .clk_scan, .reset, .fault_inject, .FaultInjectMask,
+  wallypipelinedcore #(P) core(.clk(core_clk), .reset, .fault_inject, .FaultInjectMask,
     .MTimerInt, .MExtInt, .SExtInt, .MSwInt, .MTIME_CLINT,
     .HRDATA, .HREADY, .HRESP, .HCLK, .HRESETn, .HADDR, .HWDATA, .HWSTRB,
-    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall,
+    .HWRITE, .HSIZE, .HBURST, .HPROT, .HTRANS, .HMASTLOCK, .ExternalStall, .DFTHold,
     // Register-file ECC fault report, added on Making_HDL_Synthesizable.  Left
     // open as rv64_core_wrapper does: nothing in the ASIC consumes it yet, and
     // routing it to a pad is a decision for the DFT discussion.
@@ -77,6 +75,6 @@ module forte_soc import cvw::*; #(
     .HRDATA, .HREADY, .HRESP,
     .dft_unlocked, .FaultInjectMask, .FaultEvents,
     .MTimerInt, .MSwInt, .MExtInt, .SExtInt, .MTIME_CLINT,
-    .UARTSin, .UARTSout, .ExtIrq, .MExtIntIn, .SExtIntIn);
+    .UARTSin, .UARTSout, .ExtIrq, .MExtIntIn, .SExtIntIn, .DFTHold);
 
 endmodule

@@ -44,6 +44,7 @@ module dummymask #(
                     (WIDTH <= 120) ? 7 : 8
 ) (
   input  logic             clk, reset,
+  input  logic             DFTHold,                  // DFT hold: freeze (forte_chip.sv)
   input  logic             InjectD,                  // decode stage holds an injected dummy this cycle
   input  logic [WIDTH+R:0] Rd1D, Rd2D,               // register file read codewords
   output logic [WIDTH+R:0] Rd1MaskedD, Rd2MaskedD    // operand codewords as seen by the rest of the pipeline
@@ -56,11 +57,11 @@ module dummymask #(
 
   always_ff @(posedge clk)
     if (reset) LfsrA <= 64'h0123_4567_89AB_CDEF;
-    else       LfsrA <= {LfsrA[62:0], LfsrA[63] ^ LfsrA[3] ^ LfsrA[2] ^ LfsrA[0]};
+    else if (~DFTHold) LfsrA <= {LfsrA[62:0], LfsrA[63] ^ LfsrA[3] ^ LfsrA[2] ^ LfsrA[0]};
 
   always_ff @(posedge clk)
     if (reset) LfsrB <= 64'hFEDC_BA98_7654_3210;
-    else       LfsrB <= {LfsrB[62:0], LfsrB[63] ^ LfsrB[10] ^ LfsrB[1] ^ LfsrB[0]};
+    else if (~DFTHold) LfsrB <= {LfsrB[62:0], LfsrB[63] ^ LfsrB[10] ^ LfsrB[1] ^ LfsrB[0]};
 
   // The operands are SECDED codewords, and the code is linear: the codeword of
   // (data ^ mask) is the codeword of data XORed with the codeword of mask.  So

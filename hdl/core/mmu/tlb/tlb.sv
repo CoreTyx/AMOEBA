@@ -54,6 +54,7 @@
 module tlb import cvw::*;  #(parameter cvw_t P,
                              parameter TLB_ENTRIES = 8, ITLB = 0) (
   input logic                      clk, reset,
+  input logic                      DFTHold,          // DFT hold: no TLB write/flush/LRU update (forte_chip.sv)
   input  logic [P.SVMODE_BITS-1:0] SATP_MODE,        // Current address translation mode
   input  logic [P.ASID_BITS-1:0]   SATP_ASID,
   input  logic                     STATUS_MXR, STATUS_SUM, STATUS_MPRV,
@@ -119,9 +120,9 @@ module tlb import cvw::*;  #(parameter cvw_t P,
     .TLBMiss, .TLBHit, .TLBPageFault,
     .UpdateDA, .SV39Mode, .SV48Mode, .Translate, .PTE_N, .PBMemoryType);
 
-  tlblru #(TLB_ENTRIES) lru(.clk, .reset, .TLBWrite, .Matches, .TLBHit, .WriteEnables);
+  tlblru #(TLB_ENTRIES) lru(.clk, .reset, .TLBWrite(TLBWrite & ~DFTHold), .Matches, .TLBHit(TLBHit & ~DFTHold), .WriteEnables);
   tlbcam #(P, TLB_ENTRIES, P.VPN_BITS + P.ASID_BITS, P.VPN_SEGMENT_BITS)
-    tlbcam(.clk, .reset, .VPN, .PageTypeWriteVal, .SV39Mode, .SV48Mode, .TLBFlush, .WriteEnables, .PTE_Gs, .PTE_NAPOTs,
+    tlbcam(.clk, .reset, .VPN, .PageTypeWriteVal, .SV39Mode, .SV48Mode, .TLBFlush(TLBFlush & ~DFTHold), .WriteEnables, .PTE_Gs, .PTE_NAPOTs,
            .SATP_ASID, .Matches, .HitPageType, .CAMHit);
   tlbram #(P, TLB_ENTRIES) tlbram(.clk, .reset, .PTE, .Matches, .WriteEnables, .PPN, .PTEAccessBits, .PTE_Gs, .PTE_NAPOTs);
 

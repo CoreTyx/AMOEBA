@@ -36,6 +36,7 @@ module ahbapbbridge import cvw::*;  #(parameter cvw_t P,
   input  logic                 HWRITE,
   input  logic [1:0]           HTRANS,
   input  logic                 HREADY,
+  input  logic                 DFTHold,        // DFT hold: freeze (forte_chip.sv)
 //  input  logic [3:0]        HPROT, // not used
   output logic [P.XLEN-1:0]    HRDATA,
   output logic                 HRESP, HREADYOUT,
@@ -65,9 +66,11 @@ module ahbapbbridge import cvw::*;  #(parameter cvw_t P,
   assign initTransSel = initTrans & |HSEL; // capture data and address if any of the peripherals are selected
 
   // delay AHB Address phase signals to align with AHB Data phase because APB expects them at the same time
-  flopen  #(32) addrreg(HCLK, HREADY, HADDR[31:0], PADDR);
-  flopenr #(1) writereg(HCLK, ~HRESETn, HREADY, HWRITE, PWRITE);
-  flopenr #(PERIPHS) selreg(HCLK, ~HRESETn, HREADY, HSEL & {PERIPHS{initTrans}}, PSEL);
+  // DFT hold (hdl/forte_chip.sv, "DFT HOLD"): every register here keeps its
+  // value, so an AHB transfer caught mid-flight completes once, on resume.
+  flopen  #(32) addrreg(HCLK, HREADY & ~DFTHold, HADDR[31:0], PADDR);
+  flopenr #(1) writereg(HCLK, ~HRESETn, HREADY & ~DFTHold, HWRITE, PWRITE);
+  flopenr #(PERIPHS) selreg(HCLK, ~HRESETn, HREADY & ~DFTHold, HSEL & {PERIPHS{initTrans}}, PSEL);
   // PPROT[2:0] = {Data/InstrB, Secure, Privileged};
   // assign PPROT = {~HPROT[0], 1'b0, HPROT[1]};  // protection not presently used
   // assign PWAKEUP = 1'b1; // not used
@@ -81,9 +84,9 @@ module ahbapbbridge import cvw::*;  #(parameter cvw_t P,
   // cycle2: AHB puts HWDATA on the bus.  This effectively extends the setup phase
   // cycle3: bridge raises PENABLE.  Peripheral typically responds with PREADY.
   //         Read occurs by end of cycle.  Write occurs at end of cycle.
-  flopr #(1) inittransreg(HCLK, ~HRESETn, initTransSel, initTransSelD);
+  flopenr #(1) inittransreg(HCLK, ~HRESETn, ~DFTHold, initTransSel, initTransSelD);
   assign nextPENABLE = PENABLE ? ~HREADY : initTransSelD;
-  flopr #(1) enablereg(HCLK, ~HRESETn, nextPENABLE, PENABLE);
+  flopenr #(1) enablereg(HCLK, ~HRESETn, ~DFTHold, nextPENABLE, PENABLE);
 
   // result and ready multiplexer
   int i;

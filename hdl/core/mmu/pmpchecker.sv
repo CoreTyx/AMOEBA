@@ -33,6 +33,7 @@
 module pmpchecker import cvw::*;  #(parameter cvw_t P,
                                     parameter MATCH_REG = 0) ( // 1: the faults are for the address of the cycle before
   input  logic                     clk, reset,
+  input  logic                     DFTHold,     // DFT hold: matchreg holds (forte_chip.sv)
   input  logic [P.PA_BITS-1:0]     PhysicalAddress,
   input  logic [1:0]               EffectivePrivilegeModeW,
   // ModelSim has a switch -svinputport which controls whether input ports
@@ -82,7 +83,7 @@ module pmpchecker import cvw::*;  #(parameter cvw_t P,
   // are those of the address presented one cycle earlier.  The instruction MMU is built this
   // way: a fetch does not look at its fault until the cycle after its address was checked.
   if (MATCH_REG) begin : matchreg
-    flopr #(P.PMP_ENTRIES) matchreg(clk, reset, MatchLive, Match);
+    flopenr #(P.PMP_ENTRIES) matchreg(clk, reset, ~DFTHold, MatchLive, Match);
   end else begin : matchreg
     assign Match = MatchLive;
   end

@@ -31,6 +31,7 @@ module ft_shadow_ctrl #(
 ) (
   // Clock/reset/flush define the lifetime of the held transaction.
   input  logic clk, reset, flush,
+  input  logic DFTHold,               // DFT hold: freeze (forte_chip.sv)
   input  logic valid,                 // operation currently occupies the wrapper
   input  logic check,                 // mismatch and the recompute results are valid this cycle: evaluate them
   input  logic advance,               // owning pipeline stage accepts the transaction
@@ -59,7 +60,7 @@ module ft_shadow_ctrl #(
 
   assign recompute_mode = (state == RECOMPUTE);
   // Capture unmasked post-injection results once, including threshold 1.
-  assign capture_normal = (state == NORMAL) & check & valid & mismatch & ~reset & ~flush;
+  assign capture_normal = (state == NORMAL) & check & valid & mismatch & ~reset & ~flush & ~DFTHold;
   assign isolated       = (state == ISOLATED);
   assign unresolved     = (state == UNRESOLVED);
   // A mismatch/recompute holds every architectural stage.  UNRESOLVED is
@@ -76,7 +77,7 @@ module ft_shadow_ctrl #(
       use_shadow     <= 1'b0;
       pe_primary     <= 1'b0;
       pe_shadow      <= 1'b0;
-    end else begin
+    end else if (~DFTHold) begin
       case (state)
         // First disagreement starts the retry count; normal execution has
         // no added latency when both copies agree.

@@ -29,7 +29,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module controller import cvw::*;  #(parameter cvw_t P) (
-  input  logic        clk, clk_scan, reset,
+  input  logic        clk, reset,
   // Decode stage control signals
   input  logic        StallD, FlushD,          // Stall, flush Decode stage
   input  logic [31:0] InstrD,                  // Instruction in Decode stage
@@ -427,7 +427,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   end
 
   // Decode stage pipeline control register
-  flopenrc #(1)  controlregD(clk_scan, reset, FlushD, ~StallD, 1'b1, InstrValidD);
+  flopenrc #(1)  controlregD(clk, reset, FlushD, ~StallD, 1'b1, InstrValidD);
 
   // AMOEBA: mask for control signals an injected dummy instruction must never assert.
   // The stage 1 capture filter admits ALU-class instructions only, so every masked
@@ -436,14 +436,14 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign DummyMaskD = ~InjectD;
 
   // Execute stage pipeline control register and logic
-  flopenrc #(47) controlregE(clk_scan, reset, FlushE, ~StallE,
+  flopenrc #(47) controlregE(clk, reset, FlushE, ~StallE,
                            {ALUSelectD, RegWriteD, ResultSrcD, MemRWD & {2{DummyMaskD}}, JumpD & DummyMaskD, BranchD & DummyMaskD, ALUSrcAD, ALUSrcBD, ALUResultSrcD, CSRReadD & DummyMaskD, CSRWriteD & DummyMaskD, PrivilegedD & DummyMaskD, Funct3D, Funct7D, W64D, BUW64D, SubArithD, MDUD & DummyMaskD, AtomicD & {2{DummyMaskD}}, InvalidateICacheD & DummyMaskD, FlushDCacheD & DummyMaskD, FenceD & DummyMaskD, CMOpD & {4{DummyMaskD}}, IFUPrefetchD & DummyMaskD, LSUPrefetchD & DummyMaskD, CZeroD, InstrValidD & DummyMaskD, InjectD, DummySelD},
                            {ALUSelectE, IEURegWriteE, ResultSrcE, MemRWE, JumpE, BranchE, ALUSrcAE, ALUSrcBE, ALUResultSrcE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, Funct7E, W64E, UW64E, SubArithE, MDUE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, CMOpE, IFUPrefetchE, LSUPrefetchE, CZeroE, InstrValidE, DummyE, DummySelE});
-  flopenrc #(5)  Rs1EReg(clk_scan, reset, FlushE, ~StallE, Rs1D, Rs1E);
-  flopenrc #(5)  Rs2EReg(clk_scan, reset, FlushE, ~StallE, Rs2D, Rs2E);
+  flopenrc #(5)  Rs1EReg(clk, reset, FlushE, ~StallE, Rs1D, Rs1E);
+  flopenrc #(5)  Rs2EReg(clk, reset, FlushE, ~StallE, Rs2D, Rs2E);
   // A dummy's architectural destination reads as x0 so it can never forward to a real
   // instruction; the register file redirects its write to a shadow register instead.
-  flopenrc #(5)  RdEReg(clk_scan, reset, FlushE, ~StallE, InjectD ? 5'b0 : RdD, RdE);
+  flopenrc #(5)  RdEReg(clk, reset, FlushE, ~StallE, InjectD ? 5'b0 : RdD, RdE);
 
   // Branch Logic
   //  The comparator handles both signed and unsigned branches using BranchSignedE
@@ -465,16 +465,16 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign IntDivE = MDUE & Funct3E[2]; // Integer division operation
 
   // Memory stage pipeline control register
-  flopenrc #(27) controlregM(clk_scan, reset, FlushM, ~StallM,
+  flopenrc #(27) controlregM(clk, reset, FlushM, ~StallM,
                          {RegWriteE, ResultSrcE, MemRWE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, FWriteIntE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, InstrValidE, IntDivE, CMOpE, LSUPrefetchE, DummyE, DummySelE},
                          {RegWriteM, ResultSrcM, MemRWM, CSRReadM, CSRWriteM, PrivilegedM, Funct3M, FWriteIntM, AtomicM, InvalidateICacheM, FlushDCacheM, FenceM, InstrValidM, IntDivM, CMOpM, LSUPrefetchM, DummyM, DummySelM});
-  flopenrc #(5)  RdMReg(clk_scan, reset, FlushM, ~StallM, RdE, RdM);
+  flopenrc #(5)  RdMReg(clk, reset, FlushM, ~StallM, RdE, RdM);
 
   // Writeback stage pipeline control register
-  flopenrc #(7) controlregW(clk_scan, reset, FlushW, ~StallW,
+  flopenrc #(7) controlregW(clk, reset, FlushW, ~StallW,
                          {RegWriteM, ResultSrcM, IntDivM, DummyM, DummySelM},
                          {RegWriteW, ResultSrcW, IntDivW, DummyW, DummySelW});
-  flopenrc #(5) RdWReg(clk_scan, reset, FlushW, ~StallW, RdM, RdW);
+  flopenrc #(5) RdWReg(clk, reset, FlushW, ~StallW, RdM, RdW);
 
   // Flush F, D, and E stages on a CSR write or Fence.I or SFence.VMA
   assign CSRWriteFenceM = CSRWriteM | FenceM;
