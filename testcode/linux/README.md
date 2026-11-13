@@ -115,8 +115,11 @@ across runs.
 | `proc` | three `fork`ed children exiting with distinct codes, reaped out of order with `wait4`, then `-ECHILD`; pipe ping-pong of 4 messages with a child, EOF after it exits |
 | `sys` | `getppid() == 1`, `uname` reports `Linux` / `6.6` / `riscv64`, `CLOCK_MONOTONIC` strictly increases across a busy loop |
 
-Together they cost a few million cycles after M5 -- small next to the boot
-itself; `boot_report.py` prints a per-program breakdown.
+They are not free on the RTL. Measured on the first local run, each program
+costs millions of cycles including its `fork`, `execve` (which loads and
+page-faults in a fresh image) and `wait4`: `arith` 6.0M, `mem` 8.0M. Budget
+roughly 25-35M cycles for all four, against ~420M for the boot itself.
+`boot_report.py` prints the per-program breakdown.
 
 Everything under `userland/` is freestanding C: no libc, just
 
@@ -143,9 +146,9 @@ kernel. `make -C testcode/linux userland` builds just them.
 2. Append `<name>` to `PROGS` in the `Makefile`. That one list drives the
    build, the `file /bin/<name>` lines appended to the initramfs spec, and the
    order `/init` runs them in -- nothing else needs editing.
-3. Keep it short: the core runs about 100k cycles per second of wall time
-   in Verilator. Aim for well under a million cycles; `fork` and `execve`
-   are the expensive parts, not arithmetic.
+3. Keep it short: the core runs 50-100k cycles per second of wall time in
+   Verilator, and `fork` + `execve` + `wait4` alone cost a few million cycles
+   per program before `main` does any work. Keep the work itself small.
 
 ## What makes this finish in hours instead of weeks
 
