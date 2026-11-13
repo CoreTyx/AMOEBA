@@ -1,0 +1,136 @@
+# Nightly Linux userspace test.
+#
+# Boots the same image as linux-boot.yml, then lets PID 1 run the freestanding
+# test programs in testcode/linux/userland/ (arith, mem, proc, sys) and
+# requires it to print AMOEBA_LINUX_PROGS_OK.  /init still prints
+# AMOEBA_LINUX_BOOT_OK first, so the boot nightly is unaffected.
+#
+# OVERLAP: this job repeats the whole boot that linux-boot.yml already pays
+# for (~420M cycles to AMOEBA_LINUX_BOOT_OK on the first local run); the
+# programs add a few tens of millions on top (6-8M each, mostly fork/execve).  Once this tier has a track record it can be folded into the boot
+# nightly by moving that job's default milestone from AMOEBA_LINUX_BOOT_OK to
+# AMOEBA_LINUX_PROGS_OK and adding AMOEBA_PROG_FAIL to its LINUX_FAIL, after
+# which this file can be deleted.  It is separate for now so a userspace
+# failure is reported apart from a boot failure, and runs at a different hour
+# so the two hours-long jobs do not compete for runners.
+name: Linux Userspace (nightly)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 09:00 UTC nightly, two hours after linux-boot.yml
+  workflow_dispatch:
+  # The programs and /init live in testcode/linux, and they reach the image only
+  # through linux-image.yml, so that is all this job keys on.  Core and
+  # testbench changes are covered by linux-boot.yml's PR trigger.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'testcode/linux/**'
+      - 'bin/linux_image_to_lst.py'
+      - '.github/workflows/linux-userspace.yml'
+
+# gh run list / gh run download need actions:read.  A repository whose default
+# token is contents-only would otherwise fail at the download step.
+# pull-requests:read is for the changed-file check in "Download boot image".
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  userspace:
+    name: Boot and run user programs
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch riscv-formal submodule
+        run: git submodule update --init third_party/riscv-formal
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 python3-pip gcc g++ make \
+            autoconf flex bison libfl-dev help2man zlib1g-dev
+          pip3 install --quiet pyyaml
+
+      - name: Cache Verilator v5.026
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.026-${{ runner.os }}
+
+      - name: Build Verilator v5.026 from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+          cd /tmp/verilator-src && autoconf
+          ./configure --prefix=/opt/verilator
+          make -j$(nproc)
+          make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> $GITHUB_PATH
+
+      # Built by .github/workflows/linux-image.yml, which also builds the
+      # userland into the initramfs.  A PR that changes testcode/linux must have
+      # a successful image build on its own branch (see the script).
+      - name: Download boot image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: .github/scripts/download_boot_image.sh
+
+      - name: Show image provenance
+        run: |
+          echo "Boot image built from branch: ${LINUX_IMAGE_FROM:-unknown}"
+          cat testcode/linux/build/boot.provenance
+
+      - name: Build Linux boot simulator
+        run: make -C sim build_linux
+
+      # Cheap pre-flight: proves the UART tap, the .lst loader and the pass
+      # matcher all work before committing hours to a boot.
+      - name: Console-path smoke test
+        run: |
+          make -C testcode/linux smoke
+          make -C sim linux_boot \
+            LINUX_MEMLST=$PWD/testcode/linux/build/uart_smoke.lst \
+            LINUX_PASS=AMOEBA_UART_OK LINUX_TIMEOUT=400000
+
+      # Same 800M-cycle budget as the boot nightly.  Measured locally: boot to
+      # AMOEBA_LINUX_BOOT_OK at ~421M cycles, each program 6-8M after that, so
+      # a passing run should end around 450-460M -- ~1.7x headroom.
+      # LINUX_FAIL is sim/Makefile's default list plus /init's failure line, so
+      # a failing program ends the run immediately instead of at the timeout.
+      - name: Boot Linux and run user programs
+        run: |
+          make -C sim linux_boot \
+            LINUX_TIMEOUT=800000000 \
+            LINUX_PASS=AMOEBA_LINUX_PROGS_OK \
+            LINUX_FAIL='Kernel panic|Unable to handle kernel|Oops:|SBI panic|AMOEBA_PROG_FAIL'
+
+      - name: Program results
+        if: always()
+        run: |
+          grep -E 'AMOEBA_|PROG' sim/verilator/linux_boot/boot_uart.log || true
+
+      - name: Milestone timing report
+        if: always()
+        run: |
+          python3 testcode/linux/boot_report.py \
+            sim/verilator/linux_boot/simulation.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-userspace-logs
+          path: |
+            sim/verilator/linux_boot/simulation.log
+            sim/verilator/linux_boot/boot_uart.log
+          retention-days: 14

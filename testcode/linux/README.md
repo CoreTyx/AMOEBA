@@ -1,8 +1,8 @@
 # Linux boot test
 
 Boots Linux 6.6 on the CVW core under Verilator and checks that it reached
-userspace. The pass criterion is a string printed by PID 1 over the SoC's
-NS16550 UART.
+userspace, then runs a handful of small user programs. The pass criterion is a
+string printed by PID 1 over the SoC's NS16550 UART.
 
 ## Why this tier exists
 
@@ -20,8 +20,9 @@ boot_shim.S              reset-vector entry; sets a0=hartid, jumps to firmware
 uart_smoke.S             console-path pre-flight (no firmware needed)
 dts/amoeba.dts           device tree; forked from cvw/linux/devicetree/wally-virt.dts
 configs/linux_amoeba.config   kernel fragment merged over riscv defconfig
-initramfs/init.S         PID 1: prints the pass string, never exits
+initramfs/init.c         PID 1: prints the boot string, runs /bin/*, never exits
 initramfs/initramfs.spec gen_init_cpio spec (creates /dev/console without root)
+userland/                freestanding user programs run by /init (see below)
 build/                   downloads and build products (gitignored)
 ```
 
@@ -78,10 +79,76 @@ boot log into a table of these with per-phase cycle costs.
 | M3 | `Initmem setup node 0` | MMU enabled, page tables walked, memblock done |
 | M4 | `Freeing unused kernel image` | Full kernel init, drivers probed |
 | M5 | `AMOEBA_LINUX_BOOT_OK` | Userspace reached, U-mode syscalls work |
+| M6 | `AMOEBA_LINUX_PROGS_OK` | fork/execve/wait4 work and every user program passed |
 
 ```bash
 python3 testcode/linux/boot_report.py sim/verilator/linux_boot/simulation.log --wall 385
 ```
+
+M5 is printed by `/init` *before* it starts any program, so it means exactly
+what it did when `/init` printed one string and stopped; the boot nightly
+(`linux-boot.yml`) still stops there. M6 is the userspace nightly
+(`linux-userspace.yml`). Run it locally with:
+
+```bash
+make -C sim linux_boot LINUX_PASS=AMOEBA_LINUX_PROGS_OK \
+  LINUX_FAIL='Kernel panic|Unable to handle kernel|Oops:|SBI panic|AMOEBA_PROG_FAIL'
+```
+
+## User programs
+
+`/init` (`initramfs/init.c`) forks and `execve`s each program in turn as
+`/bin/<name>`, waits for it, and prints `PROG_EXIT <name> <code>` (or
+`PROG_EXIT <name> signal <n>` if it was killed). After the last it prints
+`AMOEBA_LINUX_PROGS_OK` if every program exited 0, otherwise
+`AMOEBA_PROG_FAIL <first failing name>`, and then spins forever.
+
+Each program prints one result line, `PROG <name> PASS <checksum-hex>` or
+`PROG <name> FAIL <reason>`, and exits 0 only on a pass. The checksum is
+deterministic (no addresses, PIDs or times go into it), so it can be compared
+across runs.
+
+| Program | Checks |
+|---|---|
+| `arith` | Every RV64M instruction and the shift family against expected values, including divide-by-zero, `INT_MIN / -1` and the `*W` forms' sign extension; random-operand identities (`mul` against a software multiply, `q*b + r == a`); CRC-32 of `"123456789"` == `0xCBF43926`, and bitwise against table-driven CRC-32 over 4 KiB |
+| `mem` | `brk` grow 64 KiB / fill / verify / shrink; anonymous `mmap` of 128 KiB read-faulted to the zero page then written (copy-on-write fault per page), verified, sub-word store merging, `munmap`, twice |
+| `proc` | three `fork`ed children exiting with distinct codes, reaped out of order with `wait4`, then `-ECHILD`; pipe ping-pong of 4 messages with a child, EOF after it exits |
+| `sys` | `getppid() == 1`, `uname` reports `Linux` / `6.6` / `riscv64`, `CLOCK_MONOTONIC` strictly increases across a busy loop |
+
+They are not free on the RTL. Measured on the first local run, each program
+costs millions of cycles including its `fork`, `execve` (which loads and
+page-faults in a fresh image) and `wait4`: `arith` 6.0M, `mem` 8.0M. Budget
+roughly 25-35M cycles for all four, against ~420M for the boot itself.
+`boot_report.py` prints the per-program breakdown.
+
+Everything under `userland/` is freestanding C: no libc, just
+
+- `syscall.h` -- inline-asm `ecall` wrappers for the RISC-V Linux syscall
+  ABI. RISC-V uses the asm-generic table, so there is no `fork`, `pipe`,
+  `dup2` or `waitpid`; the wrappers use `clone(SIGCHLD)`, `pipe2`, `dup3` and
+  `wait4` the way a libc would.
+- `crt0.S` -- `_start` sets `gp`, calls `main(argc, argv, envp)`, and passes
+  its return value to `exit_group`.
+- `ulib.c` / `ulib.h` -- `mem*`/`str*`, line-buffered output (one `write` per
+  line, so concurrent processes cannot interleave mid-line), CRC-32, and the
+  `prog_pass` / `prog_fail` result-line helpers.
+
+All are built with `-march=rv64imac -mabi=lp64 -O2 -ffreestanding -nostdlib
+-nostartfiles -static` and stripped, by the same `CROSS_COMPILE` as the
+kernel. `make -C testcode/linux userland` builds just them.
+
+### Adding a program
+
+1. Write `userland/<name>.c` with a `main` that prints its result line via
+   `prog_pass(name, checksum)` or `return prog_fail(name, "reason")`, and
+   returns 0 only on success. Use only syscalls in `syscall.h` (add a wrapper
+   there if needed, and check the kernel config enables the feature).
+2. Append `<name>` to `PROGS` in the `Makefile`. That one list drives the
+   build, the `file /bin/<name>` lines appended to the initramfs spec, and the
+   order `/init` runs them in -- nothing else needs editing.
+3. Keep it short: the core runs 50-100k cycles per second of wall time in
+   Verilator, and `fork` + `execve` + `wait4` alone cost a few million cycles
+   per program before `main` does any work. Keep the work itself small.
 
 ## What makes this finish in hours instead of weeks
 
@@ -122,11 +189,14 @@ page walk on every TLB miss. These force Sv39 and its three-level walk.
 
 ## Toolchain
 
-Everything builds with the bare-metal `riscv64-unknown-elf-` toolchain the repo
-already requires. `/init` is freestanding assembly against the Linux syscall
-ABI, so no musl, glibc or buildroot is needed to answer "did we reach
-userspace". A richer busybox userland would need a `riscv64-*-linux-gnu`
-toolchain; that is deliberately out of scope here.
+The kernel's VDSO cannot be linked by a bare-metal `riscv64-unknown-elf-`
+toolchain, so the Makefile uses a host `riscv64-linux-gnu-` (or
+`riscv64-unknown-linux-gnu-`) compiler if there is one, else fetches
+kernel.org's checksum-pinned nolibc cross compiler (see the Makefile).
+`/init` and `userland/` are freestanding C against the Linux syscall ABI,
+built by that same compiler, so no musl, glibc or buildroot is needed. A
+richer busybox userland would need a full `riscv64-*-linux-gnu` toolchain with
+a libc; that is deliberately out of scope here.
 
 ## Console plumbing
 
