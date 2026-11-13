@@ -210,6 +210,20 @@ proc dft_list_cells {prefix coll {max 50}} {
 # strict 0 reports the second kind instead of failing: DFT_SCOPE=pc scans only
 # the PC while cg_scan clocks the whole full-scope set.  The first kind is
 # always an error.
+# hold_mode must be loadable from the scan_en pin through sesync.  Errors if
+# compile folded the path (hold mode would then be unselectable and every DFT
+# session a legacy, destructive one), naming what hold_mode's D still sees.
+proc dft_check_hold_select {{chip chip}} {
+  set d [get_pins -quiet $chip/hold_mode_reg/D]
+  if {[sizeof_collection $d] != 1} { error "DFT: no $chip/hold_mode_reg/D after compile" }
+  set starts [all_fanin -flat -to $d -startpoints_only]
+  set from_se [filter_collection $starts "full_name=~$chip/sesync/*"]
+  if {[sizeof_collection $from_se] == 0} {
+    error "DFT: $chip/hold_mode_reg/D no longer depends on $chip/sesync (scan_en): fanin is [get_object_name $starts]"
+  }
+  puts "DFT hold select: $chip/hold_mode_reg/D <- [get_object_name $from_se]"
+}
+
 proc dft_check_clock_split {{chip chip} {strict 1} {scan ""} {what "scan-selected"}} {
   foreach g {cg_ns cg_scan} {
     if {[sizeof_collection [get_pins -quiet $chip/$g/gclk]] != 1} {

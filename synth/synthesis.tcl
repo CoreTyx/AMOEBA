@@ -600,6 +600,8 @@ change_names -rules nameRules -hierarchy
 # scan-selected.  Stops here, before the checkpoint, if the RTL split and the
 # dft_setup.tcl groups disagree.
 dft_check_clock_split chip [expr {$dft_scope eq "full"}]
+# hold_mode must still sample scan_en through sesync (dft_setup.tcl).
+dft_check_hold_select chip
 # What each RTL clock gate became; a discrete latch + AND gets the clock-gating
 # check DC does not infer for it (dft_procs.tcl, dft_rtl_clock_gate_checks).
 dft_rtl_clock_gate_checks chip

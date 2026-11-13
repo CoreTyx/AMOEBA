@@ -202,6 +202,16 @@ foreach {what pattern} {
   set_dont_retime $regs true
 }
 
+# scan_en's one functional load.  Declaring scan_en as the ScanEnable port
+# (below) makes test-ready compile treat it as inactive in functional logic,
+# and without this compile_ultra folded sesync away and tied hold_mode's D to
+# 0: hold mode could never be selected and every session was a legacy one
+# (found by full_tb phase S on a FreePDK45 run, 2026-11-12).  A separate
+# boundary with no boundary optimisation keeps that constant out of sesync;
+# dft_check_hold_select (dft_procs.tcl) checks the result after compile.
+set_ungroup [get_cells chip/sesync] false
+set_boundary_optimization [get_cells chip/sesync] false
+
 # Existing tester controls at the package pins. The single core_clk pad feeds
 # both core_clk and link_clk inside chip; there is no second test clock.
 set_scan_configuration -style multiplexed_flip_flop -clock_mixing no_mix
