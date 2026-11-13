@@ -368,6 +368,10 @@ task automatic res_session(input string tag, input string variant, inout int cyc
                                     same, DIAG_RF_ICG_TE, DIAG_RF_ICG, DIAG_RF_TE_NET, DIAG_ICG_TE, DIAG_ICG));
     if (variant == "tm") idle(4 * maxlen);
     else begin
+      // enter_hold() leaves scan_en low (the protocol's frozen idle edges);
+      // the unload and reload shift, so raise it, as enter_test() does.
+      set_se(1'b1);
+      if (scan_en !== 1'b1) fail($sformatf("%s: scan_en is %b for the unload; the session would not shift", tag, scan_en));
       shift(zeros, rec1);
       shift(encode(decode(rec1)), thru);
       // The zeros the unload shifted in come out first: inv[k] on every chain.

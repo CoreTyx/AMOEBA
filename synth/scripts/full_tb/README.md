@@ -141,8 +141,9 @@ regeneration unless its inputs changed.
 
 Pin comparisons determine pass/fail; internal hookups are diagnostic only.
 A/M/B always run first. A map or constrained-baseline failure blocks dependent
-cases. The remaining default order is `CDEPHFRI`; S runs only when named
-(`+SCAN_PHASES=S`): it fails until the hold-mode RTL is in.
+cases. The remaining default order is `CDEPHFRIS`. S needs a netlist with the
+hold-mode RTL (`dft-hold`); on an older netlist it fails by design, naming the
+causes (run `+SCAN_PHASES=CDEPHFRI` there).
 
 | Phase | Check |
 |---|---|
@@ -220,7 +221,8 @@ least 3 cycles: 3/4/8/16/50; the test-mode holds keep 1/2/4/8/16/50.
    pattern; see cause 4 below).
 2. Enter: `test_mode=1` and `scan_en=0` in the same cycle, 3 idle cycles (two
    functional edges while `test_mode` crosses `tmsync`, then frozen).
-3. Shift as needed; a `scan_en=0` edge must change nothing.
+3. Shift as needed with `scan_en=1` (`enter_hold()` leaves it low; phase S
+   raises it for the unload). A `scan_en=0` edge must change nothing.
 4. Exit: `scan_en=0`, `test_mode=0`, 3 idle cycles (two more frozen edges, then
    functional).
 
@@ -291,7 +293,7 @@ while the agent is paused, and on a failure prints `S CAUSE:` lines:
 
 | Argument | Default / purpose |
 |---|---|
-| `SCAN_PHASES=<letters>` | `CDEPHFRI`; ordered phases after A/M/B; letters may repeat. |
+| `SCAN_PHASES=<letters>` | `CDEPHFRIS`; ordered phases after A/M/B; letters may repeat. |
 | `SCAN_CASE=<substring>` | All cases; case-sensitive filter. A/M/B/C unaffected; no executable match fails. |
 | `SCAN_OP=capture|load|both` | `capture`; behavior described above. |
 | `SCAN_RANDOM_ITERS=<n>` / `SCAN_EXEC_ITERS=<n>` | `100` / `16`; positive counts. Eight I cases cover all categories. |
@@ -367,24 +369,23 @@ map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
 
 ## Open action items
 
-- [ ] **Make phase S pass, then add it to the default order.** Needs the
-  hold-mode RTL (session type latched from `scan_en` at test-mode entry,
-  non-scan state frozen, clock-gate `TE` and `scan_en` qualified by test mode)
-  and a netlist from it; then `--regen`, `+SCAN_PHASES=S`, and add `S` to
-  `phase_order` and `regress.sh`.
-
-- [ ] **Implement the DFT-session stall and rebuild/verify the DFT flow.** Tie
-  the halt to qualified `test_mode_dft` so it persists when `scan_en=0`; audit
-  unscanned side effects and synchronized mode-entry timing. Re-synthesize,
-  redo scan selection (including revised multiplier state), regenerate metadata,
-  remap/reverify logical phase, and verify capture/retention plus scan priority
-  with the new netlist. Define intentional ECC/fault updates and any separate
-  halt release needed for advancing functional capture.
+- [x] **Make phase S pass, then add it to the default order.** Done with the
+  hold-mode RTL (`dft-hold`: clock split `cg_ns`/`cg_scan`, hold mode latched
+  from `scan_en` at test-mode entry, `scan_en` qualified by test mode) and the
+  flow's clock-gate exclusions. FreePDK45 full scope (2026-11-12): all phases
+  incl. S pass (20 S cases), BREAK_SE/BREAK_MAP fail; on the pre-hold netlist
+  S fails with causes 1-4. TSMC run still to do.
+- [x] **Implement the DFT-session stall and rebuild/verify the DFT flow.**
+  Superseded by the hold (a clock split rather than a stall: a stall cannot
+  freeze traps, flushes, the regfile write, cache/bus/MDU/FT FSMs or MTIME).
+  Legacy test mode keeps functional capture edges; see `HANDOFF.md` 6a.
 - [x] **Port the testbench/DFT interface to the new I/O.** Chains are
   `io_in[k] -> io_out[k]`; phase I uses the current link agent; the bench waits
   out the test_mode synchroniser; scan_map.awk and internal_hookups.py treat the
   scandef STOP entry as the chain endpoint, not a cell.
-- [ ] **Explain and fix unprotected readout corruption.** Compare matched
+- [ ] **Explain and fix unprotected readout corruption (legacy mode).** Hold
+  sessions read without reset and without corruption; this item now concerns
+  legacy (capture) sessions only, where the core runs during the unload. Compare matched
   protected/unprotected cases at the first divergence; inspect effective scan
   enable, DFT lock, pad mux, clocks/resets, and unscanned activity. Keep protected
   unloading as default until the supported unprotected procedure is verified.

@@ -212,7 +212,7 @@ module tb_scan;
   bit in_check_fail = 1'b0;
   bit have_snapshot = 1'b0;
   // A/M/B are prerequisites. Remaining letters execute in the requested order.
-  string phase_order = "CDEPHFRI", case_filter = "", scan_op = "capture";
+  string phase_order = "CDEPHFRIS", case_filter = "", scan_op = "capture";
   bit baseline_ok = 0, sentinel_enabled = 0, sweep_enabled = 0;
   bit unload_reset_enabled = 1;
   int case_repeats = 1, cases_selected = 0, checks_skipped = 0;
