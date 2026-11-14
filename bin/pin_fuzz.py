@@ -25,6 +25,10 @@ Cascade is used as published, with four replacements made from here (no fork):
   - counters: this core has no Zicntr/Zihpm; the initial block's mcycle and
     minstret resets become mscratch writes, and random CSR ops skip them.
   - generation seed: Cascade's gen_many_elfs always seeds 0; ours takes --seed.
+  - Spike's stderr: Cascade reads the debug console's output by line number,
+    counting on the "warning: tohost and fromhost symbols not in ELF" line
+    Spike 1.1.0 prints first.  Later Spikes (the course's 1.1.1-dev) do not
+    print it, which shifts every value by one line; it is put back when absent.
 A Cascade program detects a bug by not terminating, so the bench's
 run_until_tohost timeout is the check.
 """
@@ -124,6 +128,23 @@ def cascade_env(tmp):
         def choice(self, seq):
             return _random.choice([x for x in seq if getattr(x, "name", None) not in self.absent] or seq)
     pr.random = NoCounters()
+    # Spike >= 1.1.1 dropped the warning Cascade's line-numbered parsing
+    # skips (common/spike.py reads value i at line i+1): restore it.
+    import common.spike as cspike
+    import subprocess as _sp
+    TOHOST_WARN = b"warning: tohost and fromhost symbols not in ELF; can't communicate with target\n"
+
+    class SpikeCompat:
+        def __getattr__(self, name):
+            return getattr(_sp, name)
+        @staticmethod
+        def run(cmd, *a, **k):
+            r = _sp.run(cmd, *a, **k)
+            if (cmd and cmd[0] == "spike" and isinstance(r.stderr, bytes)
+                    and not r.stderr.startswith(b"warning: tohost")):
+                r.stderr = TOHOST_WARN + r.stderr
+            return r
+    cspike.subprocess = SpikeCompat()
     from cascade.fuzzfromdescriptor import gen_new_test_instance, gen_fuzzerstate_elf_expectedvals
     from common.spike import calibrate_spikespeed
     return gen_new_test_instance, gen_fuzzerstate_elf_expectedvals, calibrate_spikespeed

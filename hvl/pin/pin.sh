@@ -11,6 +11,7 @@
 #                             script: load, reset, run to tohost, expect exit 0.
 #                             With one: $MEM (the image), $RUN and $REPO expand.
 #   compare <runA> <runB>     pin traces must match (bin/pin_trace_cmp.py)
+#   build-dir / runs-dir      print where build / run would go, and stop
 #
 # DUT variants -- the first two are the RTL references, the third the netlist:
 #   rtl      forte_top RTL with `SYNTHESIS: SRAM macros and pad cells exactly
@@ -21,8 +22,30 @@
 #            unless $SDF is set in vm_paths.sh.
 # Verilator is 2-state: it validates the bench and the flow, not X behaviour.
 #
-# Runs land in sim/pin/runs/$SIM_$DUT/<name>/: sim.log, pin_trace.log,
-# uart.log, and RESULT (the PIN_TB_RESULT line, or FAIL if there was none).
+# Runs land in sim/pin/runs/$SIM_$DUT[_<corner>]/<name>/: sim.log, pin_trace.log,
+# pin_cycle.log.gz, uart.log, and RESULT (the PIN_TB_RESULT line, or FAIL if
+# there was none).
+#
+# Environment (all optional; postpnr/run.sh and postpnr/prepare.sh set them):
+#   PIN_NETLIST, PIN_SDF, PIN_SDF_CORNER   override vm_paths.sh's NETLIST, SDF,
+#                                          SDF_CORNER (the post-PnR drop folder)
+#   PIN_PATHS_EXTRA   a file sourced after vm_paths.sh (postpnr's pnr.env)
+#   PIN_RTL_ROOT      take hdl/ and pkg/ from this tree instead of this checkout
+#                     (the golden RTL at a pinned commit, with this bench)
+#   PIN_BUILD, PIN_RUNS   build and run directories instead of sim/pin/...
+#   PIN_WAIVERS       file of regexes: matching 'Timing violation' lines are
+#                     reported but do not fail the run (none by default)
+#   INITREG=0|1|random    VCS only: start every register and memory at that
+#                     value (+vcs+initreg).  For triage of X-pessimism ONLY --
+#                     a sign-off run starts from X; RESULT says when it did not.
+#
+# A gate build with an SDF is a TIMING simulation, and fails hard on:
+#   - any VCS SDFCOM_* message at compile time (an SDF entry not annotated --
+#     a missing instance, pin or arc means some delay or check is not modelled),
+#     or any other SDF* message (SDFPE: a parse error, which ABORTS annotation),
+#   - an annotation VCS does not report completed with 0 errors and 0 warnings,
+# and every run of it fails on any 'Timing violation' (setup, hold, recovery,
+# removal, width, period) not matched by PIN_WAIVERS, even if the bench passed.
 # One simulation at a time per checkout: generate_memory_file.py writes a
 # shared sim/bin/memory_8.lst, which this script copies away immediately.
 set -euo pipefail
@@ -31,10 +54,8 @@ R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 P="$R/hvl/pin"
 SIM="${SIM:-verilator}"
 DUT="${DUT:-rtl}"
-# WAVES=1 builds (waveform dumping) live in their own directory, so a normal
-# rebuild -- the self-test, vm_run.sh -- cannot replace them unnoticed.
-BUILD="$R/sim/pin/build/${SIM}_${DUT}${WAVES:+_waves}"
-RUNS="$R/sim/pin/runs/${SIM}_${DUT}"
+RTL="${PIN_RTL_ROOT:-$R}"
+INITREG="${INITREG:-}"
 
 die() { echo "pin.sh: $*" >&2; exit 1; }
 
@@ -42,15 +63,37 @@ case "$SIM" in verilator|vcs) ;; *) die "SIM must be verilator or vcs, not '$SIM
 case "$DUT" in rtl|rtl_sva|gate) ;; *) die "DUT must be rtl, rtl_sva or gate, not '$DUT'";; esac
 [ "$SIM/$DUT" = "verilator/gate" ] && die "gate-level needs a 4-state simulator: use SIM=vcs"
 
+case "$INITREG" in ""|0|1|random) ;; *) die "INITREG must be 0, 1 or random, not '$INITREG'";; esac
+[ -n "$INITREG" ] && [ "$SIM" != vcs ] && die "INITREG is VCS only (Verilator is 2-state and starts at 0)"
+
 if [ "$SIM" = vcs ]; then
   # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
   [ -f "$P/vm_paths.sh" ] || die "no $P/vm_paths.sh: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
   # shellcheck source=vm_paths.example.sh
   PDK_FIRST=(); VCS_FLAGS=()
   source "$P/vm_paths.sh"
+  if [ -n "${PIN_PATHS_EXTRA:-}" ]; then
+    [ -f "$PIN_PATHS_EXTRA" ] || die "PIN_PATHS_EXTRA: no such file: $PIN_PATHS_EXTRA"
+    # shellcheck disable=SC1090
+    source "$PIN_PATHS_EXTRA"
+  fi
+  # The drop folder wins over whatever vm_paths.sh hard-codes.
+  [ -n "${PIN_NETLIST:-}" ]    && NETLIST="$PIN_NETLIST"
+  [ -n "${PIN_SDF+x}" ]        && SDF="$PIN_SDF"
+  [ -n "${PIN_SDF_CORNER:-}" ] && SDF_CORNER="$PIN_SDF_CORNER"
+  SDF_CORNER="${SDF_CORNER:-max}"
+  case "$SDF_CORNER" in min|typ|max) ;; *) die "SDF_CORNER must be min, typ or max, not '$SDF_CORNER'";; esac
 else
   NETLIST=""; SDF=""; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=()
 fi
+[ "$DUT" = gate ] || SDF=""        # SDF belongs to the netlist only
+TIMED=""; [ "$DUT" = gate ] && [ -n "$SDF" ] && TIMED="_sdf${SDF_CORNER}"
+
+# One build per configuration: WAVES=1 (waveform dumping), each SDF corner
+# (annotated at compile time) and INITREG live in their own directories, so a
+# normal rebuild -- the self-test, vm_run.sh -- cannot replace them unnoticed.
+BUILD="${PIN_BUILD:-$R/sim/pin/build/${SIM}_${DUT}${TIMED}${INITREG:+_init$INITREG}${WAVES:+_waves}}"
+RUNS="${PIN_RUNS:-$R/sim/pin/runs/${SIM}_${DUT}${TIMED}${INITREG:+_init$INITREG}}"
 
 # ---- source lists ------------------------------------------------------------
 # Only directories that exist: a VM unpacked from vm_bundle.tgz has no
@@ -59,10 +102,10 @@ INCS=()
 # hdl itself: prim_fifo_async.sv (moved there from third_party/opentitan) does
 # `include "prim_assert.sv".
 for d in pkg hdl hdl/core hdl/core/ifu/bpred third_party/cvw/config/rv64gc; do
-  [ -d "$R/$d" ] && INCS+=(+incdir+"$R/$d")
+  [ -d "$RTL/$d" ] && INCS+=(+incdir+"$RTL/$d")
 done
-BENCH=("$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/pin_tb.sv")
-LINK_PKG="$R/hdl/forte_link_pkg.sv"
+BENCH=("$P/pin_link_agent.sv" "$P/pin_uart_agent.sv" "$P/pin_cycle_trace.sv" "$P/pin_tb.sv")
+LINK_PKG="$RTL/hdl/forte_link_pkg.sv"
 
 # Compile order.  PDK model files go FIRST, as ordinary sources, in the order
 # vm_paths.sh lists them: PDK_FIRST (primitives, headers and anything the pad
@@ -78,8 +121,8 @@ pdk_first() {
 
 rtl_sources() {
   local core forte
-  mapfile -t core  < <(find "$R/hdl/core" \( -name '*.sv' -o -name '*.v' \) ! -name cvw.sv | sort)
-  mapfile -t forte < <(find "$R/hdl" -maxdepth 1 -name 'forte_*.sv' ! -name forte_link_pkg.sv | sort)
+  mapfile -t core  < <(find "$RTL/hdl/core" \( -name '*.sv' -o -name '*.v' \) ! -name cvw.sv | sort)
+  mapfile -t forte < <(find "$RTL/hdl" -maxdepth 1 -name 'forte_*.sv' ! -name forte_link_pkg.sv | sort)
   DEFS=(+define+PIN_TB_RTL +define+ECE411_NO_FLOAT +define+ECE411_LINUX)
   LIBS=()
   SRCS=()
@@ -92,8 +135,8 @@ rtl_sources() {
     if [ ${#SRAM_MODELS[@]} -gt 0 ]; then PDK+=("${SRAM_MODELS[@]}"); else PDK+=("$P/models/sram_behav.sv"); fi
     SRCS=("${PDK[@]}")
   fi
-  SRCS+=("$R/pkg/types.sv" "$LINK_PKG" "$R/hdl/core/cvw.sv" "${core[@]}" "${forte[@]}"
-         "$R/hdl/prim_flop_2sync.sv" "$R/hdl/prim_fifo_async.sv"
+  SRCS+=("$RTL/pkg/types.sv" "$LINK_PKG" "$RTL/hdl/core/cvw.sv" "${core[@]}" "${forte[@]}"
+         "$RTL/hdl/prim_flop_2sync.sv" "$RTL/hdl/prim_fifo_async.sv"
          "${BENCH[@]}")
 }
 
@@ -130,7 +173,9 @@ preflight() {
     local hdr; hdr="$(sed -nE '/^[[:space:]]*module[[:space:]]+forte_top([^[:alnum:]_]|$)/,/;/p' "$NETLIST")"
     [ -n "$hdr" ] || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
     # Every SRAM macro and pad cell the netlist instantiates must be defined by a model.
-    local defs; defs="$(cat ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null | grep -oE '^[[:space:]]*module[[:space:]]+[A-Za-z0-9_]+' | awk '{print $2}' | sort -u)"
+    # (models/sram_behav.sv defines its macros through `PIN_RF_SP(name, ...).)
+    local defs; defs="$(cat ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null \
+      | grep -oE '^[[:space:]]*(module[[:space:]]+|`PIN_RF_SP\()[A-Za-z0-9_]+' | sed -E 's/.*(module[[:space:]]+|\()//' | sort -u)"
     for m in $(grep -oE '^[[:space:]]*((rf|sram)_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done
@@ -151,8 +196,12 @@ src_hash() {
   local f files=()
   for f in "${SRCS[@]}" "${LIBS[@]}"; do [ -f "$f" ] && files+=("$f"); done
   # Included headers are not in SRCS: take every header the include paths hold.
-  while IFS= read -r f; do files+=("$f"); done < <(find "$R/pkg" "$R/hdl" -maxdepth 1 \( -name '*.vh' -o -name '*.svh' -o -name 'prim_assert.sv' \) 2>/dev/null)
-  sha256sum "${files[@]}" 2>/dev/null | awk '{print $1}' | sha256sum | awk '{print $1}'
+  while IFS= read -r f; do files+=("$f"); done < <(find "$RTL/pkg" "$RTL/hdl" -maxdepth 1 \( -name '*.vh' -o -name '*.svh' -o -name 'prim_assert.sv' \) 2>/dev/null)
+  # The SDF, corner and INITREG are compiled in too.
+  { sha256sum "${files[@]}" 2>/dev/null | awk '{print $1}'
+    # An SDF can be gigabytes: identify it by path, size and mtime, not content.
+    [ -n "$SDF" ] && { stat -L -c '%n %s %Y' "$SDF"; echo "corner=$SDF_CORNER"; }
+    echo "initreg=$INITREG"; } | sha256sum | awk '{print $1}'
 }
 
 build() {
@@ -173,8 +222,15 @@ build() {
     [ -n "${WAVES:-}" ] && xp+=(-debug_access+all -kdb +define+PIN_WAVES)
     local timing=(+nospecify +notimingcheck)
     if [ "$DUT" = gate ] && [ -n "$SDF" ]; then
-      timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk)
+      # Timing checks ON (no +notimingcheck/+nospecify), negative limits
+      # honoured, and every SDF message printed rather than summarised.
+      # NTC and RECREM are the cell-model conventions (Artisan/TSMC, NanGate)
+      # that switch on the delayed-signal nets negative limits need and the
+      # recovery/removal checks: without them a library may compile its
+      # timing checks out or ignore negative setup/hold values.
+      timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk +sdfverbose +define+NTC +define+RECREM)
     fi
+    [ -n "$INITREG" ] && timing+=(+vcs+initreg+random)
     # All of VCS's output into build.log (and the terminal), not -l: licence,
     # environment and command-line errors only ever reach the terminal.
     # simv is kept between builds: VCS compiles incrementally and, when nothing
@@ -204,8 +260,51 @@ build() {
       die "vcs build failed (exit $rc), see $BUILD/build.log"
     fi
   fi
+  if [ "$SIM" = vcs ] && [ -n "$SDF" ]; then sdf_gate; fi
   src_hash > "$BUILD/srchash"
   echo "build: OK"
+}
+
+# The SDF must annotate completely.  Fails the build on:
+#   - any VCS SDF message: SDFCOM_* (an SDF instance, port, arc or check it
+#     could not find or apply -- delays or checks silently missing) and every
+#     other SDF* tag, e.g. SDFPE (a parse error, after which VCS ABORTS the
+#     annotation and the build would otherwise run with no delays at all);
+#   - an annotation that did not end in "SDF annotation completed" with
+#     "Total errors: 0" and "Total warnings: 0", or that VCS reports aborted.
+sdf_gate() {
+  local bad summ now
+  now="$(src_hash)"
+  # VCS skips an unchanged design ("need not be recompiled") and prints no
+  # annotation at all: accept that only if this exact configuration (sources,
+  # netlist, SDF path/size/mtime, corner) annotated cleanly before.
+  if grep -q "design hasn't changed and need not be recompiled" "$BUILD/build.log"; then
+    if [ "$(cat "$BUILD/sdf_ok" 2>/dev/null)" = "$now" ]; then
+      echo "build: SDF $SDF ($SDF_CORNER) unchanged since it annotated completely"
+      return 0
+    fi
+    sdf_fail "VCS did not recompile, and this configuration has no record of a clean annotation"
+  fi
+  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" || true)"
+  if [ -n "$bad" ]; then
+    grep -A4 -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | head -40 | sed 's/^/  | /' >&2
+    sdf_fail "$(wc -l <<<"$bad") SDF message(s): $(grep -oE 'SDF[A-Z0-9_]*' <<<"$bad" | sort | uniq -c | awk '{printf "%s x%s ", $2, $1}')(first above; all in $BUILD/build.log)"
+  fi
+  summ="$(sed -n '/SDF annotation begin/,/SDF annotation \(completed\|aborted\)/p' "$BUILD/build.log")"
+  if [ -z "$summ" ] || grep -q 'SDF annotation aborted' <<<"$summ" || ! grep -q 'SDF annotation completed' <<<"$summ" \
+     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE 'Total warnings: +0$' <<<"$summ"; then
+    echo "$summ" | tail -12 | sed 's/^/  | /' >&2
+    sdf_fail "annotation of $SDF did not complete cleanly (above; $BUILD/build.log)"
+  fi
+  echo "$now" > "$BUILD/sdf_ok"
+  echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors, 0 warnings, no SDF* messages"
+}
+
+# A failed annotation leaves no runnable build, and makes VCS recompile next
+# time instead of calling the design unchanged.
+sdf_fail() {
+  rm -f "$BUILD/srchash" "$BUILD/sdf_ok" "$BUILD/simv.daidir/.vcs.timestamp"
+  die "SDF annotation: $*"
 }
 
 # ---- run -------------------------------------------------------------------------------
@@ -249,8 +348,11 @@ run() {
     args=(+CMD="$run/script.cmd")
   fi
   echo "run: $name${script:+ ($(basename "$script"))} -> $run"
-  ( cd "$run" && "$exe" "${args[@]}" +FPGA_TRACE="$run/pin_trace.log" +UART_LOG="$run/uart.log" "$@" ) \
+  [ -n "$INITREG" ] && args+=(+vcs+initreg+"$INITREG")
+  ( cd "$run" && "$exe" "${args[@]}" +FPGA_TRACE="$run/pin_trace.log" +UART_LOG="$run/uart.log" \
+      +PIN_CYCLE_TRACE="$run/pin_cycle.log" "$@" ) \
     > "$run/sim.log" 2>&1 || true
+  [ -f "$run/pin_cycle.log" ] && gzip -f "$run/pin_cycle.log"
   [ $vcd = 1 ] && { [ -s "$run/pin.vcd" ] && echo "waveform: $run/pin.vcd" || echo "pin.sh: WARNING +PIN_VCD given but no $run/pin.vcd was written" >&2; }
   [ $fsdb = 1 ] && { [ -s "$run/wave.fsdb" ] && echo "waveform: $run/wave.fsdb  (verdi -ssf $run/wave.fsdb)" || echo "pin.sh: WARNING +PIN_FSDB given but no $run/wave.fsdb was written" >&2; }
   # No verdict line: a $fatal in the DESIGN (its own assertions) ends the run
@@ -261,9 +363,31 @@ run() {
     if [ -n "$fat" ]; then res="PIN_TB_RESULT: FAIL design \$fatal: $fat"
     else res="PIN_TB_RESULT: FAIL no verdict (crash or killed; see $run/sim.log)"; fi
   fi
+  # Timing checks: a violation is a failure however the bench ended.
+  local nv nw=0 viol
+  nv="$(grep -c 'Timing violation' "$run/sim.log" || true)"
+  if [ "$nv" -gt 0 ]; then
+    viol="$(grep -A2 'Timing violation' "$run/sim.log" | grep -v '^--$')"
+    if [ -n "${PIN_WAIVERS:-}" ] && [ -s "$PIN_WAIVERS" ]; then
+      local pats; pats="$(grep -vE '^[[:space:]]*(#|$)' "$PIN_WAIVERS" || true)"
+      if [ -n "$pats" ]; then
+        nw="$(grep 'Timing violation' "$run/sim.log" | grep -cEf <(echo "$pats") || true)"
+        grep 'Timing violation' "$run/sim.log" | grep -Ef <(echo "$pats") > "$run/TCHK_WAIVED" || true
+      fi
+    fi
+    echo "$viol" | head -60 > "$run/TCHK"
+    if [ $((nv - nw)) -gt 0 ]; then
+      local wv=""; [ "$nw" -gt 0 ] && wv=" ($nw waived)"
+      # Never the word PASS in a FAIL line: callers grep for it.
+      local bench="${res#PIN_TB_RESULT: }"; [[ "$bench" == PASS* ]] && bench="functionally ok"
+      res="PIN_TB_RESULT: FAIL $((nv - nw)) timing violation(s)$wv; bench: $bench"
+    fi
+  fi
+  echo "tchk=$nv waived=$nw" > "$run/TCHK_COUNT"
+  [ -n "$INITREG" ] && res="$res [INITREG=$INITREG: not sign-off]"
   echo "$res" | tee "$run/RESULT"
   grep -E '^\[PIN_TB\] cycles=|ERROR' "$run/sim.log" | head -20 || true
-  [[ "$res" == *PASS* ]]
+  [[ "$res" == "PIN_TB_RESULT: PASS"* ]]
 }
 
 case "${1:-}" in
@@ -271,5 +395,7 @@ case "${1:-}" in
   build)     build;;
   run)       shift; run "$@";;
   compare)   shift; python3 "$R/bin/pin_trace_cmp.py" "$@";;
-  *)         sed -n '2,24p' "$0"; exit 1;;
+  build-dir) echo "$BUILD";;
+  runs-dir)  echo "$RUNS";;
+  *)         sed -n '2,/^set -euo pipefail/{/^set -euo/d;p}' "$0"; exit 1;;
 esac

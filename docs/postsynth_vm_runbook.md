@@ -192,8 +192,18 @@ The plusargs are listed in `hvl/pin/README.md`.  `+FPGA_TCO_PS` and
 `+FPGA_SAMPLE_PS` move the bench's drive and sample points, which matters once
 an SDF is in use.
 
-## Later: post-place-and-route
+## Post-place-and-route
 
-The same procedure applies.  Point `NETLIST` at the post-PnR netlist and set
-`SDF` (with `SDF_CORNER` = `min`, `typ` or `max`) in `vm_paths.sh`.  The build
-then back-annotates delays on `pin_tb.dut` and enables timing checks.
+Post-PnR has its own driver and runbook: **`postpnr/README.md`**.
+
+- **Drop folder:** put the netlist, the SDF(s) and the PnR SDC in one folder and set `PNR_DIR`.
+- **Golden:** made locally from the netlist's RTL commit, then bundled.
+- **On the VM:** `postpnr/run.sh` runs every image on both SDF corners with the SDC's I/O delays. It compares each run with the golden RTL, pin by pin and cycle by cycle.
+
+A run fails on any of:
+- an `SDFCOM_*` message,
+- a VCS `Timing violation`,
+- a pad output-window error,
+- a trace difference.
+
+Only the model paths in `vm_paths.sh` are used; `run.sh` sets `NETLIST`, `SDF` and `SDF_CORNER` itself.

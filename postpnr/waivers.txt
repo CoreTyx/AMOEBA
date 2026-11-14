@@ -1,0 +1,11 @@
+# postpnr/waivers.txt -- timing-check waivers for postpnr/run.sh.  EMPTY BY POLICY.
+#
+# Every VCS 'Timing violation' fails its run.  A line here is an extended
+# regex (grep -E) matched against each 'Timing violation in <instance>' line;
+# a match is still listed in the run's TCHK_WAIVED and counted in SUMMARY, but
+# does not fail the run.  Add one only for a reviewed, understood case -- e.g.
+# the first flop of a synchroniser on a truly asynchronous input -- with a
+# comment saying who reviewed it and why, e.g.:
+#
+#   # 2026-11-20 reviewed: irq is async (set_false_path), first sync stage
+#   Timing violation in pin_tb\.dut\..*irq_sync.*_reg_0_

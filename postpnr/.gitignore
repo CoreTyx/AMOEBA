@@ -1,0 +1,6 @@
+# generated: goldens (postpnr/prepare.sh), scratch, VM results, bundles
+golden/
+work/
+results/
+*.tgz
+__pycache__/

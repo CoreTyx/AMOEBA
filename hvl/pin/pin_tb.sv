@@ -90,6 +90,12 @@ module pin_tb;
 
   pin_uart_agent uart (.core_clk, .rst_n, .uart_tx, .uart_rx);
 
+  // Per-cycle pin trace and the pad output-window checks (both off unless
+  // their plusargs are given; see pin_cycle_trace.sv).
+  pin_cycle_trace #(.LINK_W(LINK_W)) pins (
+    .core_clk, .rst_n, .io_in, .ready, .rvalid, .irq, .uart_rx, .test_mode,
+    .scan_en, .fault_inject, .io_out, .req, .wr, .uart_tx, .status, .clk_out);
+
 `ifdef PIN_TB_RTL
   // Only the RTL has a forte_chip to ask.
   initial if (dut.chip.LINK_BEATS != BEATS)
@@ -105,7 +111,7 @@ module pin_tb;
   int     status_edges = 0;
 
   function automatic int total_errors();
-    return errors + link.errors + uart.errors;
+    return errors + link.errors + uart.errors + pins.errors;
   endfunction
 
   function automatic void err(input string m);

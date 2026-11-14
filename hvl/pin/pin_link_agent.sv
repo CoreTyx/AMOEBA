@@ -13,6 +13,10 @@
 //   capture  chip outputs (req, wr, io_out) are sampled SAMPLE after the
 //            clk_out posedge.  clk_out is the forwarded link clock, so in an
 //            SDF run this tracks the chip's own insertion delay, as on the board.
+//            +FPGA_SAMPLE_REF=core samples SAMPLE after the core_clk posedge
+//            instead: the reference synth/constraints.sdc times the outputs
+//            against (set_output_delay -clock core_clk), so postpnr/run.sh
+//            uses it with SAMPLE = T - output_delay(max).
 // Sampling mid-cycle and launching after the edge is race-free in RTL, in a
 // zero-delay netlist and with back-annotated delays alike, so an RTL run and a
 // netlist run see the same cycle on every pin and their traces are comparable.
@@ -62,6 +66,7 @@ module pin_link_agent import forte_link_pkg::*; #(
   // ---- knobs (plusargs, overridable by tb commands) -----------------------
   real         tco_ns     = 2.0;             // +FPGA_TCO_PS
   real         sample_ns  = 5.0;             // +FPGA_SAMPLE_PS
+  bit          sample_core = 0;              // +FPGA_SAMPLE_REF=core|clk_out
   int          rd_latency = 0;               // extra cycles before the first word
   int          gap_pct    = 0;               // % of cycles ready/rvalid withheld
   string       idle_drive = "0";             // io_in when no read word is on it: 0|x|z
@@ -196,6 +201,10 @@ module pin_link_agent import forte_link_pkg::*; #(
     string s;
     if ($value$plusargs("FPGA_TCO_PS=%d", v))     tco_ns    = v / 1000.0;
     if ($value$plusargs("FPGA_SAMPLE_PS=%d", v))  sample_ns = v / 1000.0;
+    if ($value$plusargs("FPGA_SAMPLE_REF=%s", s)) begin
+      if (s == "core") sample_core = 1;
+      else if (s != "clk_out") $fatal(1, "pin_link_agent: FPGA_SAMPLE_REF=%s, expected core or clk_out", s);
+    end
     if ($value$plusargs("FPGA_RD_LAT=%d", v))     rd_latency = v;
     if ($value$plusargs("FPGA_GAP_PCT=%d", v))    gap_pct   = v;
     if ($value$plusargs("FPGA_SEED=%d", v))       seed      = v;
@@ -267,7 +276,7 @@ module pin_link_agent import forte_link_pkg::*; #(
     line_w = new[BEATS];
     st = A_IDLE; first_xact = 1; notready_cnt = 0;
     forever begin
-      @(posedge clk_out);
+      if (sample_core) @(posedge core_clk); else @(posedge clk_out);
       #(sample_ns);
       s_req = req; s_wr = wr; s_io = io_out;
 
