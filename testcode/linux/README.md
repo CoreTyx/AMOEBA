@@ -150,6 +150,20 @@ kernel. `make -C testcode/linux userland` builds just them.
    Verilator, and `fork` + `execve` + `wait4` alone cost a few million cycles
    per program before `main` does any work. Keep the work itself small.
 
+### When a program fails on the RTL but passes on Spike
+
+Every attempt at the failure costs a boot of hours, so do not debug it here.
+Model the kernel path the program exercises as a bare-metal ISA-level test, with
+an M-mode trap handler doing what the kernel does, and run that in minutes, with
+waveforms.
+
+`isa_level_testing/tc_cow_fault.c` is the worked example. `mem` read back zeros
+because the instruction cache returned the next line after the ITLB miss that
+follows every page-fault return, so the retried copy-on-write store was never
+executed. The test faults on demand-paged and zero-page pages the way Linux
+does, `sfence.vma` included. It pins the faulting store at the line offsets that
+exposed the bug, and caught it in 1M cycles.
+
 ## What makes this finish in hours instead of weeks
 
 **Waveforms are compiled out, not disabled.** `make -C sim build_linux` builds
