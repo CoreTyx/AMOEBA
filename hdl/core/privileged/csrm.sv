@@ -34,6 +34,7 @@
 
 module csrm  import cvw::*;  #(parameter cvw_t P) (
   input  logic                     clk, reset,
+  input  logic                     DFTHold,     // DFT hold: MSECFAULT holds (forte_chip.sv)
   input  logic                     UngatedCSRMWriteM, CSRMWriteM, MTrapM,
   input  logic [11:0]              CSRAdrM,
   input  logic [P.XLEN-1:0]        NextEPCM, NextMtvalM, MSTATUS_REGW, MSTATUSH_REGW,
@@ -257,7 +258,8 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
 
   always_ff @(posedge clk)
     if (reset) MSECFAULT_REGW <= 7'h00;
-    else       MSECFAULT_REGW <= (MSECFAULT_REGW | SecFaultM) & ~msecfault_clr;
+    // Scanned, but not stall-enabled: hold it explicitly in a DFT hold.
+    else if (~DFTHold) MSECFAULT_REGW <= (MSECFAULT_REGW | SecFaultM) & ~msecfault_clr;
 
   // Read machine mode CSRs
   // verilator lint_off WIDTH

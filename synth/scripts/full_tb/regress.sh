@@ -94,6 +94,8 @@ else
     run_case 08_full_suite      +SCAN_OP=both +SCAN_UNLOAD_RESET
     run_case 09_randomized      +SCAN_PHASES=R +SCAN_RANDOM_ITERS=1000 +SCAN_OP=both +SCAN_UNLOAD_RESET +SCAN_TIMEOUT_NS=1000000000
     run_case 10_instruction_scan +SCAN_PHASES=I +SCAN_EXEC_ITERS=64 +SCAN_OP=both +SCAN_UNLOAD_RESET
+    # Hold sessions mid-program: unload, reload, resume, compare.
+    run_case 11_session_resume  +SCAN_PHASES=S +SCAN_RESUME_ITERS=8
 fi
 
 echo

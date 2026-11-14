@@ -40,6 +40,7 @@
 module cacheway #(parameter NUMSETS=512, READ_ONLY_CACHE = 0) (
   input  logic                        clk,
   input  logic                        reset,
+  input  logic                        DFTHold,        // DFT hold: freeze (forte_chip.sv)
   input  logic                        FlushStage,     // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                        InvalidateFlushStage,     // Pipeline flush of second stage (prevent writes and bus operations)
   input  logic                        CacheEn,        // Enable the cache memory arrays.  Disable hold read data constant
@@ -142,10 +143,10 @@ module cacheway #(parameter NUMSETS=512, READ_ONLY_CACHE = 0) (
   assign HitWayLive = ArriveWay & ValidWay & TagMatchLive & ~InvalidateCacheDelay & ~TagDedErrLive; // exclusion-tag: dcache HitWay
   always_ff @(posedge clk)
     if (reset | ScanStart) {HitWayQ, TagSecErr, TagDedErr} <= '0;
-    else if (ArriveWay)    {HitWayQ, TagSecErr, TagDedErr} <= {HitWayLive, TagSecErrLive, TagDedErrLive};
+    else if (ArriveWay & ~DFTHold)    {HitWayQ, TagSecErr, TagDedErr} <= {HitWayLive, TagSecErrLive, TagDedErrLive};
   // An invalidate must not be outlived by a registered hit.
   assign HitWay = HitWayQ & ~InvalidateCacheDelay;
-  flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, 1'b1, InvalidateCache, InvalidateCacheDelay);
+  flopenrc #(1) InvalidateCacheReg(clk, 1'b0, InvalidateFlushStage, ~DFTHold, InvalidateCache, InvalidateCacheDelay);
 
   assign HitDirtyWay = DirtyEff & ValidWay;
   // The lost-tag check and the flush walk act in the cycle the tag is read.

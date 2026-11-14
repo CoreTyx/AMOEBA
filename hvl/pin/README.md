@@ -84,7 +84,8 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 | `uart_div <n>` / `uart_gap <bits>` / `uart_send <text>` / `uart_fail <text>` | console |
 | `irq <0\|1> <0\|1>` / `fault_inject <0\|1>` | pins |
 | `dump_mem <hexaddr> <nbytes> <path>` | write memory to a file |
-| `dft ...` | stub: fails until DFT testing exists |
+| `dft_hold <cycles>` | a DFT hold session (`hdl/forte_chip.sv`, "DFT HOLD"): pause the link, arm `scan_en`, enter test mode, stay frozen `<cycles>`, leave; `req`/`wr` must stay low, and under `DUT=rtl` the fetch PC, register file and MTIME must not move. No shifting: the RTL has no chains (gate-level `full_tb` phase S covers that). `tests/dft_hold.cmd` runs four of them; compare its trace with a plain run using `compare --no-cycles` |
+| `dft ...` | fails: scan shifting is tested at gate level (`synth/scripts/full_tb` on `dft`) |
 | `finish` | pass, if no checker has fired |
 
 ## Plusargs
