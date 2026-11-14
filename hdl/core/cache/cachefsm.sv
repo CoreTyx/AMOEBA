@@ -256,7 +256,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
 
   // com back to CPU
   assign CacheCommitted = (CurrState != STATE_ACCESS) & ~(READ_ONLY_CACHE & (CurrState == STATE_ADDRESS_SETUP));
-  assign StallConditions =  FlushCache | AnyMiss | (|CMOpM);                            // exclusion-tag: icache FlushCache
+  assign StallConditions =  FlushCache | (|CMOpM);                                      // exclusion-tag: icache FlushCache
   // CacheBusy: in the middle of an access.  CacheStall adds the cycle a request is first seen in
   // ACCESS, which depends on the live request; a client that already holds the pipeline for that
   // cycle by other means can use CacheBusy and stay off that path.
