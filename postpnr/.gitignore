@@ -3,4 +3,6 @@ golden/
 work/
 results/
 *.tgz
+# ...except the bundles: the VM takes its golden from the repo
+!postpnr_bundle_*.tgz
 __pycache__/

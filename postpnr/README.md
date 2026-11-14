@@ -67,16 +67,53 @@ FreeRTOS needs `third_party/FreeRTOS-Kernel`; any checkout's copy is borrowed, o
 
 ## 3. Run on the VM
 
+The golden is committed as `postpnr/postpnr_bundle_<sha12>.tgz` (`golden/` itself is ignored), so a clone of this branch has everything. Our layout:
+
 ```
-mkdir -p ~/postpnr && tar -xzf postpnr_bundle_<sha12>.tgz -C ~/postpnr
-cp ~/postpnr/hvl/pin/vm_paths.example.sh ~/postpnr/hvl/pin/vm_paths.sh   # once: PDK model paths
-PNR_DIR=/path/to/drop ~/postpnr/postpnr/run.sh --jobs 4
+/groups/ece427-group4/post_pnr_tb/
+  AMOEBA/   clone on postpnr_verif: bench, golden, vm_paths.sh, builds, results
+  drop/     what PnR produced (section 1)
 ```
+
+`run.sh` writes builds (`sim/pin/build/`) and results (`postpnr/results/`) inside the checkout it runs from, so the checkout is what lives in the group folder. Use a clone, not a worktree: a worktree points into your home directory, which the group cannot read.
+
+Once:
+
+```
+umask 002
+git -C ~/AMOEBA fetch origin && git -C ~/AMOEBA checkout postpnr_verif && git -C ~/AMOEBA pull
+mkdir -p /groups/ece427-group4/post_pnr_tb/drop && cd /groups/ece427-group4/post_pnr_tb
+git clone --branch postpnr_verif ~/AMOEBA AMOEBA
+cd AMOEBA
+tar -xzf postpnr/postpnr_bundle_<sha12>.tgz ./postpnr/golden        # the golden only
+cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh                  # then fill in the model paths
+chmod -R g+rwX /groups/ece427-group4/post_pnr_tb
+find /groups/ece427-group4/post_pnr_tb -type d -exec chmod g+s {} +
+```
+
+Extract only `./postpnr/golden`. The whole bundle would add `postpnr/BUNDLE.sha256`, and `run.sh` would then hold the checkout to the bundle's files, which fails after the next `git pull`.
+
+`vm_paths.sh` needs `STDCELL_MODELS`, `SRAM_MODELS` (`rf_sp_64_128`, `_64_46`, `_64_53`, `_64_137`) and `PAD_MODELS` (`io_in`, `io_out`). `PDK_FIRST` and `VCS_FLAGS` are needed only if the models ask for them. Leave `NETLIST` and `SDF` empty: `run.sh` takes them from the drop folder. Put the PnR files and `pnr.env` (`RTL_REF=<sha>`) in `drop/`.
+
+Each run, in a shell with `umask 002`:
+
+```
+cd /groups/ece427-group4/post_pnr_tb/AMOEBA
+module load vcs && which vcs                                         # or the site's Synopsys setup
+export PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop
+python3 postpnr/sdc_delays.py $PNR_DIR/*.sdc                          # the timing the bench will apply
+postpnr/run.sh --only '^smoke$' --corners max                         # minutes: models, ports, SDF annotation
+postpnr/run.sh --jobs 4                                               # hours; each job holds a VCS licence
+```
+
+To update: `git -C ~/AMOEBA pull`, then `git pull` in the clone. If a new bundle came with the pull, extract its golden as above. `vm_paths.sh`, `drop/` and `results/` are untouched by both.
+
+Without git, the bundle works on its own: `tar -xzf postpnr_bundle_<sha12>.tgz -C <dir>`, add `vm_paths.sh`, and run `PNR_DIR=... <dir>/postpnr/run.sh`. In that case `run.sh` checks every file against the bundle.
 
 `--only '^(smoke|bm_|isa_)'` narrows the images, and `--corners max` runs one corner. `--with-vcs-rtl` also runs the golden RTL under 4-state VCS and compares it.
 
 **Steps, each stopping the run on failure:**
-1. **Bundle check.** Every file must be as packed.
+1. **Bundle check.** If `postpnr/BUNDLE.sha256` is present (a bundle-only setup), every file must be as packed.
 2. **Drop folder.** Find the files and record their checksums.
 3. **Golden check.** The golden's RTL must be `RTL_REF`.
 4. **SDC.** `sdc_delays.py` derives the bench's timing, or refuses.
