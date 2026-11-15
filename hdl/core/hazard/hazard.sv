@@ -36,6 +36,7 @@ module hazard (
   // Shadow retry has the same whole-pipeline semantics as a cache/bus stall.
   input  logic  FTStall,                           // result is not yet trusted
   input  logic  wfiM, IntPendingM,
+  input  logic  ExceptionWaitsM,                  // exception held off by a committed fetch (privileged.sv)
   input  logic  InjectD,
   // Stall & flush outputs
   output logic StallF, StallD, StallE, StallM, StallW,
@@ -98,7 +99,8 @@ module hazard (
   // An older M-stage trap/return/CSR flush cancels younger FT diagnosis. A fresh
   // mismatch in E must not hold the flushing instruction forever; flopenrc clears
   // only when enabled, so trap flushing must also release the stall.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | (FTStall & ~FlushMCause);
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | (FTStall & ~FlushMCause) |
+                       ExceptionWaitsM;
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0
