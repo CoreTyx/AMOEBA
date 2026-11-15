@@ -78,6 +78,7 @@ module ft_core_fault_tb;
       .FTStall(1'b1),
       .wfiM(probe_wfi),
       .IntPendingM(probe_pending),
+      .ExceptionWaitsM(1'b0),
       .InjectD(1'b0),
       .StallF(),
       .StallD(),

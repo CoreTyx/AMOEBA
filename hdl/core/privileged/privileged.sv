@@ -97,6 +97,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] TrapVectorM,                                    // Trap vector, to IFU PC logic
   // control outputs
   output logic              RetM, TrapM,                                    // return instruction, or trap
+  output logic              ExceptionWaitsM,                                // exception held off by a fetch the IFU has committed to
   output logic              sfencevmaM,                                     // sfence.vma instruction
   input  logic              InvalidateICacheM,                              // fence instruction
   output logic              BigEndianM,                                     // Use big endian in current privilege mode
@@ -190,4 +191,9 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),
     .DCacheEccDedTrapTakenM,
     .IntPendingM, .DelegateM, .CauseM);
+
+  // TrapM waits out CommittedF.  The faults reach Memory from registers, a cycle into the
+  // instruction's stay there, by when the next fetch may be under way, and the IFU's stall
+  // alone does not hold Memory through a Decode flush.  Hold it for the trap.
+  assign ExceptionWaitsM = ExceptionM & CommittedF;
 endmodule

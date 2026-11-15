@@ -2,6 +2,7 @@
 #
 #   make            build/boot.lst -- shim + OpenSBI + kernel + initramfs
 #   make smoke      build/uart_smoke.lst -- console-path pre-flight, no firmware
+#   make userland   build/init, build/bin/* and build/initramfs.spec only
 #   make clean      remove build products, keep downloaded tarballs
 #   make distclean  remove everything including downloads
 #
@@ -123,18 +124,52 @@ $(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz
 	touch $@
 
 # ---- userland ---------------------------------------------------------------
-# /init is freestanding assembly against the Linux syscall ABI, so the newlib
-# bare-metal toolchain is all that is needed -- no musl, no glibc, no buildroot.
+# /init and the test programs under userland/ are freestanding C against the
+# Linux syscall ABI (userland/syscall.h, userland/crt0.S): no libc, so the same
+# cross compiler as everything else is all that is needed -- no musl, no
+# glibc, no buildroot.
+#
+# PROGS is the single list of test programs.  Each NAME builds from
+# userland/NAME.c into /bin/NAME in the initramfs, and /init runs them in this
+# order.  To add one: write userland/NAME.c, append NAME here.
 
-$(BUILD)/init: initramfs/init.S | check-toolchain
-	mkdir -p $(BUILD)
-	$(CROSS_COMPILE)gcc -march=rv64imac -mabi=lp64 -nostdlib -nostartfiles -static \
-	    -Wl,--build-id=none -o $@ $<
+PROGS := arith mem proc sys
+
+USER_CFLAGS := -march=rv64imac -mabi=lp64 -O2 -Wall -ffreestanding \
+    -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector \
+    -fno-pie -fno-asynchronous-unwind-tables -I$(TOP)/userland
+USER_LDFLAGS := -nostdlib -nostartfiles -static -no-pie -Wl,--build-id=none
+USER_COMMON  := userland/crt0.S userland/ulib.c
+USER_HDRS    := userland/syscall.h userland/ulib.h
+
+USER_BINS := $(addprefix $(BUILD)/bin/,$(PROGS))
+
+$(BUILD)/bin/%: userland/%.c $(USER_COMMON) $(USER_HDRS) | check-toolchain
+	mkdir -p $(BUILD)/bin
+	$(CROSS_COMPILE)gcc $(USER_CFLAGS) $(USER_LDFLAGS) -o $@ $(USER_COMMON) $< -lgcc
 	$(CROSS_COMPILE)strip $@
 
-# gen_init_cpio reads this and creates /dev/console without needing root.
-$(BUILD)/initramfs.spec: initramfs/initramfs.spec $(BUILD)/init
-	sed 's|@INIT@|$(BUILD)/init|' $< > $@
+# Depends on the Makefile because the program list is compiled in.
+$(BUILD)/init: initramfs/init.c $(USER_COMMON) $(USER_HDRS) Makefile | check-toolchain
+	mkdir -p $(BUILD)
+	$(CROSS_COMPILE)gcc $(USER_CFLAGS) $(USER_LDFLAGS) \
+	    -DAMOEBA_PROGS='$(foreach p,$(PROGS),"$(p)",)' \
+	    -o $@ $(USER_COMMON) $< -lgcc
+	$(CROSS_COMPILE)strip $@
+
+# gen_init_cpio reads this and creates /dev/console without needing root.  One
+# `file /bin/NAME` line per entry in PROGS is appended here, so the program
+# list lives only in this Makefile.  The kernel's usr/ build tracks every file
+# the spec names, so a rebuilt program re-packs the initramfs.
+$(BUILD)/initramfs.spec: initramfs/initramfs.spec $(BUILD)/init $(USER_BINS)
+	sed 's|@INIT@|$(BUILD)/init|' $< > $@.tmp
+	for p in $(PROGS); do \
+	    echo "file /bin/$$p $(BUILD)/bin/$$p 0755 0 0" >> $@.tmp; \
+	done
+	mv $@.tmp $@
+
+.PHONY: userland
+userland: $(BUILD)/initramfs.spec
 
 # ---- device tree ------------------------------------------------------------
 
@@ -201,7 +236,7 @@ $(BUILD)/uart_smoke.lst: uart_smoke.S | check-toolchain
 
 clean:
 	rm -rf $(BUILD)/boot.lst $(BUILD)/boot_shim.* $(BUILD)/amoeba.dt* \
-	       $(BUILD)/init $(BUILD)/initramfs.spec $(BUILD)/uart_smoke.*
+	       $(BUILD)/init $(BUILD)/bin $(BUILD)/initramfs.spec $(BUILD)/uart_smoke.*
 	-$(MAKE) -C $(SBI_SRC) PLATFORM=generic clean 2>/dev/null
 	-$(KMAKE) clean 2>/dev/null
 

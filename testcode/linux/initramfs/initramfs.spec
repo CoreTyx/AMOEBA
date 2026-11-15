@@ -6,7 +6,13 @@
 # console for init and the boot string never appears.
 #
 # @INIT@ is substituted by testcode/linux/Makefile with the built init binary.
+# The Makefile also appends one line per test program in its PROGS list:
+#
+#   file /bin/<name> <build>/bin/<name> 0755 0 0
+#
+# so programs are added in the Makefile only, never here.
 
 dir  /dev 0755 0 0
 nod  /dev/console 0600 0 0 c 5 1
+dir  /bin 0755 0 0
 file /init @INIT@ 0755 0 0
