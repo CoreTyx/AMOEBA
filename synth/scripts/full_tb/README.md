@@ -4,6 +4,8 @@ Gate-level check of the scan chains from the package pins: every scanned
 register (PC, pipeline, hardened CSRs) is loaded, captured, reset and read back
 through the eight chains. For the DC side and the overall flow see
 `../HANDOFF.md` (section 1 is the quick start) and `../../DFT_FLOW.md`.
+For the hold integration branch's VM rebuild and acceptance gates, see
+[`../HOLD_VM.md`](../HOLD_VM.md).
 
 **Typical run on ece-427-02:**
 
@@ -318,7 +320,7 @@ VCS; runtime plusargs go to simulation (`--` forces subsequent runtime args).
 ./run.sh +SCAN_PHASES=P '+SCAN_CASE=RANDINSTRFREQreg all 1' +SCAN_UNLOAD_NO_RESET
 ./regress.sh --unload-reset  # Paired protected/unprotected cases; control failures remain failures
 ./run.sh +SCAN_PHASES=D +SCAN_SWEEP
-./run.sh +SCAN_PHASES=S       # Expected failure until the hold-mode RTL lands
+./run.sh +SCAN_PHASES=S       # Requires a netlist built with hold RTL and synthesis protections
 ./run.sh +SCAN_PHASES=S +SCAN_RESUME_ITERS=1 +SCAN_RESUME_N=4000 '+SCAN_CASE=session'
 ./run.sh +define+BREAK_SE    # Expected failure: shifting disabled
 ./run.sh +define+BREAK_MAP   # Expected failure: corrupted inversion map

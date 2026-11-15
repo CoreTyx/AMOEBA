@@ -5,7 +5,8 @@
 // is touched through its pads and nothing else, so the same bench runs the RTL
 // (`forte_top` from hdl/) and the synthesized or placed-and-routed netlist,
 // selected purely by the file list.  There is no RVFI, no Spike and no
-// hierarchical probe here -- correctness of the program itself is established
+// hierarchical probes in gate runs. RTL hold tests add internal freeze checks;
+// correctness of the program itself is established
 // by the RTL flow in sim/ (Spike co-sim); this bench establishes that the chip
 // does the same thing at its pins.
 //
@@ -185,6 +186,10 @@ module pin_tb;
   bit done = 0;
   task automatic verdict(input bit pass, input string why);
     if (done) return;
+    if (pass && cyc == 0) begin
+      pass = 0;
+      why = "no clock cycles executed";
+    end
     done = 1;
     $display("[PIN_TB] cycles=%0d link_rd=%0d link_wr=%0d uart_rx=%0d uart_tx=%0d status_edges=%0d errors=%0d",
              cyc, link.n_rd, link.n_wr, uart.n_rx, uart.n_tx, status_edges, total_errors());
@@ -254,49 +259,118 @@ module pin_tb;
   //   3. enter: test_mode=1, scan_en=0, 3 cycles (2 functional, then frozen)
   //   4. <cycles> frozen cycles; req/wr must stay low
   //   5. exit: test_mode=0, 3 cycles (2 frozen, then functional); release link
-  // Under PIN_TB_RTL it also compares the fetch PC, the register file and
-  // MTIME before and after step 4.
+  // PIN_TB_RTL checks representative state on every frozen edge.
   int dft_holds = 0;
+`ifdef PIN_TB_RTL
+  // Representative state, sampled on EVERY frozen clock, not just at exit.
+  // SRAM contents are checked indirectly by the resumed program and pin trace.
+  function automatic logic [1023:0] hold_state(input int group_id);
+    case (group_id)
+      0: return {dut.chip.soc.core.ifu.PCF, dut.chip.soc.core.ifu.PCD,
+                 dut.chip.soc.core.ifu.PCE, dut.chip.soc.core.ifu.PCM,
+                 dut.chip.soc.core.ifu.InstrD, dut.chip.soc.core.ifu.InstrM};
+      1: return dut.chip.soc.uncore.clint.MTIME;
+      2: return {dut.chip.soc.core.ifu.bus.icache.icache.cachefsm.CurrState,
+                 dut.chip.soc.core.lsu.bus.dcache.dcache.cachefsm.CurrState};
+      3: return {dut.chip.soc.core.ebu.ebu.ebufsmarb.CurrState,
+                 dut.chip.linkcore.st, dut.chip.linkcore.bcnt, dut.chip.linkcore.pending};
+      4: return {dut.chip.soc.core.FaultLfsr, dut.chip.soc.core.FaultCount,
+                 dut.chip.soc.core.FTStatusSticky, dut.chip.soc.core.EccDedFaultM,
+                 dut.chip.soc.core.EccDedFaultEPCM, dut.chip.soc.core.EccDedFaultMtvalM};
+      5: return {dut.chip.soc.core.priv.priv.csr.csrm.MSECFAULT_REGW,
+                 dut.chip.soc.core.priv.priv.csr.csrm.MSCRATCH_REGW,
+                 dut.chip.soc.core.priv.priv.csr.csrm.MTVEC_REGW,
+                 dut.chip.soc.core.priv.priv.csr.csrm.RAND_INSTR_INSERT_FREQ_REGW};
+      6: return {dut.chip.soc.core.mdu.mdu.ftmul.phase,
+                 dut.chip.soc.core.mdu.mdu.ftmul.primary.Acc,
+                 dut.chip.soc.core.mdu.mdu.ftmul.primary.MQ,
+                 dut.chip.soc.core.mdu.mdu.ftmul.primary.Cnt,
+                 dut.chip.soc.core.mdu.mdu.div.ftdiv.phase,
+                 dut.chip.soc.core.mdu.mdu.div.ftdiv.primary.state};
+      7: return {dut.chip.soc.core.lsu.hptw.hptw.WalkerState,
+                 dut.chip.soc.core.lsu.hptw.hptw.PTE};
+      8: return {dut.chip.soc.uncore.onchip.plic.intPending,
+                 dut.chip.soc.uncore.onchip.plic.intInProgress,
+                 dut.chip.soc.uncore.faultcount.Count};
+      default: return 'x;
+    endcase
+  endfunction
+`endif
   task automatic dft_hold(input longint n);
     int quiet = 0;
+    int waited = 0;
+    int quiet_timeout = 10000;
+    int frozen_se = 0;
 `ifdef PIN_TB_RTL
-    logic [63:0] pc0, mt0;
+    logic [1023:0] state0 [0:8];
     logic [$bits(dut.chip.soc.core.ieu.dp.regf.rf[1])-1:0] rf0 [1:$size(dut.chip.soc.core.ieu.dp.regf.rf)];
     int  nrf = $size(dut.chip.soc.core.ieu.dp.regf.rf);
 `endif
+    if (n < 1) begin err("dft_hold: cycles must be positive"); return; end
+    void'($value$plusargs("DFT_QUIET_TIMEOUT=%d", quiet_timeout));
+    void'($value$plusargs("DFT_HOLD_SE=%d", frozen_se));
+    if (!(frozen_se inside {0, 1})) begin err("dft_hold: DFT_HOLD_SE must be 0 or 1"); return; end
+    if (quiet_timeout < 8) begin err("dft_hold: DFT_QUIET_TIMEOUT must be >= 8"); return; end
     @(posedge core_clk); #(tco_ns);
     link_hold_ready = 1;
     while (quiet < 8) begin
       @(posedge core_clk);
-      quiet = (int'(link.st) == 0 && req !== 1'b1 && link_rvalid !== 1'b1) ? quiet + 1 : 0;
+      quiet = (int'(link.st) === 0 && req === 1'b0 && link_rvalid === 1'b0) ? quiet + 1 : 0;
+      waited++;
+      if (quiet < 8 && waited >= quiet_timeout) begin
+        err("dft_hold: timeout waiting for a quiet link"); return;
+      end
     end
     #(tco_ns);
     link_hold_rvalid = 1;
     scan_en = 1'b1;
     run_cycles(3); #(tco_ns);
     test_mode = 1'b1; scan_en = 1'b0;
-    run_cycles(3);
+    run_cycles(3); #(tco_ns);
+    scan_en = (frozen_se != 0);
 `ifdef PIN_TB_RTL
-    pc0 = dut.chip.soc.core.ifu.PCF;
-    mt0 = dut.chip.soc.uncore.clint.MTIME;
+    if (dut.chip.hold !== 1'b1) err("dft_hold: hold did not assert");
+    $display("[PIN_TB] hold entry pc=%h icache=%0d dcache=%0d mul_busy=%b div_state=%0d walker=%0d se=%b",
+             dut.chip.soc.core.ifu.PCF,
+             dut.chip.soc.core.ifu.bus.icache.icache.cachefsm.CurrState,
+             dut.chip.soc.core.lsu.bus.dcache.dcache.cachefsm.CurrState,
+             dut.chip.soc.core.mdu.mdu.ftmul.primary.Busy,
+             dut.chip.soc.core.mdu.mdu.div.ftdiv.primary.state,
+             dut.chip.soc.core.lsu.hptw.hptw.WalkerState, scan_en);
+    for (int g = 0; g < 9; g++) state0[g] = hold_state(g);
     for (int i = 1; i <= nrf; i++) rf0[i] = dut.chip.soc.core.ieu.dp.regf.rf[i];
 `endif
     for (longint c = 0; c < n; c++) begin
-      @(negedge core_clk);
+      @(posedge core_clk); #(tco_ns);
       if (req !== 1'b0 || wr !== 1'b0) err($sformatf("dft_hold: req=%b wr=%b during the hold", req, wr));
-    end
 `ifdef PIN_TB_RTL
-    if (dut.chip.soc.core.ifu.PCF !== pc0)
-      err($sformatf("dft_hold: fetch PC moved during the hold: %h -> %h", pc0, dut.chip.soc.core.ifu.PCF));
-    if (dut.chip.soc.uncore.clint.MTIME !== mt0)
-      err($sformatf("dft_hold: MTIME moved during the hold: %0d -> %0d", mt0, dut.chip.soc.uncore.clint.MTIME));
-    for (int i = 1; i <= nrf; i++)
-      if (dut.chip.soc.core.ieu.dp.regf.rf[i] !== rf0[i])
-        err($sformatf("dft_hold: x%0d changed during the hold: %h -> %h", i, rf0[i], dut.chip.soc.core.ieu.dp.regf.rf[i]));
+      if (dut.chip.hold !== 1'b1) err("dft_hold: hold dropped early");
+      for (int g = 0; g < 9; g++)
+        if (hold_state(g) !== state0[g]) err($sformatf("dft_hold: state group %0d changed at frozen cycle %0d", g, c));
+      for (int i = 1; i <= nrf; i++)
+        if (dut.chip.soc.core.ieu.dp.regf.rf[i] !== rf0[i])
+          err($sformatf("dft_hold: x%0d changed at frozen cycle %0d", i, c));
+      if ({dut.chip.soc.core.StallF, dut.chip.soc.core.StallD, dut.chip.soc.core.StallE,
+           dut.chip.soc.core.StallM, dut.chip.soc.core.StallW} !== 5'b11111 ||
+          {dut.chip.soc.core.FlushD, dut.chip.soc.core.FlushE,
+           dut.chip.soc.core.FlushM, dut.chip.soc.core.FlushW} !== 4'b0000)
+        err("dft_hold: pipeline stall/flush controls do not preserve state");
+      if (dut.chip.soc.uncore.PSELP !== '0 || dut.chip.ofifo.wvalid_i !== 1'b0 ||
+          dut.chip.ififo.rready_i !== 1'b0 || dut.chip.soc.core.ieu.dp.regf.WriteEn !== 1'b0)
+        err("dft_hold: APB/FIFO/register-file write enables active");
+      if ((dut.chip.soc.core.ifu.bus.icache.icache.CacheEnArray &&
+           (dut.chip.soc.core.ifu.bus.icache.icache.TagWe || dut.chip.soc.core.ifu.bus.icache.icache.DataWe)) ||
+          (dut.chip.soc.core.lsu.bus.dcache.dcache.CacheEnArray &&
+           (dut.chip.soc.core.lsu.bus.dcache.dcache.TagWe || dut.chip.soc.core.lsu.bus.dcache.dcache.DataWe)))
+        err("dft_hold: cache array write enabled");
 `endif
+    end
     @(posedge core_clk); #(tco_ns);
-    test_mode = 1'b0;
+    test_mode = 1'b0; scan_en = 1'b0;
     run_cycles(3); #(tco_ns);
+`ifdef PIN_TB_RTL
+    if (dut.chip.hold !== 1'b0) err("dft_hold: hold did not release");
+`endif
     link_hold_ready = 0; link_hold_rvalid = 0;
     dft_holds++;
     $display("[PIN_TB] dft_hold %0d: %0d frozen cycles", dft_holds, n);
@@ -304,15 +378,22 @@ module pin_tb;
 
   // ---- the command interpreter ----------------------------------------------------
   int  exit_code = -1;
+  int commands_executed = 0;
 
   task automatic exec(input string raw, input int lineno);
     string  ln, cmd, a1, a2, a3;
-    int     n, rc;
+    int     rc;
     longint t, v;
     logic [63:0] addr;
     ln = chomp(raw);
-    n = $sscanf(ln, "%s %s %s %s", cmd, a1, a2, a3);
-    if (n < 1 || cmd.getc(0) == "#") return;
+    // Parse optional words separately: some simulator versions return EOF
+    // for a multi-word scan with fewer inputs than conversions, even after
+    // successfully reading the command. Never skip a valid short command.
+    if ($sscanf(ln, "%s", cmd) != 1 || cmd.getc(0) == "#") return;
+    void'($sscanf(rest_after(ln, 1), "%s", a1));
+    void'($sscanf(rest_after(ln, 2), "%s", a2));
+    void'($sscanf(rest_after(ln, 3), "%s", a3));
+    commands_executed++;
     $display("[PIN_TB] cmd %0d: %s", lineno, ln);
     case (cmd)
       "mem_policy": link.mem_policy = a1;
@@ -412,6 +493,7 @@ module pin_tb;
       exec($sformatf("run_until_tohost %0d", to), 3);
       exec("expect_tohost 0", 4);
     end
+    if (commands_executed == 0 || cyc == 0) verdict(0, "no commands or clock cycles executed");
     verdict(1, "");
   end
 

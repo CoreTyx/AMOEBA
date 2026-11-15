@@ -2,6 +2,9 @@
 
 Scan insertion for `forte_top` and the gate-level benches that check it. Start with section 1; the rest is reference.
 
+For hold integration and the required new VM runs, see [HOLD_VM.md](HOLD_VM.md).
+Historical results below do not validate a newly synthesized netlist.
+
 ## 1. Quick start
 
 **Where things live**
@@ -364,12 +367,12 @@ The PC-focused bench, for `DFT_SCOPE=pc` netlists only.
 ## 11. Status
 
 - **DFT hold (single clock), verified locally on EWS with FreePDK45 (2026-11-13), not yet on TSMC:**
-  - RTL from branch `dft-hold` (off `main`; the same commit is on `dft`). Integrated `DFT_SCOPE=full` run: `DFT hold select: chip/hold_mode_reg/D <- chip/sesync/...`; `DFT cg mixing: 0 ICGs clock scan registers`; `DFT hold coverage: ... 0 without a hold dependence`; `DFT cg: 0 ICGs hooked, 337 excluded`; 1,299 scan cells, 0 stored inverted; post-insertion DRC 0 errors.
+  - Historical RTL from `dft-hold`; the restored integration is on `dft-hold-integration` (`dft` reverted the hold work). Integrated `DFT_SCOPE=full` run: `DFT hold select: chip/hold_mode_reg/D <- chip/sesync/...`; `DFT cg mixing: 0 ICGs clock scan registers`; `DFT hold coverage: ... 0 without a hold dependence`; `DFT cg: 0 ICGs hooked, 337 excluded`; 1,299 scan cells, 0 stored inverted; post-insertion DRC 0 errors.
   - `full_tb ./run.sh --regen +SCAN_OP=both` (`CDEPHFRIS`): every phase passes, 439 cases, `DFT TB PASS` (about 10 min). Phase S: 4 programs, 12 hold sessions at different N plus 4 `scan_en=0`-only sessions and 4 link-pause controls, all match the uninterrupted run (tohost, signature, memory, final WFI scan). `BREAK_SE` fails (17), `BREAK_MAP` fails (1).
   - The same bench on the pre-hold netlist: S fails (536 errors) with causes 1 (clock-gate TE forced non-scan flops), 2 (core not frozen), 3 (link not isolated), 4 (scan_en shifted outside test mode).
   - What the first single-clock run taught: `-gate_clock` shared ICGs between scan and non-scan registers (the page walker's gate also clocked 752 retimed registers), so a hold-mode shift clocked those non-scan registers and S failed 8 of 20. Scan registers are now excluded from clock gating (`dft_setup.tcl`) and `dft_check_cg_mixing` guards it.
-  - Area 149,673 vs 146,622 before (+2.1%: scan registers carry enable muxes instead of shared clock gates, plus the hold gating). At the flow's 4 ns the worst slack is unchanged (0.155 ns, an input path). Re-timed at 2.5 ns (400 MHz) on FreePDK45 the earlier single-clock netlist had WNS -1.66 ns vs -1.50 before (this library at a 4 ns compile does not make 400 MHz either way), worst path from `tmsync` through `hold` to the FIFO write mask: the hold fans out chip-wide. It only switches at session entry and exit, so it can be timed as a multicycle or false path if the tester runs the session at a slow clock; that is a decision still to make. The TSMC run on the VM is the real 400 MHz check.
-  - **To run it on the VM:** copy `hdl/` from `dft`, the `synth/` tcl, `synth/scripts/full_tb/` and `hvl/pin/pin_link_agent.sv`. Then `make synth DFT_SCOPE=full && make dft`, check the `DFT hold select`, `DFT cg mixing`, `DFT hold coverage` and `DFT cg` lines, and `./run.sh --regen +SCAN_OP=both`.
+  - Area 149,673 vs 146,622 before (+2.1%: scan registers carry enable muxes instead of shared clock gates, plus the hold gating). At the flow's 4 ns the worst slack is unchanged (0.155 ns, an input path). Re-timed at 2.5 ns (400 MHz) on FreePDK45 the earlier single-clock netlist had WNS -1.66 ns vs -1.50 before (this library at a 4 ns compile does not make 400 MHz either way), worst path from `tmsync` through `hold` to the FIFO write mask: the hold fans out chip-wide. Hold fanout must meet receiving-register setup/hold timing. A slow scan clock alone does not justify a false path on controls sampled by the functional clock; any exception requires a proven entry/exit protocol. The TSMC run on the VM is the real 400 MHz check.
+  - **To run it on the VM:** use the complete `dft-hold-integration` revision; see `HOLD_VM.md`. Then `make synth DFT_SCOPE=full && make dft`, check the `DFT hold select`, `DFT cg mixing`, `DFT hold coverage` and `DFT cg` lines, and `./run.sh --regen +SCAN_OP=both`.
 - **Verified on TSMC 65nm, ece-427-02 (2026-11-12):** `make synth DFT_SCOPE=full` then `make dft`; `full_tb ./run.sh --regen +SCAN_OP=both` passes every phase (A, M, B, C, D, E, P, H, F, R, I), 419 cases, 0 errors, `DFT TB PASS`. The self-tests fail as they must: `BREAK_SE` with 17 errors, `BREAK_MAP` with 1.
   - 1,297 scan cells on 8 chains (c0 163, c1–c7 162); c0, c1, c3, c4, c5, c7 invert. `DFT phase: 1297 scan cells, 168 scan-out QN, 1297 single-output, 0 stored inverted`.
   - Every TSMC scan flop is single-output (Q-only `SDFFQX*`/`SDFFRPQX*`/…, or QN-only `SDFFQNX*`/`SDFFRPQNX*`/`SDFFSQNX*`). The first VM run used a `dft_write_phase` that read a missing Q pin as an unnamed net and flagged 166 cells as stored inverted; phase B then failed on 14 registers whose flop values were correct (section 5).

@@ -4,8 +4,8 @@
 #   hvl/pin/pin.sh run testcode/baremetal/sorting_algo.c          # reference
 #   hvl/pin/pin.sh compare --no-cycles <reference run> <this run>
 # Each dft_hold pauses the link, enters a hold (scan_en armed before test_mode),
-# idles frozen, and leaves it; under DUT=rtl it checks that the fetch PC, the
-# register file and MTIME did not move.  The program must still exit 0 with the
+# idles frozen, and leaves it; under DUT=rtl it checks representative internal
+# state on every frozen clock. The program must still exit 0 with the
 # same link traffic as an uninterrupted run.  Holds land early (cold caches,
 # misses), mid-run and late; one is long enough to cover many MTIME ticks.
 load_lst $MEM
