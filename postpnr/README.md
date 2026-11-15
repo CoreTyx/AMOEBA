@@ -145,6 +145,7 @@ FAIL bm_sorting_algo                          min  func=PASS tchk=3 win=0 trace=
 - **Clock:** the `create_clock` period on `core_clk`.
 - **Inputs:** every input launches `set_input_delay` after the `core_clk` edge: `-max` in the **max** corner (setup) and `-min` in the **min** corner (hold). `io_in`/`ready`/`rvalid` are captured on the chip's **negedge** (`forte_link_phy.sv`), so the setup check is against `T/2`.
 - **Outputs:** sampled at `T - set_output_delay -max` after the edge, and window-checked as in §4.
+  A positive `-min` (the board's hold ending before the edge, as when `-min` equals `-max`) is checked as `-min 0`: nothing launched at an edge reaches the pad before it, so the SDC then requires only that outputs stay quiet from `T - max` to the edge. `sdc_delays.py` warns when it does this.
 
 **`sdc_delays.py` refuses, and says why, when:**
 - a link port or a slow output lacks a `-max` or a `-min`;

@@ -595,6 +595,15 @@ def derive(sdc):
             errs.append(f"{g} output delay -max {fmt_num(omax)} ns <= 0: no sample point before the next edge")
         if omin > omax:
             errs.append(f"{g} output delay -min {fmt_num(omin)} > -max {fmt_num(omax)}")
+        elif omin > 0:
+            # A positive -min says the board's hold ends before the next edge E.
+            # What E launches reaches the pad after E, so the hold side is met
+            # by construction, and the SDC's whole requirement is "quiet over
+            # (E - max, E)": exactly the window for -min 0.  Use that.
+            warns.append(f"{g} output delay -min {fmt_num(omin)} ns is positive (the board's hold ends before the "
+                         f"edge): checked as -min 0, i.e. no output change from {fmt_num(omax)} ns before the "
+                         f"core_clk edge until the edge")
+            res[f"OUT_MIN_{g}"] = 0.0
     if groups:
         first_settle = min(res[f"OUT_MAX_{g}"] for g in groups)
         for g in groups:
