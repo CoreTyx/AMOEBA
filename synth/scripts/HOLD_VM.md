@@ -109,12 +109,28 @@ There are two layers to this integration:
    Commit `97e1bdc` reverses the revert on `dft` and restores 70 files, including
    the single-clock hold RTL, synthesis protections, diagnostic hookups and
    `full_tb` phase S. This is integration of existing work, not a new processor
-   implementation. At this review the integrated `hdl/` matches `dft-hold`.
+   implementation. Before the subsequent main synchronization, the integrated
+   `hdl/` matched `dft-hold`.
 2. **Add native validation and strengthen the pin bench.** The subsequent
    working-tree changes add `hold_regress.sh`, the memory/CSR workload and IRQ
    hold script, improve `dft_hold`, fix short-command parsing, reject zero-cycle
    passes, allow `JOBS` for compilation, and update documentation. These changes
-   remain uncommitted. They do not change the restored processor RTL.
+   are recorded in `b344b0b`. That commit does not change the restored processor
+   RTL.
+
+The subsequent synchronization with `main` (`c84cd89`, 2026-11-15) brings in
+current CI, Linux userspace tests, cache repair/stale-row fixes, and exception
+stall handling while retaining the DFT hold controls. The 2026-11-14 results
+below describe the integration before that synchronization; later validation
+must be associated with its own source revision.
+
+After synchronization, the full native 100-session hold regression passed
+again (`sim/pin/hold_regress/20261115_140156_3/`), and the new
+`icache_ecc_flush_test` passed. Its cache instance ties the additional
+`DFTHold` input low because it tests ordinary execution. CI workflow files
+match the synchronized main revision; Linux boot/userspace validation runs
+remotely against the integration branch and requires a branch boot-image
+artifact first. These native results do not establish Linux boot success.
 
 | Area | Main files | Purpose |
 |---|---|---|
@@ -233,6 +249,9 @@ Holding stages is insufficient if a branch/trap can still flush them. The
 hazard unit masks `FlushD/E/M/W` with `~DFTHold`. Consequently a held cycle
 has all five stalls asserted and all four flushes deasserted. Intermediate
 scan encodings cannot discard an instruction by generating a false flush.
+The latest-main integration also adds `ExceptionWaitsM` as an ordinary stall
+cause while a pending exception waits for a committed fetch. This supplements
+normal execution handling; the DFT stall and flush masks remain present.
 
 The IFU also has state outside the main pipeline: fetch-check history,
 instruction-page-fault records, cacheability selection, delayed stalls and

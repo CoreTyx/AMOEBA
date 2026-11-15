@@ -59,6 +59,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          StallF, StallD, StallE, StallM, StallW;
   logic                          FlushD, FlushE, FlushM, FlushW;
   logic                          TrapM, RetM;
+  logic                          ExceptionWaitsM;
 
   //  signals that must connect through DP
   logic                          IntDivE, W64E;
@@ -411,7 +412,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .FPUStallD, .ExternalStall,
     .DivBusyE, .FDivBusyE,
     .FTStall,
-    .wfiM, .IntPendingM, .InjectD,
+    .wfiM, .IntPendingM, .ExceptionWaitsM, .InjectD,
     // Stall & flush outputs
     .StallF, .StallD, .StallE, .StallM, .StallW,
     .FlushD, .FlushE, .FlushM, .FlushW);
@@ -423,7 +424,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .FlushD, .FlushE, .FlushM, .FlushW, .StallD, .StallE, .StallM, .StallW,
       .CSRReadM, .CSRWriteM, .SrcAM, .PCM, .PCSpillM,
       .InstrM, .InstrOrigM, .CSRReadValW, .EPCM, .TrapVectorM,
-      .RetM, .TrapM, .sfencevmaM, .InvalidateICacheM, .DCacheStallM, .ICacheStallF,
+      .RetM, .TrapM, .ExceptionWaitsM, .sfencevmaM, .InvalidateICacheM, .DCacheStallM, .ICacheStallF,
       .InstrValidM, .CommittedM, .CommittedF,
       .FRegWriteM, .LoadStallD, .StoreStallD,
       .BPDirWrongM, .BTAWrongM, .BPWrongM,
@@ -451,7 +452,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             SATP_REGW, STATUS_MXR, STATUS_SUM, STATUS_MPRV, STATUS_MPP, STATUS_FS, FRM_REGW,
             // PMPCFG_ARRAY_REGW, PMPADDR_ARRAY_REGW,
             ENVCFG_CBE, ENVCFG_PBMTE, ENVCFG_ADUE,
-            EPCM, TrapVectorM, RetM, TrapM,
+            EPCM, TrapVectorM, RetM, TrapM, ExceptionWaitsM,
             sfencevmaM, BigEndianM, wfiM, IntPendingM, EccDedTrapTakenM, DCacheEccDedTrapTakenM, PrivModeUncorrectableFaultW_priv,
             PrivModeSecFaultW} = '0;
     // Without a CSR to program it, dummy instruction insertion stays disabled.

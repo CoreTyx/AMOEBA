@@ -335,6 +335,62 @@ jobs:
           path: sim/verilator/tc_*/simulation.log
           retention-days: 14
 
+  # ── The ASIC top under continuous fault injection, from its pins ───────────
+  # The ECC baremetal jobs below use ECE411_SIM_INJECT at one memory timing.
+  # This drives forte_top's fault_inject pin with the link at three gap and
+  # latency settings: that is what exposed an I$ ECC repair landing in the
+  # wrong set, in one run of 144 (hvl/pin/fi_always.sh, which also replays that
+  # exact image from hvl/pin/tests/vectors/).  Its unit tests arm FI_CONTROL
+  # one unit at a time and read the chip's fault counters: each unit must
+  # detect, and nothing may go uncorrectable or move another unit's counter.
+  ci-fi-always:
+    name: Always-on fault injection (pin bench)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3 python3-pip gcc g++ make \
+            autoconf flex bison libfl-dev help2man zlib1g-dev \
+            gcc-riscv64-unknown-elf
+          pip3 install --quiet pyyaml
+
+      - name: Cache Verilator v5.026
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.026-${{ runner.os }}
+
+      - name: Build Verilator v5.026 from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+          cd /tmp/verilator-src && autoconf
+          ./configure --prefix=/opt/verilator
+          make -j$(nproc)
+          make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> $GITHUB_PATH
+
+      - name: Always-on fault injection, vectors, unit tests and matrix
+        run: hvl/pin/fi_always.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fi-always-logs
+          path: |
+            sim/pin/fi_always/**/run.log
+            sim/pin/fi_always/units/**/uart.log
+          retention-days: 14
+
   # ── Baremetal regression: run tests with cached Spike DPI simulator ────────
   ci-baremetal:
     name: Baremetal - ${{ matrix.test }}
@@ -468,6 +524,15 @@ jobs:
 
       - name: Run CSR hardening unit test
         run: PATH=/opt/verilator/bin:$PATH make -C sim csr_harden_test
+
+      - name: Run cache ECC enc/dec unit test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim cache_ecc_unit_test
+
+      - name: Run cache integration test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim cache_integration_test
+
+      - name: Run I$ ECC repair under flush test
+        run: PATH=/opt/verilator/bin:$PATH make -C sim icache_ecc_flush_test
 
   # ── Build ECC inject simulator (ECE411_SIM_INJECT) ──────────────────────────
   ci-build-ecc-inject:

@@ -2,7 +2,10 @@
  * irq[0] is PLIC source 3 and irq[1] source 6 (docs/memory_map.md).  The
  * handler claims, reports the ID on the console, masks the source (the pins
  * are level-sensitive and the script drops them only after it has seen the
- * report) and completes.  Exit 0 once both arrived, each exactly once. */
+ * report) and completes.  Exit 0 once both arrived, each exactly once.
+ * The wait checks the flags with MIE off: an interrupt taken between the
+ * check and wfi would return into wfi and sleep for good, while a pending
+ * one still wakes wfi with MIE off. */
 #include <stdint.h>
 #define UART  ((volatile uint8_t  *)0x10000000UL)
 #define PRIO  ((volatile uint32_t *)0x0C000000UL)   /* + source */
@@ -33,8 +36,12 @@ int main(void) {
     asm volatile("csrs mie, %0" :: "r"(1u << 11));      /* MEIE */
     asm volatile("csrs mstatus, %0" :: "r"(1u << 3));   /* MIE  */
     puts_("PIN_IRQ_ARMED\n");
-    while (!(seen3 && seen6)) asm volatile("wfi");
-    asm volatile("csrc mstatus, %0" :: "r"(1u << 3));
+    for (;;) {
+        asm volatile("csrc mstatus, %0" :: "r"(1u << 3));
+        if (seen3 && seen6) break;
+        asm volatile("wfi");
+        asm volatile("csrs mstatus, %0" :: "r"(1u << 3));
+    }
     puts_("PIN_IRQ_DONE\n");
     return (seen3 == 1 && seen6 == 1 && spurious == 0) ? 0 : 1;
 }
