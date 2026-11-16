@@ -120,7 +120,7 @@ Without git, the bundle works on its own: `tar -xzf postpnr_bundle_<sha12>.tgz -
 2. **Drop folder.** Find the files and record their checksums.
 3. **Golden check.** The golden's RTL must be `RTL_REF`.
 4. **SDC.** `sdc_delays.py` derives the bench's timing, or refuses.
-5. **Corner builds.** One build per corner. Any `SDFCOM_*` message fails it, as does a missing SDF-annotation confirmation. `+neg_tchk`, `+define+NTC` and `+define+RECREM` are on, and timing checks are never disabled.
+5. **Corner builds.** One build per corner. Any `SDFCOM_*` message fails it, as does a missing SDF-annotation confirmation. `+neg_tchk`, `-negdelay`, `+define+NTC` and `+define+RECREM` are on, and timing checks are never disabled.
 6. **Runs.** Every image × corner, compared with its golden.
 
 The result is in `postpnr/results/<stamp>/SUMMARY`, and everything else is in `postpnr/results/<stamp>.tgz`.

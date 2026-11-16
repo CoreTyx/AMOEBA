@@ -284,7 +284,9 @@ build() {
       # that switch on the delayed-signal nets negative limits need and the
       # recovery/removal checks: without them a library may compile its
       # timing checks out or ignore negative setup/hold values.
-      timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk +sdfverbose +define+NTC +define+RECREM)
+      # -negdelay: post-PnR SDF has negative IOPATH/INTERCONNECT delays (slew
+      # effects); without it VCS replaces them with 0 (SDFCOM_NDI).
+      timing=(-sdf "$SDF_CORNER:pin_tb.dut:$SDF" +neg_tchk -negdelay +sdfverbose +define+NTC +define+RECREM)
     fi
     [ -n "$INITREG" ] && timing+=(+vcs+initreg+random)
     # All of VCS's output into build.log (and the terminal), not -l: licence,
