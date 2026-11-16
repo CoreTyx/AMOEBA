@@ -270,7 +270,7 @@ for c in "${CORN[@]}"; do
     bpid=$!
     heartbeat $bpid "$OUT/build_$c.log" "building $c corner ($OUT/build_$c.log)"
     wait $bpid \
-      || { tail -45 "$OUT/build_$c.log" >> "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
+      || { tail -45 "$OUT/build_$c.log" | tee -a "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
   fi
   grep -E '^build: SDF' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
@@ -279,7 +279,7 @@ if [ $VCS_RTL = 1 ]; then
   SIM=vcs DUT=rtl "$P/pin.sh" build > "$OUT/build_rtl.log" 2>&1 </dev/null &
   bpid=$!
   heartbeat $bpid "$OUT/build_rtl.log" "building VCS RTL ($OUT/build_rtl.log)"
-  wait $bpid || { tail -30 "$OUT/build_rtl.log" >> "$SUM"; stop "VCS RTL build"; }
+  wait $bpid || { tail -30 "$OUT/build_rtl.log" | tee -a "$SUM"; stop "VCS RTL build"; }
 fi
 
 # ---- runs -----------------------------------------------------------------------------------
