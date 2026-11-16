@@ -174,7 +174,8 @@ preflight() {
     [ -n "$hdr" ] || { echo "  NETLIST has no 'module forte_top'"; bad=1; }
     # Every SRAM macro and pad cell the netlist instantiates must be defined by a model.
     # (models/sram_behav.sv defines its macros through `PIN_RF_SP(name, ...).)
-    local defs; defs="$(cat ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} "${SRAM_MODELS[@]}" "${PAD_MODELS[@]}" 2>/dev/null \
+    # </dev/null: with every model list empty, cat would otherwise wait on the terminal.
+    local defs; defs="$(cat /dev/null ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} ${SRAM_MODELS[@]+"${SRAM_MODELS[@]}"} ${PAD_MODELS[@]+"${PAD_MODELS[@]}"} 2>/dev/null </dev/null \
       | grep -oE '^[[:space:]]*(module[[:space:]]+|`PIN_RF_SP\()[A-Za-z0-9_]+' | sed -E 's/.*(module[[:space:]]+|\()//' | sort -u)"
     for m in $(grep -oE '^[[:space:]]*((rf|sram)_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }

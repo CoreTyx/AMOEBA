@@ -66,7 +66,7 @@ if [ "${1:-}" = __one ]; then
   echo "$(date '+%T') start  $corner $n" >&2
   env ${env_sdf[@]+"${env_sdf[@]}"} PIN_RUNS="$runs" SIM=vcs DUT=$dut "$P/pin.sh" run "$img/$n.lst" ${cmd:+"$cmd"} \
       +TIMEOUT=10000000 +UART_QUIET +MAX_ERRORS="$MAX_ERRORS" ${pa[@]+"${pa[@]}"} ${a[@]+"${a[@]}"} \
-      > "$runs/$n.pin.log" 2>&1 || true
+      > "$runs/$n.pin.log" 2>&1 </dev/null || true
   d="$runs/$n"
   mkdir -p "$d"          # pin.sh may have died before making it
   res="$(cat "$d/RESULT" 2>/dev/null || echo 'PIN_TB_RESULT: FAIL no RESULT (see '"$runs/$n.pin.log"')')"
@@ -237,13 +237,15 @@ fi
 [ -n "${INITREG:-}" ] && log "WARNING: INITREG=$INITREG -- registers start at a value, not X: NOT a sign-off run"
 IFS=, read -r -a CORN <<<"$CORNERS"
 for c in "${CORN[@]}"; do case "$c" in max|min) ;; *) stop "--corners: $c is not max or min";; esac; done
-SIM=vcs DUT=gate PIN_SDF="$SDF_max" "$P/pin.sh" preflight > "$OUT/preflight.log" 2>&1 \
-  || { cat "$OUT/preflight.log" >> "$SUM"; stop "preflight"; }
+log "preflight: tools, model paths, netlist ports and cells ($OUT/preflight.log)"
+SIM=vcs DUT=gate PIN_SDF="$SDF_max" "$P/pin.sh" preflight > "$OUT/preflight.log" 2>&1 </dev/null \
+  || { cat "$OUT/preflight.log" >> "$SUM"; cat "$OUT/preflight.log"; stop "preflight"; }
+grep -E '^(preflight: OK|  )' "$OUT/preflight.log" | sed 's/^/         /' | tee -a "$SUM"
 for c in "${CORN[@]}"; do
   v="SDF_$c"
   if [ $BUILD = 1 ]; then
     log "build:   gate, SDF $c corner ($(basename "${!v}"))"
-    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 &
+    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 </dev/null &
     bpid=$!
     heartbeat $bpid "$OUT/build_$c.log" "building $c corner ($OUT/build_$c.log)"
     wait $bpid \
@@ -253,7 +255,7 @@ for c in "${CORN[@]}"; do
 done
 if [ $VCS_RTL = 1 ]; then
   log "build:   golden RTL under VCS"
-  SIM=vcs DUT=rtl "$P/pin.sh" build > "$OUT/build_rtl.log" 2>&1 &
+  SIM=vcs DUT=rtl "$P/pin.sh" build > "$OUT/build_rtl.log" 2>&1 </dev/null &
   bpid=$!
   heartbeat $bpid "$OUT/build_rtl.log" "building VCS RTL ($OUT/build_rtl.log)"
   wait $bpid || { tail -30 "$OUT/build_rtl.log" >> "$SUM"; stop "VCS RTL build"; }
