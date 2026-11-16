@@ -63,6 +63,7 @@ if [ "${1:-}" = __one ]; then
     pa_var="PLUSARGS_$corner"; read -r -a pa <<<"${!pa_var}"
   fi
   runs="$OUT/runs/$corner"
+  echo "$(date '+%T') start  $corner $n" >&2
   env ${env_sdf[@]+"${env_sdf[@]}"} PIN_RUNS="$runs" SIM=vcs DUT=$dut "$P/pin.sh" run "$img/$n.lst" ${cmd:+"$cmd"} \
       +TIMEOUT=10000000 +UART_QUIET +MAX_ERRORS="$MAX_ERRORS" ${pa[@]+"${pa[@]}"} ${a[@]+"${a[@]}"} \
       > "$runs/$n.pin.log" 2>&1 || true
@@ -116,6 +117,17 @@ log() { echo "$*" | tee -a "$SUM"; }
 pack() { tar -C "$R/postpnr/results" -czf "$R/postpnr/results/$STAMP.tgz" "$STAMP" 2>/dev/null
          echo "results: $SUM  and  $R/postpnr/results/$STAMP.tgz"; }
 stop() { log "STOPPED: $*"; pack; exit 1; }
+# heartbeat <pid> <log> <what>: a line a minute while <pid> runs (console only)
+heartbeat() {
+  local pid="$1" f="$2" what="$3" t0=$SECONDS last=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    if [ $((SECONDS - last)) -ge 60 ]; then
+      last=$SECONDS
+      echo "         ... $what: $(( (SECONDS - t0) / 60 )) min, $(wc -l < "$f" 2>/dev/null || echo 0) log lines: $(tail -1 "$f" 2>/dev/null | cut -c1-100)"
+    fi
+  done
+}
 
 log "==== postpnr/run.sh $(date '+%F %T')  host=$(hostname)"
 [ -n "${PNR_DIR:-}" ] || stop "set PNR_DIR to the post-PnR drop folder (netlist, SDF, SDC)"
@@ -231,14 +243,20 @@ for c in "${CORN[@]}"; do
   v="SDF_$c"
   if [ $BUILD = 1 ]; then
     log "build:   gate, SDF $c corner ($(basename "${!v}"))"
-    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 \
+    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 &
+    bpid=$!
+    heartbeat $bpid "$OUT/build_$c.log" "building $c corner ($OUT/build_$c.log)"
+    wait $bpid \
       || { tail -45 "$OUT/build_$c.log" >> "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
   fi
   grep -E '^build: SDF' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
 if [ $VCS_RTL = 1 ]; then
   log "build:   golden RTL under VCS"
-  SIM=vcs DUT=rtl "$P/pin.sh" build > "$OUT/build_rtl.log" 2>&1 || { tail -30 "$OUT/build_rtl.log" >> "$SUM"; stop "VCS RTL build"; }
+  SIM=vcs DUT=rtl "$P/pin.sh" build > "$OUT/build_rtl.log" 2>&1 &
+  bpid=$!
+  heartbeat $bpid "$OUT/build_rtl.log" "building VCS RTL ($OUT/build_rtl.log)"
+  wait $bpid || { tail -30 "$OUT/build_rtl.log" >> "$SUM"; stop "VCS RTL build"; }
 fi
 
 # ---- runs -----------------------------------------------------------------------------------
@@ -252,6 +270,7 @@ while read -r name duts; do
 done < "$GOLDEN/images/MANIFEST"
 for c in "${CORN[@]}" rtl; do mkdir -p "$OUT/runs/$c"; done
 log "runs:    $(wc -l < "$OUT/jobs") ($(cut -d' ' -f2 "$OUT/jobs" | sort -u | wc -l) images x ${CORN[*]}$([ $VCS_RTL = 1 ] && echo ' + vcs rtl')), $JOBS at a time"
+log "         a 'start' line when each simulation begins, its row when it ends; per-run logs in $OUT/runs/<corner>/<name>.pin.log"
 log ""
 xargs -a "$OUT/jobs" -P "$JOBS" -L1 "$0" __one | tee "$OUT/rows.unsorted"
 
