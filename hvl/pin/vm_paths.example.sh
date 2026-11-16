@@ -19,7 +19,9 @@ NETLIST="${NETLIST:-}"
 # SDF for the same netlist.  Empty = zero-delay functional gate simulation
 # (post-synthesis).  Set it for post-PnR timing simulation.
 # postpnr/run.sh overrides NETLIST, SDF and SDF_CORNER from its drop folder
-# ($PNR_DIR), so for post-PnR runs only the MODEL paths below matter here.
+# ($PNR_DIR), so for post-PnR runs only the MODEL paths below matter here,
+# plus PNR_DIR itself if you want it here instead of in the environment:
+# PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop
 # An SDF build compiles with +neg_tchk +sdfverbose +define+NTC +define+RECREM
 # (the cell-model switches for negative limits and recovery/removal checks)
 # and fails on any SDFCOM_* message.
@@ -46,7 +48,10 @@ SRAM_TIES="${SRAM_TIES:-}"
 # Extra VCS flags for every VCS build (pin.sh, the self-test, sram_cmp), added
 # after the defaults so they win.  Put site flags here rather than editing the
 # scripts: bundle files are checksummed, and a new bundle replaces them.  e.g.
-#   VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
+#   VCS_FLAGS=(-j4 -fgp)
+# +define+ARM_UD_MODEL (unit-delay SRAM models) is for zero-delay post-synthesis
+# runs only: SDF builds drop it.  -debug_acc+all -kdb slow every run; WAVES=1
+# builds a separate waveform build instead.
 VCS_FLAGS=()
 
 # Physical-only cells (fill, decap, tap, endcap) the libraries have no Verilog

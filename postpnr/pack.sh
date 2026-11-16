@@ -32,7 +32,7 @@ STAGE="$R/postpnr/work/pack.stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE/postpnr/golden"
 tar -cf - --exclude='hvl/pin/vm_paths.sh' --exclude='*.swp' --exclude='__pycache__' \
     hvl/pin bin/pin_trace_cmp.py bin/vcd_first_x.py \
-    postpnr/README.md postpnr/run.sh postpnr/sdc_delays.py postpnr/sdf_out_wires.py postpnr/waivers.txt postpnr/selfcheck.sh \
+    postpnr/README.md postpnr/run.sh postpnr/variants.sh postpnr/sdc_delays.py postpnr/sdf_out_wires.py postpnr/waivers.txt postpnr/selfcheck.sh \
   | tar -xf - -C "$STAGE"
 # The golden itself, wherever it lives, lands at postpnr/golden/<sha12>.
 tar -C "$G" -cf - GOLDEN rtl images traces | { mkdir -p "$STAGE/$GREL"; tar -xf - -C "$STAGE/$GREL"; }

@@ -2,6 +2,7 @@
 # postpnr/run.sh -- post-PnR chip-level verification, on the VCS VM.
 #
 #   PNR_DIR=/path/to/drop postpnr/run.sh [options]
+#   (or PNR_DIR=/path/to/drop in vm_paths.sh; the environment wins)
 #
 # The drop folder ($PNR_DIR) holds what PnR produced:
 #   forte_top.v (or the one *.v / *.v.gz)    the post-PnR netlist (ports as forte_top)
@@ -134,10 +135,6 @@ heartbeat() {
 }
 
 log "==== postpnr/run.sh $(date '+%F %T')  host=$(hostname)"
-[ -n "${PNR_DIR:-}" ] || stop "set PNR_DIR to the post-PnR drop folder (netlist, SDF, SDC)"
-[ -d "$PNR_DIR" ] || stop "PNR_DIR=$PNR_DIR is not a directory"
-PNR_DIR="$(cd "$PNR_DIR" && pwd)"
-log "drop:    $PNR_DIR"
 
 # ---- the model paths (vm_paths.sh) --------------------------------------------------------
 if [ -z "$VMP" ]; then
@@ -147,6 +144,17 @@ fi
   || stop "no vm_paths.sh${VMP:+ at $VMP}: put one beside this checkout ($(cd "$R/.." && pwd)/vm_paths.sh), or pass --vm-paths"
 VMP="$(cd "$(dirname "$VMP")" && pwd)/$(basename "$VMP")"
 export PIN_VM_PATHS="$VMP"
+
+# ---- the drop folder: $PNR_DIR from the environment, else PNR_DIR=... in vm_paths.sh -------
+PNR_FROM="environment"
+if [ -z "${PNR_DIR:-}" ]; then
+  PNR_DIR="$(bash -c 'set +u; PNR_DIR=; source "$1" >/dev/null 2>&1 </dev/null; printf %s "$PNR_DIR"' _ "$VMP")"
+  PNR_FROM="$VMP"
+fi
+[ -n "$PNR_DIR" ] || stop "set PNR_DIR to the post-PnR drop folder (netlist, SDF, SDC): in the environment, or PNR_DIR=... in $VMP"
+[ -d "$PNR_DIR" ] || stop "PNR_DIR=$PNR_DIR (from $PNR_FROM) is not a directory"
+PNR_DIR="$(cd "$PNR_DIR" && pwd)"
+log "drop:    $PNR_DIR  (PNR_DIR from $PNR_FROM)"
 log "paths:   $VMP"
 # Source it here too (in a subshell, so it cannot touch this script's variables)
 # and list every entry of every array, exactly as pin.sh will use them
