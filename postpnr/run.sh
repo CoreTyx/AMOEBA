@@ -149,11 +149,14 @@ VMP="$(cd "$(dirname "$VMP")" && pwd)/$(basename "$VMP")"
 export PIN_VM_PATHS="$VMP"
 log "paths:   $VMP"
 # Source it here too (in a subshell, so it cannot touch this script's variables)
-# and show what it defines; pin.sh preflight checks every file.
-bash -c 'set +u; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=(); VCS_FLAGS=()
+# and list every entry of every array, exactly as pin.sh will use them
+# ("${ARRAY[@]}"); pin.sh preflight then checks every file.
+bash -c 'set +u; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=(); VCS_FLAGS=(); IGNORE_CELLS=()
   source "$1" >/dev/null || exit 1
-  for a in STDCELL_MODELS SRAM_MODELS PAD_MODELS PDK_FIRST VCS_FLAGS; do
-    declare -n x=$a; printf "         %-15s %s\n" "$a" "${#x[@]} entr$([ ${#x[@]} = 1 ] && echo y || echo ies)${x:+: ${x[0]}$([ ${#x[@]} -gt 1 ] && echo " ...")}"
+  for a in STDCELL_MODELS SRAM_MODELS PAD_MODELS PDK_FIRST VCS_FLAGS IGNORE_CELLS; do
+    declare -n x=$a
+    printf "         %-15s %s\n" "$a" "${#x[@]} entr$([ ${#x[@]} = 1 ] && echo y || echo ies)"
+    for e in "${x[@]}"; do printf "           %s\n" "$e"; done
   done' _ "$VMP" | tee -a "$SUM" || stop "sourcing $VMP failed"
 
 # The bundle's own check (postpnr/pack.sh): every file as packed.
