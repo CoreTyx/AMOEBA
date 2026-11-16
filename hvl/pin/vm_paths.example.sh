@@ -48,3 +48,11 @@ SRAM_TIES="${SRAM_TIES:-}"
 # scripts: bundle files are checksummed, and a new bundle replaces them.  e.g.
 #   VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
 VCS_FLAGS=()
+
+# Physical-only cells (fill, decap, tap, endcap) the libraries have no Verilog
+# for, as cell-name globs, QUOTED (else the shell may expand them as file names):
+#   IGNORE_CELLS=('FILLCAP*' 'DCAP*')
+# Each matching cell gets an empty module (listed in build.log as 'build:
+# ignored ...').  A cell whose instances connect anything but power/ground pins
+# is refused: that one needs a real model.
+IGNORE_CELLS=()

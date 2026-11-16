@@ -272,7 +272,7 @@ for c in "${CORN[@]}"; do
     wait $bpid \
       || { tail -45 "$OUT/build_$c.log" | tee -a "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
   fi
-  grep -E '^build: SDF' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
+  grep -E '^build: (SDF|ignored)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
 if [ $VCS_RTL = 1 ]; then
   log "build:   golden RTL under VCS"
