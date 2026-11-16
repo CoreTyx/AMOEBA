@@ -247,6 +247,25 @@ python3 "$R/postpnr/sdc_delays.py" "$SDC" --sh > "$OUT/sdc.env"
 cat "$OUT/sdc.txt" >> "$SUM"; cat "$OUT/sdc.txt"
 # shellcheck disable=SC1091
 source "$OUT/sdc.env"
+# Wires from the pad drivers to forte_top's output ports: VCS cannot annotate
+# them (SDFCOM_UHICD, accepted by pin.sh only for exactly these), so outputs
+# change up to that much earlier in simulation than on silicon.  The max corner
+# (setup side) therefore checks each output group's window that much earlier:
+# a pass then holds with the wire included.  The min corner needs nothing: an
+# output that changes earlier only makes its hold-side check stricter.
+python3 "$R/postpnr/sdf_out_wires.py" "$SDF_max" > "$OUT/wires.env" || stop "postpnr/sdf_out_wires.py $SDF_max failed"
+# shellcheck disable=SC1091
+source "$OUT/wires.env"
+if [ "$WIRES_N" -gt 0 ]; then
+  for g in LINK SLOW; do
+    w="WIRES_${g}_PS"; o="OUT_MAX_${g}_PS"
+    [ -n "${!o}" ] && [ "${!w}" -gt 0 ] || continue
+    PLUSARGS_MAX="$(sed "s/+OUT_MAX_${g}_PS=[0-9]*/+OUT_MAX_${g}_PS=$(( ${!o} + ${!w} ))/" <<<"$PLUSARGS_MAX")"
+  done
+  log "  pad wires      $WIRES_N INTERCONNECT(s) into forte_top output ports, not annotatable in VCS (SDFCOM_UHICD); largest:"
+  log "                 io_out/req/wr $(awk -v p="$WIRES_LINK_PS" 'BEGIN{printf "%.3f", p/1000}') ns, uart_tx/status $(awk -v p="$WIRES_SLOW_PS" 'BEGIN{printf "%.3f", p/1000}') ns, clk_out $(awk -v p="$WIRES_CLK_PS" 'BEGIN{printf "%.3f", p/1000}') ns"
+  log "                 -> max corner: outputs must settle that much earlier than the SDC says ($(grep -oE '\+OUT_MAX_[A-Z]+_PS=[0-9]+' <<<"$PLUSARGS_MAX" | tr '\n' ' '))"
+fi
 export PLUSARGS_max="$PLUSARGS_MAX" PLUSARGS_min="$PLUSARGS_MIN"
 # The VCS RTL cross-check runs at the bench defaults, like the golden.
 export PLUSARGS_RTL=""
@@ -275,7 +294,7 @@ for c in "${CORN[@]}"; do
     wait $bpid \
       || { tail -45 "$OUT/build_$c.log" | tee -a "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
   fi
-  grep -E '^build: (SDF|ignored)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
+  grep -E '^build: (SDF|ignored|dropped)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
 if [ $VCS_RTL = 1 ]; then
   log "build:   golden RTL under VCS"
@@ -298,7 +317,7 @@ for c in "${CORN[@]}" rtl; do mkdir -p "$OUT/runs/$c"; done
 log "runs:    $(wc -l < "$OUT/jobs") ($(cut -d' ' -f2 "$OUT/jobs" | sort -u | wc -l) images x ${CORN[*]}$([ $VCS_RTL = 1 ] && echo ' + vcs rtl')), $JOBS at a time"
 log "         a 'start' line when each simulation begins, its row when it ends; per-run logs in $OUT/runs/<corner>/<name>.pin.log"
 log ""
-xargs -a "$OUT/jobs" -P "$JOBS" -L1 "$0" __one | tee "$OUT/rows.unsorted"
+xargs -r -a "$OUT/jobs" -P "$JOBS" -L1 "$0" __one | tee "$OUT/rows.unsorted"
 
 # ---- summary -----------------------------------------------------------------------------------
 log ""

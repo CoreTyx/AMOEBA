@@ -92,6 +92,17 @@ else
 fi
 [ "$DUT" = gate ] || SDF=""        # SDF belongs to the netlist only
 TIMED=""; [ "$DUT" = gate ] && [ -n "$SDF" ] && TIMED="_sdf${SDF_CORNER}"
+# ARM's +define+ARM_UD_MODEL (and its ARM_UD_* companions) selects the models'
+# unit-delay branch, which has no specify block: with an SDF every IOPATH and
+# timing check of those models goes unannotated.  An SDF build drops them.
+UD_DROPPED=()
+if [ -n "$TIMED" ] && [ ${#VCS_FLAGS[@]} -gt 0 ]; then
+  keep=()
+  for f in "${VCS_FLAGS[@]}"; do
+    if [[ "$f" =~ ^\+define\+ARM_UD_ ]]; then UD_DROPPED+=("$f"); else keep+=("$f"); fi
+  done
+  VCS_FLAGS=(${keep[@]+"${keep[@]}"})
+fi
 
 # One build per configuration: WAVES=1 (waveform dumping), each SDF corner
 # (annotated at compile time) and INITREG live in their own directories, so a
@@ -239,6 +250,19 @@ preflight() {
       grep -qw "$p" <<<"$hdr" || { echo "  forte_top in NETLIST has no port $p"; bad=1; }
     done
   fi
+  if [ "$SIM" = vcs ] && [ "$DUT" = gate ] && [ ${#STDCELL_MODELS[@]} -gt 1 ]; then
+    # -v libraries: VCS takes each cell from the FIRST file that defines it.
+    # Several variants of one library (e.g. with and without negative-check
+    # support) listed together means the later ones are never used.
+    grep -HoE '^[[:space:]]*module[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "${STDCELL_MODELS[@]}" 2>/dev/null </dev/null \
+      | awk -F: '{ n = split($NF, w, /[ \t]+/); m = w[n]; f = $1
+                   if (m in owner) { if (owner[m] != f) { shadow[f]++; dup++ } } else { owner[m] = f; mine[f]++ } }
+                 END { if (dup) {
+                         print "  WARNING " dup " cell definition(s) appear in more than one STDCELL_MODELS file; VCS uses the first file listed:"
+                         for (f in mine) if (f in shadow) print "            " f ": its " shadow[f] " duplicate cell(s) are never used"
+                         for (f in shadow) if (!(f in mine)) print "            " f ": never used (every cell it defines comes from an earlier file)"
+                         print "          Keep one variant of each library: the one whose cells carry the timing checks the SDF has." } }' || true
+  fi
   [ $bad = 0 ] && echo "preflight: OK" || die "preflight failed"
 }
 
@@ -263,6 +287,7 @@ build() {
   preflight
   mkdir -p "$BUILD"
   [ "$DUT" = gate ] && [ -n "$IGNORED_V" ] && ignored_cells
+  [ ${#UD_DROPPED[@]} -gt 0 ] && echo "build: dropped ${UD_DROPPED[*]} from VCS_FLAGS: unit-delay models have no specify block for the SDF"
   if [ "$DUT" = gate ]; then gate_sources; else rtl_sources; fi
   cd "$BUILD"
   echo "build: $BUILD"
@@ -343,19 +368,50 @@ sdf_gate() {
     fi
     sdf_fail "VCS did not recompile, and this configuration has no record of a clean annotation"
   fi
-  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" || true)"
+  # SDFCOM_UHICD on a wire from a cell pin to one of forte_top's own output
+  # ports: VCS cannot annotate a wire that leaves the annotated scope.  Accepted
+  # only when every one is exactly that -- each message's SDF line is checked --
+  # because postpnr/run.sh measures those wires (postpnr/sdf_out_wires.py) and
+  # tightens the output-window check by the largest.  Any other SDF message fails.
+  local uh_n uh_lines uh_badl
+  uh_n="$(grep -c 'Warning-\[SDFCOM_UHICD\]' "$BUILD/build.log" || true)"
+  if [ "$uh_n" -gt 0 ]; then
+    uh_lines="$(grep -A1 'Warning-\[SDFCOM_UHICD\]' "$BUILD/build.log" | grep -oE ', [0-9]+[[:space:]]*$' | tr -dc '0-9\n')"
+    [ "$(grep -c . <<<"$uh_lines")" = "$uh_n" ] \
+      || sdf_fail "$uh_n SDFCOM_UHICD message(s), but could not read the SDF line of each ($BUILD/build.log)"
+    uh_badl="$(awk -v div="$(grep -m1 -oE '\(DIVIDER[[:space:]]+[^[:space:])]' "$SDF" | awk '{print $2}')" '
+        NR == FNR { want[$1] = 1; next }
+        FNR in want {
+          ok = 0
+          if (match($0, /^[[:space:]]*\(INTERCONNECT[[:space:]]+/)) {
+            n = split(substr($0, RLENGTH + 1), t, /[[:space:]]+/)
+            src = t[1]; dst = t[2]; sub(/^\\/, "", dst); port = dst; sub(/\[[0-9]+\]$/, "", port)
+            if (div == "") div = "/"
+            if (index(src, div) && !index(dst, div) && port ~ /^(io_out|req|wr|uart_tx|status|clk_out)$/) ok = 1
+          }
+          if (!ok) print FNR
+        }' <(echo "$uh_lines") "$SDF" | head -5)"
+    [ -z "$uh_badl" ] \
+      || sdf_fail "SDFCOM_UHICD on SDF line(s) $(echo $uh_badl) that are not a wire into a forte_top output port"
+  fi
+  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | grep -v 'Warning-\[SDFCOM_UHICD\]' || true)"
   if [ -n "$bad" ]; then
-    grep -A4 -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | head -40 | sed 's/^/  | /' >&2
+    awk '/(Warning|Error)-\[SDF[A-Z0-9_]*\]/ { show = ($0 !~ /SDFCOM_UHICD/); left = 5 }
+         show && left-- > 0' "$BUILD/build.log" | head -40 | sed 's/^/  | /' >&2
     sdf_fail "$(wc -l <<<"$bad") SDF message(s): $(grep -oE 'SDF[A-Z0-9_]*' <<<"$bad" | sort | uniq -c | awk '{printf "%s x%s ", $2, $1}')(first above; all in $BUILD/build.log)"
   fi
   summ="$(sed -n '/SDF annotation begin/,/SDF annotation \(completed\|aborted\)/p' "$BUILD/build.log")"
   if [ -z "$summ" ] || grep -q 'SDF annotation aborted' <<<"$summ" || ! grep -q 'SDF annotation completed' <<<"$summ" \
-     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE 'Total warnings: +0$' <<<"$summ"; then
+     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE "Total warnings: +(0|$uh_n)\$" <<<"$summ"; then
     echo "$summ" | tail -12 | sed 's/^/  | /' >&2
     sdf_fail "annotation of $SDF did not complete cleanly (above; $BUILD/build.log)"
   fi
   echo "$now" > "$BUILD/sdf_ok"
-  echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors, 0 warnings, no SDF* messages"
+  if [ "$uh_n" -gt 0 ]; then
+    echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors; $uh_n SDFCOM_UHICD, each a wire into a forte_top output port (run.sh compensates), no other SDF* message"
+  else
+    echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors, 0 warnings, no SDF* messages"
+  fi
 }
 
 # A failed annotation leaves no runnable build, and makes VCS recompile next
