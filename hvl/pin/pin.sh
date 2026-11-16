@@ -29,6 +29,8 @@
 # Environment (all optional; postpnr/run.sh and postpnr/prepare.sh set them):
 #   PIN_NETLIST, PIN_SDF, PIN_SDF_CORNER   override vm_paths.sh's NETLIST, SDF,
 #                                          SDF_CORNER (the post-PnR drop folder)
+#   PIN_VM_PATHS      the vm_paths.sh to source instead of hvl/pin/vm_paths.sh
+#                     (postpnr/run.sh sets it to the one it found)
 #   PIN_PATHS_EXTRA   a file sourced after vm_paths.sh (postpnr's pnr.env)
 #   PIN_RTL_ROOT      take hdl/ and pkg/ from this tree instead of this checkout
 #                     (the golden RTL at a pinned commit, with this bench)
@@ -68,10 +70,11 @@ case "$INITREG" in ""|0|1|random) ;; *) die "INITREG must be 0, 1 or random, not
 
 if [ "$SIM" = vcs ]; then
   # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
-  [ -f "$P/vm_paths.sh" ] || die "no $P/vm_paths.sh: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
+  VM_PATHS="${PIN_VM_PATHS:-$P/vm_paths.sh}"
+  [ -f "$VM_PATHS" ] || die "no $VM_PATHS: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
   # shellcheck source=vm_paths.example.sh
   PDK_FIRST=(); VCS_FLAGS=()
-  source "$P/vm_paths.sh"
+  source "$VM_PATHS"
   if [ -n "${PIN_PATHS_EXTRA:-}" ]; then
     [ -f "$PIN_PATHS_EXTRA" ] || die "PIN_PATHS_EXTRA: no such file: $PIN_PATHS_EXTRA"
     # shellcheck disable=SC1090
@@ -153,7 +156,7 @@ preflight() {
   local bad=0
   need() { command -v "$1" >/dev/null || { echo "  MISSING tool: $1"; bad=1; }; }
   isfile() { [ -f "$2" ] || { echo "  MISSING $1: '$2'"; bad=1; }; }
-  echo "preflight: SIM=$SIM DUT=$DUT"
+  echo "preflight: SIM=$SIM DUT=$DUT${VM_PATHS:+  paths: $VM_PATHS}"
   need python3
   if [ "$SIM" = verilator ]; then need verilator; verilator --version
   else
@@ -176,7 +179,7 @@ preflight() {
     # (models/sram_behav.sv defines its macros through `PIN_RF_SP(name, ...).)
     # </dev/null: with every model list empty, cat would otherwise wait on the terminal.
     local defs; defs="$(cat /dev/null ${PDK_FIRST[@]+"${PDK_FIRST[@]}"} ${SRAM_MODELS[@]+"${SRAM_MODELS[@]}"} ${PAD_MODELS[@]+"${PAD_MODELS[@]}"} 2>/dev/null </dev/null \
-      | grep -oE '^[[:space:]]*(module[[:space:]]+|`PIN_RF_SP\()[A-Za-z0-9_]+' | sed -E 's/.*(module[[:space:]]+|\()//' | sort -u)"
+      | grep -oE '^[[:space:]]*(module[[:space:]]+|`PIN_RF_SP\()[A-Za-z0-9_]+' | sed -E 's/.*(module[[:space:]]+|\()//' | sort -u || true)"
     for m in $(grep -oE '^[[:space:]]*((rf|sram)_sp_[0-9]+_[0-9]+|sram_dp_[0-9]+_[0-9]+|io_in|io_out|io_tri)[[:space:]]' "$NETLIST" | sort -u); do
       grep -qx "$m" <<<"$defs" || { echo "  netlist instantiates $m but no model defines it"; bad=1; }
     done

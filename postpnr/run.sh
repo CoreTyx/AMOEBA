@@ -21,6 +21,9 @@
 #                      image and compare it with the Verilator golden
 #   --max-errors N     bench errors before a run stops (default 1)
 #   --no-build         reuse the corner builds as they are
+#   --vm-paths FILE    the model paths (vm_paths.sh format) to use; default:
+#                      $VM_PATHS, else vm_paths.sh beside this checkout
+#                      (../vm_paths.sh), else hvl/pin/vm_paths.sh
 #
 # What makes a row PASS -- all of:
 #   func  the bench's verdict: the program finished with exit 0 and no pin,
@@ -92,7 +95,7 @@ if [ "${1:-}" = __one ]; then
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -102,6 +105,7 @@ while [ $# -gt 0 ]; do
     --with-vcs-rtl) VCS_RTL=1;;
     --max-errors) MAX_ERRORS="$2"; shift;;
     --no-build) BUILD=0;;
+    --vm-paths) VMP="$2"; shift;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -134,6 +138,23 @@ log "==== postpnr/run.sh $(date '+%F %T')  host=$(hostname)"
 [ -d "$PNR_DIR" ] || stop "PNR_DIR=$PNR_DIR is not a directory"
 PNR_DIR="$(cd "$PNR_DIR" && pwd)"
 log "drop:    $PNR_DIR"
+
+# ---- the model paths (vm_paths.sh) --------------------------------------------------------
+if [ -z "$VMP" ]; then
+  for f in "$R/../vm_paths.sh" "$P/vm_paths.sh"; do [ -f "$f" ] && { VMP="$f"; break; }; done
+fi
+[ -n "$VMP" ] && [ -f "$VMP" ] \
+  || stop "no vm_paths.sh${VMP:+ at $VMP}: put one beside this checkout ($(cd "$R/.." && pwd)/vm_paths.sh), or pass --vm-paths"
+VMP="$(cd "$(dirname "$VMP")" && pwd)/$(basename "$VMP")"
+export PIN_VM_PATHS="$VMP"
+log "paths:   $VMP"
+# Source it here too (in a subshell, so it cannot touch this script's variables)
+# and show what it defines; pin.sh preflight checks every file.
+bash -c 'set +u; STDCELL_MODELS=(); SRAM_MODELS=(); PAD_MODELS=(); PDK_FIRST=(); VCS_FLAGS=()
+  source "$1" >/dev/null || exit 1
+  for a in STDCELL_MODELS SRAM_MODELS PAD_MODELS PDK_FIRST VCS_FLAGS; do
+    declare -n x=$a; printf "         %-15s %s\n" "$a" "${#x[@]} entr$([ ${#x[@]} = 1 ] && echo y || echo ies)${x:+: ${x[0]}$([ ${#x[@]} -gt 1 ] && echo " ...")}"
+  done' _ "$VMP" | tee -a "$SUM" || stop "sourcing $VMP failed"
 
 # The bundle's own check (postpnr/pack.sh): every file as packed.
 if [ -f "$R/postpnr/BUNDLE.sha256" ]; then

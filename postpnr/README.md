@@ -71,8 +71,9 @@ The golden is committed as `postpnr/postpnr_bundle_<sha12>.tgz` (`golden/` itsel
 
 ```
 /groups/ece427-group4/post_pnr_tb/
-  AMOEBA/   clone on postpnr_verif: bench, golden, vm_paths.sh, builds, results
-  drop/     what PnR produced (section 1)
+  AMOEBA/        clone on postpnr_verif: bench, golden, builds, results
+  vm_paths.sh    the TSMC model paths (format: hvl/pin/vm_paths.example.sh)
+  drop/          what PnR produced (section 1)
 ```
 
 `run.sh` writes builds (`sim/pin/build/`) and results (`postpnr/results/`) inside the checkout it runs from, so the checkout is what lives in the group folder. Use a clone, not a worktree: a worktree points into your home directory, which the group cannot read.
@@ -86,12 +87,14 @@ mkdir -p /groups/ece427-group4/post_pnr_tb/drop && cd /groups/ece427-group4/post
 git clone --branch postpnr_verif ~/AMOEBA AMOEBA
 cd AMOEBA
 tar -xzf postpnr/postpnr_bundle_<sha12>.tgz ./postpnr/golden        # the golden only
-cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh                  # then fill in the model paths
+[ -f ../vm_paths.sh ] || cp hvl/pin/vm_paths.example.sh ../vm_paths.sh   # then fill in the model paths
 chmod -R g+rwX /groups/ece427-group4/post_pnr_tb
 find /groups/ece427-group4/post_pnr_tb -type d -exec chmod g+s {} +
 ```
 
 Extract only `./postpnr/golden`. The whole bundle would add `postpnr/BUNDLE.sha256`, and `run.sh` would then hold the checkout to the bundle's files, which fails after the next `git pull`.
+
+`run.sh` takes the model paths from `$VM_PATHS` or `--vm-paths FILE` if given, else from `vm_paths.sh` beside the checkout (`../vm_paths.sh`), else from `hvl/pin/vm_paths.sh`. It prints which file it used and what each list holds. The lists are bash arrays in that file (`STDCELL_MODELS=(/path/*.v)`), not environment variables: an exported array never reaches the scripts.
 
 `vm_paths.sh` needs `STDCELL_MODELS`, `SRAM_MODELS` (`rf_sp_64_128`, `_64_46`, `_64_53`, `_64_137`) and `PAD_MODELS` (`io_in`, `io_out`). `PDK_FIRST` and `VCS_FLAGS` are needed only if the models ask for them. Leave `NETLIST` and `SDF` empty: `run.sh` takes them from the drop folder. Put the PnR files and `pnr.env` (`RTL_REF=<sha>`) in `drop/`.
 
