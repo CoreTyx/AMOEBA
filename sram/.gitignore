@@ -1,3 +1,3 @@
+# Generated SRAM views.  All ignored for now: the .v/.db exceptions that used
+# to be here would also let foundry SRAM models placed in output/ be committed.
 output/*/*
-!output/*/*.v
-!output/*/*.db

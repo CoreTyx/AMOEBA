@@ -7,3 +7,7 @@ hdl/cvw/addins/
 sim/pin/
 hvl/pin/vm_paths.sh
 third_party/cascade/
+# VM-only files, if ever placed inside the checkout: model paths, PnR drop folder
+/vm_paths.sh
+/drop/
+pnr.env
