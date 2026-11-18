@@ -1,7 +1,7 @@
 #!/bin/bash
 # postpnr/variants.sh -- which STDCELL_MODELS file should come first?
 #
-#   postpnr/variants.sh [--vm-paths FILE] [--corner max|min] [--static-only]
+#   postpnr/variants.sh [--vm-paths FILE] [--corner max|min] [--clk-mhz MHZ] [--static-only]
 #
 # VCS takes each cell from the first -v file that defines it, so with several
 # variants of one library in STDCELL_MODELS the order decides which model --
@@ -19,17 +19,19 @@
 # that order).  Pick, per threshold-voltage flavour, the entry with no
 # SDFCOM_CFTC/IANE/TANE: only SDFCOM_UHICD (pad wires) should remain.
 #
-# PNR_DIR as for run.sh (environment, else PNR_DIR=... in vm_paths.sh).
+# The SDF and PNR_DIR as for run.sh (SDF=... in vm_paths.sh, else the drop
+# folder).  --clk-mhz is passed to run.sh (needed there when there is no SDC).
 # Each build replaces sim/pin/build/vcs_gate_sdf<corner>; the next run.sh
 # rebuilds it from the real vm_paths.sh.  Builds run one after another.
 set -uo pipefail
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VMP="${VM_PATHS:-}" CORNER=max STATIC_ONLY=0
+VMP="${VM_PATHS:-}" CORNER=max STATIC_ONLY=0 CLK=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --vm-paths) VMP="$2"; shift;;
     --corner) CORNER="$2"; shift;;
     --static-only) STATIC_ONLY=1;;
+    --clk-mhz) CLK=(--clk-mhz "$2"); shift;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "variants.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -78,8 +80,9 @@ for i in "${!LIBS[@]}"; do
           for (k = 1; k <= nm; k++) printf " %8d", cnt["`" M[k]]
           printf "\n" }'
 done
-SDF=""
-if [ -n "${PNR_DIR:-}" ] && [ -d "$PNR_DIR" ]; then
+SDF="$(bash -c 'set +u; SDF=; source "$1" >/dev/null 2>&1 </dev/null; printf %s "$SDF"' _ "$VMP")"
+[ -n "$SDF" ] && [ ! -f "$SDF" ] && SDF=""
+if [ -z "$SDF" ] && [ -n "${PNR_DIR:-}" ] && [ -d "$PNR_DIR" ]; then
   s=("$PNR_DIR"/*.sdf "$PNR_DIR"/*.sdf.gz); for f in "${s[@]}"; do [ -f "$f" ] && { SDF="$f"; break; }; done
 fi
 if [ -n "$SDF" ]; then
@@ -102,7 +105,7 @@ for i in "${!LIBS[@]}"; do
   echo
   echo "---- [$i] first  ($(date '+%T'))"
   log="$TMP/run_$i.log"
-  "$R/postpnr/run.sh" --vm-paths "$v" --only '^smoke$' --corners "$CORNER" > "$log" 2>&1 </dev/null
+  "$R/postpnr/run.sh" --vm-paths "$v" --only '^smoke$' --corners "$CORNER" ${CLK[@]+"${CLK[@]}"} > "$log" 2>&1 </dev/null
   rc=$?
   out="$(sed -n 's/^results: \(.*\)\/SUMMARY .*/\1/p' "$log" | tail -1)"
   b="$out/build_$CORNER.log"

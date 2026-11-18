@@ -18,9 +18,13 @@ NETLIST="${NETLIST:-}"
 
 # SDF for the same netlist.  Empty = zero-delay functional gate simulation
 # (post-synthesis).  Set it for post-PnR timing simulation.
-# postpnr/run.sh overrides NETLIST, SDF and SDF_CORNER from its drop folder
-# ($PNR_DIR), so for post-PnR runs only the MODEL paths below matter here,
-# plus PNR_DIR itself if you want it here instead of in the environment:
+# postpnr/run.sh: when NETLIST and SDF are both set here, it simulates exactly
+# these (one SDF with min:typ:max triples; .gz allowed; SDF_CORNER is ignored,
+# run.sh builds the corners it is asked for), and SDC is optional:
+# SDC=/path/forte_top.sdc
+# Without an SDC (here or in a drop folder) run.sh needs --clk-mhz and derives
+# the I/O timing from the clock.  When NETLIST and SDF are empty here, run.sh
+# takes netlist, SDF and SDC from the drop folder instead:
 # PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop
 # An SDF build compiles with +neg_tchk +sdfverbose +define+NTC +define+RECREM
 # (the cell-model switches for negative limits and recovery/removal checks)

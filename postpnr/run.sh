@@ -1,10 +1,12 @@
 #!/bin/bash
 # postpnr/run.sh -- post-PnR chip-level verification, on the VCS VM.
 #
-#   PNR_DIR=/path/to/drop postpnr/run.sh [options]
-#   (or PNR_DIR=/path/to/drop in vm_paths.sh; the environment wins)
+#   postpnr/run.sh [options]
 #
-# The drop folder ($PNR_DIR) holds what PnR produced:
+# The netlist and SDF come from vm_paths.sh when it sets NETLIST=... and
+# SDF=... (one SDF with min:typ:max triples, .gz allowed), and SDC=... there is
+# optional.  Otherwise they come from the drop folder, PNR_DIR=... (the
+# environment, else vm_paths.sh):
 #   forte_top.v (or the one *.v / *.v.gz)    the post-PnR netlist (ports as forte_top)
 #   forte_top.sdc (or the one *.sdc)         the SDC PnR signed off with
 #   *.sdf[.gz]: one SDF with min:typ:max triples, or one per corner whose name
@@ -12,6 +14,11 @@
 #   pnr.env     optional: RTL_REF=<sha> (the commit the netlist came from; the
 #               golden must be that commit's), and any vm_paths.sh override
 #               (STDCELL_MODELS=(...), VCS_FLAGS=(...), ...)
+# With no SDC anywhere, --clk-mhz is required, and the I/O timing is derived
+# from the clock: inputs launched 25% (max corner) / 10% (min corner) of a
+# period after the core_clk edge, outputs sampled at 75% (so they must settle
+# within the first 75% of the cycle), and no pad output-window check.  SUMMARY
+# says so.  That is a "does it run at this clock" test, not an I/O sign-off.
 #
 # Options:
 #   --only REGEX       images whose name matches (default: all with a golden)
@@ -22,8 +29,8 @@
 #                      image and compare it with the Verilator golden
 #   --max-errors N     bench errors before a run stops (default 1)
 #   --no-build         reuse the corner builds as they are
-#   --clk-mhz MHZ      run core_clk at MHZ instead of the SDC's period: the
-#                      target-frequency test.  The SDC's I/O delays are board
+#   --clk-mhz MHZ      run core_clk at MHZ instead of the SDC's period (needed
+#                      when there is no SDC): the target-frequency test.  The SDC's I/O delays are board
 #                      delays and stay as they are; everything derived from the
 #                      period follows MHZ (postpnr/sdc_delays.py --period).
 #                      The period is rounded to a whole even number of ps.
@@ -152,16 +159,27 @@ fi
 VMP="$(cd "$(dirname "$VMP")" && pwd)/$(basename "$VMP")"
 export PIN_VM_PATHS="$VMP"
 
-# ---- the drop folder: $PNR_DIR from the environment, else PNR_DIR=... in vm_paths.sh -------
+# ---- where the netlist, SDF and SDC come from ------------------------------------------------
+# vm_paths.sh's NETLIST= and SDF= (and SDC=, optional) win; else the drop folder.
+mapfile -t vv < <(bash -c 'set +u; NETLIST=; SDF=; SDC=; PNR_DIR=; source "$1" >/dev/null 2>&1 </dev/null
+                           printf "%s\n%s\n%s\n%s\n" "$NETLIST" "$SDF" "$SDC" "$PNR_DIR"' _ "$VMP")
+V_NETLIST="${vv[0]:-}" V_SDF="${vv[1]:-}" V_SDC="${vv[2]:-}"
 PNR_FROM="environment"
-if [ -z "${PNR_DIR:-}" ]; then
-  PNR_DIR="$(bash -c 'set +u; PNR_DIR=; source "$1" >/dev/null 2>&1 </dev/null; printf %s "$PNR_DIR"' _ "$VMP")"
-  PNR_FROM="$VMP"
+if [ -z "${PNR_DIR:-}" ]; then PNR_DIR="${vv[3]:-}"; PNR_FROM="$VMP"; fi
+if [ -n "$V_NETLIST" ] || [ -n "$V_SDF" ]; then
+  [ -n "$V_NETLIST" ] && [ -n "$V_SDF" ] \
+    || stop "$VMP sets $([ -n "$V_NETLIST" ] && echo NETLIST || echo SDF) but not $([ -n "$V_NETLIST" ] && echo SDF || echo NETLIST): set both, or neither to use the drop folder"
+  SRC=vm_paths
+  log "design:  NETLIST and SDF from $VMP"
+else
+  SRC=drop
+  [ -n "$PNR_DIR" ] || stop "no netlist: set NETLIST=... and SDF=... in $VMP, or PNR_DIR to the post-PnR drop folder (environment or $VMP)"
 fi
-[ -n "$PNR_DIR" ] || stop "set PNR_DIR to the post-PnR drop folder (netlist, SDF, SDC): in the environment, or PNR_DIR=... in $VMP"
-[ -d "$PNR_DIR" ] || stop "PNR_DIR=$PNR_DIR (from $PNR_FROM) is not a directory"
-PNR_DIR="$(cd "$PNR_DIR" && pwd)"
-log "drop:    $PNR_DIR  (PNR_DIR from $PNR_FROM)"
+if [ -n "$PNR_DIR" ]; then
+  [ -d "$PNR_DIR" ] || stop "PNR_DIR=$PNR_DIR (from $PNR_FROM) is not a directory"
+  PNR_DIR="$(cd "$PNR_DIR" && pwd)"
+  log "drop:    $PNR_DIR  (PNR_DIR from $PNR_FROM)$([ $SRC = vm_paths ] && echo ": SDC and pnr.env only")"
+fi
 log "paths:   $VMP"
 # Source it here too (in a subshell, so it cannot touch this script's variables)
 # and list every entry of every array, exactly as pin.sh will use them
@@ -181,9 +199,16 @@ if [ -f "$R/postpnr/BUNDLE.sha256" ]; then
   log "bundle:  $(head -1 "$R/postpnr/BUNDLE" 2>/dev/null) -- all $(wc -l < "$R/postpnr/BUNDLE.sha256") files verified"
 fi
 
-# ---- the drop folder ----------------------------------------------------------------------
-one_file() {   # one_file <desc> <glob>...: the first glob with matches must have exactly one;
-               # it is gunzipped into $OUT/drop if need be
+# ---- the design files ------------------------------------------------------------------------
+unz() {   # unz <file>: the file, gunzipped into $OUT/drop if need be
+  local f="$1"
+  [ -f "$f" ] || { echo "ERR:$f: no such file"; return; }
+  if [[ "$f" == *.gz ]]; then
+    mkdir -p "$OUT/drop"; gunzip -c "$f" > "$OUT/drop/$(basename "${f%.gz}")"; f="$OUT/drop/$(basename "${f%.gz}")"
+  fi
+  echo "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+}
+one_file() {   # one_file <desc> <glob>...: the first glob with matches in $PNR_DIR must have exactly one
   local desc="$1" f g; shift
   local hits=()
   shopt -s nullglob
@@ -192,47 +217,55 @@ one_file() {   # one_file <desc> <glob>...: the first glob with matches must hav
     [ ${#hits[@]} -gt 0 ] && break
   done
   shopt -u nullglob
-  [ ${#hits[@]} -eq 1 ] || { echo "ERR:$desc: ${#hits[@]} candidates (${hits[*]:-none}) for $*" ; return; }
-  f="${hits[0]}"
-  if [[ "$f" == *.gz ]]; then
-    mkdir -p "$OUT/drop"; gunzip -c "$f" > "$OUT/drop/$(basename "${f%.gz}")"; f="$OUT/drop/$(basename "${f%.gz}")"
-  fi
-  echo "$f"
+  [ ${#hits[@]} -eq 1 ] || { echo "ERR:$desc: ${#hits[@]} candidates (${hits[*]:-none}) in $PNR_DIR for $*" ; return; }
+  unz "${hits[0]}"
 }
-NETLIST="$(one_file netlist forte_top.v forte_top.v.gz '*.v' '*.v.gz')"
-SDC="$(one_file sdc forte_top.sdc '*.sdc')"
-[[ "$NETLIST" == ERR:* ]] && stop "${NETLIST#ERR:}"
-[[ "$SDC" == ERR:* ]] && stop "${SDC#ERR:}"
 SDF_max="" SDF_min=""
-shopt -s nullglob nocaseglob
-sdfs=("$PNR_DIR"/*.sdf "$PNR_DIR"/*.sdf.gz)
-shopt -u nocaseglob
-if [ ${#sdfs[@]} -eq 1 ]; then
-  SDF_max="$(one_file sdf "$(basename "${sdfs[0]}")")"; SDF_min="$SDF_max"; SDF_MODE="one SDF, min:typ:max triples"
-elif [ ${#sdfs[@]} -eq 2 ]; then
-  for f in "${sdfs[@]}"; do
-    b="$(basename "$f" | tr 'A-Z' 'a-z')"
-    if [[ "$b" =~ (max|ss|slow|wc|worst) ]]; then SDF_max="$(one_file sdf "$(basename "$f")")"
-    elif [[ "$b" =~ (min|ff|fast|bc|best) ]]; then SDF_min="$(one_file sdf "$(basename "$f")")"; fi
-  done
-  [ -n "$SDF_max" ] && [ -n "$SDF_min" ] || stop "two SDFs, but cannot tell max from min by name: ${sdfs[*]}"
-  SDF_MODE="one SDF per corner"
+if [ $SRC = vm_paths ]; then
+  NETLIST="$(unz "$V_NETLIST")"
+  SDF_max="$(unz "$V_SDF")"; SDF_min="$SDF_max"; SDF_MODE="one SDF from vm_paths.sh, min:typ:max triples"
+  [[ "$NETLIST" == ERR:* ]] && stop "NETLIST in $VMP: ${NETLIST#ERR:}"
+  [[ "$SDF_max" == ERR:* ]] && stop "SDF in $VMP: ${SDF_max#ERR:}"
 else
-  stop "need one SDF (min:typ:max) or two (max and min) in $PNR_DIR, found ${#sdfs[@]}"
+  NETLIST="$(one_file netlist forte_top.v forte_top.v.gz '*.v' '*.v.gz')"
+  [[ "$NETLIST" == ERR:* ]] && stop "${NETLIST#ERR:}"
+  shopt -s nullglob nocaseglob
+  sdfs=("$PNR_DIR"/*.sdf "$PNR_DIR"/*.sdf.gz)
+  shopt -u nocaseglob nullglob
+  if [ ${#sdfs[@]} -eq 1 ]; then
+    SDF_max="$(one_file sdf "$(basename "${sdfs[0]}")")"; SDF_min="$SDF_max"; SDF_MODE="one SDF, min:typ:max triples"
+  elif [ ${#sdfs[@]} -eq 2 ]; then
+    for f in "${sdfs[@]}"; do
+      b="$(basename "$f" | tr 'A-Z' 'a-z')"
+      if [[ "$b" =~ (max|ss|slow|wc|worst) ]]; then SDF_max="$(one_file sdf "$(basename "$f")")"
+      elif [[ "$b" =~ (min|ff|fast|bc|best) ]]; then SDF_min="$(one_file sdf "$(basename "$f")")"; fi
+    done
+    [ -n "$SDF_max" ] && [ -n "$SDF_min" ] || stop "two SDFs, but cannot tell max from min by name: ${sdfs[*]}"
+    SDF_MODE="one SDF per corner"
+  else
+    stop "need one SDF (min:typ:max) or two (max and min) in $PNR_DIR, found ${#sdfs[@]}"
+  fi
 fi
-shopt -u nullglob
 export SDF_max SDF_min
+# The SDC: vm_paths.sh's SDC=, else the drop folder's one *.sdc, else none.
+SDC=""
+if [ -n "$V_SDC" ]; then
+  SDC="$(unz "$V_SDC")"; [[ "$SDC" == ERR:* ]] && stop "SDC in $VMP: ${SDC#ERR:}"
+elif [ -n "$PNR_DIR" ] && compgen -G "$PNR_DIR/*.sdc" >/dev/null; then
+  SDC="$(one_file sdc forte_top.sdc '*.sdc')"; [[ "$SDC" == ERR:* ]] && stop "${SDC#ERR:}"
+fi
 
 RTL_REF=""
 EXTRA=""
-if [ -f "$PNR_DIR/pnr.env" ]; then
+if [ -n "$PNR_DIR" ] && [ -f "$PNR_DIR/pnr.env" ]; then
   EXTRA="$PNR_DIR/pnr.env"
   RTL_REF="$(bash -c 'source "$1" >/dev/null 2>&1; echo "${RTL_REF:-}"' _ "$EXTRA")"
 fi
-for f in $(printf '%s\n' "$NETLIST" "$SDF_max" "$SDF_min" "$SDC" ${EXTRA:+"$EXTRA"} | awk '!seen[$0]++'); do
+for f in $(printf '%s\n' "$NETLIST" "$SDF_max" "$SDF_min" ${SDC:+"$SDC"} ${EXTRA:+"$EXTRA"} | awk '!seen[$0]++'); do
   log "  $(sha256sum "$f" | cut -c1-16)  $(du -h "$f" | cut -f1)  $f"
 done
 log "sdf:     $SDF_MODE"
+[ -n "$SDC" ] || log "sdc:     NONE -- I/O timing derived from --clk-mhz (see below); not an I/O timing sign-off"
 
 # ---- the golden ------------------------------------------------------------------------
 if [ -z "$GOLDEN" ]; then
@@ -252,7 +285,7 @@ log "golden:  $GOLDEN (RTL $gsha)"
 if [ -n "$RTL_REF" ]; then
   [[ "$gsha" == "$RTL_REF"* ]] || stop "pnr.env says RTL_REF=$RTL_REF but the golden is RTL $gsha"
 else
-  log "WARNING: no RTL_REF in pnr.env -- cannot prove the netlist came from golden RTL $gsha"
+  log "WARNING: no RTL_REF (drop/pnr.env) -- cannot prove the netlist came from golden RTL $gsha"
 fi
 export GOLDEN OUT MAX_ERRORS
 
@@ -265,6 +298,23 @@ if [ -n "$CLK_MHZ" ]; then
     || stop "--clk-mhz $CLK_MHZ: give a positive number of MHz"
   PERIOD=(--period "$(awk -v f="$CLK_MHZ" 'BEGIN { printf "%.3f", 2 * int(500000 / f + 0.5) / 1000 }')")
 fi
+if [ -z "$SDC" ]; then
+  # No SDC: derive the bench's I/O timing from the clock alone (header).  The
+  # generated SDC goes through the same sdc_delays.py and its checks; the pad
+  # output-window plusargs are dropped below (no set_output_delay to check).
+  [ -n "$CLK_MHZ" ] || stop "no SDC (SDC= in $VMP, or one *.sdc in the drop folder): give --clk-mhz MHZ"
+  SDC="$OUT/generated.sdc"
+  awk -v p="${PERIOD[1]}" 'BEGIN {
+    printf "# generated by postpnr/run.sh: no SDC was given; I/O timing from --clk-mhz\n"
+    printf "create_clock -name core_clk -period %s [get_ports core_clk]\n", p
+    printf "set_input_delay -max %.3f -clock core_clk [get_ports {io_in[*] ready rvalid}]\n", 0.25 * p
+    printf "set_input_delay -min %.3f -clock core_clk [get_ports {io_in[*] ready rvalid}]\n", 0.10 * p
+    printf "set_false_path -from [get_ports {rst_n irq[*] uart_rx test_mode scan_en fault_inject}]\n"
+    printf "set_output_delay -max %.3f -clock core_clk [get_ports {io_out[*] req wr uart_tx status}]\n", 0.25 * p
+    printf "set_output_delay -min 0 -clock core_clk [get_ports {io_out[*] req wr uart_tx status}]\n" }' > "$SDC"
+  NO_SDC=1
+  PERIOD=()
+fi
 python3 "$R/postpnr/sdc_delays.py" "$SDC" ${PERIOD[@]+"${PERIOD[@]}"} > "$OUT/sdc.txt" 2>&1 \
   || { cat "$OUT/sdc.txt" >> "$SUM"; cat "$OUT/sdc.txt"; stop "the SDC${CLK_MHZ:+ at --clk-mhz $CLK_MHZ} cannot drive the bench (above)"; }
 python3 "$R/postpnr/sdc_delays.py" "$SDC" ${PERIOD[@]+"${PERIOD[@]}"} --sh > "$OUT/sdc.env"
@@ -272,7 +322,9 @@ cat "$OUT/sdc.txt" >> "$SUM"; cat "$OUT/sdc.txt"
 # shellcheck disable=SC1091
 source "$OUT/sdc.env"
 CLK_NOTE="clock $(awk -v p="$CLK_PS" 'BEGIN { printf "%g ns = %g MHz", p / 1000, 1e6 / p }')"
-if [ "$CLK_PS" != "$SDC_CLK_PS" ]; then
+if [ -n "${NO_SDC:-}" ]; then
+  CLK_NOTE="$CLK_NOTE (--clk-mhz $CLK_MHZ, NO SDC: inputs at 25%/10% of the period, outputs sampled at 75%, no output-window check)"
+elif [ "$CLK_PS" != "$SDC_CLK_PS" ]; then
   CLK_NOTE="$CLK_NOTE (--clk-mhz $CLK_MHZ; the SDC's is $(awk -v p="$SDC_CLK_PS" 'BEGIN { printf "%g ns", p / 1000 }'))"
 else
   CLK_NOTE="$CLK_NOTE (the SDC's)"
@@ -284,9 +336,17 @@ log "clock:   ${CLK_NOTE#clock }"
 # (setup side) therefore checks each output group's window that much earlier:
 # a pass then holds with the wire included.  The min corner needs nothing: an
 # output that changes earlier only makes its hold-side check stricter.
-python3 "$R/postpnr/sdf_out_wires.py" "$SDF_max" > "$OUT/wires.env" || stop "postpnr/sdf_out_wires.py $SDF_max failed"
-# shellcheck disable=SC1091
-source "$OUT/wires.env"
+WIRES_N=0
+if [ -n "${NO_SDC:-}" ]; then
+  # No set_output_delay to check: no pad window, so no window compensation.
+  # The sample points stay (outputs must have settled by 75% of the period).
+  PLUSARGS_MAX="$(sed -E 's/ ?\+OUT_M(AX|IN)_[A-Z]+_PS=-?[0-9]+//g' <<<"$PLUSARGS_MAX")"
+  PLUSARGS_MIN="$(sed -E 's/ ?\+OUT_M(AX|IN)_[A-Z]+_PS=-?[0-9]+//g' <<<"$PLUSARGS_MIN")"
+else
+  python3 "$R/postpnr/sdf_out_wires.py" "$SDF_max" > "$OUT/wires.env" || stop "postpnr/sdf_out_wires.py $SDF_max failed"
+  # shellcheck disable=SC1091
+  source "$OUT/wires.env"
+fi
 if [ "$WIRES_N" -gt 0 ]; then
   for g in LINK SLOW; do
     w="WIRES_${g}_PS"; o="OUT_MAX_${g}_PS"

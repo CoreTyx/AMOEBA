@@ -33,7 +33,7 @@ The golden is made on EWS and the netlist is checked on the TSMC VM; git is the 
 
 **On the VM, beside the checkout:**
 
-- `vm_paths.sh`: the model lists and `PNR_DIR`. Never committed.
+- `vm_paths.sh`: the model lists, and either `NETLIST` + `SDF` (+ optional `SDC`) or `PNR_DIR`. Never committed.
 - `drop/`: what PnR produced (netlist `forte_top.pnr.v`, one min:typ:max SDF `forte_top.pnr.sdf`, SDC `forte_top.gate.sdc`) and, once known, `pnr.env` with `RTL_REF=<sha>`.
 
 ### IP rules
@@ -156,7 +156,7 @@ postpnr/run.sh --only '^smoke$' --corners max       # minutes: models, ports, SD
 postpnr/run.sh --jobs 4                             # hours, inside tmux; each job holds a VCS licence
 ```
 
-`PNR_DIR` comes from `vm_paths.sh` (the environment wins if set). Inside a new tmux window, run `umask 002` and `module load vcs` again.
+`run.sh` simulates the `NETLIST` and `SDF` set in `vm_paths.sh`; if they are empty, it takes netlist, SDF and SDC from the drop folder `PNR_DIR` (the environment wins if set). With no SDC, `--clk-mhz` is required and the I/O timing is derived from the clock (inputs at 25% / 10% of the period, outputs sampled at 75%, no output-window check). Inside a new tmux window, run `umask 002` and `module load vcs` again.
 
 | `run.sh` option | Does |
 | --- | --- |

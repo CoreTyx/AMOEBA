@@ -96,7 +96,12 @@ Extract only `./postpnr/golden`. The whole bundle would add `postpnr/BUNDLE.sha2
 
 `run.sh` takes the model paths from `$VM_PATHS` or `--vm-paths FILE` if given, else from `vm_paths.sh` beside the checkout (`../vm_paths.sh`), else from `hvl/pin/vm_paths.sh`. It prints which file it used and what each list holds. The lists are bash arrays in that file (`STDCELL_MODELS=(/path/*.v)`), not environment variables: an exported array never reaches the scripts.
 
-`vm_paths.sh` needs `STDCELL_MODELS`, `SRAM_MODELS` (`rf_sp_64_128`, `_64_46`, `_64_53`, `_64_137`) and `PAD_MODELS` (`io_in`, `io_out`). `PDK_FIRST` and `VCS_FLAGS` are needed only if the models ask for them. Leave `NETLIST` and `SDF` empty: `run.sh` takes them from the drop folder. Put the PnR files and `pnr.env` (`RTL_REF=<sha>`) in `drop/`, and set `PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop` in `vm_paths.sh`: `run.sh` uses it when `PNR_DIR` is not in the environment (the environment wins), so a new shell or tmux window needs no export.
+`vm_paths.sh` needs `STDCELL_MODELS`, `SRAM_MODELS` (`rf_sp_64_128`, `_64_46`, `_64_53`, `_64_137`) and `PAD_MODELS` (`io_in`, `io_out`). `PDK_FIRST` and `VCS_FLAGS` are needed only if the models ask for them. The netlist and SDF come from one of two places:
+
+- **`vm_paths.sh`:** set `NETLIST=...` and `SDF=...` (one SDF with min:typ:max triples; `.gz` allowed) and `run.sh` simulates exactly those. `SDC=...` there is optional. With no SDC anywhere, `run.sh` needs `--clk-mhz` and derives the I/O timing from the clock: inputs launched 25% (max corner) and 10% (min corner) of a period after the edge, outputs sampled at 75%, no pad output-window check. SUMMARY says so; it tests that the netlist runs at that clock, not the board I/O timing.
+- **The drop folder:** leave `NETLIST` and `SDF` empty, put the PnR files and `pnr.env` (`RTL_REF=<sha>`) in `drop/`, and set `PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop` in `vm_paths.sh` (the environment wins).
+
+A drop folder set alongside `NETLIST`/`SDF` still supplies the SDC (if `vm_paths.sh` has none) and `pnr.env`.
 
 If `STDCELL_MODELS` holds several variants of one library (the preflight warns when a cell is defined in more than one file), VCS takes each cell from the first file listed. `postpnr/variants.sh` builds the smoke test once per entry, with that entry first, and prints counts only: per file, the modules and the timing checks their specify blocks have, the SDF's timing checks by kind, and per build the count of each `SDF*` message. Keep the order whose build shows only `SDFCOM_UHICD`. `--static-only` skips the builds.
 
@@ -105,7 +110,7 @@ Each run, in a shell with `umask 002`:
 ```
 cd /groups/ece427-group4/post_pnr_tb/AMOEBA
 module load vcs && which vcs                                         # or the site's Synopsys setup
-python3 postpnr/sdc_delays.py ../drop/*.sdc                           # the timing the bench will apply
+python3 postpnr/sdc_delays.py ../drop/*.sdc                           # the timing the bench will apply (if there is an SDC)
 postpnr/variants.sh                                                   # once: which STDCELL_MODELS order
 postpnr/run.sh --only '^smoke$' --corners max                         # minutes: models, ports, SDF annotation
 postpnr/run.sh --jobs 4                                               # hours; each job holds a VCS licence
