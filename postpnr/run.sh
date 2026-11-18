@@ -383,7 +383,9 @@ for c in "${CORN[@]}"; do
     bpid=$!
     heartbeat $bpid "$OUT/build_$c.log" "building $c corner ($OUT/build_$c.log)"
     wait $bpid \
-      || { tail -45 "$OUT/build_$c.log" | tee -a "$SUM"; stop "gate build, $c corner (SDFCOM messages fail it: above, and $OUT/build_$c.log)"; }
+      || { tail -45 "$OUT/build_$c.log" | tee -a "$SUM"
+           why="$(grep -E '^pin\.sh: ' "$OUT/build_$c.log" | tail -1)"
+           stop "gate build, $c corner: ${why:-see above} ($OUT/build_$c.log)"; }
   fi
   grep -E '^build: (SDF|ignored|dropped)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
