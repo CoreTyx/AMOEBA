@@ -117,6 +117,8 @@ Without git, the bundle works on its own: `tar -xzf postpnr_bundle_<sha12>.tgz -
 
 `--only '^(smoke|bm_|isa_)'` narrows the images, and `--corners max` runs one corner. `--with-vcs-rtl` also runs the golden RTL under 4-state VCS and compares it.
 
+`--clk-mhz MHZ` runs `core_clk` at a target frequency instead of the SDC's period. The SDC's I/O delays are board delays and stay as they are; the negedge capture, sample points and output windows follow the new period, and `sdc_delays.py` refuses a period the I/O budget cannot fit (input delay `-max` must be under half a period, output delay `-max` under a period). The golden needs no change: its traces count cycles, not time. SUMMARY's `clock:` line and the `TOTAL` line name the clock. A pass at MHZ means no timing violation and identical pins on these programs at that clock. It is not STA: only the paths the programs exercise are checked. A clock faster than the SDC's is one PnR did not close timing at, and `sdc_delays.py` warns.
+
 **Steps, each stopping the run on failure:**
 1. **Bundle check.** If `postpnr/BUNDLE.sha256` is present (a bundle-only setup), every file must be as packed.
 2. **Drop folder.** Find the files and record their checksums.

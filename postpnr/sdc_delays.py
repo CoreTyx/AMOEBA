@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Clock period and pin I/O delays for the pin bench, from the SDC PnR signed off with.
 
-    sdc_delays.py <file.sdc> [--sh | --plusargs max|min] [--env K=V ...]
+    sdc_delays.py <file.sdc> [--sh | --plusargs max|min] [--period NS] [--env K=V ...]
 
 Reads create_clock, set_input_delay / set_output_delay (-max/-min) and
 set_false_path, for the forte_top ports, and turns them into the pin bench's
@@ -32,6 +32,12 @@ It REFUSES (exit 1, with the reason) rather than guess:
     sample point, or a link sample point T - OUT_MAX not after IN_MAX (the
     bench's FPGA model samples, then launches at the next edge)
   - any Tcl it cannot evaluate in a command that names one of these ports.
+
+--period NS runs the bench at a clock period other than the SDC's (a target
+frequency): the SDC still names the clock and gives every I/O delay, which are
+board delays in ns and do not scale with the clock; everything derived from
+the period (negedge capture, sample points, output windows) and every check
+above uses NS.  The SDC's own period is still reported.
 
 Default output is a human summary; --sh prints shell assignments, --plusargs
 prints the bench plusargs for one corner.  Tcl variables, [expr], [getenv]
@@ -498,7 +504,7 @@ def split_words(s):
 
 
 # ---- the bench's numbers --------------------------------------------------------
-def derive(sdc):
+def derive(sdc, period=None):
     errs, warns = [], []
     src = [n for n, c in sdc.clocks.items() if CLOCK_PORT in c["ports"]]
     if len(src) != 1:
@@ -536,7 +542,17 @@ def derive(sdc):
                     vals.append(v)
         return agg(vals), None
 
-    res = {"CLK_NAME": cname, "T": T}
+    # The clock's own consistency (waveform, virtual clocks) is checked against
+    # the SDC's period above; from here on the bench runs at `period` if given.
+    T_SDC = T
+    if period is not None:
+        if period <= 0:
+            raise SdcError(f"--period {period}: must be positive")
+        T = period
+        if T < T_SDC:
+            warns.append(f"period {fmt_num(T)} ns is SHORTER than the SDC's {fmt_num(T_SDC)} ns: "
+                         f"PnR did not close timing at this clock, so violations are expected")
+    res = {"CLK_NAME": cname, "T": T, "T_SDC": T_SDC}
     # -- inputs --
     for k, agg in (("max", max), ("min", min)):
         v, missing = bound(sdc.in_dly, LINK_IN, k, agg, "input")
@@ -648,7 +664,9 @@ def plusargs(res, corner):
 def summary(res, warns, sdc, path):
     T = res["T"]
     L = [f"SDC {path}",
-         f"  clock          {res['CLK_NAME']} on {CLOCK_PORT}: period {fmt_num(T)} ns",
+         f"  clock          {res['CLK_NAME']} on {CLOCK_PORT}: period {fmt_num(T)} ns"
+         + ("" if T == res["T_SDC"] else
+            f" ({fmt_num(1000 / T)} MHz, from --period; the SDC's is {fmt_num(res['T_SDC'])} ns)"),
          f"  inputs         io_in/ready/rvalid launched {fmt_num(res['IN_MAX'])} ns (max corner) / "
          f"{fmt_num(res['IN_MIN'])} ns (min corner) after core_clk; negedge capture at {fmt_num(T / 2)} ns"]
     for g, names in (("LINK", "io_out/req/wr"), ("SLOW", "uart_tx/status")):
@@ -675,7 +693,7 @@ def summary(res, warns, sdc, path):
 
 def main(argv):
     env = dict(os.environ)
-    args, mode, corner = [], "summary", None
+    args, mode, corner, period = [], "summary", None, None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -687,6 +705,12 @@ def main(argv):
             mode, corner = "plusargs", argv[i + 1]; i += 1
             if corner not in ("max", "min"):
                 print("--plusargs takes max or min", file=sys.stderr); return 2
+        elif a == "--period":
+            try:
+                period = float(argv[i + 1])
+            except (IndexError, ValueError):
+                print("--period takes a number of ns", file=sys.stderr); return 2
+            i += 1
         elif a.startswith("-"):
             print(__doc__); return 2
         else:
@@ -698,13 +722,14 @@ def main(argv):
     try:
         with open(args[0]) as f:
             sdc.load(f.read())
-        res, warns = derive(sdc)
+        res, warns = derive(sdc, period)
     except (SdcError, OSError) as e:
         print(f"sdc_delays: {args[0]}: REFUSED\n  {e}", file=sys.stderr)
         return 1
     if mode == "sh":
         print(f"CLK_NAME={res['CLK_NAME']}")
         print(f"CLK_PS={ps(res['T'])}")
+        print(f"SDC_CLK_PS={ps(res['T_SDC'])}")
         for k in ("IN_MAX", "IN_MIN", "OUT_MAX_LINK", "OUT_MIN_LINK", "OUT_MAX_SLOW", "OUT_MIN_SLOW", "TRACE_SAMPLE"):
             print(f"{k}_PS={'' if res[k] is None else ps(res[k])}")
         print(f"PLUSARGS_MAX='{' '.join(plusargs(res, 'max'))}'")

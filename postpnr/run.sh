@@ -22,6 +22,12 @@
 #                      image and compare it with the Verilator golden
 #   --max-errors N     bench errors before a run stops (default 1)
 #   --no-build         reuse the corner builds as they are
+#   --clk-mhz MHZ      run core_clk at MHZ instead of the SDC's period: the
+#                      target-frequency test.  The SDC's I/O delays are board
+#                      delays and stay as they are; everything derived from the
+#                      period follows MHZ (postpnr/sdc_delays.py --period).
+#                      The period is rounded to a whole even number of ps.
+#                      SUMMARY and the TOTAL line name the clock either way.
 #   --vm-paths FILE    the model paths (vm_paths.sh format) to use; default:
 #                      $VM_PATHS, else vm_paths.sh beside this checkout
 #                      (../vm_paths.sh), else hvl/pin/vm_paths.sh
@@ -96,7 +102,7 @@ if [ "${1:-}" = __one ]; then
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}"
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -106,6 +112,7 @@ while [ $# -gt 0 ]; do
     --with-vcs-rtl) VCS_RTL=1;;
     --max-errors) MAX_ERRORS="$2"; shift;;
     --no-build) BUILD=0;;
+    --clk-mhz) CLK_MHZ="$2"; shift;;
     --vm-paths) VMP="$2"; shift;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
@@ -250,11 +257,27 @@ fi
 export GOLDEN OUT MAX_ERRORS
 
 # ---- the SDC ------------------------------------------------------------------------------
-python3 "$R/postpnr/sdc_delays.py" "$SDC" > "$OUT/sdc.txt" 2>&1 || { cat "$OUT/sdc.txt" >> "$SUM"; stop "the SDC cannot drive the bench (above)"; }
-python3 "$R/postpnr/sdc_delays.py" "$SDC" --sh > "$OUT/sdc.env"
+# --clk-mhz: the period in ns, a whole even number of ps so the bench's
+# half-period is exact in its 1 ps time precision.
+PERIOD=()
+if [ -n "$CLK_MHZ" ]; then
+  awk -v f="$CLK_MHZ" 'BEGIN { exit !(f + 0 > 0 && f ~ /^[0-9]*\.?[0-9]+$/) }' \
+    || stop "--clk-mhz $CLK_MHZ: give a positive number of MHz"
+  PERIOD=(--period "$(awk -v f="$CLK_MHZ" 'BEGIN { printf "%.3f", 2 * int(500000 / f + 0.5) / 1000 }')")
+fi
+python3 "$R/postpnr/sdc_delays.py" "$SDC" ${PERIOD[@]+"${PERIOD[@]}"} > "$OUT/sdc.txt" 2>&1 \
+  || { cat "$OUT/sdc.txt" >> "$SUM"; cat "$OUT/sdc.txt"; stop "the SDC${CLK_MHZ:+ at --clk-mhz $CLK_MHZ} cannot drive the bench (above)"; }
+python3 "$R/postpnr/sdc_delays.py" "$SDC" ${PERIOD[@]+"${PERIOD[@]}"} --sh > "$OUT/sdc.env"
 cat "$OUT/sdc.txt" >> "$SUM"; cat "$OUT/sdc.txt"
 # shellcheck disable=SC1091
 source "$OUT/sdc.env"
+CLK_NOTE="clock $(awk -v p="$CLK_PS" 'BEGIN { printf "%g ns = %g MHz", p / 1000, 1e6 / p }')"
+if [ "$CLK_PS" != "$SDC_CLK_PS" ]; then
+  CLK_NOTE="$CLK_NOTE (--clk-mhz $CLK_MHZ; the SDC's is $(awk -v p="$SDC_CLK_PS" 'BEGIN { printf "%g ns", p / 1000 }'))"
+else
+  CLK_NOTE="$CLK_NOTE (the SDC's)"
+fi
+log "clock:   ${CLK_NOTE#clock }"
 # Wires from the pad drivers to forte_top's output ports: VCS cannot annotate
 # them (SDFCOM_UHICD, accepted by pin.sh only for exactly these), so outputs
 # change up to that much earlier in simulation than on silicon.  The max corner
@@ -341,6 +364,6 @@ for c in "${CORN[@]}" rtl; do
 done
 ins="$(for f in "$OUT"/runs/{max,min}/*/sim.log.gz; do [ -f "$f" ] && zcat "$f" | grep -m1 'clk_out insertion' | sed "s|^|$(basename "$(dirname "$(dirname "$f")")") |"; done 2>/dev/null | sort -u | head -4)"
 [ -n "$ins" ] && log "$ins"
-log "TOTAL: $pass/$total pass$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")"
+log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")"
 pack
 [ "$pass" = "$total" ] && [ "$total" -gt 0 ]

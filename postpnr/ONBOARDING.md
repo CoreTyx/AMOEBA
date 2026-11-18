@@ -164,6 +164,7 @@ postpnr/run.sh --jobs 4                             # hours, inside tmux; each j
 | `--corners max,min` | Default both; or one |
 | `--jobs N` | Simulations at once |
 | `--no-build` | Reuse the corner builds |
+| `--clk-mhz MHZ` | Run `core_clk` at a target frequency instead of the SDC's period; I/O delays stay as the SDC gives them |
 | `--with-vcs-rtl` | Also run the golden RTL under 4-state VCS and compare |
 | `--vm-paths FILE` | A different model-path file |
 | `WAVES=1` (env) | A separate waveform build |
