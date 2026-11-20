@@ -2,7 +2,8 @@
 // of every register on them: the PC, the pipeline registers and the hardened
 // CSRs that dft_setup.tcl selects.
 //
-// Pass/fail uses the package pins; internal hookups are diagnostic only.
+// Pass/fail uses the package pins; phase S also enforces available internal
+// hold-retention/control probes and reports missing required probes as partial.
 // The chains are the ones
 // dft_insert.tcl declares: c0..c7, scan in on io_in[k], scan out on io_out[k].
 // Below, chain k = 1..8 is c(k-1): io_in[k-1] -> io_out[k-1].  Chain lengths and
@@ -101,8 +102,8 @@
 // scan enable toggled per cycle on scan_en.  The link is two one-way buses, so
 // no pad changes direction: io_in carries scan-in (the bench's si) except while
 // the link agent runs phase I, and io_out carries scan-out in test mode.
-// The DFT lock resets to unlocked, so it does not get in the way here; it is
-// not tested.
+// The DFT lock resets to unlocked. Phase S checks permission retention;
+// deliberate locking/unlocking and access-policy tests are outside this bench.
 //
 // TEST_MODE IS SYNCHRONISED in forte_chip (tmsync, two core_clk flops), so
 // test_mode_dft -- which selects what io_out carries -- follows the pin two

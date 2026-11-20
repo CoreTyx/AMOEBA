@@ -153,7 +153,7 @@ module forte_chip import cvw::*; import forte_link_pkg::*; #(
   //                                                 edge 3 is functional again
   //
   // test_mode raised with scan_en low is legacy test mode, unchanged.  The full
-  // tester protocol (padding, inversion) is in synth/scripts/HANDOFF.md on dft.
+  // Tester protocol and scan flow are documented in synth/DFT_FLOW.md.
   //
   // THE LINK IS NOT FROZEN.  It is a separate clock domain and the tester only
   // enters a hold while the link is quiet (no transaction in flight, ready and
