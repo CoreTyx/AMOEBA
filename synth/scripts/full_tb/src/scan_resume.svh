@@ -14,9 +14,9 @@
 //   ctl      no test mode and no scan_en: only the link pause, as long as a
 //            session.  It must pass on any design; a failure is a bench/oracle
 //            problem, not a DFT one.
-// The verdict uses pins and the agent's memory.  Register file, CSR and scan
-// cell hookups (internal_hookups.py) are diagnostic only: on failure they name
-// the likely cause (cause 1-4 lines).
+// The verdict checks pins/memory plus available hold-retention/control probes.
+// Missing required probes produce explicit partial coverage. Heuristic cause
+// classification remains diagnostic; definite invariant violations fail.
 
 localparam logic [63:0] RES_DATA = 64'h8001_0000;   // 16 KiB: four times the D$
 localparam logic [63:0] RES_SIG  = 64'h8002_0000;
@@ -42,15 +42,6 @@ always @(link.n_wr)
     res_wlog.push_back(64'(link.addr));
     res_wlog.push_back(link.line_w[0]);
     res_wlog.push_back(link.line_w[1]);
-  end
-
-// Link activity while the agent is paused (cause 3).
-bit res_mon = 0;
-int res_req_n, res_wr_n;
-always @(posedge clk)
-  if (res_mon) begin
-    if (req !== 1'b0) res_req_n++;
-    if (wr !== 1'b0) res_wr_n++;
   end
 
 function automatic logic [63:0] res_rand();
@@ -304,7 +295,7 @@ string res_cause [$];       // what the session diagnostics point at
 // value shared with another changed row.
 task automatic res_compare(input string what, input res_snap_t a, input res_snap_t b,
                            input bit cells, output int rows, output int same_rows,
-                           output string detail);
+                           output string detail, input bit quiet = 0);
   int by_val [logic [ECC_CW-1:0]];
   string s = "";
   rows = 0; same_rows = 0;
@@ -319,7 +310,7 @@ task automatic res_compare(input string what, input res_snap_t a, input res_snap
       s = $sformatf("%0d register-file row(s) changed:", rows);
       for (int i = 1, n = 0; i <= 31 && n < 6; i++)
         if (b.rf[i] !== a.rf[i]) begin
-          s = {s, $sformatf(" x%0d %h->%h", i, a.rf[i][ECC_CW-1 -: ECC_DW], b.rf[i][ECC_CW-1 -: ECC_DW])};
+          s = {s, $sformatf(" x%0d codeword %h->%h", i, a.rf[i], b.rf[i])};
           n++;
         end
     end
@@ -338,8 +329,11 @@ task automatic res_compare(input string what, input res_snap_t a, input res_snap
     if (nc > 0) s = {s, $sformatf(" %0d scan register(s) changed", nc)};
   end
   detail = s;
-  $display("[%0t] S DIAG: %s: %s", $time, what, s == "" ? "no non-scan change" : s);
+  if (!quiet)
+    $display("[%0t] S DIAG: %s: %s", $time, what, s == "" ? "no non-scan change" : s);
 endtask
+
+`include "scan_hold_checks.svh"
 
 // ---- the session -------------------------------------------------------------------
 // Returns with test_mode=0, scan_en=0, the agent still paused.
@@ -350,8 +344,7 @@ task automatic res_session(input string tag, input string variant, inout int cyc
   int rows, same, link_err0 = link.errors, shift_bad = 0, again_bad = 0;
   string d, bad_chains = "";
   bit shifted;
-  res_req_n = 0; res_wr_n = 0;
-  res_mon = 1;
+  res_checks_begin(tag, variant);
   s0 = res_snap();
   if (variant == "ctl") begin
     idle(4 * maxlen + 2 * TM_SYNC + 3);
@@ -359,13 +352,15 @@ task automatic res_session(input string tag, input string variant, inout int cyc
   end else begin
     enter_hold(shifted);
     if (shifted)
-      res_cause.push_back("cause 4: scan_en shifted the chains outside test mode: the first three cells of every chain took the arm pattern (scan_en not qualified by test_mode)");
+      res_cause.push_back("cause 4: possible shifting outside test mode: first-cell arm pattern matches (heuristic; check effective-SE results)");
+    res_arm_suspect = shifted;
     s1 = res_snap();
     // Five functional edges write at most five rows, each its own value.
     res_compare({tag, ": arm and entry (functional edges)"}, s0, s1, 0, rows, same, d);
     if (same >= 6)
       res_cause.push_back($sformatf("cause 1: clock-gate TE forced non-scan flops while armed (scan_en=1, test_mode=0): %0d register-file rows took one shared value (%0d of %0d register-file clock gates have TE=%s; %0d of %0d chip-wide)",
                                     same, DIAG_RF_ICG_TE, DIAG_RF_ICG, DIAG_RF_TE_NET, DIAG_ICG_TE, DIAG_ICG));
+    res_checks_hold_begin(s1, variant == "tm");
     if (variant == "tm") idle(4 * maxlen);
     else begin
       // enter_hold() leaves scan_en low (the protocol's frozen idle edges);
@@ -398,7 +393,7 @@ task automatic res_session(input string tag, input string variant, inout int cyc
     end
     cyc += 4 * maxlen + 3 + TM_SYNC;
     s2 = res_snap();
-    exit_hold();
+    exit_hold(1);
     cyc += TM_SYNC;
     res_compare({tag, ": test mode, entry to exit"}, s1, s2, variant == "tm", rows, same, d);
     if (same >= 2 && variant == "session")
@@ -410,9 +405,9 @@ task automatic res_session(input string tag, input string variant, inout int cyc
       res_cause.push_back($sformatf("cause 5: the DFT lock was cleared %s (dft_unlocked 1->0): from then on scan_en and test_mode do nothing; the core, running on corrupted state, wrote forte_dft_lock",
                                     s1.unlocked !== 1'b1 ? "during arm/entry" : "in test mode"));
   end
-  res_mon = 0;
+  res_checks_end();
   if (res_req_n || res_wr_n || link.errors != link_err0)
-    res_cause.push_back($sformatf("cause 3: link not isolated: req active on %0d and wr on %0d session cycle(s), %0d link agent error(s)%s",
+    res_cause.push_back($sformatf("cause 3: link not isolated: req asserted on %0d and wr on %0d session sample(s), %0d link agent error(s)%s",
                                   res_req_n, res_wr_n, link.errors - link_err0,
                                   link.errors != link_err0 ? {": ", link.last_err} : ""));
 endtask
@@ -473,12 +468,13 @@ endtask
 task automatic phase_s();
   string s;
   int n_case = 0, n_bad = 0, cov_ses = 0, cov_tm = 0, cov_ctl = 0;
+  bit probes_checked = 0;
   if (scan_op == "load") begin
     skip_check("S", "the resumable session requires capture/both, not SCAN_OP=load");
     return;
   end
   if (!DIAG_RF_OK || !DIAG_CSR_OK)
-    $display("[%0t] S: register-file/CSR hookups unavailable (SCAN_HOOKUPS=0 or names not found): cause 1/2 diagnostics limited", $time);
+    $display("[%0t] S: register-file/CSR probes unavailable: retention coverage is partial", $time);
   else
     $display("[%0t] S: diagnostics on %s and %0d machine CSRs; %0d of %0d register-file clock gates have TE=%s",
              $time, DIAG_RF_PATH, diag_csr_by_name.num(), DIAG_RF_ICG_TE, DIAG_RF_ICG, DIAG_RF_TE_NET);
@@ -526,6 +522,10 @@ task automatic phase_s();
           continue;
         end
         cases_selected++; n_case++; n_pat++;
+        if (!probes_checked && variants[v] != "ctl") begin
+          res_checks_require_probes();
+          probes_checked = 1;
+        end
         $display("[%0t] CASE: %s seed=%0d", $time, tag, scan_seed);
         res_cause.delete();
         le0 = link.errors;

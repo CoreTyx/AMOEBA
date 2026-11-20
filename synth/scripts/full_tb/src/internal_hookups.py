@@ -553,6 +553,30 @@ if len(lock) == 1:
 else:
     out += ["localparam bit DIAG_LOCK_OK = 0;", "wire diag_dft_unlocked = 1'bz;"]
 print(f"Phase S diagnostics: DFT lock flop: {'/'.join(lock[0][0] + [lock[0][1]]) if len(lock) == 1 else 'not found'}")
+
+# The effective SE net, rather than a coincidental match to an arm pattern,
+# establishes whether shifting is enabled outside test mode. Accept only an
+# explicitly declared scalar net with the preserved name (possibly flattened).
+se_refs = []
+for mm in module_re.finditer(netlist_text):
+    mod = mm.group(1).lstrip("\\")
+    for decl in re.finditer(r"\b(?:wire|tri|logic)\s+([^;]+);", mm.group(2)):
+        tokens = re.findall(r"\\\S+|[A-Za-z_$][\w$]*|[^\s]", decl.group(1))
+        ident = r"\\\S+|[A-Za-z_$][\w$]*"
+        if not tokens or any((token != "," if i % 2 else not re.fullmatch(ident, token))
+                             for i, token in enumerate(tokens)) or len(tokens) % 2 == 0:
+            continue  # do not mistake vector nets or initializer expressions for scalar declarations
+        for name in tokens[::2]:
+            if not re.fullmatch(r"scan_en_dft|\\\S+/scan_en_dft", name):
+                continue
+            for _, path in instance_paths(lambda m, mod=mod: m == mod):
+                se_refs.append(args.dut + "." + ".".join(sv_ident(x) for x in path + [name.lstrip("\\")]))
+se_refs = sorted(set(se_refs))
+if len(se_refs) == 1:
+    out += ["localparam bit DIAG_SE_OK = 1;", f"wire diag_scan_en_dft = {se_refs[0]};"]
+else:
+    out += ["localparam bit DIAG_SE_OK = 0;", "wire diag_scan_en_dft = 1'bz;"]
+print(f"Phase S diagnostics: effective scan enable: {se_refs[0] if len(se_refs) == 1 else 'unavailable or ambiguous'}")
 out += [""]
 
 report_path = args.report or args.output.with_suffix(".report.tsv")

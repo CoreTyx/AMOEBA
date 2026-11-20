@@ -73,7 +73,7 @@ if [[ "${1:-}" == clean ]]; then
 fi
 
 mkdir -p "$SIM_DIR"
-for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" "$SRC_DIR/scan_resume.svh"; do
+for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/scan_exec.svh" "$SRC_DIR/scan_resume.svh" "$SRC_DIR/scan_hold_checks.svh" "$SRC_DIR/scan_output_z.svh"; do
     [ -s "$source_file" ] || die "missing source: $source_file; use the complete full_tb/src directory"
 done
 
@@ -264,6 +264,6 @@ vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
     -Mdir=csrc -top tb_scan -o simv_scan
 
 rm -f sim.log
-./simv_scan -l sim.log "${RUN_ARGS[@]}" | grep -E '^\[|^(GROUP|REG|PC|PHASE):|DFT TB|^=+'
+./simv_scan -l sim.log "${RUN_ARGS[@]}" | grep -E '^\[|^(GROUP|REG|PC|PHASE):|^S (CHECKS|CHECK COVERAGE|COVERAGE|RESUME):|^OUTPUT Z SUMMARY:|DFT TB|^=+'
 grep -qE '^DFT TB PASS($| \(partial coverage:)' sim.log \
     || die "simulation did not produce a passing verdict; see $SIM_DIR/sim.log"

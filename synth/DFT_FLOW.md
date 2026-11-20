@@ -11,7 +11,7 @@ The flow inserts eight scan chains at `forte_top`, through the ASIC pad ring: ch
 
 Internal objects are identified before compilation. A mapped, pre-insertion DDC checkpoint allows insertion to be repeated without rerunning synthesis or searching for renamed registers and control gates.
 
-The flow does not implement cache MBIST or ATPG pattern generation, and it makes no RTL changes. The benches in `scripts/` verify the inserted chains at gate level; see `scripts/HANDOFF.md` for the full hand-off notes.
+The Tcl flow inserts scan into the mapped netlist; resumable sessions also require the hold RTL described below. Cache MBIST and ATPG pattern generation are outside this flow. See [full_tb](scripts/full_tb/README.md) for the executable scan checks and [pin verification](../hvl/pin/README.md) for native hold-only checks.
 
 ## Files and execution order
 
@@ -247,10 +247,11 @@ Standalone mode writes the complete Verilog and DDC; integrated mode returns to 
 
 Clock tracing uses `all_fanout -flat -endpoints_only` / `all_fanin -flat -only_cells`, which cross buffers and an ICG's CK→GCK arc and stop at a register clock pin. ICGs are the leaf cells with `is_icg == true`; their test pin is the one whose library pin has `clock_gate_test_pin`.
 
-**`sesync` and the ScanEnable declaration.** `dft_setup.tcl` declares `scan_en` as the ScanEnable port before compile. Test-ready compile then treats that port as inactive in functional logic.
-- **What went wrong:** `scan_en`'s only functional load is `sesync`, so the first full-scope run (FreePDK45, 2026-11-12) folded `sesync` away and tied `hold_mode_reg/D` to 0. Hold mode could never be selected, and every session was a legacy one. full_tb phase S caught it: no chain shifted under a hold.
-- **Fix:** keeping `chip/sesync` as a hierarchy without boundary optimisation stops the constant at its boundary. `dft_check_hold_select` guards it.
-- **Alternative:** removing the pre-compile ScanEnable declaration also worked on a small model, but it changes more.
+**`sesync` and the ScanEnable declaration.** The pre-compile ScanEnable
+specification can make test-ready compile treat `scan_en` as inactive in
+functional logic. Preserve `chip/sesync` as a hierarchy without boundary
+optimization so the hold selector keeps its functional input. The post-compile
+`dft_check_hold_select` check must confirm that dependency survived mapping.
 
 ### DC options (W-2024.09) and why these
 
@@ -263,7 +264,7 @@ Clock tracing uses `all_fanout -flat -endpoints_only` / `all_fanin -flat -only_c
   - `set_clock_gating_style -control_signal test_mode` would make the inferred ICGs transparent for the whole of test mode: the non-scan registers would be clocked on every shift again.
 - **Cost of excluding:** excluded ICGs keep `TE=0` in every mode, so their registers load only on their own enable, also in legacy test mode. They are non-scan, so this costs no chain coverage; DRC reports them as nonscan cells disturbed during shift (`S19`), as before.
 
-### Open points
+### Constraints and coverage
 
 - Timing of the `DFTHold` terms: they land on enable and next-state paths, including the caches' `CacheEn` (SRAM CE). Check them in the timing reports.
 - With `DFT_SCOPE=pc` only the PC is scanned. The rest of the pipeline registers are then non-scan, frozen by the stall, and checked by `dft_check_hold_coverage` only as a warning.
@@ -338,17 +339,17 @@ Paths below are relative to the repository root. The `synth/synout/dft/` and `sy
 | `synth/synout/dft/forte_top.gate.v` | Complete inserted ASIC Verilog |
 | `synth/synout/dft/forte_top.gate.ddc` | Complete inserted ASIC DDC |
 
-## Validation status
+## Acceptance checks
 
-| Where | Scope | Result | Bench |
-|---|---|---|---|
-| TSMC 65nm, ece-427-02 (2026-11-12) | `full` | 1,297 scan cells, 8 chains of 162–163, all single-output cells, 0 stored inverted (`synout/dft/` from `make dft`) | `full_tb ./run.sh --regen +SCAN_OP=both`: every phase passes, 419 cases; `BREAK_SE` (17 errors) and `BREAK_MAP` (1) fail |
+After each VM run, inspect the selected group counts, Q/QN-aware `DFT hookup:`
+lines, logical-phase totals, and post-insertion DRC (zero errors/fatals). Confirm
+eight paths from io_in[k] to io_out[k] in the preview/final reports. Use full_tb
+for full scope and pc_tb for PC-only scope. Require hold-selector, mixed-clock-
+gate, hold-coverage and ICG-hookup checks to pass; structural hold dependence
+is not proof of functional retention.
 
-The local runs below used EWS with DC W-2024.09 and FreePDK45 standing in for TSMC (a copy of `stdcells.db` with `test_cell` added to the `SDFF*` cells; behavioural pads; SRAMs as black boxes):
-
-| Scope | Result | Bench |
-|---|---|---|
-| `pc` | 63 cells, 8 chains (7 × 8 + 7), post-insertion DRC 0 errors / 0 fatals, phase file all 0 | `pc_tb`: `DFT TB PASS`; `BREAK_SE` and `BREAK_MAP` fail |
-| `full` | 1,347 flops selected, 1,298 scan cells, 8 chains of 162–163, DRC 0 errors / 0 fatals, 0 stored inverted | `full_tb ./run.sh --regen +SCAN_OP=both`: every phase passes (419 cases, about 9 min); `BREAK_SE` and `BREAK_MAP` fail |
-
-On the TSMC VM, check after each run: the per-group flop counts, the `DFT hookup:` lines (Q or QN, active state), `DFT phase: ... 0 stored inverted`, `reports/dft/dft_drc_post.rpt` (0 errors, 0 fatals), and `dft_preview.rpt` (8 chains, `io_in[k] -> io_out[k]`). Then run the bench that matches the scope: `full_tb` for `full`, `pc_tb` for `pc` (pc_tb fails D/E on a full netlist). Still open: 400 MHz timing with the full scope, fault coverage, and test-mode hold timing.
+Run the matching bench and its negative controls. Keep VM artifacts from one
+netlist/scandef/phase generation together. Full_tb accepts paused req/wr X/Z as
+warnings but still fails definite assertions, retention/control violations and
+scan-data mismatches. Its pass does not establish physical timing, full ATPG
+coverage or uninterrupted real-time behavior during a hold.

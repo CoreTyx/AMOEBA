@@ -251,7 +251,10 @@ module tb_scan;
   int phase_start_errors;
   int phase_start_cases, phase_start_skips;
 
+`include "scan_output_z.svh"
+
   task automatic phase_begin(input int p);
+    output_z_phase = p;
     phase_start_errors = errors;
     phase_start_cases = cases_selected;
     phase_start_skips = checks_skipped;
@@ -335,12 +338,14 @@ module tb_scan;
   st_t    rst_exp;                       // the reset values, X where there is none
 `include "scan_map.generated.svh"
 `ifdef SCAN_NO_HOOKUPS
-  // Diagnostic hookups are never required for the pin-level verdict.
+  // Pin checks still run; phase S reports explicit partial probe coverage.
   val_t internal_raw_by_name[string];
   val_t internal_est_by_name[string];
   val_t internal_available_by_name[string];
   // Phase S non-scan diagnostics (internal_hookups.py writes the real ones)
   localparam bit DIAG_RF_OK = 0, DIAG_CSR_OK = 0, DIAG_LOCK_OK = 0;
+  localparam bit DIAG_SE_OK = 0;
+  wire diag_scan_en_dft = 1'bz;
   wire diag_dft_unlocked = 1'bz;
   localparam string DIAG_RF_PATH = "", DIAG_RF_TE_NET = "";
   localparam int DIAG_ICG = 0, DIAG_ICG_TE = 0, DIAG_RF_ICG = 0, DIAG_RF_ICG_TE = 0;
@@ -463,11 +468,15 @@ module tb_scan;
 
   // Leave a HOLD session: scan_en=0 and test_mode=0 together, TM_SYNC idle
   // cycles (two more frozen edges, then functional).
-  task automatic exit_hold();
+  task automatic exit_hold(input bit check_retention = 0);
     $display("[%0t] TRACE exit_hold", $time);
     set_se(1'b0);
     test_mode = 1'b0;
-    idle(TM_SYNC);
+    if (check_retention) begin
+      idle(TM_SYNC - 1);
+      res_checks_hold_end(); // the last exit edge may resume execution
+      idle(1);
+    end else idle(TM_SYNC);
   endtask
 
   // Shift maxlen cycles: chain k takes in[k][t] at cycle t and its output is
@@ -1399,6 +1408,7 @@ module tb_scan;
     if (case_filter != "" && cases_selected == 0)
       fail($sformatf("no executable cases matched SCAN_CASE='%s'; inspect any skip reasons", case_filter));
     phase_summary();
+    output_z_summary();
 
     if (errors == 0 && checks_skipped == 0) $display("DFT TB PASS");
     else if (errors == 0) $display("DFT TB PASS (partial coverage: %0d explicit skips)", checks_skipped);
@@ -1414,6 +1424,7 @@ module tb_scan;
     if (timeout_ns <= 0) $fatal(1, "SCAN_TIMEOUT_NS must be positive");
     #(timeout_ns);
     $display("DFT TB FAIL (timeout)");
+    output_z_summary();
     $fatal(1, "DFT timeout");
   end
 

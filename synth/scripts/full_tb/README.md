@@ -1,393 +1,178 @@
 # Full scan testbench
 
-Gate-level check of the scan chains from the package pins: every scanned
-register (PC, pipeline, hardened CSRs) is loaded, captured, reset and read back
-through the eight chains. For the DC side and the overall flow see
-`../HANDOFF.md` (section 1 is the quick start) and `../../DFT_FLOW.md`.
-For the hold integration branch's VM rebuild and acceptance gates, see
-[`../HOLD_VM.md`](../HOLD_VM.md).
-
-**Typical run on ece-427-02:**
-
-```bash
-cd /groups/ece427-group4/dft_testing/synth
-make synth DFT_SCOPE=full && make dft          # netlist + scandef + phase file in synout/dft/
-cd scripts/full_tb
-./run.sh --regen +SCAN_OP=both         # must end "DFT TB PASS"
-```
-
 ## Run flow
 
-**Create `full_tb/paths.sh`, beside `run.sh`, before running the testbench or
-regression. It is local configuration and is not included in Git.** Run the
-commands below from `synth/scripts/full_tb/` with VCS available.
-
-The bench targets the current pins: eight chains `c<k>`, scan in on `io_in[k]`
-and out on `io_out[k]`, from a netlist synthesised with `DFT_SCOPE=full`
-(`make synth DFT_SCOPE=full`; the default `pc` scope puts only the PC on the
-chains, and then only A/M/B/E have anything to test). `test_mode` goes through
-a two-flop synchroniser in `forte_chip`, so each time the bench raises it, it
-idles `TM_SYNC` (3) cycles with `scan_en` low before shifting. Phase I uses the
-repo's current link agent (`hvl/pin/pin_link_agent.sv`, `hdl/forte_link_pkg.sv`).
-
-Verified results (`./run.sh --regen +SCAN_OP=both`, every phase passes, 419
-cases):
-- TSMC 65nm on ece-427-02 (2026-11-12): 1,297 cells, 8 chains of 162–163,
-  netlist from `make dft` (`synout/dft/`); `BREAK_SE` (17 errors) and
-  `BREAK_MAP` (1) fail as they should.
-- FreePDK45 on EWS (2026-11-11): 1,298 cells, about 9 min;
-  `BREAK_SE` and `BREAK_MAP` fail as they should.
-
-See `../HANDOFF.md` section 11.
-
-### 1. Configure paths
+**Create `paths.sh` beside `run.sh` before running the bench or regression.**
+Use VCS and matching netlist, scandef, logical-phase and simulation models.
+The synthesis/scan flow is documented in [DFT_FLOW.md](../../DFT_FLOW.md).
 
 ```bash
-# full_tb/paths.sh — ordinary Bash assignments; no export needed
-# Use the make dft outputs: netlist, scandef and phase file from one run.
-NETLIST=/groups/ece427-group4/dft_testing/synth/synout/dft/forte_top.gate.v
-SCANDEF=/groups/ece427-group4/dft_testing/synth/synout/dft/forte_top.scandef
+# From synth/, after configuring the VM's synthesis libraries:
+make synth DFT_SCOPE=full
+make dft DFT_SCOPE=full
+cd scripts/full_tb
+# Create paths.sh here, then:
+./run.sh --regen +SCAN_OP=both
+./regress.sh
+```
+
+Example local `paths.sh` (ordinary Bash assignments; no export needed):
+
+```bash
+NETLIST=/path/to/synout/dft/forte_top.gate.v
+SCANDEF=/path/to/synout/dft/forte_top.scandef
+LOGICAL_PHASE=/path/to/synout/dft/forte_top.scan_phase.txt
 STDCELL_MODELS=(/path/to/cells/*.v)
 SRAM_MODELS=(/path/to/srams/*.v)
 PAD_MODELS=(/path/to/pads.v)
-VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
-# Optional: logical-phase file; otherwise ./scan_phase.txt if present, else
-# forte_top.scan_phase.txt beside SCANDEF (written by dft_insert.tcl)
-# LOGICAL_PHASE=/path/to/scan_phase.txt
-# Optional: link sources for phase I if the repo's hdl/ and hvl/ are not
-# three levels up from full_tb (as on a VM with only synth/ copied)
-# LINK_PKG=/path/to/hdl/forte_link_pkg.sv
-# LINK_AGENT=/path/to/hvl/pin/pin_link_agent.sv
-# SCAN_HOOKUPS=0  # Disable internal diagnostics; default is 1
+VCS_FLAGS=()
+# Optional if hdl/ and hvl/ are not at their repository-relative locations:
+# LINK_PKG=/path/to/forte_link_pkg.sv
+# LINK_AGENT=/path/to/pin_link_agent.sv
 ```
 
-Use a matching netlist, scandef and phase file, all from the same DC run:
-`synout/dft/` after `make dft`, or `synout/` after `make synth` alone. Mixing
-them (for example a `synout/dft/` netlist with the `synout/` phase file) gives
-wrong results without any error. Use matching cell/SRAM/pad models. Model settings accept
-files, directories, or arrays of paths/globs. Relative paths resolve from the
-caller's directory. `SCANDEF` defaults to `forte_top.scandef` beside the netlist.
-Simulation is zero-delay: nonempty `SDF` is rejected; `SDF_CORNER` has no effect.
+Library/model paths accept files, globs, directories or Bash arrays. Keep
+netlists and licensed models local. This bench is zero-delay: nonempty `SDF`
+is rejected and `SDF_CORNER` has no effect.
 
-### 2. Update mappings and logical phase
-
-After regenerating the netlist or changing scan selection:
-
-1. Point `paths.sh` at the new netlist/scandef pair. Update the register table
-   in `src/scan_map.awk` for changed names, classifications, and reset values.
-2. Review the logical phase. `dft_insert.tcl` writes `forte_top.scan_phase.txt`
-   beside the scandef, and `--regen` uses it unless `LOGICAL_PHASE` or a local
-   `scan_phase.txt` overrides it. Each entry is
-   `<full scandef instance path> <0|1>`: `0` means physical Q matches the logical
-   RTL bit; `1` means it is inverted. `synthesis.tcl` runs `compile_ultra
-   -no_seq_output_inversion`, so expect all `0`, and the DC log line
-   `DFT phase: ... 0 stored inverted`. `dft_write_phase` reads each cell's
-   phase from the netlist (a cell with Q and QN whose RTL-named net hangs off QN
-   is `1`; single-output cells are `0`) and
-   lists any such cell in `reports/dft/dft_phase.rpt`; B and F's exact reset
-   values cross-check it. **Q versus QN
-   scan-output selection does not establish logical phase.** Do not reuse old
-   instance paths.
-3. Regenerate metadata and run a baseline check:
+`--regen` creates the scan map and enabled internal hookups in `sim/`. Repeat
+it after netlist, scandef, phase, mapping or hookup-generator changes; other
+runs reuse the cached files. Update `src/scan_map.awk` when register names or
+classifications change. The synthesis flow writes the logical phase file:
+`0` means physical Q matches the RTL bit, `1` means inverted storage. Keep it
+from the same synthesis/insertion run; Q/QN scan-path inversion is accounted
+for separately. Without explicit `LOGICAL_PHASE`, the runner checks local
+`scan_phase.txt`, then the file beside the scandef. No stale checked-in hookup
+snapshot is used.
 
 ```bash
-./run.sh --regen +SCAN_PHASES=E '+SCAN_CASE=E reset value' +SCAN_OP=both
-```
-
-`--regen` rebuilds `sim/scan_map.generated.svh`, optional
-`sim/scan_hookups.generated.svh`, and its `.report.tsv`, then compiles and runs.
-It **never generates or overwrites the logical-phase input**. Do not hand-edit
-the generated map; fix its inputs and regenerate.
-
-For verified phase changes to entries already present in the phase file:
-
-```bash
-python3 src/set_scan_phase.py '*verified_instance_pattern*' 1 --file scan_phase.txt
-# Check the reported matched/changed counts, then rerun --regen.
-```
-
-The utility changes matching flags; it does not discover polarity or add
-missing entries. Regenerate after changing netlist, scandef, phase corrections,
-or generators. Normal runs reuse cached metadata; `run.sh` stops and asks for
-`--regen` when the map is missing or older than the netlist, scandef, phase
-file or `src/scan_map.awk`.
-
-### 3. Run and inspect results
-
-```bash
-./run.sh +SCAN_OP=both  # Full suite, including R100 and I16
-./regress.sh           # Ten runs with separate logs and a summary
-```
-
-The regression runs baseline repetition, E load-only, D capture, E/P/H/F,
-the full suite, R1000, and I64. H includes baseline sentinels; R1000 uses an
-extended watchdog. Runs continue after failures. Do not run simulations or
-regressions concurrently: they share `sim/`.
-
-Current logs: `sim/run.log`, `compile.log`, `sim.log`, and `pin_trace.log`.
-Regression archives: `regressions/<timestamp>_<pid>/`, including per-run
-commands/logs/phase results and `summary.tsv`; previous logs go in `preexisting/`.
-Regression exits are 0 for all PASS, 1 for any failure, and 2 for partial-only
-coverage. A standalone passing run with explicit skips returns success but
-reports partial coverage. Observed X/Z values are not sanitized. Mismatches
-count per register; structural/protocol errors are reported separately.
-
-```bash
-./run.sh clean  # Remove build/current logs; retain cached metadata and phase input
-```
-
-Regression archives are preserved. These commands require no metadata
-regeneration unless its inputs changed.
-
-## Tests and interpretation
-
-Pin comparisons determine pass/fail; internal hookups are diagnostic only.
-A/M/B always run first. A map or constrained-baseline failure blocks dependent
-cases. The remaining default order is `CDEPHFRIS`. S needs a netlist with the
-hold-mode RTL (`dft-hold`); on an older netlist it fails by design, naming the
-causes (run `+SCAN_PHASES=CDEPHFRI` there).
-
-| Phase | Check |
-|---|---|
-| A | Measure eight chain lengths/inversions; check repeating `0011` transport. |
-| M | Check map lengths, inversion parity, unique register-bit assignments, and classifications. |
-| B | Reset, run 200 clocks without memory responses, compare resettable bits, and save baseline. |
-| C | Random shift-through data, corrected for measured chain lengths/inversions. |
-| D | Reload baseline, apply one capture edge, and compare all scanned cells. |
-| E | Fixed, walking-bit, and random PC patterns; other cells stay at baseline. |
-| P | Individual data, valid ECC, sticky-fault and legal MPP patterns; coherent U-mode privilege copies. |
-| H | Inject ECC/privilege-copy faults or reserved MPP; check repair, stored values, and MSECFAULT flags. |
-| F | Load all ones, inverted baseline, or random data; reset and compare resettable bits. |
-| R | Multi-register edge/random patterns with legal MPP and valid ECC; alternate valid, SEC, DED, parity-only, and TMR cases. |
-| I | Execute short generated RV64 sequences through the link agent, then verify selected state through scan. |
-| S | Stop a generated program at cycle N, unload/reload every chain in a HOLD session, resume; the result must match a run without the session. |
-
-**`SCAN_OP` controls load verification:** `capture` (default) loads, captures,
-and reads back; `load` omits capture; `both` first checks load/readback, then
-independently resets/reloads and checks capture. Failed loads block capture.
-F substitutes reset recovery for capture. I has no scan-loaded stimulus:
-`capture`/`both` execute it identically; `load` explicitly skips it. Comparison
-counts include load checks and sentinels; I contributes one per execution.
-
-D/E/P/H/R reset independently with scan disabled before loading. Reset is
-released `RST_LAT` shift clocks before load completion (default four), aligning
-capture with the first functional edge. These checks rely on the reset IFU
-fetch-check interlock, inert controls, and no overriding fault/flush; external
-`ready=rvalid=0` alone does not guarantee a stall. Current test mode does not
-implement the proposed global halt. Unreset bits are excluded from reset
-comparisons; only unconstrained baseline *stimulus* is filled with zeros.
-
-**Protected readout is the default.** After capture, select scan, assert
-`rst_n=0`, and shift out the pre-reset contents. Scan takes precedence over
-functional reset in the selected cells; contents advance through the chain,
-not through a saved internal snapshot. Incoming zeros destructively replace
-them. Expected captured values, including nonzero fault flags, remain unchanged.
-Reset is restored afterward. A/C transport checks do not use this protection.
-
-R defaults to 100 iterations with zero/all-one, sign-bit/extreme, checkerboard,
-and random patterns. Controls remain inert, privilege copies coherent, and
-fault flags initially clear. Incomplete ECC mappings are excluded explicitly;
-I fails if required endpoint mappings are missing. R reports stimulus counts
-and distinct SEC bits, not exhaustive fault coverage. The current decoder does
-not flag/repair overall-parity-only errors; R characterizes this limitation.
-
-I defaults to 16 sequences across ADD/XOR/shift/MUL, RANDINSTRFREQ set/clear and
-32-bit truncation, MSCRATCH readback, and MPP WARL behavior. MSECFAULT W1C is
-checked on a clean baseline. The first 32 sequences use edge operand pairs;
-later ones use random pairs. A defined 4 KiB instruction window exercises
-multiple cache lines, latency 0–15, and gap profiles 0/10/25%; no ELF or data
-loads/stores are used. After 4096–4127 clocks, scan must show the aligned WFI
-in M, its following ADD in E, their PCs, expected RD1E/RD2E codewords and CSR
-values, and clear MSECFAULT. Fetch PC must be known/aligned in the terminal
-window, with at least two completed instruction reads and no memory writes.
-Other dynamic cells are unconstrained. Operand-settling NOPs and controlled
-insertion periods make these expectations explicit.
-
-The link agent is disabled before scan takes the pins: the bench holds its
-`rst_n` low (no checks, no transaction state), forces ready/rvalid low and
-gives `io_in` back to the scan-in drive. Memory and errors persist; each next
-case resets the DUT. Destructive scanning does not support execution resumption;
-phase S tests the session that does.
-
-**Legacy and hold sessions.** The hold-mode RTL picks the session type when
-test mode is entered: `scan_en` high on the cycles before `test_mode` rises
-selects HOLD (non-scan state frozen, scan cells clock only on `scan_en=1`
-edges). Every phase but S is a legacy session, so `enter_test()` now fails if
-`scan_en` was not low for the `TM_SYNC` (3) edges before `test_mode` rises. For
-that reason D's `+SCAN_SWEEP` functional holds (which drop `test_mode`) are at
-least 3 cycles: 3/4/8/16/50; the test-mode holds keep 1/2/4/8/16/50.
-`enter_hold()` and `exit_hold()` in `tb_scan.sv` implement the hold protocol
-(100 ns cycle, as above):
-
-1. Arm: `scan_en=1`, `test_mode=0` for 3 cycles (`io_in` carries a random
-   pattern; see cause 4 below).
-2. Enter: `test_mode=1` and `scan_en=0` in the same cycle, 3 idle cycles (two
-   functional edges while `test_mode` crosses `tmsync`, then frozen).
-3. Shift as needed with `scan_en=1` (`enter_hold()` leaves it low; phase S
-   raises it for the unload). A `scan_en=0` edge must change nothing.
-4. Exit: `scan_en=0`, `test_mode=0`, 3 idle cycles (two more frozen edges, then
-   functional).
-
-**Phase S** (`src/scan_resume.svh`). Each program (`+SCAN_RESUME_ITERS`,
-default 4) is generated in the bench with phase I's emitters: setup (mtvec to
-a trap handler, mscratch/mepc/mcause/mtval, RANDINSTRFREQ on), then 10–16
-loop iterations of ALU ops, MUL/MULHU/MULW, DIV/REMU/DIVW, loads and stores
-(byte to doubleword) over a 16 KiB region (four times the D$, so misses and
-write-backs), a data-dependent branch and CSR swaps; then x1–x31 and eight CSRs
-(mscratch, mtvec, mepc, mcause, mtval, mstatus, MSECFAULT, RANDINSTRFREQ) to a
-signature, `fence.i`, `tohost = 1`, `fence.i`, WFI. A trap writes
-`tohost = (0x400|mcause)<<1|1` and its mepc/mtval to the signature. About
-14,500–19,000 cycles each, link latency `p % 4`, no gaps (the agent's PRNG is
-not reseeded per run). Per program:
-
-- **reference**: reset, run to `tohost` (`+SCAN_RESUME_BUDGET`, default 60000
-  cycles), 256 cycles parked, then a protected readout at the WFI. Records
-  `tohost`, signature, data region, the ordered link write log and the scan state.
-- **session** at three N (20/45/70 % of the reference plus a per-program
-  offset; or `+SCAN_RESUME_N=n1,n2,...`): reset, run N cycles, quiet the link,
-  pause the agent, arm/enter, unload (zeros in), reload `encode(decode(read))`,
-  unload again (must equal the first), reload again, exit, unpause, run to
-  `tohost`, park, protected readout. Everything the reference recorded must
-  match exactly; the reload pass also checks that the unload's zeros come out
-  unchanged.
-- **tm** (middle N): the same entry and exit, but `4*maxlen` `scan_en=0` edges
-  in test mode and no shifting: separates a core that is not frozen from a
-  shift that corrupts.
-- **ctl** (middle N): only the link pause, as long as a session, no test mode.
-  It must pass on any design; if it fails the oracle is wrong, not the DFT.
-
-Default: 4 programs, 20 cases (12 session, 4 tm, 4 ctl), about 2 min on the
-FreePDK45 netlist. On the current design (2026-11-12, FreePDK45 full scope)
-every session and tm case fails and every ctl case passes; the cause lines
-name 1 (31 of 31 register-file clock gates have `TE=test_se`), 2, 3, 4 and 6.
-
-Tags are `S prog <p> N=<n> <session|tm|ctl>`, so `+SCAN_CASE=session` or
-`+SCAN_CASE=S prog 1 ` select cases. The interrupted run's budget is 1.5× the
-reference plus 2000 cycles, and it stops at the first link error.
-
-**Link pause.** `link_paused` gives `io_in` back to the bench and holds
-`ready`/`rvalid` low without resetting the agent (`link_active` still resets
-it). The agent (`hvl/pin/pin_link_agent.sv`) has two tb-set bits:
-`hold_ready` keeps `ready` low while idle (a transaction started in the guard
-band completes), and `paused` makes the sampler skip every link cycle, so it
-neither checks nor decodes scan traffic and resumes where it stopped. The bench
-waits for the agent idle with no `req` for 5 cycles under `hold_ready`, then
-pauses it.
-
-**Diagnostics.** With hookups on, `internal_hookups.py` also finds the
-register file (`rf_reg_<i>__<b>_`, 31 rows × 72-bit codewords), mscratch,
-mtvec, mepc, mcause, mtval, the DFT lock flop and every clock gate's `TE`
-connection; missing names only disable these (`DIAG_*_OK = 0`). Phase S
-snapshots them before arming, after entry and before exit, monitors `req`/`wr`
-while the agent is paused, and on a failure prints `S CAUSE:` lines:
-
-| Line | Evidence |
-|---|---|
-| cause 1: clock-gate TE forced non-scan flops | many register-file rows took one shared value while armed (≥6) or in test mode (≥2); with the count of clock gates whose `TE` is driven (`test_se`) |
-| cause 2: core not frozen in test mode | rows, CSRs or (tm) scan cells/PC changed in test mode, or the link writes differ from the reference |
-| cause 3: link not isolated | `req`/`wr` active, or agent errors, while paused |
-| cause 4: scan_en shifted outside test mode | the first three cells of every chain took the arm pattern (`scan_en` not qualified by `test_mode`) |
-| cause 5: DFT lock cleared | `dft_unlocked` fell during the session window |
-| cause 6: chains do not shift cleanly with the core live | the reload did not return the unload's zeros; per chain, wrong/length |
-
-
-## Controls and diagnostics
-
-| Argument | Default / purpose |
-|---|---|
-| `SCAN_PHASES=<letters>` | `CDEPHFRIS`; ordered phases after A/M/B; letters may repeat. |
-| `SCAN_CASE=<substring>` | All cases; case-sensitive filter. A/M/B/C unaffected; no executable match fails. |
-| `SCAN_OP=capture|load|both` | `capture`; behavior described above. |
-| `SCAN_RANDOM_ITERS=<n>` / `SCAN_EXEC_ITERS=<n>` | `100` / `16`; positive counts. Eight I cases cover all categories. |
-| `SCAN_RESUME_ITERS=<n>` / `SCAN_RESUME_N=<n,...>` / `SCAN_RESUME_BUDGET=<n>` | `4` programs / 20, 45, 70 % of the reference / `60000` reference cycles; phase S. |
-| `SCAN_REPEAT=<n>` / `SCAN_SEED=<n>` | `1` / `1`; fresh preparation per repetition. Reproduction needs the same seed and phase order. |
-| `SCAN_SENTINEL` | Off; baseline capture before each D/E/P/H/R case; failure blocks the target. |
-| `SCAN_UNLOAD_NO_RESET` | Off; unprotected diagnostic readout. `SCAN_UNLOAD_RESET` explicitly requests the default; both flags together fail. |
-| `SCAN_SWEEP` | Off; D's 50-clock hold, 3/4/8/16/50 functional and 1/2/4/8/16/50 test-mode sweeps, plus E's four 50-clock holds. |
-| `SCAN_TIMEOUT_NS=<n>` | `100000000`; positive watchdog duration. |
-| `FPGA_TCO_PS=<n>` | `2000`; post-rising-edge control delay, strictly between 0 and 50000 ps. |
-| `FPGA_SAMPLE_PS=<n>` | `5000`; phase-I link sampling. I sets its own latency/gap profiles. |
-| `SCAN_NO_DUMP` / `SCAN_TRACE_CYCLES` / `SCAN_TRACE_SHIFT` | Suppress failure dumps / enable cycle or shift tracing. |
-| `+define+SCAN_FSDB` / `+define+NO_HARDEN` | Optional FSDB / explicitly skip H. |
-
-The clock period is 100 ns; scan inputs launch 10 ns after the falling edge
-and outputs sample 40 ns after it. Compiler flags such as `+define+...` go to
-VCS; runtime plusargs go to simulation (`--` forces subsequent runtime args).
-
-```bash
+./run.sh +SCAN_OP=both                         # reuse metadata
+./run.sh +SCAN_PHASES=S +SCAN_OP=both          # focused hold/resume
 ./run.sh +SCAN_PHASES=H +SCAN_OP=both +SCAN_SENTINEL
-./run.sh +SCAN_PHASES=I +SCAN_EXEC_ITERS=64 +SCAN_OP=both
-./run.sh +SCAN_PHASES=P '+SCAN_CASE=RANDINSTRFREQreg all 1' +SCAN_UNLOAD_NO_RESET
-./regress.sh --unload-reset  # Paired protected/unprotected cases; control failures remain failures
-./run.sh +SCAN_PHASES=D +SCAN_SWEEP
-./run.sh +SCAN_PHASES=S       # Requires a netlist built with hold RTL and synthesis protections
-./run.sh +SCAN_PHASES=S +SCAN_RESUME_ITERS=1 +SCAN_RESUME_N=4000 '+SCAN_CASE=session'
-./run.sh +define+BREAK_SE    # Expected failure: shifting disabled
-./run.sh +define+BREAK_MAP   # Expected failure: corrupted inversion map
+./run.sh +define+BREAK_SE                     # negative control: must fail
+./run.sh +define+BREAK_MAP                    # negative control: must fail
+./run.sh clean                               # preserve cached metadata
 ```
 
-Long holds are optional diagnostics: scan reload does not restore unscanned
-state, and a blocked link does not establish continuous retention. Requested
-mismatches still fail. Passing these tests does not independently establish
-mapping order/polarity, complete ECC/TMR behavior, general CPU correctness,
-or ATPG fault/timing coverage. External fault injection, memory ECC, DFT-lock
-transitions, and delayed/corner simulations remain outside current coverage.
+A/M/B are prerequisites and always execute. Remaining phases follow
+`+SCAN_PHASES=<letters>`; default `CDEPHFRIS`. `+SCAN_CASE=<substring>` selects
+cases; selecting no executable case fails. `+SCAN_REPEAT=n` repeats cases.
+Inputs launch after the clock edge (`+FPGA_TCO_PS`, default 2000 ps), and scan
+outputs are sampled before the next shift edge. Test-mode entry waits three
+clocks for the synchronizer.
 
-## Troubleshooting
+## Phases
 
-Errors seen when bringing the bench up on a new machine:
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| M: `cN is 9 cells in the scandef, 162 at the pins` (c7: 8) after A found the full chains | The cached map is the old PC-only one: the run reused `sim/` without `--regen` | `./run.sh --regen`. `run.sh` now refuses a map older than its netlist or scandef |
-| B fails on many registers, and each `INTERNAL:` line shows `raw_Q` equal to the expected value while `logical_est` is wrong | The phase file marks true-polarity cells as inverted: an older `dft_write_phase` misread QN-only TSMC cells | Re-run insertion with the current `dft_procs.tcl` (`make dft`, or `make synth DFT_SCOPE=full`), or with a netlist built with `-no_seq_output_inversion` write an all-0 phase file: `awk '!/^#/{print $1, 0}' <scandef dir>/forte_top.scan_phase.txt > scan_phase.txt`, then `--regen` |
-| B fails as above, but `make dft` printed `0 stored inverted` | `paths.sh` still points at `synout/`, so the bench read the old phase file there; `make dft` writes to `synout/dft/` | Point `NETLIST` and `SCANDEF` at `synout/dft/`; check that the run prints `logical phase from .../synout/dft/forte_top.scan_phase.txt` |
-| `internal_hookups.py: map and scandef cell counts differ` (old versions: `AssertionError: Map and scandef cell counts differ`) | An old `internal_hookups.py` whose line-based parser missed cells in the TSMC scandef | Copy the current `src/internal_hookups.py`; it reads the scandef the same way as `scan_map.awk`, and prints per-chain counts if they still differ |
-| `Error-[VFS_SDB_ERROR] ... tdc.sdb ... is corrupted` | Two runs building in the same `sim/`, or an interrupted compile | `./run.sh clean`, then rerun. If `clean` reports permission errors, the files belong to another user: have them delete `sim/`, or run from your own copy of `full_tb/` |
-| A finds 63 cells (7 × 8 + 7) | The netlist was built with `DFT_SCOPE=pc` | `make synth DFT_SCOPE=full`, then `./run.sh --regen` |
-| M: `cN is n+1 cells in the scandef, n at the pins` on every chain | An old `src/scan_map.awk` that counts the scandef `STOP` entry as a cell, or a cached map from before the fix | Copy the current `src/`; `grep -c stop_seen src/scan_map.awk` must print 0; rerun with `--regen` |
-| `Error-[IND] Identifier 'TA' not declared` in `pin_link_agent.sv` | The old 16-bit link agent compiled against the new 8-bit `forte_link_pkg.sv` | Copy the current `hvl/pin/pin_link_agent.sv`, or point `LINK_AGENT` at it in `paths.sh` |
-| `Error-[XMRE]` on `dut.chip.soc_core_..._reg_N_.Q` in `scan_hookups.generated.svh` | Seen with an older copy of the scripts; the current ones compile on the TSMC netlist | Copy the current `src/` and `--regen`. Fallback: `SCAN_HOOKUPS=0` in `paths.sh`; the hookups only add diagnostics, every check still runs without them |
-| `INTERNAL UNAVAILABLE: <reg>[n] ... no_scan_map_entry` lines at the start | Information only: RTL bits DC removed as constant or merged (PC[0], unused control bits); phase M lists the same bits | None |
-
-After copying new scripts or a new netlist, run once with `--regen`.
-
-**Reading a phase-B failure:** under each `ERROR`, the `INTERNAL:` line shows
-the flop outputs probed directly (`raw_Q`) next to what the bench decoded from
-the pins. If `raw_Q` equals the expected value, the hardware is right and the
-map or phase file is wrong; if `raw_Q` is wrong too, look at reset or the RTL.
-
-## Files
-
-| Path | Contents |
+| Phase | Stimulus and checked result |
 |---|---|
-| `src/tb_scan.sv`, `src/scan_*.svh` | Scan tasks, directed/random tests, instruction builder/checks; `scan_resume.svh` is phase S. |
-| `src/{scan_map.awk,internal_hookups.py,set_scan_phase.py}` | Mapping generator, diagnostic generator, verified-phase editor. |
-| `run.sh`, `regress.sh` | Entry points. |
-| `paths.sh` (not in Git) | Local configuration: netlist, scandef, models. |
-| `scan_phase.txt` (optional, not in Git) | A local phase file; overrides the one beside the scandef. Delete it once DC writes a correct one. |
-| `sim/`, `regressions/` | Current metadata/build/logs; archived runs. |
-| `generated/` | Checked-in hookup snapshots from the old 16-bit netlist, unused by the runner. |
+| A: transport | Measure eight chain lengths and inversion parity using zero/one stimulus; check repeating `0011` transport. |
+| M: mapping | Match discovered lengths and parity to the scandef; reject duplicate register-bit mappings and unknown classifications. |
+| B: baseline | Reset and run 200 clocks without memory responses; compare resettable bits and retain the resulting baseline. |
+| C: round trip | Shift random data through every chain and compare with length/inversion correction. |
+| D: capture | Load baseline, apply one capture edge, and compare every mapped scanned cell. |
+| E: PC | Load zero, ones, checkerboards, walking ones/zeros and random PC patterns; retain other cells at baseline. |
+| P: registers | Test individual data/ECC/sticky/MPP registers, using valid ECC codewords and coherent privilege copies. |
+| H: hardening | Inject single/double ECC faults, inconsistent privilege copies and reserved MPP; check repair or retained values and MSECFAULT flags. |
+| F: reset | Load ones, inverted baseline and random state; reset and compare all resettable scanned bits. |
+| R: randomized | Combine edge/random register patterns with valid, SEC, DED, parity-only and TMR cases; default 100 iterations. |
+| I: instructions | Execute short RV64 sequences through the link agent; check scan-visible PCs, pipeline operands, CSRs, WFI endpoint and absence of unexpected memory writes; default 16 sequences. |
+| S: resumable hold | Run generated memory/arithmetic/CSR programs, interrupt with unload/restore, resume and compare against uninterrupted execution. |
 
-## Open action items
+`SCAN_OP=capture` (default) loads, captures and reads back. `load` omits capture.
+`both` checks load/readback first, then independently resets/reloads and checks
+capture; failed loads block capture. F substitutes reset for capture. I has no
+scan-loaded stimulus, so `load` explicitly skips it.
 
-- [x] **Make phase S pass, then add it to the default order.** Done with the
-  hold-mode RTL (`dft-hold`: one clock, pipeline stall plus DFTHold gating,
-  hold mode latched from `scan_en` at test-mode entry, `scan_en` qualified by
-  test mode) and the flow's clock-gate exclusions. FreePDK45 full scope
-  (2026-11-13): all phases incl. S pass (20 S cases), BREAK_SE/BREAK_MAP fail;
-  on the pre-hold netlist S fails with causes 1-4. TSMC run still to do.
-- [x] **Implement the DFT-session stall and rebuild/verify the DFT flow.**
-  Done as the hold: the stall plus DFTHold gating of everything a stall does
-  not freeze (traps, flushes, the regfile write, cache/bus/MDU/FT FSMs, MTIME).
-  Legacy test mode keeps functional capture edges; see `HANDOFF.md` 6a.
-- [x] **Port the testbench/DFT interface to the new I/O.** Chains are
-  `io_in[k] -> io_out[k]`; phase I uses the current link agent; the bench waits
-  out the test_mode synchroniser; scan_map.awk and internal_hookups.py treat the
-  scandef STOP entry as the chain endpoint, not a cell.
-- [ ] **Explain and fix unprotected readout corruption (legacy mode).** Hold
-  sessions read without reset and without corruption; this item now concerns
-  legacy (capture) sessions only, where the core runs during the unload. Compare matched
-  protected/unprotected cases at the first divergence; inspect effective scan
-  enable, DFT lock, pad mux, clocks/resets, and unscanned activity. Keep protected
-  unloading as default until the supported unprotected procedure is verified.
+D/E/P/H/R reset independently before loading. Capture is aligned to the first
+functional edge after reset, relying on the IFU fetch-check interlock and inert
+controls. `ready=rvalid=0` alone does not guarantee a processor stall. Optional
+`+SCAN_SWEEP` runs longer retention experiments; mismatches still fail and the
+single-edge premise must not be generalized to them.
+
+**Conventional readout holds reset by default.** It shifts out the captured
+pre-reset values because scan has priority over functional reset in selected
+cells. Incoming bits destructively replace them; this is not resumable state
+capture. `+SCAN_UNLOAD_NO_RESET` explicitly selects unprotected legacy readout;
+`+SCAN_UNLOAD_RESET` selects protection. Phase S uses the separate reset-free
+hold protocol below.
+
+R includes zero/ones, extremes, checkerboards and random patterns. Incomplete
+ECC mappings are explicitly excluded. Coverage reports describe sampled SEC
+bits and cases, not exhaustive fault coverage. The current decoder's
+parity-only behavior is characterized rather than assumed to repair.
+
+I covers ADD/XOR/shifts/MUL, RANDINSTRFREQ changes, MSCRATCH and MPP WARL behavior
+with edge/random operands and varied link latency/gaps. It loads instructions
+into a defined 4 KiB window, executes to a controlled WFI pipeline endpoint,
+and compares selected scan-visible state. It is not a complete program loader
+or an independent ISA correctness oracle.
+
+## Phase S: hold, scan, restore and resume
+
+Hold is selected at entry: SE=1/TM=0 for three clocks, then SE=0/TM=1 for three
+clocks. Non-scan state must remain held while scan cells shift on SE=1 edges.
+Exit uses SE=TM=0 for three clocks; two are held and the last may resume.
+Legacy phases enter with SE low and preserve their functional capture edges.
+
+Each of four default programs exercises integer arithmetic, multiply/divide,
+loads/stores across a 16 KiB data region, branches, CSR swaps and dummy
+insertion. It writes a register/CSR signature, fences, reports through tohost
+and reaches WFI. The uninterrupted reference records completion, signature,
+data memory, ordered external writes and final scan state.
+
+Per program, S executes:
+
+- Three full sessions at selected execution positions: drain/pause the link,
+  arm/enter hold, unload with zeros, reload the saved state, unload/compare it,
+  reload again, exit and resume. Both reload paths check the expected zeros.
+- One hold-only (`tm`) control with the same hold/shift duration but no shifts.
+- One link-pause (`ctl`) control with no test-mode/scan-enable activity.
+
+Default coverage is 20 cases: 12 full sessions, four hold-only and four pause
+controls. `+SCAN_RESUME_ITERS=n`, `+SCAN_RESUME_N=n1,n2,...` and
+`+SCAN_RESUME_BUDGET=n` control workload count, interruption positions and
+execution budget. **Reset is never asserted inside a resumable session.**
+The final reference/result readout is a separate protected, destructive scan.
+
+S also checks available internal observations: RF codewords, MSCRATCH/MTVEC/
+MEPC/MCAUSE/MTVAL, DFT permission, effective scan enable, and scan registers
+for hold-only cases. Changes are latched even if later restored. Functional
+entry and the first resume edge may legitimately change state. Missing required
+probes produce explicit partial coverage, not a qualified pass. Arming-pattern
+and clock-gate shared-value heuristics are diagnostic only.
+
+For paused-link isolation, only a definite `1` on req/wr counts as an asserted
+handshake and fails. X/Z warns once per pin/value category per session and has
+separate sample counts; summaries show `isolation=WARN`. Warnings do not prove
+internal isolation. Agent errors, retention changes, permission loss, effective
+scan-enable violations and scan-data mismatches remain fatal.
+
+All 13 output bits have event-based Z diagnostics, including startup and
+control transitions. `OUTPUT Z SUMMARY` reports episodes per bit. These are
+warnings, not electrical measurements or proof of a sustained fault; a control
+change can be reported before combinational pad logic settles.
+
+## Regression and results
+
+`./regress.sh` runs 11 jobs: repeated baseline, E load-only, D capture, E/P/H/F,
+the full suite, R1000, I64 and S with eight programs. H includes sentinels.
+`./regress.sh --unload-reset` runs nine directed comparisons: four matched
+protected/unprotected cases plus protected hardening readout. Runs continue
+after failures and execute sequentially because they share `sim/`.
+
+Current logs are `sim/run.log`, `compile.log`, `sim.log` and `pin_trace.log`.
+Archives and `summary.tsv` are in `regressions/<timestamp>_<pid>/`. Standalone
+runs require `DFT TB PASS`; explicit skips are labeled partial coverage. The
+regression returns 0 for all passes, 1 for any failure, and 2 for partial-only
+coverage. A warning-only pad observation does not make coverage partial.
+
+The cell order comes from the scandef, so round trips alone cannot establish
+semantic mapping independently. Unreset bits are excluded from reset-value
+comparisons. Matching X values does not establish known architectural state.
+S compares observable completion/state, not every instruction retirement.
+Timer/IRQ boundaries, short asynchronous pulses, active UART, MMU/atomic cases
+and Linux scan/resume need additional directed qualification. UART and input
+synchronizers continue running during hold; MTIME and PLIC state are held.
+Counters, scrubbers and disabled processor features need separate qualification
+if enabled. Netlist timing, physical implementation and ATPG coverage are VM
+signoff tasks, not conclusions of this zero-delay bench.

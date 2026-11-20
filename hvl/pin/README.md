@@ -111,7 +111,8 @@ An additional IRQ workload checks four holds around level-sensitive interrupt
 service, matching both pin traffic and UART bytes: 100 hold sessions total.
 These checks are representative, not exhaustive SRAM/RTL-state coverage.
 For mapped-netlist checks and limitations see
-[the VM handoff](../../synth/scripts/HOLD_VM.md).
+[the DFT flow](../../synth/DFT_FLOW.md) and
+[full_tb](../../synth/scripts/full_tb/README.md).
 
 Waveforms (VCS): `WAVES=1` on both the build and the run (it selects a separate
 build directory, `<sim>_<dut>_waves`), plus `+PIN_VCD` (and `+PIN_VCD_CYCLES=n`,
