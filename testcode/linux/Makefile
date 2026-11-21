@@ -150,7 +150,7 @@ HELPERS := child
 list-progs:
 	@echo $(PROGS)
 
-USER_CFLAGS := -march=rv64imac -mabi=lp64 -O2 -Wall -ffreestanding \
+USER_CFLAGS := -march=rv64gc_zicsr_zifencei -mabi=lp64 -O2 -Wall -ffreestanding \
     -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector \
     -fno-pie -fno-asynchronous-unwind-tables -I$(TOP)/userland
 USER_LDFLAGS := -nostdlib -nostartfiles -static -no-pie -Wl,--build-id=none
