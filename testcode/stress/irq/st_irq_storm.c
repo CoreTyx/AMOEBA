@@ -30,7 +30,14 @@ static int m_hook(st_frame_t *f) {
     if (f->cause == (CAUSE_INTR | IRQ_M_TIMER)) {
         g_irqs++;
         for (int i = 0; i < 8; i++) g_handler_scratch[(g_irqs + (uint64_t)i * 7) & 63] += (uint64_t)i;
-        if (g_storm) st_set_mtimecmp(st_mtime() + 50 + st_rand_range(450));
+        /* Measured (GCC 14 build): this handler costs ~1.9k cycles.  Re-arming
+         * sooner than that expires the timer before mret, so nearly every
+         * mret re-entered the handler at once: 7430 interrupts but ~125
+         * workload iterations in 14M cycles, against 600 in 6M without
+         * interrupts -- the test measured handler throughput instead of
+         * interrupting the workload.  2.5-6.5k cycles still lands interrupts
+         * on every kind of instruction in the mix. */
+        if (g_storm) st_set_mtimecmp(st_mtime() + 2500 + st_rand_range(4000));
         else st_timer_off();
         return 1;
     }

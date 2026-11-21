@@ -7,7 +7,10 @@ reset 16
 run_until_uart 400000 PIN_UART_READY
 uart_send hello pins\n
 run_until_uart 800000 echo:HELLO PINS
-run_until_uart 400000 DIV2
+# wait for the "\n" too: the agent decodes a character at mid-stop-bit, and
+# switching its rate while the newline is still on the wire at div 1 is a
+# framing error of the BENCH's making (the chip waits TEMT before it switches)
+run_until_uart 400000 DIV2\n
 uart_div 2
 run_until_uart 800000 AT_DIV2
 uart_send second rate\n

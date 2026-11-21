@@ -128,7 +128,7 @@ def entries(tier, pin=False):
                 for part, chunk in enumerate(chunks(seeds, CHUNK[tier])):
                     out.append(dict(
                         name=name, path=rel, build=build, dut=dut,
-                        seeds=" ".join(map(str, chunk)), timeout=int(cfg.get("timeout", 10000000)),
+                        seeds=" ".join(map(str, chunk)), timeout=int(cfg.get("timeout", 10000000)) * SCALE[tier],
                         expect=expect, scale=SCALE[tier], link_args=link_args, variant="",
                         xfail=cfg.get("xfail", ""),
                         id=f"{name}-{dut}-{build}-{chunk[0]}"))

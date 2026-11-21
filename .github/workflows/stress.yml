@@ -310,11 +310,14 @@ jobs:
           # failures also become ::error annotations (readable without signing in)
           run() {
             echo "=== $*"
-            if ! SIM=verilator DUT=rtl hvl/pin/pin.sh run "$@" > pin_run.log 2>&1; then
-              fail=1; echo "FAILED: $*"; tail -40 pin_run.log
-              msg=$( { grep -h "PIN_TB_RESULT" pin_run.log; echo "--- uart ---"; tail -15 sim/pin/runs/verilator_rtl/*/uart.log 2>/dev/null; } | tail -30 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-              echo "::error title=pin $(basename "$1")::$msg"
-            else tail -3 pin_run.log; fi
+            n=$(basename "${1%.*}")
+            if ! SIM=verilator DUT=rtl hvl/pin/pin.sh run "$@" > pin_run_$n.log 2>&1; then
+              fail=1; echo "FAILED: $*"; tail -40 pin_run_$n.log
+              # must not fail itself: under bash -e a failing substitution (a
+              # glob with no match under pipefail) ended the step unannotated
+              msg=$( { tail -20 pin_run_$n.log; echo "--- uart ---"; tail -c 600 sim/pin/runs/verilator_rtl/$n/uart.log; } 2>&1 | tail -40 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' ) || true
+              echo "::error title=pin $n::$msg"
+            else tail -3 pin_run_$n.log; fi
           }
           run hvl/pin/tests/smoke.c
           run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd
@@ -340,6 +343,7 @@ jobs:
         with:
           name: pin-directed-logs
           path: |
+            pin_run_*.log
             sim/pin/runs/**/sim.log
             sim/pin/runs/**/uart.log
             sim/pin/runs/**/RESULT

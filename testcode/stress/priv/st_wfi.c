@@ -73,9 +73,14 @@ int main(void) {
     st_section("WFI with MIE=1 takes the interrupt; mepc = next instruction");
     for (int i = 0; i < ROUNDS; i++) {
         uint64_t before = g_timer_irqs;
+        /* The delay first, THEN read mtime and arm.  Computed the other way
+         * round (as GCC 14 schedules it) rand_delay()'s own multiply/divide
+         * cycles ate the 400-cycle margin: the deadline expired before MIE
+         * was set, the interrupt was taken just after `csrs mstatus` (before
+         * the wfi), and the wfi then rightly slept until the backstop. */
+        uint64_t d = 400 + rand_delay(i);
         uint64_t t0 = st_mtime();
-        /* deadline well past the few instructions between here and the wfi */
-        st_set_mtimecmp(t0 + 400 + rand_delay(i));
+        st_set_mtimecmp(t0 + d);
         csr_set(mstatus, MSTATUS_MIE);
         wfi_marked();
         /* an early return would leave the interrupt to arrive here */

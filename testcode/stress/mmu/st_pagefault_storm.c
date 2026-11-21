@@ -17,7 +17,7 @@
 //     and sepc = the instruction
 // The U program does a seeded random read-modify-write walk and keeps its own
 // expected values; every value read back after any number of evictions must
-// match.  Thousands of faults per run.
+// match.  Hundreds of faults per PR run, thousands at nightly/weekly scale.
 #include "../lib/stress.h"
 
 #ifndef ST_SCALE
@@ -27,7 +27,11 @@
 #define NCODE     6                  /* code pages (incl. straddle pair) */
 #define NPAGES    (NDATA + NCODE)
 #define NFRAMES   12                 /* resident set << working set     */
-#define ITERS     (1500 * ST_SCALE)
+/* Measured (GCC 14, legacy): ~2.4M cycles of setup, then ~47k cycles per
+ * iteration (~52k per page-in: a 4 KiB copy in, plus a writeback when dirty,
+ * through a 4 KiB D$).  1500 iterations needed ~73M cycles against the 60M
+ * budget; 500 is ~26M, ~800 faults at PR scale, thousands at nightly/weekly. */
+#define ITERS     (500 * ST_SCALE)
 #define SLOTS     8                  /* tracked words per page           */
 #define VA_BASE   0xC0000000UL
 #define VA_CODE   (VA_BASE + NDATA * ST_PAGE)
