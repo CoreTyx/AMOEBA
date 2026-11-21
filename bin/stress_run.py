@@ -30,8 +30,19 @@ SIM = os.path.join(REPO, "sim")
 MAKE = os.environ.get("MAKE", "make")
 
 TARGET = {"spike": "run_verilator_top_tb", "no_spike": "run_verilator_top_tb_no_spike", "ecc": "run_ecc_inject"}
-# F/D/Q/Zfh mnemonics; `fence`, `fence.i`, `fence.tso` are fine.
-FP_RE = re.compile(r"^\s*[0-9a-f]+:\s+[0-9a-f]+\s+(f(?!ence)[a-z0-9.]*)\b")
+# objdump line: "  addr:<tab>encoding<tab>mnemonic ..."
+INSN_RE = re.compile(r"^\s*[0-9a-f]+:\s+([0-9a-f]{4}|[0-9a-f]{8})\s")
+FP_OPCODES = {0x07, 0x27, 0x43, 0x47, 0x4B, 0x4F, 0x53}   # LOAD-FP STORE-FP FMADD..FNMADD OP-FP
+
+
+def is_fp_encoding(hexword):
+    """By ENCODING, not mnemonic: objdump spells CSR accesses to fflags/frm/
+    fcsr as frflags/frrm/frcsr, which are SYSTEM (0x73) instructions."""
+    w = int(hexword, 16)
+    if len(hexword) == 8:
+        return (w & 0x7F) in FP_OPCODES
+    q, f3 = w & 3, (w >> 13) & 7
+    return (q in (0, 2)) and f3 in (1, 5)      # c.fld / c.fsd / c.fldsp / c.fsdsp (RV64)
 
 
 SECTION_RE = re.compile(r"^Disassembly of section (\S+):")
@@ -52,8 +63,8 @@ def fp_lint(dis_path):
                 continue
             if not code:
                 continue
-            m = FP_RE.match(line)
-            if m:
+            m = INSN_RE.match(line)
+            if m and is_fp_encoding(m.group(1)):
                 bad.append(line.strip())
     return bad
 

@@ -83,7 +83,8 @@ int main(void)
     u_signal(SIGSEGV, on_fault);
     u_signal(SIGILL, on_fault);
     for (int i = 0; i < 20; i++) {
-        volatile unsigned long *bad = (volatile unsigned long *)(0x1000UL * (unsigned long)(i + 1) + (unsigned long)(i * 8));
+        /* below 0x10000, where a static riscv64 binary's text starts: never mapped */
+        volatile unsigned long *bad = (volatile unsigned long *)(0x100UL + 0x800UL * (unsigned long)i + (unsigned long)(i * 8));
         if (u_setjmp(jb) == 0) { (void)*bad; U_FAIL(NAME, "load from unmapped page succeeded"); }
         if (g_sig != SIGSEGV || g_addr != (void *)bad || g_code != SEGV_MAPERR) U_FAIL(NAME, "SIGSEGV info");
     }

@@ -49,6 +49,8 @@ int main(void) {
     ST_CHECK_EQ("S reads through megapage", check_marks(VA_MEGA, mpa0, ST_MEGAPAGE, ST_PAGE + 8, 1, PRV_S), 0);
     ST_CHECK_EQ("store through megapage", probe_sd(VA_MEGA + 0x1ffff8, PRV_S, 0xfeedface), 0);
     ST_CHECK_EQ("  lands at PA + offset", *(volatile uint64_t *)(mpa0 + 0x1ffff8), 0xfeedface);
+    /* 0x1ffff8 = 511 * (ST_PAGE + 8) is one of the marks: put it back */
+    *(volatile uint64_t *)(mpa0 + 0x1ffff8) = st_mix64(mpa0 + 0x1ffff8 + 1);
 
     st_section("sfence.vma on an INTERIOR address drops the megapage");
     map_mega(root, VA_MEGA, mpa1, PTE_R | PTE_W | PTE_AD);
@@ -56,12 +58,12 @@ int main(void) {
     ST_CHECK_EQ("new megapage visible at every slice", check_marks(VA_MEGA, mpa1, ST_MEGAPAGE, ST_PAGE + 8, 2, PRV_S), 0);
     map_mega(root, VA_MEGA, mpa0, PTE_R | PTE_W | PTE_AD);
     sfence_va_asid(VA_MEGA + 0x1ff000, 3);
-    ST_CHECK_EQ("va,asid form on last 4K slice", check_marks(VA_MEGA, mpa0, ST_MEGAPAGE, 3 * ST_PAGE + 8, 1, PRV_S), 0);
+    ST_CHECK_EQ("va,asid form on last 4K slice", check_marks(VA_MEGA, mpa0, ST_MEGAPAGE, 3 * (ST_PAGE + 8), 1, PRV_S), 0);
 
     st_section("gigapage over all of RAM");
     map_giga(root, VA_GIGA, ST_RAM_BASE, PTE_R | PTE_W | PTE_AD);
     sfence_all();
-    ST_CHECK_EQ("gigapage reaches megapage frames", check_marks(VA_GIGA + (mpa0 - ST_RAM_BASE), mpa0, ST_MEGAPAGE, 7 * ST_PAGE + 8, 1, PRV_S), 0);
+    ST_CHECK_EQ("gigapage reaches megapage frames", check_marks(VA_GIGA + (mpa0 - ST_RAM_BASE), mpa0, ST_MEGAPAGE, 7 * (ST_PAGE + 8), 1, PRV_S), 0);
     uint64_t v = 0;
     ST_CHECK_EQ("gigapage reads image text", probe_ld((VA_GIGA + ((uint64_t)(void *)main - ST_RAM_BASE)) & ~7UL, PRV_S, &v), 0);
     ST_CHECK_EQ("  same bytes as identity", v, *(volatile uint64_t *)(((uint64_t)(void *)main) & ~7UL));

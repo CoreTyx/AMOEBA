@@ -17,7 +17,7 @@
 #ifndef ST_SCALE
 #define ST_SCALE 1
 #endif
-#define INCS (3000 * ST_SCALE)
+#define INCS (20000 * ST_SCALE)
 
 static inline uint64_t lr_d(volatile uint64_t *a) { uint64_t v; __asm__ volatile ("lr.d %0, (%1)" : "=r"(v) : "r"(a) : "memory"); return v; }
 static inline uint64_t sc_d(volatile uint64_t *a, uint64_t v) { uint64_t r; __asm__ volatile ("sc.d %0, %2, (%1)" : "=&r"(r) : "r"(a), "r"(v) : "memory"); return r; }
@@ -44,7 +44,12 @@ static int timer_irq(st_frame_t *f) {
     /* handler traffic of its own, as a real kernel's would be */
     static volatile uint64_t scratch[16];
     for (int i = 0; i < 16; i++) scratch[i] += (uint64_t)i;
-    st_set_mtimecmp(st_mtime() + 150 + st_rand_range(350));
+    /* Measured: this handler costs ~1.7k cycles (GCC 14 build).  Re-arming
+     * closer than that leaves the timer already expired at mret, so the next
+     * interrupt is taken at once and the loop never runs (CI saw 4272
+     * interrupts and 2 LR/SC iterations in 7.4M cycles).  2-4k cycles out
+     * still lands interrupts between LR and SC many times over. */
+    st_set_mtimecmp(st_mtime() + 2000 + st_rand_range(2000));
     return 1;
 }
 

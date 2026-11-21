@@ -26,7 +26,11 @@ static int s_irq(st_frame_t *f) {
         if (now < g_last_tick_time) g_nonmono++;
         g_last_tick_time = now;
         /* re-arm from inside the handler: set_timer clears STIP */
-        if (g_ticks < TICKS) st_ecall(ST_ECALL_SET_TIMER, now + 300 + st_rand_range(700));
+        /* One tick costs ~3.3k cycles here (S trap, SBI ecall to M, M timer
+         * trap forwarding STIP).  Re-arming sooner than that keeps STIP pending
+         * at every sret: measured, S then took tick after tick back to back
+         * and never returned to the kernel loop (0 ticks from U, 0 SSIs). */
+        if (g_ticks < TICKS) st_ecall(ST_ECALL_SET_TIMER, now + 5000 + st_rand_range(5000));
         else st_ecall(ST_ECALL_SET_TIMER, ~0UL);
         return 1;
     }
@@ -46,9 +50,11 @@ static uint64_t s_kernel(uint64_t arg) {
     g_s_irq_hook = s_irq;
     csr_set(sie, MIP_STIP | MIP_SSIP);
     csr_set(sstatus, MSTATUS_SIE);
-    st_ecall(ST_ECALL_SET_TIMER, st_mtime() + 500);
+    /* the reference value first: computed after arming the timer, all the
+     * ticks would land in this S loop and the U program would never run */
     uint64_t want = 1;
     for (uint64_t i = 0; i < 4000; i++) want = want * 6364136223846793005ULL + 1442695040888963407ULL;
+    st_ecall(ST_ECALL_SET_TIMER, st_mtime() + 500);
     uint64_t bad = 0;
     while (g_ticks < TICKS) {
         if (st_s_run_user(u_compute, 4000, (uint64_t)(g_ustack + sizeof g_ustack)) != want) bad++;
