@@ -34,6 +34,17 @@ CFLAGS := -march=$(MARCH) -mabi=$(MABI) -mcmodel=medany \
           -Wa,-march=$(MARCH)
 
 # Add stub headers when the cross-sysroot lacks newlib (e.g. Ubuntu gcc-riscv64-unknown-elf)
+# Per-test configuration: a test may carry one line
+#     // @freertos-cflags -DconfigTICK_RATE_HZ=50000 -DconfigUSE_TICK_HOOK=1
+# whose flags apply to the whole build (kernel and port included, so the
+# FreeRTOSConfig.h overrides are consistent everywhere).  EXTRA_CFLAGS adds
+# more from the command line.  Both CI tiers (ci.yml's ci-freertos and the
+# stress suite) build through `make build PROG=...`, so a test is
+# self-describing and needs no workflow edit.
+TEST_CFLAGS := $(shell sed -n 's|^// @freertos-cflags ||p' $(PROG) 2>/dev/null)
+EXTRA_CFLAGS ?=
+CFLAGS += $(TEST_CFLAGS) $(EXTRA_CFLAGS)
+
 _SYSROOT := $(shell $(CC) -print-sysroot 2>/dev/null)
 ifeq ($(wildcard $(_SYSROOT)/include/stdlib.h),)
 _STUB_INC := -isystem $(abspath stub_include)
@@ -79,6 +90,9 @@ $(FREERTOS_KERNEL_DIR)/tasks.c:
 	@echo ""
 	@exit 1
 
+# The ELF is per-PROG and per-flags; always relink (a few seconds) so a
+# leftover ELF from another test or flag set can never be simulated.
+.PHONY: $(ELF)
 $(ELF): $(FREERTOS_KERNEL_DIR)/tasks.c $(ALL_SRCS) freertos_wally.ld
 	$(CC) $(CFLAGS) $(INC) $(LDFLAGS) -o $@ $(ALL_SRCS)
 	$(OBJDUMP) -S -D $@ > $(ELF:.elf=.dis)

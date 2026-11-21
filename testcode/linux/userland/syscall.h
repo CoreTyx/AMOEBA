@@ -29,6 +29,16 @@
 #define __NR_execve         221
 #define __NR_mmap           222
 #define __NR_wait4          260
+/* used by the stress programs */
+#define __NR_ftruncate       46
+#define __NR_nanosleep      101
+#define __NR_setitimer      103
+#define __NR_kill           129
+#define __NR_rt_sigaction   134
+#define __NR_rt_sigprocmask 135
+#define __NR_mprotect       226
+#define __NR_madvise        233
+#define __NR_riscv_flush_icache 259
 
 #define AT_FDCWD        (-100)
 #define O_RDONLY        0
@@ -42,6 +52,26 @@
 #define PROT_WRITE      2
 #define MAP_PRIVATE     0x02
 #define MAP_ANONYMOUS   0x20
+#define MAP_SHARED      0x01
+#define MAP_FIXED       0x10
+#define PROT_EXEC       4
+#define PROT_NONE       0
+#define MADV_DONTNEED   4
+#define O_CREAT         0100
+#define O_TRUNC         01000
+
+#define SIGILL          4
+#define SIGBUS          7
+#define SIGUSR1         10
+#define SIGSEGV         11
+#define SIGALRM         14
+#define SA_SIGINFO      0x00000004UL
+#define SA_NODEFER      0x40000000UL
+#define SA_RESTART      0x10000000UL
+#define SEGV_MAPERR     1
+#define SEGV_ACCERR     2
+#define BUS_ADRALN      1
+#define ITIMER_REAL     0
 
 #define CLOCK_REALTIME  0
 #define CLOCK_MONOTONIC 1
@@ -120,6 +150,29 @@ static inline int  sys_wait4(int pid, int *status, int options, void *rusage)
 /* fork() == clone(SIGCHLD, 0, ...): no new stack, so the child resumes on a
  * copy-on-write image of the parent's, exactly as fork does. */
 static inline int sys_fork(void) { return SYS2(__NR_clone, SIGCHLD, 0); }
+
+/* ---- stress-program additions ---- */
+struct k_sigaction {                 /* riscv: no sa_restorer, the VDSO returns */
+    void        (*handler)(int, void *, void *);
+    unsigned long flags;
+    unsigned long mask;
+};
+struct itimerval { struct { long tv_sec, tv_usec; } it_interval, it_value; };
+
+static inline int  sys_mprotect(void *a, size_t len, int prot) { return SYS3(__NR_mprotect, a, len, prot); }
+static inline int  sys_madvise(void *a, size_t len, int adv)   { return SYS3(__NR_madvise, a, len, adv); }
+static inline int  sys_nanosleep(const struct timespec *req, struct timespec *rem) { return SYS2(__NR_nanosleep, req, rem); }
+static inline int  sys_kill(int pid, int sig)                  { return SYS2(__NR_kill, pid, sig); }
+static inline int  sys_rt_sigaction(int sig, const struct k_sigaction *a, struct k_sigaction *o)
+{
+    return SYS4(__NR_rt_sigaction, sig, a, o, 8);
+}
+static inline int  sys_setitimer(int which, const struct itimerval *v, struct itimerval *o)
+{
+    return SYS3(__NR_setitimer, which, v, o);
+}
+static inline int  sys_ftruncate(int fd, long len)             { return SYS2(__NR_ftruncate, fd, len); }
+static inline int  sys_flush_icache(void *start, void *end)    { return SYS3(__NR_riscv_flush_icache, start, end, 0); }
 
 static inline __attribute__((noreturn)) void sys_exit(int code)
 {

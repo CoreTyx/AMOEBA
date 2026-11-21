@@ -100,15 +100,51 @@ static int run(const char *prog)
     return -1;
 }
 
-int main(void)
+/* The boot command line carries `amoeba_prog=<name>` padded with '_' to a
+ * fixed width (testcode/linux/Makefile PROG_SLOT, rewritten per CI job by
+ * bin/patch_bootarg.py); the kernel passes it to PID 1 as an environment
+ * variable.  A name selects that one program; all underscores, or no variable
+ * at all, runs every program as before. */
+static const char *selected(char **envp, char *buf, size_t n)
 {
+    for (char **e = envp; e && *e; e++) {
+        if (strncmp(*e, "amoeba_prog=", 12) != 0)
+            continue;
+        size_t len = 0;
+        for (const char *v = *e + 12; *v && len < n - 1; v++)
+            buf[len++] = *v;
+        while (len && buf[len - 1] == '_')
+            len--;
+        buf[len] = 0;
+        return len ? buf : 0;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv, char **envp)
+{
+    (void)argc; (void)argv;
     console_setup();
     out_str("AMOEBA_LINUX_BOOT_OK\n");
 
+    char sel_buf[32];
+    const char *sel = selected(envp, sel_buf, sizeof sel_buf);
     const char *failed = 0;
-    for (unsigned i = 0; i < NPROGS; i++)
-        if (run(progs[i]) != 0 && !failed)
-            failed = progs[i];
+    if (sel) {
+        int known = 0;
+        for (unsigned i = 0; i < NPROGS; i++)
+            if (strcmp(progs[i], sel) == 0)
+                known = 1;
+        out_str("AMOEBA_PROG_SELECT ");
+        out_str(sel);
+        out_str("\n");
+        if (!known || run(sel) != 0)
+            failed = sel;
+    } else {
+        for (unsigned i = 0; i < NPROGS; i++)
+            if (run(progs[i]) != 0 && !failed)
+                failed = progs[i];
+    }
 
     if (failed) {
         out_str("AMOEBA_PROG_FAIL ");

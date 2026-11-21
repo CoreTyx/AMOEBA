@@ -1,0 +1,87 @@
+# One place for the tool setup every simulation job needs.  Same recipes and
+# the SAME cache keys as ci.yml (verilator-5.026-<os>, spike-commitlog-<os>-v1.1.0),
+# so whichever workflow warms a cache first serves both.
+name: Set up AMOEBA simulation tools
+description: apt dependencies, Verilator 5.026 (cached), optional Spike v1.1.0 (cached), spike.so
+inputs:
+  spike:
+    description: "'true' to put Spike (with --enable-commitlog) on PATH"
+    default: 'false'
+  submodules:
+    description: space-separated submodule paths to initialise
+    default: third_party/riscv-formal
+  build-spike-if-missing:
+    description: "'true' to build Spike on a cache miss (only the tools job should)"
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Fetch submodules
+      if: inputs.submodules != ''
+      shell: bash
+      run: git submodule update --init ${{ inputs.submodules }}
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y python3 python3-pip gcc g++ make \
+          autoconf flex bison libfl-dev help2man zlib1g-dev bc \
+          gcc-riscv64-unknown-elf device-tree-compiler libboost-regex-dev libboost-system-dev
+        pip3 install --quiet pyyaml
+
+    - name: Cache Verilator v5.026
+      id: cache-verilator
+      uses: actions/cache@v4
+      with:
+        path: /opt/verilator
+        key: verilator-5.026-${{ runner.os }}
+
+    - name: Build Verilator v5.026 from source
+      if: steps.cache-verilator.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone https://github.com/verilator/verilator --branch v5.026 --depth=1 /tmp/verilator-src
+        cd /tmp/verilator-src && autoconf
+        ./configure --prefix=/opt/verilator
+        make -j$(nproc)
+        make install
+
+    - name: Add Verilator to PATH
+      shell: bash
+      run: echo "/opt/verilator/bin" >> $GITHUB_PATH
+
+    # Built before any cached Vtop_tb is restored and touched: the Spike DPI
+    # build lists spike.so as a dependency, so a .so newer than the restored
+    # binary would otherwise trigger a full rebuild.
+    - name: Build spike.so (DPI bridge)
+      shell: bash
+      run: g++ -shared -fPIC -O2 hvl/common/spike_dpi.cpp -o hvl/common/spike.so
+
+    - name: Restore Spike executable
+      if: inputs.spike == 'true'
+      id: cache-spike
+      uses: actions/cache@v4
+      with:
+        path: /tmp/spike-install
+        key: spike-commitlog-${{ runner.os }}-v1.1.0
+
+    - name: Build Spike v1.1.0 from source
+      if: inputs.spike == 'true' && steps.cache-spike.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        if [ "${{ inputs.build-spike-if-missing }}" != "true" ]; then
+          echo "::error::Spike cache miss in a job that should only restore it (the tools job builds it)"
+          exit 1
+        fi
+        git clone --depth=1 https://github.com/riscv-software-src/riscv-isa-sim.git --branch v1.1.0 /tmp/spike-src
+        sed -i '9i #include <cstdint>' /tmp/spike-src/fesvr/device.h
+        mkdir /tmp/spike-src/build && cd /tmp/spike-src/build
+        ../configure --enable-commitlog --prefix=/tmp/spike-install
+        make -j$(nproc)
+        make install
+
+    - name: Add Spike to PATH
+      if: inputs.spike == 'true'
+      shell: bash
+      run: echo "/tmp/spike-install/bin" >> $GITHUB_PATH

@@ -1,0 +1,15 @@
+# Weekly tier of the stress suite: 4x-scaled workloads, 16-64 seeds per test,
+# 32 Cascade fuzz shards (see stress.yml).  The weekly Linux run on the ASIC
+# top is a schedule of linux-userspace.yml.
+name: Stress suite (weekly)
+
+on:
+  schedule:
+    - cron: '0 1 * * 0'      # Sunday 01:00 UTC
+  workflow_dispatch:
+
+jobs:
+  stress:
+    uses: ./.github/workflows/stress.yml
+    with:
+      tier: weekly

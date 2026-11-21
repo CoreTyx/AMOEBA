@@ -37,6 +37,45 @@ if sys.argv[1] == "arch":
             retval += 'c'
     print(retval)
 
+# The ISA the reference model (Spike) runs.  Unlike "arch" -- the compiler
+# target, deliberately left at rv64gc -- this must describe the CHIP so that an
+# instruction the hardware traps on also traps in the model.  F/D and C come
+# from options.json; the rest of the pruned ISA (no Zicntr/Zihpm, no B/K, no
+# Sstc) is fixed by pkg/config.vh and has no options.json switch.
+def _config_vh(name, default=None):
+    import re
+    try:
+        with open("pkg/config.vh") as cf:
+            for line in cf:
+                m = re.match(r"\s*localparam\s+(?:\w+\s+)?%s\s*=\s*([^;]+);" % name, line)
+                if m:
+                    v = m.group(1).strip()
+                    v = re.sub(r"^\d*'[bdh]", "", v)
+                    return int(v.replace("_", ""), 0) if v[:2] not in ("0x",) else int(v, 16)
+    except (OSError, ValueError):
+        pass
+    return default
+
+if sys.argv[1] == "spike_isa":
+    isa = "rv64ima"
+    if j.get("f_ext", False):
+        isa += "fd"
+    if j.get("c_ext", True):
+        isa += "c"
+    isa += "_zicsr_zifencei"
+    print(isa)
+
+if sys.argv[1] == "spike_extra":
+    pmp = _config_vh("PMP_ENTRIES", 16)
+    s = 1 if _config_vh("S_SUPPORTED", 1) else 0
+    u = 1 if _config_vh("U_SUPPORTED", 1) else 0
+    priv = "m" + ("s" if s else "") + ("u" if u else "")
+    if priv == "ms":
+        priv = "m"
+    # --pmpregions does not exist in Spike v1.1.0 (the version CI builds),
+    # which hard-codes 16 PMP regions: only pass it when the chip differs.
+    print(f"--priv={priv}" + (f" --pmpregions={pmp}" if pmp != 16 else ""))
+
 if sys.argv[1] == "abi":
     xlen = j.get("xlen", 32)
     if xlen == 64:
