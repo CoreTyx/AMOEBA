@@ -21,7 +21,10 @@ static void word_move(unsigned char *d, const unsigned char *s, unsigned long n)
     } else ref_move(d, s, n);
 }
 
-static unsigned char A[4096], B[4096];
+/* Big enough for every window below and no bigger: refilling and comparing
+ * cost is per combination (2816 of them), on a core with a 65-cycle multiply. */
+#define BUF 512
+static unsigned char A[BUF], B[BUF];
 
 int main(void)
 {
@@ -29,14 +32,15 @@ int main(void)
     for (int sa = 0; sa < 16; sa++)
         for (int da = 0; da < 16; da++)
             for (int len = 0; len < 72; len += 7) {
-                for (int i = 0; i < 4096; i++) A[i] = B[i] = (unsigned char)u_rand();
-                memcpy(A + 1024 + da, A + 2048 + sa, (size_t)len);
-                ref_move(B + 1024 + da, B + 2048 + sa, (unsigned long)len);
-                if (memcmp(A, B, 4096)) U_FAIL(NAME, "memcpy");
+                unsigned char seed = (unsigned char)(sa * 13 + da * 7 + len);
+                for (int i = 0; i < BUF; i++) A[i] = B[i] = (unsigned char)(seed + i * 37);
+                memcpy(A + 64 + da, A + 256 + sa, (size_t)len);
+                ref_move(B + 64 + da, B + 256 + sa, (unsigned long)len);
+                if (memcmp(A, B, BUF)) U_FAIL(NAME, "memcpy");
                 word_move(A + 100 + da, A + 100 + sa, (unsigned long)len + 64);   /* overlapping */
                 ref_move(B + 100 + da, B + 100 + sa, (unsigned long)len + 64);
-                if (memcmp(A, B, 4096)) U_FAIL(NAME, "overlapping move");
-                sum += A[1024 + da];
+                if (memcmp(A, B, BUF)) U_FAIL(NAME, "overlapping move");
+                sum += A[64 + da];
             }
     /* 1 MiB of brk */
     unsigned char *cur = (unsigned char *)sys_brk(0);
