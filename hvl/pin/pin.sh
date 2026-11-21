@@ -162,7 +162,7 @@ build() {
   cd "$BUILD"
   echo "build: $BUILD"
   if [ "$SIM" = verilator ]; then
-    verilator --binary -j "$(nproc)" --timing --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style \
+    verilator --binary -j "${JOBS:-$(nproc)}" --timing --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style \
       +define+ECE411_VERILATOR "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" \
       --top-module pin_tb -o pin_tb 2>&1 | tee build.log
     [ -x obj_dir/pin_tb ] || die "verilator build failed, see $BUILD/build.log"

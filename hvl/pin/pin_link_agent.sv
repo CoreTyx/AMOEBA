@@ -72,6 +72,14 @@ module pin_link_agent import forte_link_pkg::*; #(
   int          mutate     = 0;               // +FPGA_MUTATE: harness self-test only
   bit          x_in_reset = 0;               // +FPGA_X_IN_RESET
   int          wdog_cyc   = 1000;            // +FPGA_WDOG: link cycles per transaction
+  // Set by a tb that suspends the link mid-program (full_tb phase S):
+  // hold_ready  idle with ready low, as on a gap, but for as long as it is set;
+  //             a transaction already started still completes.
+  // paused      the sampler skips every link cycle: no checks, no state change,
+  //             outputs held.  Set it only with the agent idle and ready low;
+  //             clearing it carries on exactly where it stopped.
+  bit          hold_ready = 0;
+  bit          paused     = 0;
 
   // ---- state visible to the tb --------------------------------------------
   int          errors     = 0;
@@ -270,6 +278,7 @@ module pin_link_agent import forte_link_pkg::*; #(
       @(posedge clk_out);
       #(sample_ns);
       s_req = req; s_wr = wr; s_io = io_out;
+      if (paused) continue;
 
       n_rvalid = 1'b0; n_en = 1'b0;
 
@@ -366,7 +375,7 @@ module pin_link_agent import forte_link_pkg::*; #(
           end
         endcase
 
-        if (st == A_IDLE && s_req !== 1'b1) n_ready = !gap;
+        if (st == A_IDLE && s_req !== 1'b1) n_ready = !gap && !hold_ready;
         else if (st != A_IDLE) n_ready = 1'b0;
       end
     end
