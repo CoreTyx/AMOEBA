@@ -1,0 +1,15 @@
+# riscv-tests that do not apply to the shipped configuration (pkg/config.vh).
+# One per line: <test-name>  <reason>.  bin/riscv_tests.py skips these and
+# prints the reason, so an exclusion is always visible in the CI log.
+# A test that fails for a reason that IS a hardware bug must NOT be listed
+# here -- mark it `xfail` in the run instead and file the bug.
+rv64ui-p-ma_data            ZICCLSM=0: misaligned data accesses trap; the p env has no emulation handler
+rv64ui-v-ma_data            ZICCLSM=0: misaligned data accesses trap (the v env does not emulate them either)
+rv64mi-p-zicntr             no Zicntr/Zihpm (COUNTERS=0): cycle/time/instret are illegal
+rv64mi-p-instret_overflow   no Zicntr/Zihpm: minstret does not exist
+rv64mi-p-ld-misaligned      ZICCLSM=0: requires misaligned loads to complete in hardware
+rv64mi-p-lh-misaligned      ZICCLSM=0: requires misaligned loads to complete in hardware
+rv64mi-p-lw-misaligned      ZICCLSM=0: requires misaligned loads to complete in hardware
+rv64mi-p-sd-misaligned      ZICCLSM=0: requires misaligned stores to complete in hardware
+rv64mi-p-sh-misaligned      ZICCLSM=0: requires misaligned stores to complete in hardware
+rv64mi-p-sw-misaligned      ZICCLSM=0: requires misaligned stores to complete in hardware

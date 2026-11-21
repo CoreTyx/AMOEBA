@@ -98,6 +98,36 @@ NO_SPIKE_DIR := $(NO_SPIKE_DIR)$(RETIRE_SUFFIX)
 TIMEOUT      ?= 10000000
 PROG_NAME ?= $(notdir $(basename $(PROG)))
 
+# ── Strict exit (bare-metal / ISA / FreeRTOS / stress tiers) ──────────────────
+# On by default: a run passes only through a tohost exit.  Without it the
+# monitor treats any `j .` / `beq zero,zero,.` as a halt and ends the run with
+# status 0, so a program that hangs in a park loop -- a lost interrupt, a trap
+# storm -- would PASS.  STRICT_EXIT=0 restores the old behaviour for debugging.
+# The Linux targets never pass it: ECE411_LINUX already halts only on the
+# explicit halt encoding and judges pass/fail from the UART.
+STRICT_EXIT ?= 1
+ifeq ($(STRICT_EXIT),1)
+  STRICT_ARGS := +STRICT_EXIT_ECE411
+else
+  STRICT_ARGS :=
+endif
+
+# ── Spike reference-model configuration ───────────────────────────────────────
+# The compiler target stays rv64gc (get_options.py arch), but Spike models the
+# CHIP (get_options.py spike_isa / spike_extra: RV64IMAC, no counters, 16 PMP
+# regions), so an instruction the core traps on also traps in the model.
+# hvl/common/spike_dpi.cpp reads these from the environment.
+export SPIKE_ISA_ECE411   := $(shell python3 $(CURDIR)/../bin/get_options.py spike_isa)
+export SPIKE_EXTRA_ECE411 := $(shell python3 $(CURDIR)/../bin/get_options.py spike_extra)
+
+# CFLAGS_EXTRA reaches bin/generate_memory_file.py through the environment
+# (e.g. CFLAGS_EXTRA=-DSEED=7 for a seeded stress test).
+export CFLAGS_EXTRA
+
+# Extra run-time plusargs for the bare-metal run targets, e.g.
+#   PLUSARGS=+TOHOST_ADDR_ECE411=80001000   (riscv-tests' own tohost placement)
+PLUSARGS ?=
+
 ECE411_NO_FLOAT = $(shell python3 $(CURDIR)/../bin/get_options.py no_float)
 # The compiler needs the Verilog define above; rvfi_reference.py instead
 # expects the literal token "no_float" when the F extension is absent.
@@ -185,7 +215,7 @@ run_verilator_top_tb_no_spike: verilator/$(NO_SPIKE_DIR)/Vtop_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(NO_SPIKE_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(STRICT_ARGS) $(PLUSARGS) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -227,7 +257,7 @@ run_ecc_inject: verilator/$(ECC_INJECT_DIR)/Vtop_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(ECC_INJECT_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(STRICT_ARGS) $(PLUSARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -391,7 +421,7 @@ run_vcs_top_tb: $(VCS_DIR)/top_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd $(VCS_DIR) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
-		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(STRICT_ARGS) $(PLUSARGS) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -404,7 +434,7 @@ run_vcs_top_tb_no_spike: $(VCS_NO_SPIKE_DIR)/top_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd $(VCS_NO_SPIKE_DIR) && ./top_tb -l simulation.log -exitstatus -suppress=ASLR_DETECTED_INFO \
-		+TIMEOUT_ECE411=$(TIMEOUT) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(STRICT_ARGS) $(PLUSARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst"
@@ -433,7 +463,7 @@ run_verilator_top_tb: verilator/$(BUILD_DIR)/Vtop_tb $(PROG)
 	python3 $(CURDIR)/../bin/get_options.py clock
 	python3 $(CURDIR)/../bin/get_options.py bmem_x
 	cd verilator && ./$(BUILD_DIR)/Vtop_tb \
-		+TIMEOUT_ECE411=$(TIMEOUT) $(LINK_ARGS) \
+		+TIMEOUT_ECE411=$(TIMEOUT) $(STRICT_ARGS) $(PLUSARGS) $(LINK_ARGS) \
 		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
 		+BRAM_0_ON_X_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py bmem_x) \
 		+MEMLST_ECE411="$(CURDIR)/bin/memory_8.lst" \
@@ -453,11 +483,11 @@ verdi:
 .PHONY: spike
 spike: $(ELF)
 	mkdir -p spike
-	spike --isa=$(shell python3 $(CURDIR)/../bin/get_options.py arch) -m0x80000000:0x10000000 --log-commits $(ELF) |& tail -n +6 > spike/spike.log
+	spike --isa=$(SPIKE_ISA_ECE411) $(SPIKE_EXTRA_ECE411) -m0x80000000:0x10000000 --log-commits $(ELF) |& tail -n +6 > spike/spike.log
 
 .PHONY: interactive_spike
 interactive_spike: $(ELF)
-	spike --isa=$(shell python3 $(CURDIR)/../bin/get_options.py arch) -m0x80000000:0x10000000 --log-commits -d $(ELF)
+	spike --isa=$(SPIKE_ISA_ECE411) $(SPIKE_EXTRA_ECE411) -m0x80000000:0x10000000 --log-commits -d $(ELF)
 
 REGRESSION_TESTS  ?= $(shell find $(CURDIR)/../testcode/baremetal -name '*.c')
 ISA_LEVEL_TESTS   ?= $(shell find $(CURDIR)/../testcode/isa_level_testing -name '*.c' ! -name 'test_utils.h')
@@ -790,6 +820,29 @@ cache_edge_test:
 	    -Mdir verilator/cache_edge_tb --Wall -Wno-fatal -CFLAGS "-std=c++20" \
 	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/cache_edge_tb/compile.log
 	verilator/cache_edge_tb/Vcache_edge_tb +SEED=$(SEED)
+
+# PMP checker vs a reference model of the privileged spec (hvl/mmu/pmp_stress_tb.sv):
+# random 16-entry configurations, edge-biased addresses, every size, privilege
+# and access type, including accesses that only partially match an entry.
+.PHONY: pmp_stress_test
+pmp_stress_test:
+	mkdir -p verilator/pmp_stress_tb
+	verilator $(UNIT_TB_CFLAGS) --binary -O2 --top-module pmp_stress_tb \
+	    +incdir+$(CURDIR)/../pkg +incdir+$(CURDIR)/../hdl/core \
+	    $(wildcard $(CURDIR)/../pkg/*.sv) \
+	    $(CURDIR)/../hdl/core/cvw.sv \
+	    $(CURDIR)/../hdl/core/mmu/pmpchecker.sv \
+	    $(CURDIR)/../hdl/core/mmu/pmpadrdec.sv \
+	    $(CURDIR)/../hdl/core/generic/lessthan.sv \
+	    $(CURDIR)/../hdl/core/generic/lowones.sv \
+	    $(CURDIR)/../hdl/core/generic/priorityonehot.sv \
+	    $(CURDIR)/../hdl/core/generic/flop/flopr.sv \
+	    $(CURDIR)/../hvl/common/getenvval_stub.cpp \
+	    $(CURDIR)/../hvl/mmu/pmp_stress_tb.sv \
+	    -Mdir verilator/pmp_stress_tb -Wno-fatal -Wno-lint -Wno-style -CFLAGS "-std=c++20" \
+	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/pmp_stress_tb/compile.log
+	verilator/pmp_stress_tb/Vpmp_stress_tb +SEED=$(SEED) $(if $(filter 1,$(PMP_STRICT_PARTIAL)),+STRICT_PARTIAL) | tee verilator/pmp_stress_tb/run.log
+	grep -q "ALL TESTS PASSED" verilator/pmp_stress_tb/run.log
 
 csr_harden_test:
 	mkdir -p verilator/csr_harden_tb

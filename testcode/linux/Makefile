@@ -40,7 +40,14 @@ TIMEBASE_HZ ?= 100000000
 # these three must agree -- hence derived here, in one place.
 UART_HZ    ?= $(shell echo $$(( $(TIMEBASE_HZ) / 2 )))
 UART_BAUD  ?= $(shell echo $$(( $(UART_HZ) / 16 )))
-BOOTARGS   ?= console=ttyS0,$(UART_BAUD) earlycon=uart8250,mmio,0x10000000 no5lvl no4lvl loglevel=7 rdinit=/init
+# amoeba_prog=<16 chars> is a fixed-width placeholder that bin/patch_bootarg.py
+# rewrites in the finished boot.lst, so one image serves every per-program boot
+# job of the stress tier (.github/workflows/linux-userspace.yml): the kernel
+# hands unknown key=value parameters to /init as environment variables, and
+# /init runs only the named program.  All underscores (the default) = run all.
+# Same length either way, so the DTB layout never changes.
+PROG_SLOT  := amoeba_prog=________________
+BOOTARGS   ?= console=ttyS0,$(UART_BAUD) earlycon=uart8250,mmio,0x10000000 no5lvl no4lvl loglevel=7 rdinit=/init $(PROG_SLOT)
 
 NPROC ?= $(shell nproc)
 
@@ -133,16 +140,24 @@ $(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz
 # userland/NAME.c into /bin/NAME in the initramfs, and /init runs them in this
 # order.  To add one: write userland/NAME.c, append NAME here.
 
-PROGS := arith mem proc sys
+PROGS := arith mem proc sys \
+         pfault smc_jit ctxsw spawn signals misalign counters sleep stackgrow memstress fdchurn
+
+# Helper binaries placed in /bin for the programs above but not run by /init.
+HELPERS := child
+
+.PHONY: list-progs
+list-progs:
+	@echo $(PROGS)
 
 USER_CFLAGS := -march=rv64imac -mabi=lp64 -O2 -Wall -ffreestanding \
     -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector \
     -fno-pie -fno-asynchronous-unwind-tables -I$(TOP)/userland
 USER_LDFLAGS := -nostdlib -nostartfiles -static -no-pie -Wl,--build-id=none
 USER_COMMON  := userland/crt0.S userland/ulib.c
-USER_HDRS    := userland/syscall.h userland/ulib.h
+USER_HDRS    := userland/syscall.h userland/ulib.h userland/ustress.h
 
-USER_BINS := $(addprefix $(BUILD)/bin/,$(PROGS))
+USER_BINS := $(addprefix $(BUILD)/bin/,$(PROGS) $(HELPERS))
 
 $(BUILD)/bin/%: userland/%.c $(USER_COMMON) $(USER_HDRS) | check-toolchain
 	mkdir -p $(BUILD)/bin
@@ -163,7 +178,7 @@ $(BUILD)/init: initramfs/init.c $(USER_COMMON) $(USER_HDRS) Makefile | check-too
 # the spec names, so a rebuilt program re-packs the initramfs.
 $(BUILD)/initramfs.spec: initramfs/initramfs.spec $(BUILD)/init $(USER_BINS)
 	sed 's|@INIT@|$(BUILD)/init|' $< > $@.tmp
-	for p in $(PROGS); do \
+	for p in $(PROGS) $(HELPERS); do \
 	    echo "file /bin/$$p $(BUILD)/bin/$$p 0755 0 0" >> $@.tmp; \
 	done
 	mv $@.tmp $@

@@ -1,0 +1,473 @@
+# AMOEBA stress suite (testcode/stress, riscv-tests, pin bench, unit TBs).
+#
+# One workflow, three tiers:
+#   pr       every push / pull request to main: each stress test on the legacy
+#            DUT (2 seeds), the ASIC top (1 seed), the harness self-checks,
+#            riscv-tests, pin-bench directed tests, cache unit TB seeds.
+#   nightly  stress-nightly.yml: 8 seeds, ASIC top with random link gaps, the
+#            ECC-injection and dummy-instruction variants, every stress test on
+#            the pin bench, riscv-tests on forte + with dummy insertion, the pin
+#            self-test, the CDC ratio sweep, 8 Cascade fuzz shards.
+#   weekly   stress-weekly.yml: 4x-scaled workloads, 16-64 seeds, 32 Cascade
+#            shards.
+# Every matrix is fail-fast: false and one test per job, so results come back
+# in parallel and one failure never hides another.  Each test is self-
+# describing (its // @stress header, see bin/stress_matrix.py): adding a file
+# under testcode/stress is all it takes to put it in CI.
+name: Stress suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: pr | nightly | weekly
+        type: choice
+        options: [pr, nightly, weekly]
+        default: pr
+  workflow_call:
+    inputs:
+      tier:
+        type: string
+        default: nightly
+
+concurrency:
+  group: stress-${{ github.ref }}-${{ inputs.tier || 'pr' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TIER: ${{ inputs.tier || 'pr' }}
+
+jobs:
+  # ── What to run ─────────────────────────────────────────────────────────────
+  plan:
+    name: Plan (${{ inputs.tier || 'pr' }})
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      builds: ${{ steps.m.outputs.builds }}
+      pin: ${{ steps.m.outputs.pin }}
+      rt: ${{ steps.m.outputs.rt }}
+      seeds: ${{ steps.m.outputs.seeds }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Generated test config is current (pkg/config.vh -> amoeba_cfg.h)
+        run: python3 bin/gen_test_cfg.py --check
+      - name: Every @stress header is valid
+        run: python3 bin/stress_matrix.py --check
+      - name: Build the matrices
+        id: m
+        run: |
+          echo "matrix=$(python3 bin/stress_matrix.py --tier "$TIER")" >> "$GITHUB_OUTPUT"
+          echo "builds=$(python3 bin/stress_matrix.py --builds "$TIER")" >> "$GITHUB_OUTPUT"
+          echo "pin=$(python3 bin/stress_matrix.py --tier "$TIER" --pin)" >> "$GITHUB_OUTPUT"
+          git submodule update --init --recursive third_party/riscv-tests
+          echo "rt=$(python3 bin/riscv_tests.py shards)" >> "$GITHUB_OUTPUT"
+          case "$TIER" in
+            pr)      echo 'seeds=[1,2]' >> "$GITHUB_OUTPUT" ;;
+            nightly) echo 'seeds=[1,2,3,4,5,6,7,8]' >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'seeds=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]' >> "$GITHUB_OUTPUT" ;;
+          esac
+          python3 bin/stress_matrix.py --tier "$TIER" --list | tail -1
+
+  # ── Tools: warm the Verilator and Spike caches once ─────────────────────────
+  tools:
+    name: Tools (Verilator, Spike)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          spike: 'true'
+          build-spike-if-missing: 'true'
+          submodules: ''
+
+  # ── Simulator builds (cached per commit, shared with ci.yml) ────────────────
+  build:
+    name: Build ${{ matrix.build }}/${{ matrix.dut }}
+    needs: [plan, tools]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.builds) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          spike: ${{ matrix.spike }}
+      - name: Cache simulator
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: sim/verilator/${{ matrix.dir }}
+          key: ${{ matrix.key }}-${{ runner.os }}-${{ github.sha }}
+      - name: Compile
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: make -C sim ${{ matrix.target }}
+
+  # ── The stress programs ─────────────────────────────────────────────────────
+  sim:
+    name: ${{ matrix.name }} ${{ matrix.dut }}/${{ matrix.build }}${{ matrix.variant && format(' [{0}]', matrix.variant) || '' }} s${{ matrix.seeds }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          spike: ${{ matrix.build == 'spike' && 'true' || 'false' }}
+      - name: Which simulator
+        id: b
+        run: python3 bin/stress_matrix.py --build-info ${{ matrix.build }} ${{ matrix.dut }} >> "$GITHUB_OUTPUT"
+      - name: Restore simulator
+        uses: actions/cache/restore@v4
+        with:
+          path: sim/verilator/${{ steps.b.outputs.dir }}
+          key: ${{ steps.b.outputs.key }}-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - name: Touch Vtop_tb (no timestamp-triggered rebuild)
+        run: touch sim/verilator/${{ steps.b.outputs.dir }}/Vtop_tb
+      - name: Run
+        run: |
+          python3 bin/stress_run.py --path "${{ matrix.path }}" --build "${{ matrix.build }}" \
+            --dut "${{ matrix.dut }}" --seeds "${{ matrix.seeds }}" --timeout "${{ matrix.timeout }}" \
+            --expect "${{ matrix.expect }}" --scale "${{ matrix.scale }}" --link-args "${{ matrix.link_args }}" \
+            --variant "${{ matrix.variant }}" --xfail "${{ matrix.xfail }}" --id "${{ matrix.id }}"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-result-${{ matrix.id }}
+          path: sim/stress_results/*.json
+          retention-days: 14
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-logs-${{ matrix.id }}
+          path: |
+            sim/verilator/*/simulation.log
+            sim/verilator/*/make.log
+            sim/bin/*.dis
+          retention-days: 14
+      # A failing short test is rerun once with waveforms (TRACE=1 builds a
+      # traced simulator: ~5 min) so the FST is waiting when someone looks.
+      - name: Rerun first failing seed with waveforms
+        if: failure() && matrix.timeout <= 5000000 && matrix.build != 'ecc' && matrix.expect == 'pass'
+        continue-on-error: true
+        run: |
+          seed=$(echo "${{ matrix.seeds }}" | awk '{print $1}')
+          tgt=run_verilator_top_tb_no_spike; [ "${{ matrix.build }}" = spike ] && tgt=run_verilator_top_tb
+          make -C sim $tgt TRACE=1 DUT=${{ matrix.dut }} PROG=$PWD/${{ matrix.path }} \
+            PROG_NAME=trace_${{ matrix.name }} TIMEOUT=${{ matrix.timeout }} \
+            CFLAGS_EXTRA="-DSEED=$seed -DST_SCALE=${{ matrix.scale }}$([ ${{ matrix.build }} = spike ] && echo ' -DCOSIM')" || true
+      - name: Upload waveform
+        if: failure() && matrix.timeout <= 5000000
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-fst-${{ matrix.id }}
+          path: sim/verilator/trace_*/dump.fst
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── riscv-tests (official ISA tests) for the chip's ISA ─────────────────────
+  riscv-tests:
+    name: riscv-tests ${{ matrix.shard }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.rt) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: third_party/riscv-formal
+      - name: Fetch riscv-tests
+        run: git submodule update --init --recursive third_party/riscv-tests
+      - name: Restore legacy simulator
+        uses: actions/cache/restore@v4
+        with:
+          path: sim/verilator/build_no_spike
+          key: no-spike-build-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - name: Restore forte simulator
+        uses: actions/cache/restore@v4
+        with:
+          path: sim/verilator/build_no_spike_forte
+          key: stress-no-spike-forte-build-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - run: touch sim/verilator/build_no_spike/Vtop_tb sim/verilator/build_no_spike_forte/Vtop_tb
+      - name: legacy DUT
+        run: python3 bin/riscv_tests.py run --shard ${{ matrix.shard }} --dut legacy
+      - name: ASIC top (forte), random link gaps
+        if: env.TIER != 'pr' || endsWith(matrix.shard, '-p')
+        run: python3 bin/riscv_tests.py run --shard ${{ matrix.shard }} --dut forte ${{ env.TIER != 'pr' && '--link-args rand' || '' }}
+      - name: With random dummy-instruction insertion (nightly)
+        if: env.TIER != 'pr' && endsWith(matrix.shard, '-p')
+        run: python3 bin/riscv_tests.py run --shard ${{ matrix.shard }} --dut legacy --dummy 5
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-result-rt-${{ matrix.shard }}
+          path: sim/stress_results/*.json
+          retention-days: 14
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt-logs-${{ matrix.shard }}
+          path: sim/verilator/rt_*/make.log
+          retention-days: 14
+
+  # ── Unit testbenches ────────────────────────────────────────────────────────
+  unit:
+    name: unit TBs seed ${{ matrix.seed }}
+    needs: [plan, tools]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJson(needs.plan.outputs.seeds) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: ''
+      - name: Seeded D$ edge-case / reference-model test
+        run: make -C sim cache_edge_test SEED=$(( ${{ matrix.seed }} * 7919 ))
+      # PMP checker vs the spec.  Reports a KNOWN DEVIATION line for accesses
+      # that only partially match an entry (see hvl/mmu/pmp_stress_tb.sv);
+      # every other disagreement fails the job.
+      - name: PMP checker vs reference model (100k checks)
+        run: make -C sim pmp_stress_test SEED=$(( ${{ matrix.seed }} * 104729 ))
+
+  # ── Chip-level pin bench (forte_top through its pads) ───────────────────────
+  pin-build:
+    name: Pin bench build
+    needs: tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: ''
+      - name: Cache pin bench
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: sim/pin/build/verilator_rtl
+          key: pin-verilator-rtl-${{ runner.os }}-${{ github.sha }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: SIM=verilator DUT=rtl hvl/pin/pin.sh build
+
+  pin-directed:
+    name: Pin bench directed tests
+    needs: pin-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: ''
+      - uses: actions/cache/restore@v4
+        with:
+          path: sim/pin/build/verilator_rtl
+          key: pin-verilator-rtl-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - name: Directed tests (existing + stress)
+        run: |
+          set -o pipefail
+          fail=0
+          run() { echo "=== $*"; SIM=verilator DUT=rtl hvl/pin/pin.sh run "$@" || { echo "FAILED: $*"; fail=1; }; }
+          run hvl/pin/tests/smoke.c
+          run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd
+          run hvl/pin/tests/uart_echo.c hvl/pin/tests/uart_echo.cmd
+          run hvl/pin/tests/uart_lsr.c hvl/pin/tests/uart_lsr.cmd
+          run hvl/pin/tests/irq_storm.c hvl/pin/tests/irq_storm.cmd
+          run hvl/pin/tests/uart_full.c hvl/pin/tests/uart_full.cmd
+          run hvl/pin/tests/wfi_wake.c hvl/pin/tests/wfi_wake.cmd
+          run testcode/stress/mem/st_dcache_conflict.c hvl/pin/tests/reset_midrun.cmd
+          exit $fail
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pin-directed-logs
+          path: |
+            sim/pin/runs/**/sim.log
+            sim/pin/runs/**/uart.log
+            sim/pin/runs/**/RESULT
+          retention-days: 14
+
+  pin-stress:
+    name: pin ${{ matrix.name }}
+    if: inputs.tier == 'nightly' || inputs.tier == 'weekly'
+    needs: [plan, pin-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.pin) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: ''
+      - uses: actions/cache/restore@v4
+        with:
+          path: sim/pin/build/verilator_rtl
+          key: pin-verilator-rtl-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - name: Stress program on the chip top, random link timing
+        run: |
+          fail=0
+          for s in ${{ matrix.seeds }}; do
+            echo "=== seed $s"
+            CFLAGS_EXTRA="-DSEED=$s" SIM=verilator DUT=rtl hvl/pin/pin.sh run ${{ matrix.path }} \
+              +TIMEOUT=$(( ${{ matrix.timeout }} * 3 )) +FPGA_GAP_PCT=$(( (s * 17) % 50 )) +FPGA_SEED=$s +FPGA_RD_LAT=$(( s % 9 )) || fail=1
+          done
+          exit $fail
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pin-stress-logs-${{ matrix.name }}
+          path: |
+            sim/pin/runs/**/sim.log
+            sim/pin/runs/**/uart.log
+          retention-days: 14
+
+  pin-selftest:
+    name: Pin bench self-test (checkers catch violations)
+    if: inputs.tier == 'nightly' || inputs.tier == 'weekly'
+    needs: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          submodules: ''
+      - run: SIM=verilator hvl/pin/selftest/run.sh
+
+  cdc-sweep:
+    name: CDC ratio sweep
+    if: inputs.tier == 'nightly' || inputs.tier == 'weekly'
+    needs: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+      - run: make -C sim cdc_sweep
+
+  # ── Cascade fuzzing on the pin bench ────────────────────────────────────────
+  cascade:
+    name: Cascade shard ${{ matrix.shard }}
+    if: inputs.tier == 'nightly' || inputs.tier == 'weekly'
+    needs: [pin-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(inputs.tier == 'weekly' && '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]' || '[1,2,3,4,5,6,7,8]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: ./.github/actions/setup-sim
+        with:
+          spike: 'true'
+          submodules: ''
+      - uses: actions/cache/restore@v4
+        with:
+          path: sim/pin/build/verilator_rtl
+          key: pin-verilator-rtl-${{ runner.os }}-${{ github.sha }}
+          fail-on-cache-miss: true
+      - name: Fetch Cascade (pinned)
+        run: hvl/pin/fuzz/get_cascade.sh
+      - name: Generate
+        run: |
+          N=${{ inputs.tier == 'weekly' && 500 || 250 }}
+          SEED=$(( ${{ matrix.shard }} * 1000003 + $(date +%j) ))
+          echo "CASCADE_SEED=$SEED" >> "$GITHUB_ENV"
+          python3 bin/pin_fuzz.py gen $N --seed $SEED --out sim/pin/fuzz/s${{ matrix.shard }} --jobs $(nproc)
+      # Twists on alternate shards: random link gaps/latency, and the irq pads
+      # toggled while the program runs with external interrupts disabled --
+      # neither may change a program's outcome.
+      - name: Twist the run scripts (odd shards get irq-pad noise)
+        run: |
+          [ $(( ${{ matrix.shard }} % 2 )) = 1 ] || exit 0
+          for f in sim/pin/fuzz/s${{ matrix.shard }}/*.cmd; do
+            sed -i 's/^run_until_tohost/run 200\nirq 0 1\nrun 150\nirq 1 1\nrun 250\nirq 0 0\nirq 1 0\nrun_until_tohost/' "$f"
+          done
+      - name: Run
+        run: |
+          python3 bin/pin_fuzz.py run sim/pin/fuzz/s${{ matrix.shard }} --prune -- \
+            +FPGA_GAP_PCT=$(( ${{ matrix.shard }} * 7 % 40 )) +FPGA_SEED=${{ matrix.shard }} +FPGA_RD_LAT=$(( ${{ matrix.shard }} % 6 ))
+      - name: Upload failing programs (reproducers)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cascade-failures-${{ matrix.shard }}
+          path: |
+            sim/pin/fuzz/s${{ matrix.shard }}/
+            sim/pin/runs/**/sim.log
+          retention-days: 30
+
+  # ── One table for the whole run ─────────────────────────────────────────────
+  summary:
+    name: Summary
+    if: always()
+    needs: [sim, riscv-tests, unit, pin-directed]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stress-result-*
+          path: results
+          merge-multiple: true
+      - name: Write summary
+        run: python3 bin/stress_summary.py results >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if anything failed
+        if: needs.sim.result == 'failure' || needs.riscv-tests.result == 'failure' || needs.unit.result == 'failure' || needs.pin-directed.result == 'failure'
+        run: exit 1

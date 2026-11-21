@@ -72,7 +72,11 @@ abi = result.stdout.decode().split('\n')[0]
 opt = "-Ofast -flto"
 warn = "-Wall -Wextra -Wno-unused"
 include = "" if len(input_file) == 1 else f"-I {os.path.dirname(os.path.abspath(input_file[0]))}"
-assembler_args = f"-mcmodel=medany -ffreestanding -nostartfiles -nostdlib -static -lgcc -Wl,--no-relax -march={arch} -mabi={abi} {opt} {warn} -T {linker_script} {include}"
+# CFLAGS_EXTRA: extra compiler flags from the caller, e.g. -DSEED=7 for a
+# seeded stress test or -DCOSIM to compile console output out of a program run
+# under Spike co-simulation (Spike's commit log cannot model MMIO).
+extra = os.environ.get("CFLAGS_EXTRA", "")
+assembler_args = f"{extra} -mcmodel=medany -ffreestanding -nostartfiles -nostdlib -static -lgcc -Wl,--no-relax -march={arch} -mabi={abi} {opt} {warn} -T {linker_script} {include}"
 
 out_elf_file = os.path.join(work_dir, pathlib.Path(input_file[0]).stem + ".elf")
 out_dis_file = os.path.join(work_dir, pathlib.Path(input_file[0]).stem + ".dis")
@@ -118,6 +122,27 @@ if result.returncode != 0:
     exit(1)
 sections = [x.strip().split() for x in result.stdout.decode().splitlines()[5::2]]
 
+# A section that does not start or end on a word boundary is padded with zero
+# bytes to whole words below (riscv-tests' sections, for one, are not 8-byte
+# sized).  That is only safe while no two loadable sections share a padded
+# word -- otherwise the padding of one would overwrite the other's bytes -- so
+# that, rather than the alignment itself, is what is refused.
+def _padded_ranges(a):
+    out = []
+    for s in sections:
+        start, size = int(s[4], 16), int(s[2], 16)
+        if (start == 0 and size > 0) or size == 0:
+            continue
+        out.append((start - start % a, -(-(start + size) // a) * a, s[1]))
+    return sorted(out)
+
+for a in addressability:
+    rng = _padded_ranges(a)
+    for (s0, e0, n0), (s1, e1, n1) in zip(rng, rng[1:]):
+        if s1 < e0:
+            print(sprint_color("[ERROR] ", RED) + f"Sections {n0} and {n1} share a {a}-byte word; padding one would clobber the other")
+            exit(1)
+
 for a in addressability:
     fname = os.path.join(work_dir, f"memory_{a}.lst")
     with open(fname, 'w') as f:
@@ -128,9 +153,6 @@ for a in addressability:
             # Skip non-LOAD sections (debug, attributes, comments) — VMA = 0
             if section_start == 0 and section_size > 0:
                 continue
-            if section_start % a != 0 or section_size % a != 0 or section_end % a != 0:
-                print(sprint_color("[ERROR] ", RED) + "Non aligned section not supported")
-                exit(1)
             os.system(f"{objcopy} -O binary -j {s[1]} {out_elf_file} {temp_bin_file}")
             if not os.path.isfile(temp_bin_file):
                 print(sprint_color("[ERROR] ", RED) + "Error binarizing")

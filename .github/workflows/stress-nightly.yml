@@ -1,0 +1,14 @@
+# Nightly tier of the stress suite (see stress.yml for what it adds over a PR).
+# The per-program Linux boots are linux-userspace.yml, on its own schedule.
+name: Stress suite (nightly)
+
+on:
+  schedule:
+    - cron: '0 5 * * *'      # 05:00 UTC, clear of linux-boot (07:00) and linux-userspace (09:00)
+  workflow_dispatch:
+
+jobs:
+  stress:
+    uses: ./.github/workflows/stress.yml
+    with:
+      tier: nightly

@@ -10,7 +10,13 @@
     // RISC-V HTif tohost address — fixed in both bin/link.ld (bare-metal) and
     // freertos_wally.ld (FreeRTOS) at 0x80800000.  All test programs write
     // here on exit; the testbench fires $finish or $fatal depending on code.
-    localparam longint unsigned TOHOST_ADDR = 64'h8080_0000;
+    // +TOHOST_ADDR_ECE411=<hex> overrides it for programs with their own
+    // layout (riscv-tests place .tohost right after .text.init).
+    longint unsigned TOHOST_ADDR = 64'h8080_0000;
+    initial begin
+        longint unsigned a;
+        if ($value$plusargs("TOHOST_ADDR_ECE411=%h", a)) TOHOST_ADDR = a;
+    end
 
     mem_itf_w_mask #(
         .CHANNELS(1),
@@ -159,8 +165,18 @@
     logic [4:0] TrapCauseW;
     always_ff @(posedge clk)
         if (!`RT_TAP.StallW) TrapCauseW <= `RT_CORE.priv.priv.CauseM;
+    // Causes 0, 4 and 6 (misaligned fetch/load/store) are waived outside the
+    // Linux build as well: ZICCLSM_SUPPORTED = 0 in pkg/config.vh, so a
+    // misaligned access TRAPS, and the monitor's model of the trapped
+    // instruction (rd/mem_rmask fields) does not match CVW's RVFI taps.
+    //
+    // Causes 2 and 3 (illegal instruction, breakpoint) are waived for the same
+    // reason: the monitor is generated for rv64imafdc_zb (RVFIMON_ISA), so it
+    // expects F/D/Zb encodings -- which this RV64IMAC core correctly traps on --
+    // to execute, and it has no model of absent CSRs (no Zicntr, no Sstc).  The
+    // stress suite asserts those traps directly (testcode/stress/priv).
     assign mon_itf.mmu_fault[0] = mon_itf.valid[0] && `RT_TAP.TrapW &&
-                                  (TrapCauseW inside {5'd1, 5'd5, 5'd7, 5'd12, 5'd13, 5'd15});
+                                  (TrapCauseW inside {5'd0, 5'd1, 5'd2, 5'd3, 5'd4, 5'd5, 5'd6, 5'd7, 5'd12, 5'd13, 5'd15});
 
     // ---- UART transmit tap -------------------------------------------------
     // syscalls_amoeba.c reaches printf() -- and therefore configASSERT() -- by
@@ -402,9 +418,23 @@
         end
     end
 
+    // Under +STRICT_EXIT_ECE411 a halt is only a pass if a tohost exit was
+    // already seen.  The tohost blocks above $finish on the store itself, so
+    // in practice reaching the halt instruction at all means the program
+    // never reported -- e.g. hand-written assembly that skips the protocol.
+    bit strict_exit;
+    initial strict_exit = $test$plusargs("STRICT_EXIT_ECE411");
+
     always @(posedge clk) begin
         if (mon_itf.halt) begin
             uart_flush_line();
+`ifndef ECE411_LINUX
+            if (strict_exit) begin
+                dump_pc_hist();
+                $error("TB: halted without a tohost exit (+STRICT_EXIT_ECE411) -- test FAILED");
+                $fatal;
+            end
+`endif
             $finish;
         end
         if (timeout == 0) begin
