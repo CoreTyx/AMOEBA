@@ -21,13 +21,23 @@
 static inline void uart_wr(int r, uint8_t v) { UART_REG(r) = v; }
 static inline uint8_t uart_rd(int r) { return UART_REG(r); }
 
+/* Enter loopback with a clean receiver.  Anything still shifting out of the
+ * transmitter when loopback is switched on (the console's last characters)
+ * would loop straight into RX, and a receiver that was mid-frame on the real
+ * SIN line finishes that frame as junk: so wait for TEMT first, let any frame
+ * in flight complete after the switch, then drain RBR and clear the error
+ * flags (LSR read) before a test sends anything. */
 static void uart_setup(uint8_t lcr, uint8_t fcr) {
+    for (uint32_t s = 0; s < 200000 && !(uart_rd(UART_LSR) & UART_LSR_TEMT); s++) ;
+    uart_wr(UART_MCR, 0x10);             /* loopback first: RX now sees our TX only */
     uart_wr(UART_LCR, 0x80);
     uart_wr(UART_DLL, 1);
     uart_wr(UART_DLM, 0);
     uart_wr(UART_LCR, lcr);
-    uart_wr(UART_FCR, fcr);
-    uart_wr(UART_MCR, 0x10);             /* loopback */
+    uart_wr(UART_FCR, fcr | (fcr & 1 ? 0x06 : 0));   /* FIFO mode: also reset both FIFOs */
+    for (volatile uint32_t d = 0; d < 3000; d++) ;   /* > 2 character times at DLL=1 */
+    while (uart_rd(UART_LSR) & UART_LSR_DR) (void)uart_rd(UART_RBR);
+    (void)uart_rd(UART_LSR);
 }
 static void uart_restore(void) {
     uart_wr(UART_IER, 0);
@@ -200,8 +210,8 @@ int main(void) {
     uart_wr(UART_THR, 0x11);
     wait_lsr(UART_LSR_TEMT, 100000);
     uart_wr(UART_THR, 0x22);
-    wait_lsr(UART_LSR_TEMT, 100000);
-    for (int i = 0; i < 2000; i++) __asm__ volatile ("nop");
+    /* wait by TIME, not by polling LSR: every LSR read clears OE (16550) */
+    for (volatile int i = 0; i < 3000; i++) ;
     uint8_t lsr = uart_rd(UART_LSR);
     uint8_t lsr2 = uart_rd(UART_LSR);
     (void)uart_rd(UART_RBR);
@@ -224,7 +234,7 @@ int main(void) {
     ST_CHECK_EQ("interrupt-driven RX bytes, in order", irq_bad, 0);
     ST_CHECK_EQ("FIFO burst", fifo_bad, 0);
     ST_CHECK("overrun flagged in LSR.OE", lsr & UART_LSR_OE);
-    ST_CHECK_EQ("OE clears on LSR read", lsr2 & UART_LSR_OE, 0);
+    ST_CHECK_EQ("OE clears on the LSR read", lsr2 & UART_LSR_OE, 0);
     ST_CHECK_EQ("5/6/7/8-bit word lengths", wl_bad, 0);
     return st_result();
 }

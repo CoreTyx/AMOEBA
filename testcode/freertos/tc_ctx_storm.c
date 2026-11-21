@@ -1,9 +1,9 @@
-// @freertos-cflags -DconfigTICK_RATE_HZ=50000
+// @freertos-cflags -DconfigTOTAL_HEAP_SIZE=163840
 /*
  * tc_ctx_storm.c -- context-switch storm under a fast tick.
  *
- * Tick at 50 kHz (one every 2000 cycles at 100 MHz) with 12 worker tasks on
- * three priorities that yield every few iterations and sleep a tick now and
+ * Tick at 10 kHz (a faster tick leaves this core no time between ISRs) with 12 equal-priority
+ * worker tasks that yield every few iterations and sleep a tick now and
  * then, so the kernel switches context thousands of times: on the tick
  * interrupt (preemption + time slicing), on taskYIELD (ecall path) and on
  * vTaskDelay.  Each worker keeps its running state in many live registers and
@@ -20,7 +20,7 @@
 #include "test_utils_freertos.h"
 
 #define NW      12
-#define ROUNDS  25
+#define ROUNDS  8
 
 typedef struct { volatile uint64_t iter, v, a, b, c, d; } wstate_t;
 static wstate_t g_w[NW];
@@ -52,7 +52,7 @@ static void monitor(void *pv) {
     (void)pv;
     uint64_t last[NW] = { 0 };
     for (int r = 0; r < ROUNDS; r++) {
-        vTaskDelay(8);
+        vTaskDelay(40);          /* several full rotations of 12 workers */
         for (int k = 0; k < NW; k++) {
             if (r > 2 && g_w[k].iter == last[k]) tohost_exit(10 + k);
             last[k] = g_w[k].iter;
@@ -72,7 +72,10 @@ static void monitor(void *pv) {
 int app_main(void) {
     vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
     for (int k = 0; k < NW; k++)
-        xTaskCreate(worker, "w", configMINIMAL_STACK_SIZE * 2, (void *)(uintptr_t)k, tskIDLE_PRIORITY + 1 + (k % 3), NULL);
+        /* one priority for all workers: with strict priorities, workers that
+         * compute longer than they sleep would (legitimately) starve the lower
+         * ones; at equal priority every tick and every yield must rotate them */
+        xTaskCreate(worker, "w", configMINIMAL_STACK_SIZE * 2, (void *)(uintptr_t)k, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(monitor, "mon", configMINIMAL_STACK_SIZE * 4, NULL, configMAX_PRIORITIES - 1, NULL);
     vTaskSuspend(NULL);
     return 0;

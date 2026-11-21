@@ -571,7 +571,13 @@ static inline uint64_t st_run(uint64_t prv, uint64_t (*fn)(uint64_t), uint64_t a
 #define PMP_NAPOT 0x18
 #define PMP_L     0x80
 
+/* NAPOT needs a power-of-two size >= 8 and a size-aligned base; anything else
+ * silently encodes a DIFFERENT (larger) region, so refuse it loudly. */
 static inline uint64_t pmp_napot_addr(uint64_t base, uint64_t size) {
+    if (size < 8 || (size & (size - 1)) || (base & (size - 1))) {
+        st_puts("[ST] pmp_napot_addr: base/size not naturally aligned\n");
+        st_m_exit(0x7fe);
+    }
     return (base >> 2) | ((size >> 3) - 1);
 }
 

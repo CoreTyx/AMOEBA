@@ -10,8 +10,12 @@
 //     LOCKED entry binds M too
 #include "../lib/stress.h"
 
-#define FT_BLOCK      0x10060000UL      /* NAPOT 256 KiB covering FI_CONTROL and the counters */
-#define FT_BLOCK_SIZE 0x40000UL
+/* Two naturally aligned NAPOT regions (one covering both would have to be
+ * 1 MiB from 0x10000000, which includes the UART): */
+#define FI_BLOCK      0x10070000UL      /* 64 KiB around FI_CONTROL (0x1007000b) */
+#define FI_BLOCK_SIZE 0x10000UL
+#define CNT_BLOCK     ECC_COUNTER_BASE  /* 4 KiB of fault counters */
+#define CNT_BLOCK_SIZE 0x1000UL
 #define NCOUNTERS     18
 
 static volatile uint8_t *const g_fi = (volatile uint8_t *)FI_CONTROL_ADDR;
@@ -40,8 +44,10 @@ int main(void) {
     }
 
     st_section("PMP hides the FT block from S/U");
-    pmp_write_addr(0, pmp_napot_addr(FT_BLOCK, FT_BLOCK_SIZE));
+    pmp_write_addr(0, pmp_napot_addr(FI_BLOCK, FI_BLOCK_SIZE));
     pmp_write_cfg(0, PMP_NAPOT);                    /* no permissions, not locked */
+    pmp_write_addr(1, pmp_napot_addr(CNT_BLOCK, CNT_BLOCK_SIZE));
+    pmp_write_cfg(1, PMP_NAPOT);
     uint64_t v;
     ST_CHECK_EQ("S load of a counter faults", probe_lw(ECC_COUNTER_BASE, PRV_S, &v), 1);
     ST_CHECK_EQ("  cause", g_trap_cause, CAUSE_LOAD_ACCESS);
@@ -57,10 +63,12 @@ int main(void) {
 
     st_section("a LOCKED entry binds M as well (last: lock persists to reset)");
     pmp_write_cfg(0, PMP_NAPOT | PMP_L);
+    pmp_write_cfg(1, PMP_NAPOT | PMP_L);
     ST_CHECK_EQ("M store to FI_CONTROL now faults", m_try_sb(FI_CONTROL_ADDR, 0x12), 1);
     ST_CHECK_EQ("  cause", g_trap_cause, CAUSE_STORE_ACCESS);
     ST_CHECK_EQ("M load of a counter now faults", m_try_lw(ECC_COUNTER_BASE, &v), 1);
-    pmp_write_cfg(0, PMP_OFF);                      /* ignored: entry is locked */
+    pmp_write_cfg(1, PMP_OFF);                      /* ignored: entry is locked */
     ST_CHECK_EQ("locked cfg cannot be cleared", m_try_lw(ECC_COUNTER_BASE, &v), 1);
+    ST_CHECK_EQ("the console (UART) is still reachable from M", m_try_lbu(UART_BASE_ADDR + UART_LSR, &v), 0);
     return st_result();
 }

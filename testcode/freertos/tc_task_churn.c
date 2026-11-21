@@ -9,7 +9,9 @@
  * from a context switch that loses state at the wrong moment) shows up as a
  * drift or as the malloc-failed hook (exit 2).
  *
- * Exit codes: 0 pass, 1 wrong value, 2 heap exhausted (hook),
+ * Exit codes: 0 pass, 11 wrong value, 2 heap exhausted (malloc hook), 3 stack
+ * overflow (hook), 12 queue create failed, 13 heap drifted, 14 create failed,
+ * 15 queue timeout.  (Old list:
  *             3 heap drifted, 4 create failed, 5 queue timeout.
  */
 #include "FreeRTOS.h"
@@ -34,32 +36,35 @@ static void worker(void *pv) {
 }
 static void creator(void *pv) {
     (void)pv;
-    size_t baseline = 0;
+    /* the heap before any churn: every batch must give back exactly this much */
+    vTaskDelay(2);
+    size_t baseline = xPortGetFreeHeapSize();
     uint64_t next = 1;
     for (int b = 0; b < BATCHES; b++) {
         uint8_t seen[BATCH] = { 0 };
         uint64_t first = next;
         for (int i = 0; i < BATCH; i++, next++)
             if (xTaskCreate(worker, "wk", configMINIMAL_STACK_SIZE, (void *)(uintptr_t)next, tskIDLE_PRIORITY + 3, NULL) != pdPASS)
-                tohost_exit(4);
+                tohost_exit(14);
         for (int i = 0; i < BATCH; i++) {
             uint64_t msg[2];
-            if (xQueueReceive(g_q, msg, 1000) != pdPASS) tohost_exit(5);
-            if (msg[0] < first || msg[0] >= first + BATCH || msg[1] != model(msg[0])) tohost_exit(1);
+            if (xQueueReceive(g_q, msg, 1000) != pdPASS) tohost_exit(15);
+            if (msg[0] < first || msg[0] >= first + BATCH || msg[1] != model(msg[0])) tohost_exit(11);
             seen[msg[0] - first]++;
         }
-        for (int i = 0; i < BATCH; i++) check(seen[i] == 1, 1);
-        vTaskDelay(2);                       /* let the idle task free the TCBs/stacks */
-        size_t now = xPortGetFreeHeapSize();
-        if (b == 0) baseline = now;
-        else if (now != baseline) tohost_exit(3);
+        for (int i = 0; i < BATCH; i++) check(seen[i] == 1, 11);
+        /* the idle task frees deleted tasks' TCBs and stacks; give it up to
+         * 20 ticks to bring the heap back to the baseline (a leak never does) */
+        int t = 0;
+        while (xPortGetFreeHeapSize() != baseline && t++ < 20) vTaskDelay(1);
+        if (xPortGetFreeHeapSize() != baseline) tohost_exit(13);
     }
     tohost_exit(0);
 }
 
 int app_main(void) {
     g_q = xQueueCreate(BATCH, 2 * sizeof(uint64_t));
-    check(g_q != NULL, 2);
+    check(g_q != NULL, 12);
     xTaskCreate(creator, "creator", configMINIMAL_STACK_SIZE * 4, NULL, tskIDLE_PRIORITY + 2, NULL);
     vTaskSuspend(NULL);
     return 0;
