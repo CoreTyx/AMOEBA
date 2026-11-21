@@ -159,6 +159,12 @@ jobs:
       - name: Program output
         if: always()
         run: grep -E 'AMOEBA_|PROG|COUNTER' sim/verilator/linux_${{ matrix.prog }}/boot_uart.log || true
+      # the console tail as an annotation: readable through the public API
+      - name: Annotate failure
+        if: failure()
+        run: |
+          msg=$(tail -30 sim/verilator/linux_${{ matrix.prog }}/boot_uart.log 2>/dev/null | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=linux ${{ matrix.prog }}::$msg"
       - name: Milestone timing report
         if: always()
         run: python3 testcode/linux/boot_report.py sim/verilator/linux_${{ matrix.prog }}/simulation.log || true

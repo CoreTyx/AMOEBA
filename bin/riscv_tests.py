@@ -168,6 +168,10 @@ def cmd_run(a):
         if not ok:
             bad += 1
             print("    " + "\n    ".join(p.stdout.splitlines()[-15:]))
+            if os.environ.get("GITHUB_ACTIONS"):
+                tail = [l for l in p.stdout.splitlines() if l and "Heartbeat" not in l][-25:]
+                enc = "\n".join(tail)[-5000:].replace("%", "%25").replace("\n", "%0A")
+                print(f"::error title=riscv-tests {name} {a.dut}::{enc}", flush=True)
         results.append(dict(test=name, ok=ok))
     os.makedirs(os.path.join(SIM, "stress_results"), exist_ok=True)
     tag = f"rt-{a.shard}-{a.dut}-{a.build}{'-d' if a.dummy else ''}"

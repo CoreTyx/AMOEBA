@@ -102,6 +102,17 @@ def run_seed(a, seed):
                 tail=log.splitlines()[-25:] if not ok else [])
 
 
+def gh_error(title, lines):
+    """A GitHub ::error annotation: readable through the public API, unlike job
+    logs, so a failure's details are visible without signing in."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    keep = [l for l in lines if l and "Heartbeat" not in l][-40:]
+    msg = "\n".join(keep)[-6000:]
+    enc = msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    print(f"::error title={title.replace(',', ' ').replace(':', ' ')}::{enc}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--path", required=True)
@@ -130,6 +141,8 @@ def main():
             print("  " + l)
         if not r["ok"]:
             print("  --- last lines of the run ---\n  " + "\n  ".join(r["tail"]))
+            gh_error(f"{os.path.basename(a.path)} {a.dut}/{a.build} {a.variant or ''} seed {s}",
+                     [r["summary"]] + r["fails"] + r["fp_insns"] + ["--- tail ---"] + r["tail"])
 
     ok = all(r["ok"] for r in results)
     xfail = bool(a.xfail) and not ok

@@ -307,7 +307,15 @@ jobs:
         run: |
           set -o pipefail
           fail=0
-          run() { echo "=== $*"; SIM=verilator DUT=rtl hvl/pin/pin.sh run "$@" || { echo "FAILED: $*"; fail=1; }; }
+          # failures also become ::error annotations (readable without signing in)
+          run() {
+            echo "=== $*"
+            if ! SIM=verilator DUT=rtl hvl/pin/pin.sh run "$@" > pin_run.log 2>&1; then
+              fail=1; echo "FAILED: $*"; tail -40 pin_run.log
+              msg=$( { grep -h "PIN_TB_RESULT" pin_run.log; echo "--- uart ---"; tail -15 sim/pin/runs/verilator_rtl/*/uart.log 2>/dev/null; } | tail -30 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+              echo "::error title=pin $(basename "$1")::$msg"
+            else tail -3 pin_run.log; fi
+          }
           run hvl/pin/tests/smoke.c
           run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd
           run hvl/pin/tests/uart_echo.c hvl/pin/tests/uart_echo.cmd
