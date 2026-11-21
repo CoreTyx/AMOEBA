@@ -206,8 +206,14 @@ static void do_exit(st_frame_t *f, uint64_t code) {
 static int s_trap(st_frame_t *f) {
     if (f->cause == (CAUSE_INTR | IRQ_S_TIMER)) {
         g_ticks++;
-        st_ecall(ST_ECALL_SET_TIMER, st_mtime() + 500 + st_rand_range(1500));
         switch_from(f, 1);
+        /* Arm the next slice AFTER the switch, so it is measured from the
+         * return to U.  Measured (legacy, GCC 14): tick + SBI round trip +
+         * switch costs ~6.5k cycles; armed first and only 500-2000 cycles
+         * out, STIP was already pending at every sret, and 256 ticks / 255
+         * switches ran 0 syscalls, 0 page faults, 0 exits -- no process ever
+         * got past its first loop (CI: timeout on legacy and forte). */
+        st_ecall(ST_ECALL_SET_TIMER, st_mtime() + 3000 + st_rand_range(5000));
         return 1;
     }
     if (f->cause == CAUSE_ECALL_U) {
