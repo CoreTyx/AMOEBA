@@ -76,7 +76,7 @@ include = "" if len(input_file) == 1 else f"-I {os.path.dirname(os.path.abspath(
 # seeded stress test or -DCOSIM to compile console output out of a program run
 # under Spike co-simulation (Spike's commit log cannot model MMIO).
 extra = os.environ.get("CFLAGS_EXTRA", "")
-assembler_args = f"{extra} -mcmodel=medany -ffreestanding -nostartfiles -nostdlib -static -lgcc -Wl,--no-relax -march={arch} -mabi={abi} {opt} {warn} -T {linker_script} {include}"
+assembler_args = f"{extra} -mcmodel=medany -ffreestanding -nostartfiles -nostdlib -static -lgcc -mno-relax -Wl,--no-relax -march={arch} -mabi={abi} {opt} {warn} -T {linker_script} {include}"
 
 out_elf_file = os.path.join(work_dir, pathlib.Path(input_file[0]).stem + ".elf")
 out_dis_file = os.path.join(work_dir, pathlib.Path(input_file[0]).stem + ".dis")
