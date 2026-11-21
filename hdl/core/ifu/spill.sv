@@ -33,6 +33,7 @@
 module spill import cvw::*;  #(parameter cvw_t P) (
   input logic               clk,
   input logic               reset,
+  input logic               DFTHold,   // DFT hold: freeze (forte_chip.sv)
   input logic               StallF, FlushD,
   input logic [P.XLEN-1:0]  PCF,               // 2 byte aligned PC in Fetch stage
   input logic [P.XLEN-1:2]  PCPlus4F,          // PCF + 4
@@ -71,7 +72,7 @@ module spill import cvw::*;  #(parameter cvw_t P) (
   // select between PCF and PCF+2
   // not required for functional correctness, but improves critical path.  pcspillf ends up on the hptw's ihadr
   // and into the dmmu.  Cutting the path here removes the PC+4 adder.
-  flopr #(P.XLEN) pcplus2reg(clk, reset, PCPlus2NextF, PCPlus2F);
+  flopenr #(P.XLEN) pcplus2reg(clk, reset, ~DFTHold, PCPlus2NextF, PCPlus2F);
   mux2 #(P.XLEN) pcspillmux(.d0(PCF), .d1(PCPlus2F), .s(SelSpillF), .y(PCSpillF));
 
   ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -90,7 +91,7 @@ module spill import cvw::*;  #(parameter cvw_t P) (
 
   always_ff @(posedge clk)
     if (reset | FlushD)    CurrState <= STATE_READY;
-    else CurrState <= NextState;
+    else if (~DFTHold)     CurrState <= NextState;
 
   always_comb begin
     case (CurrState)
@@ -112,7 +113,7 @@ module spill import cvw::*;  #(parameter cvw_t P) (
   ////////////////////////////////////////////////////////////////////////////////////////////////////
 
   // save the first 2 bytes
-  flopenr #(16) SpillInstrReg(clk, reset, SpillSaveF, InstrRawF[15:0], InstrFirstHalfF);
+  flopenr #(16) SpillInstrReg(clk, reset, SpillSaveF & ~DFTHold, InstrRawF[15:0], InstrFirstHalfF);
 
   // merge together
   mux2 #(32) postspillmux(InstrRawF, {InstrRawF[15:0], InstrFirstHalfF}, SelSpillF, PostSpillInstrRawF);

@@ -32,6 +32,7 @@ module cacheLRU
   #(parameter NUMWAYS = 4, SETLEN = 9, NUMSETS = 128) (
   input  logic                clk,
   input  logic                reset,
+  input  logic                DFTHold,         // DFT hold: no invalidate (forte_chip.sv)
   input  logic                InvalidateFlushStage,
   input  logic                CacheEn,         // Enable the cache memory arrays.  Disable hold read data constant
   input  logic [NUMWAYS-1:0]  HitWay,          // Which way is valid and matches PAdr's tag
@@ -135,7 +136,7 @@ module cacheLRU
 
   // LRU memory must be reset for Questa to run. The reset value does not matter but it is best to be deterministc.
   always_ff @(posedge clk)
-    if (reset | (InvalidateCache & ~InvalidateFlushStage))
+    if (reset | (InvalidateCache & ~InvalidateFlushStage & ~DFTHold))
       for (int set = 0; set < NUMSETS; set++) LRUMemory[set] <= '0; // exclusion-tag: initialize
     else if (CacheEn & LRUWriteEn) LRUMemory[PAdr] <= NextLRU;
 

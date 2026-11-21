@@ -3,8 +3,9 @@
 Post-synthesis verification of the ASIC.  The bench is the bring-up FPGA in
 simulation: it drives and observes `forte_top` **through its pads only**, so
 the RTL, the synthesized netlist and (later) the placed-and-routed netlist all
-run the same bench unchanged.  Nothing here reads a hierarchical signal; the
-RTL flow in `sim/` (Spike co-simulation, RVFI) remains the authority on whether
+run the same bench. Gate checks use pads only; RTL hold checks additionally
+observe representative internal state. The RTL flow in `sim/` (Spike
+co-simulation, RVFI) remains the authority on whether
 a *program* is correct, and this bench establishes that the *chip* does the same
 thing at its pins.
 
@@ -14,7 +15,7 @@ thing at its pins.
 |---|---|---|
 | External memory + link protocol | `pin_link_agent.sv` | `hdl/forte_link_pkg.sv` protocol, 256 MiB sparse memory, `tohost` detection, random `ready`/`rvalid` gaps and read latency |
 | Console | `pin_uart_agent.sv` | 8N1 at a fixed divisor: one bit = `16 * (div << UART_PRESCALE)` core clocks (32 at div 1) |
-| `rst_n`, `irq[1:0]`, `fault_inject`, `test_mode`/`scan_en`, `status` | `pin_tb.sv` | `irq` = PLIC sources 3 and 6; DFT is a stub until the DFT flow lands |
+| `rst_n`, `irq[1:0]`, `fault_inject`, `test_mode`/`scan_en`, `status` | `pin_tb.sv` | `irq` = PLIC sources 3 and 6; hold/resume here, inserted-chain checks in `full_tb` |
 | Command interface | `pin_tb.sv` | the script language below |
 
 **Clocking**, as on the board: `core_clk` (100 MHz) comes from the bench and
@@ -48,6 +49,8 @@ UART: `uart_tx` never X/Z, framing (stop bit), optional fail patterns.
 SIM=verilator DUT=rtl hvl/pin/pin.sh build
 SIM=verilator DUT=rtl hvl/pin/pin.sh run testcode/baremetal/sorting_algo.c
 SIM=verilator DUT=rtl hvl/pin/pin.sh run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd
+JOBS=1 hvl/pin/hold_regress.sh              # RTL hold/resume versus reference execution
+SIM=verilator DUT=rtl TAG=irq_hold hvl/pin/pin.sh run hvl/pin/tests/irq.c hvl/pin/tests/irq_hold.cmd
 hvl/pin/selftest/run.sh                     # the harness's own tests
 hvl/pin/vm_pack.sh                          # one file for the VM: sim/pin/vm_bundle.tgz
 
@@ -84,7 +87,8 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 | `uart_div <n>` / `uart_gap <bits>` / `uart_send <text>` / `uart_fail <text>` | console |
 | `irq <0\|1> <0\|1>` / `fault_inject <0\|1>` | pins |
 | `dump_mem <hexaddr> <nbytes> <path>` | write memory to a file |
-| `dft ...` | stub: fails until DFT testing exists |
+| `dft_hold <cycles>` | Pause the link, arm `scan_en`, enter hold without reset, check each frozen clock, exit and resume. Requires positive cycles; quiet-link timeout defaults to 10,000 clocks. Gate runs check `req`/`wr`; RTL also checks RF, pipeline, timer, cache/bus FSMs, MDU, page walker, fault/CSR/PLIC state and write enables. No actual scan chains in RTL; `full_tb` phase S tests shifting/reload. |
+| `dft ...` | fails: scan shifting is tested at gate level (`synth/scripts/full_tb` on `dft`) |
 | `finish` | pass, if no checker has fired |
 
 ## Plusargs
@@ -92,7 +96,23 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 `+FPGA_TCO_PS` `+FPGA_SAMPLE_PS` `+FPGA_RD_LAT` `+FPGA_GAP_PCT` `+FPGA_SEED`
 `+FPGA_MEM=x|zero|rand` `+FPGA_IO_IDLE=0|x|z` `+FPGA_X_IN_RESET` `+FPGA_WDOG` `+UART_DIV`
 `+UART_PRESCALE` `+UART_TX_GAP` `+UART_QUIET` `+MAX_ERRORS` `+TIMEOUT` `+CLK_PS`.
+Hold controls: `+DFT_QUIET_TIMEOUT=<cycles>`, `+DFT_HOLD_SE=0|1` (default 0;
+1 exercises asserted scan enable while RTL is frozen, without inserted chains).
 `+FPGA_MUTATE=1..3` breaks the bench on purpose (self-test only).
+
+`hold_regress.sh` builds once (Verilator; `JOBS` defaults to 1), then runs
+arithmetic, sorting and memory/CSR workloads under fast and gapped link timing.
+Each profile compares uninterrupted execution with 16 holds of 1–5,000 clocks
+at different entry points. Both runs check exit code and drain the exit fence
+before comparing ordered pin traffic with timestamps ignored. All 16 holds
+must execute; a zero-cycle simulation cannot pass. Logs, source hashes and a
+summary go to ignored `sim/pin/hold_regress/<timestamp>_<pid>/`.
+An additional IRQ workload checks four holds around level-sensitive interrupt
+service, matching both pin traffic and UART bytes: 100 hold sessions total.
+These checks are representative, not exhaustive SRAM/RTL-state coverage.
+For mapped-netlist checks and limitations see
+[the DFT flow](../../synth/DFT_FLOW.md) and
+[full_tb](../../synth/scripts/full_tb/README.md).
 
 Waveforms (VCS): `WAVES=1` on both the build and the run (it selects a separate
 build directory, `<sim>_<dut>_waves`), plus `+PIN_VCD` (and `+PIN_VCD_CYCLES=n`,

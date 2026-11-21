@@ -63,8 +63,10 @@ __asm__ (
     // Two full-size instructions in one 8-byte block, so that an entry can
     // cover both or exactly one of them.
     ".option push\n"
-    ".option norvc\n"
+    // Align while 2-byte padding is allowed. The preceding RVC code may end
+    // on a halfword boundary, requiring six bytes of padding rather than four.
     ".align 3\n"
+    ".option norvc\n"
     ".globl pmp_stub\n"
     "pmp_stub:\n"
     "    nop\n"

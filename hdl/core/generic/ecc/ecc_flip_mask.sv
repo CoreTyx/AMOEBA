@@ -39,6 +39,7 @@ module ecc_flip_mask import cvw::*; #(
 ) (
   input  logic                     clk,
   input  logic                     reset,
+  input  logic                     DFTHold,         // DFT hold: mask holds (forte_chip.sv)
   input  logic                     inject_en,       // 1 = inject; 0 = mask stays zero
   input  logic [15:0]              lfsr,            // shared generator
   input  logic [FI_COUNT_BITS-1:0] count,
@@ -64,6 +65,6 @@ module ecc_flip_mask import cvw::*; #(
 
   always_ff @(posedge clk)
     if (reset) mask <= '0;
-    else       mask <= mask_next;
+    else if (~DFTHold) mask <= mask_next;
 
 endmodule

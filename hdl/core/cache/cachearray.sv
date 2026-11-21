@@ -32,6 +32,7 @@ module cachearray import cvw::*; #(parameter cvw_t P,
                   localparam int TAGSTOREWIDTH  = TAGLEN + (TAG_ECC_SUPPORTED ? TAGCHECKWIDTH : 0),
                   localparam int LINECHECKWIDTH = LINECHECKR + 1) (
   input  logic                      clk,
+  input  logic                      DFTHold,    // DFT hold: decode registers hold (forte_chip.sv)
   input  logic                      reset,
   input  logic                      CacheEn,        // Enable the arrays; disabled, they hold their output
   input  logic [WAYBITS-1:0]        RowWay,         // Way to access this cycle
@@ -118,7 +119,7 @@ module cachearray import cvw::*; #(parameter cvw_t P,
   flopenr #(WAYBITS+2) readreg(clk, reset, CacheEn, {RowWay, ~TagWe, ~DataWe}, {ReadWayQ, TagReadQ, DataReadQ});
 
   assign KeepRow = ScanArrive | (ReadWayQ == RowWay);
-  flopen #(TAGLEN)    tagdecreg(clk, TagReadQ & KeepRow, CorrectedTagLive, Tag);
-  flopen #(LINELEN+2) datadecreg(clk, DataReadQ & KeepRow, {CorrectedLineLive, DataSecErrLive, DataDedErrLive},
+  flopen #(TAGLEN)    tagdecreg(clk, TagReadQ & KeepRow & ~DFTHold, CorrectedTagLive, Tag);
+  flopen #(LINELEN+2) datadecreg(clk, DataReadQ & KeepRow & ~DFTHold, {CorrectedLineLive, DataSecErrLive, DataDedErrLive},
                                  {CorrectedLine, DataSecErr, DataDedErr});
 endmodule
