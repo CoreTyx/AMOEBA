@@ -17,7 +17,11 @@ int main(void) {
         puts_("WOKE_"); putdec_(id); putc_('\n');
         if (id) { EN(0) = 0; CLM(0) = id; }
         while (getc_() != 'n') ;                     /* script dropped the pad */
+        /* the source re-pended when its claim completed with the pad still
+         * high: unmask, drain that stale claim (pad is low now), then sleep */
         EN(0) = 1u << 3;
+        uint32_t st;
+        while ((st = CLM(0)) != 0) CLM(0) = st;
     }
     puts_("TIMER\n");
     while (!(UART[5] & 0x40)) ;

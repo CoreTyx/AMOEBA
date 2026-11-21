@@ -28,9 +28,13 @@ int main(void) {
         char c = getc_();
         if (c == 'r') {
             asm volatile("csrc mstatus, %0" :: "r"(1u << 3));
+            /* A level source whose claim completed while its pad was still
+             * high is pending again (latched until claimed, as the PLIC spec
+             * allows), even though the pad is low now.  Unmask with MIE off,
+             * claim and complete whatever is stale, then take interrupts. */
             uint32_t id;
-            while ((id = CLM(0)) != 0) CLM(0) = id;      /* drop stale pending */
             EN(0) = (1u << 3) | (1u << 6);
+            while ((id = CLM(0)) != 0) CLM(0) = id;
             asm volatile("csrs mstatus, %0" :: "r"(1u << 3));
             rounds++;
             puts_("R_"); putdec_(rounds); putc_('\n');

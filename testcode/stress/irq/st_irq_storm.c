@@ -89,11 +89,13 @@ static uint64_t u_work(uint64_t seed) {
             sum ^= old;
             break; }
         case 5: case 6: {
-            uint64_t o, fail;
-            do {
-                __asm__ volatile ("lr.d %0, (%1)" : "=r"(o) : "r"(w) : "memory");
-                __asm__ volatile ("sc.d %0, %2, (%1)" : "=&r"(fail) : "r"(w), "r"(o + 3) : "memory");
-            } while (fail);
+            /* constrained LR/SC loop in one asm block (see st_lrsc.c) */
+            uint64_t o, n, fail;
+            __asm__ volatile ("1: lr.d %[o], (%[a])\n"
+                              "   addi %[n], %[o], 3\n"
+                              "   sc.d %[f], %[n], (%[a])\n"
+                              "   bnez %[f], 1b\n"
+                              : [o] "=&r"(o), [n] "=&r"(n), [f] "=&r"(fail) : [a] "r"(w) : "memory");
             sum += o;
             break; }
         case 7: case 8: {   /* misaligned: emulated by M */

@@ -24,6 +24,19 @@ static inline uint64_t sc_d(volatile uint64_t *a, uint64_t v) { uint64_t r; __as
 static inline uint64_t lr_w(volatile uint32_t *a) { uint64_t v; __asm__ volatile ("lr.w.aq %0, (%1)" : "=r"(v) : "r"(a) : "memory"); return v; }
 static inline uint64_t sc_w(volatile uint32_t *a, uint64_t v) { uint64_t r; __asm__ volatile ("sc.w.rl %0, %2, (%1)" : "=&r"(r) : "r"(a), "r"(v) : "memory"); return r; }
 
+/* LR then SC with nothing in between (a store between them -- even the test
+ * harness's own pass counter -- may legitimately cancel the reservation). */
+static inline uint64_t lr_sc_d(volatile uint64_t *a, uint64_t v, uint64_t *old) {
+    uint64_t o, r;
+    __asm__ volatile ("lr.d %0, (%2)\n sc.d %1, %3, (%2)" : "=&r"(o), "=&r"(r) : "r"(a), "r"(v) : "memory");
+    *old = o; return r;
+}
+static inline uint64_t lr_sc_w(volatile uint32_t *a, uint64_t v, uint64_t *old) {
+    uint64_t o, r;
+    __asm__ volatile ("lr.w.aq %0, (%2)\n sc.w.rl %1, %3, (%2)" : "=&r"(o), "=&r"(r) : "r"(a), "r"(v) : "memory");
+    *old = o; return r;
+}
+
 static volatile uint64_t g_irqs;
 static int timer_irq(st_frame_t *f) {
     if (f->cause != (CAUSE_INTR | IRQ_M_TIMER)) return 0;
@@ -45,9 +58,10 @@ int main(void) {
     st_section("basic success / failure rules");
     volatile uint64_t *x = &g_ctr;
     *x = 41;
-    uint64_t v = lr_d(x);
+    uint64_t v = 0;
+    uint64_t r0 = lr_sc_d(x, 42, &v);
     ST_CHECK_EQ("lr.d value", v, 41);
-    ST_CHECK_EQ("sc.d after lr succeeds", sc_d(x, 42), 0);
+    ST_CHECK_EQ("sc.d right after lr succeeds", r0, 0);
     ST_CHECK_EQ("  wrote", *x, 42);
     ST_CHECK("second sc.d (no reservation) fails", sc_d(x, 99) != 0);
     ST_CHECK_EQ("  did not write", *x, 42);
@@ -59,9 +73,9 @@ int main(void) {
     ST_CHECK("  value is not 1234", *x != 1234);
 
     g_w[1] = 0x80000001u;
-    v = lr_w(&g_w[1]);
+    r0 = lr_sc_w(&g_w[1], 5, &v);
     ST_CHECK_EQ("lr.w sign-extends", v, 0xffffffff80000001UL);
-    ST_CHECK_EQ("sc.w succeeds", sc_w(&g_w[1], 5), 0);
+    ST_CHECK_EQ("sc.w right after lr.w succeeds", r0, 0);
     ST_CHECK_EQ("  wrote only its word", (uint64_t)g_w[0] | ((uint64_t)g_w[1] << 32), 5UL << 32);
     ST_CHECK("sc.w again fails", sc_w(&g_w[1], 6) != 0);
 
@@ -73,13 +87,21 @@ int main(void) {
     csr_set(mstatus, MSTATUS_MIE);
     uint64_t fails = 0;
     for (int i = 0; i < INCS; i++) {
-        for (;;) {
-            uint64_t o = lr_d(x);
-            /* a little work between LR and SC (still a constrained loop) */
-            uint64_t n = o + 1;
-            if (sc_d(x, n) == 0) break;
-            fails++;
-        }
+        /* One asm block: the spec's constrained LR/SC loop (no other memory
+         * access between LR and SC, <= 16 instructions), so forward progress
+         * is guaranteed and nothing the compiler schedules can break it. */
+        uint64_t tmp, f, retries;
+        __asm__ volatile ("li %[r], 0\n"
+                          "1: lr.d %[t], (%[a])\n"
+                          "   addi %[t], %[t], 1\n"
+                          "   sc.d %[f], %[t], (%[a])\n"
+                          "   beqz %[f], 2f\n"
+                          "   addi %[r], %[r], 1\n"
+                          "   j 1b\n"
+                          "2:\n"
+                          : [t] "=&r"(tmp), [f] "=&r"(f), [r] "=&r"(retries)
+                          : [a] "r"(x) : "memory");
+        fails += retries;
     }
     csr_clear(mstatus, MSTATUS_MIE);
     csr_clear(mie, MIP_MTIP);

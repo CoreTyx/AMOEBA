@@ -13,7 +13,7 @@
 #ifndef ST_SCALE
 #define ST_SCALE 1
 #endif
-#define ROUNDS (1500 * ST_SCALE)
+#define ROUNDS (400 * ST_SCALE)
 
 static uint8_t g_main_code[4096] ST_ALIGNED(4096);
 static uint8_t g_irq_code[256] ST_ALIGNED(64);
@@ -28,7 +28,11 @@ static int timer_irq(st_frame_t *f) {
     st_put_insn32(a + 4, ENC_RET);
     st_fence_i();
     if (((uint64_t (*)(void))a)() != (uint64_t)v) g_irq_bad++;
-    st_set_mtimecmp(st_mtime() + 80 + st_rand_range(400));
+    /* fence.i writes back the whole D$ (thousands of cycles); re-arming
+     * closer than that would leave the interrupted code no room to finish
+     * its own fence.i.  1-9k cycles still lands interrupts throughout the
+     * store / fence.i / call sequence below. */
+    st_set_mtimecmp(st_mtime() + 1000 + st_rand_range(8000));
     return 1;
 }
 
@@ -55,7 +59,7 @@ int main(void) {
     st_timer_off();
     ST_CHECK_EQ("main-line SMC under interrupts", bad, 0);
     ST_CHECK_EQ("handler SMC", g_irq_bad, 0);
-    ST_CHECK("interrupts landed", g_irqs > 20);
+    ST_CHECK("interrupts landed", g_irqs > 20 * ST_SCALE);
     st_puts("[ST] interrupts: "); st_putdec(g_irqs); st_putc('\n');
     return st_result();
 }

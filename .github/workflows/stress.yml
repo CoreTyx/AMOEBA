@@ -316,6 +316,15 @@ jobs:
           run hvl/pin/tests/uart_full.c hvl/pin/tests/uart_full.cmd
           run hvl/pin/tests/wfi_wake.c hvl/pin/tests/wfi_wake.cmd
           run testcode/stress/mem/st_dcache_conflict.c hvl/pin/tests/reset_midrun.cmd
+          # riscv-tests the RVFI-checked top_tb run cannot judge (see
+          # testcode/riscv_tests/exclude.txt) run here, on the chip top
+          git submodule update --init --recursive third_party/riscv-tests
+          python3 bin/riscv_tests.py build >/dev/null
+          for t in rv64si-p-icache-alias; do
+            elf=sim/riscv_tests/elf/$t.elf
+            th=$(riscv64-unknown-elf-nm "$elf" | awk '$3 == "tohost" {print $1}' | sed 's/^0*//')
+            run "$elf" +TOHOST=$th
+          done
           exit $fail
       - name: Upload logs
         if: always()
