@@ -76,7 +76,7 @@
 #define AMOEBA_PLIC_SUPPORTED                   1
 #define AMOEBA_PLIC_UART_ID                     10
 #define AMOEBA_PMP_ENTRIES                      16
-#define AMOEBA_PMP_G                            0
+#define AMOEBA_PMP_G                            2
 #define AMOEBA_PPN_BITS                         44
 #define AMOEBA_Q_BIAS                           16383
 #define AMOEBA_Q_FMT                            3

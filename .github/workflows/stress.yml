@@ -258,9 +258,7 @@ jobs:
           submodules: ''
       - name: Seeded D$ edge-case / reference-model test
         run: make -C sim cache_edge_test SEED=$(( ${{ matrix.seed }} * 7919 ))
-      # PMP checker vs the spec.  Reports a KNOWN DEVIATION line for accesses
-      # that only partially match an entry (see hvl/mmu/pmp_stress_tb.sv);
-      # every other disagreement fails the job.
+      # PMP checker vs the spec (hvl/mmu/pmp_stress_tb.sv): any disagreement fails.
       - name: PMP checker vs reference model (100k checks)
         run: make -C sim pmp_stress_test SEED=$(( ${{ matrix.seed }} * 104729 ))
 

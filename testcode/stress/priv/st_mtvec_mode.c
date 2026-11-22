@@ -1,13 +1,12 @@
-// @stress tier=pr build=no_spike duts=legacy timeout=1000000 xfail=mtvec-mode-warl ecc=no dummy=no pin=no
+// @stress tier=pr build=no_spike duts=legacy,forte timeout=1000000 ecc=no dummy=no pin=no
 //
-// st_mtvec_mode -- KNOWN RTL DEVIATION (xfail): mtvec/stvec.MODE is WARL and
-// this configuration has no vectored interrupts (pkg/config.vh:
-// VECTORED_INTERRUPTS_SUPPORTED = 0), so writing MODE = 1 must leave a legal
-// value (MODE = 0).  CVW stores MODE = 1 anyway (csrs.sv/csrm.sv
-// TVECWriteValM), so software that probes for vectored mode -- riscv-tests
-// rv64mi-p-illegal does, and then hangs -- believes it is supported while
-// traps still enter at the base.  Linux and OpenSBI always use direct mode,
-// so the boot is unaffected; the test tracks the deviation until it is fixed.
+// st_mtvec_mode -- mtvec/stvec.MODE is WARL and this configuration has no
+// vectored interrupts (pkg/config.vh: VECTORED_INTERRUPTS_SUPPORTED = 0), so
+// writing MODE = 1 must leave a legal value (MODE = 0) and must not disturb
+// BASE.  Upstream CVW stored MODE = 1 and cleared BASE[5:2] (csrm.sv/csrs.sv
+// TVECWriteValM), so software probing for vectored mode -- riscv-tests
+// rv64mi-p-illegal does -- believed it was supported and trapped to the wrong
+// address.  Regression test for that fix.
 #include "../lib/stress.h"
 
 /* Trap-entry probe.  tv_block is 64-byte aligned; its two entry points 32

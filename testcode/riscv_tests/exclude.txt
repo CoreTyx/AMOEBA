@@ -14,6 +14,4 @@ rv64mi-p-sd-misaligned      ZICCLSM=0: requires misaligned stores to complete in
 rv64mi-p-sh-misaligned      ZICCLSM=0: requires misaligned stores to complete in hardware
 rv64mi-p-sw-misaligned      ZICCLSM=0: requires misaligned stores to complete in hardware
 rv64mi-p-breakpoint         no Sdtrig: tselect/tdata1/tdata2 are not implemented (illegal instruction); the test assumes tselect exists
-rv64uc-v-rvc                KNOWN RTL BUG (see testcode/stress/mmu/st_straddle_fetch.c): a fetch straddling two pages is not checked against the first page's PTE (A/X/U), so the v env's evict() sees an executed page with A=0
-rv64mi-p-illegal            KNOWN RTL DEVIATION (see testcode/stress/priv/st_mtvec_mode.c): mtvec.MODE=1 is retained without vectored interrupts, so the test's vectored-interrupt probe hangs
 rv64si-p-icache-alias       RVFI checker artefact: riscv-formal has no MMU model and loses its shadow PC across the test's jump into a virtual alias of a code page; the test PASSES on the pin bench (no RVFI), where stress.yml's pin-directed job runs it

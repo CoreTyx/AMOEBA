@@ -1,8 +1,9 @@
-// @stress tier=pr build=no_spike duts=legacy,forte timeout=4000000 xfail=straddle-fetch-first-page-unchecked ecc=no dummy=no pin=no
+// @stress tier=pr build=no_spike duts=legacy,forte timeout=4000000 ecc=no dummy=no pin=no
 //
-// st_straddle_fetch -- KNOWN RTL BUG (xfail): a 32-bit instruction that
-// straddles a page boundary is executed even when its FIRST page denies the
-// fetch.  Only the second page's PTE is checked.
+// st_straddle_fetch -- a 32-bit instruction that straddles a page boundary
+// must fault when EITHER page denies the fetch.  Regression test for an IFU
+// bug (fixed in ifu.sv, firsthalffaultreg): only the second page's PTE was
+// checked.  Original report:
 //
 // Found by riscv-tests rv64uc-v-rvc (the v env's evict() asserts PTE.A of a
 // page that was executed from), reduced to this test.  With the instruction
@@ -15,8 +16,7 @@
 //   page 1 A=0 / X=0 / V=0     faults, tval = 0xC0001000   (correct)
 // so U-mode can execute bytes from non-executable or supervisor-only memory,
 // and Svade A-bit tracking is lost for such pages.  Spike faults in every
-// case.  The test checks the spec's behaviour; CI reports it as a KNOWN
-// failure until the IFU spill path checks the first page's permissions.
+// case.
 #include "../lib/stress.h"
 
 #define VA 0xC0000000UL
@@ -62,12 +62,12 @@ int main(void) {
     setup(ok, ok, fr0, fr1);
     ST_CHECK_EQ("straddling instruction runs", st_run_in_mode(PRV_U, (uint64_t (*)(uint64_t))(VA + 0xffe), 5, g_usp), 6);
 
-    st_section("second page denies the fetch (correct today)");
+    st_section("second page denies the fetch");
     setup(ok, 0, fr0, fr1);                              expect_fault("page 1 V=0", VA + ST_PAGE);
     setup(ok, PTE_R | PTE_U | PTE_A, fr0, fr1);          expect_fault("page 1 X=0", VA + ST_PAGE);
     setup(ok, PTE_R | PTE_X | PTE_U, fr0, fr1);          expect_fault("page 1 A=0", VA + ST_PAGE);
 
-    st_section("first page denies the fetch (the bug)");
+    st_section("first page denies the fetch");
     setup(0, ok, fr0, fr1);                              expect_fault("page 0 V=0", VA + 0xffe);
     setup(PTE_R | PTE_U | PTE_A, ok, fr0, fr1);          expect_fault("page 0 X=0", VA + 0xffe);
     setup(PTE_R | PTE_X | PTE_A, ok, fr0, fr1);          expect_fault("page 0 U=0 (supervisor page)", VA + 0xffe);

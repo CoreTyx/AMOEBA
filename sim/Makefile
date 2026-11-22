@@ -841,7 +841,7 @@ pmp_stress_test:
 	    $(CURDIR)/../hvl/mmu/pmp_stress_tb.sv \
 	    -Mdir verilator/pmp_stress_tb -Wno-fatal -Wno-lint -Wno-style -CFLAGS "-std=c++20" \
 	    -MAKEFLAGS "CXX=$(CXX)" --timescale 1ps/1ps 2>&1 | tee verilator/pmp_stress_tb/compile.log
-	verilator/pmp_stress_tb/Vpmp_stress_tb +SEED=$(SEED) $(if $(filter 1,$(PMP_STRICT_PARTIAL)),+STRICT_PARTIAL) | tee verilator/pmp_stress_tb/run.log
+	verilator/pmp_stress_tb/Vpmp_stress_tb +SEED=$(SEED) | tee verilator/pmp_stress_tb/run.log
 	grep -q "ALL TESTS PASSED" verilator/pmp_stress_tb/run.log
 
 csr_harden_test:

@@ -129,7 +129,8 @@ int main(void) {
     int e = AMOEBA_PMP_ENTRIES - 2;
     pmp_write_addr(e, ~0UL);
     uint64_t pa = pmp_read_addr(e);
-    ST_CHECK_EQ("pmpaddr holds PA_BITS-2 bits", pa, (1UL << (AMOEBA_PA_BITS - 2)) - 1);
+    ST_CHECK_EQ("pmpaddr holds PA_BITS-2 bits (low G read 0 when OFF)", pa,
+                ((1UL << (AMOEBA_PA_BITS - 2)) - 1) & ~((1UL << AMOEBA_PMP_G) - 1));
     pmp_write_addr(e, 0);
 
     return st_result();

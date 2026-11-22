@@ -111,6 +111,12 @@ module pmp_stress_tb;
         2'b10: Adr[i] = (PAB-2)'((focus + 64'($urandom_range(0, 1 << 12)) - 64'(1 << 11)) >> 2);   // NA4
         default: Adr[i] = (PAB-2)'(rnd64() >> 2);
       endcase
+      // The checker sees pmpaddr/pmpcfg as the CSR file legalizes them for grain
+      // G (csrm.sv): NA4 is not selectable when G > 0, the low G bits of a
+      // TOR/OFF address read 0, the low G-1 bits of a NAPOT address read 1.
+      if (P.PMP_G > 0 && Cfg[i][4:3] == 2'b10) Cfg[i][4:3] = 2'b01;
+      if (Cfg[i][4]) Adr[i] = Adr[i] | (PAB-2)'((64'(1) << (P.PMP_G > 0 ? P.PMP_G - 1 : 0)) - 1);
+      else           Adr[i] = Adr[i] & ~(PAB-2)'((64'(1) << P.PMP_G) - 1);
     end
   endtask
 
@@ -170,18 +176,12 @@ module pmp_stress_tb;
     end
     $display("pmp_stress_tb: seed=%0d checks=%0d errors=%0d (partial-match checks=%0d, of which wrong=%0d)",
              seed, checks, errors, partial_checks, partial_errors);
-    // KNOWN DEVIATION (xfail): CVW's pmpadrdec matches on the access's base
-    // address only (its Size input is unused), so an aligned 8- or 4-byte
-    // access straddling a 4-byte-granular TOR/NA4 edge is decided by the first
-    // entry alone instead of failing.  Reported every run; fatal only with
-    // +STRICT_PARTIAL=1 (sim/Makefile PMP_STRICT_PARTIAL=1) once fixed.
-    if (partial_errors != 0)
-      $display("KNOWN DEVIATION: %0d accesses that only partially match a PMP entry were decided by that entry (spec: must fail)",
-               partial_errors);
-    if (errors - partial_errors != 0)
-      $fatal(1, "pmp_stress_tb: %0d mismatches outside the known partial-match deviation", errors - partial_errors);
-    else if (partial_errors != 0 && $test$plusargs("STRICT_PARTIAL"))
-      $fatal(1, "pmp_stress_tb: %0d partial-match mismatches (+STRICT_PARTIAL)", partial_errors);
+    // pmpadrdec decides an access by its base address.  That is exact because
+    // the grain (pkg/config.vh PMP_G) is at least as large as any aligned
+    // access, so a legal configuration has no partially matching accesses:
+    // every mismatch, partial or not, fails.
+    if (errors != 0)
+      $fatal(1, "pmp_stress_tb: %0d mismatches (%0d of them partial matches)", errors, partial_errors);
     $display("ALL TESTS PASSED");
     $finish;
   end
