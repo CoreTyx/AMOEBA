@@ -22,6 +22,9 @@
 #                          flushed in its write cycle landed in the flush
 #                          target's set; a later fetch hit it and ran another
 #                          function's code, and the test trapped forever.
+#                          Rebuilt (GCC 14.2) from the 16 B-PMP-grain tc_pmp_deny
+#                          when pkg/config.vh moved to PMP_G = 2: the old image
+#                          checked 8-byte regions the chip can no longer make.
 # Timing also moves with the RTL, so a vector can stop reaching its coincidence
 # without failing: hvl/cache/icache_ecc_flush_tb.sv is that bug's direct test.
 #
