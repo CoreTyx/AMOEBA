@@ -190,7 +190,7 @@ module csrm  import cvw::*;  #(parameter cvw_t P) (
      CSRAdrM == MHARTID | CSRAdrM == MCONFIGPTR | CSRAdrM == MFTSTATUS);
 
   // CSRs
-  assign TVECWriteValM = CSRWriteValM[0] ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00};
+  assign TVECWriteValM = (P.VECTORED_INTERRUPTS_SUPPORTED & CSRWriteValM[0]) ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00};
   flopenr #(P.XLEN) MTVECreg(clk, reset, WriteMTVECM, TVECWriteValM, MTVEC_REGW);
   if (P.S_SUPPORTED) begin : deleg // DELEG registers should exist
     flopenr #(16) MEDELEGreg(clk, reset, WriteMEDELEGM, CSRWriteValM[15:0] & MEDELEG_MASK, MEDELEG_REGW);

@@ -68,10 +68,24 @@ extern "C" void spike_dpi_init(const char *mem_space, const char *elf_file) {
     else
         snprintf(spike_bin, sizeof(spike_bin), "spike");
 
+    // The reference model must be configured as the CHIP, not as the compiler
+    // target: tests are built -march=rv64gc (no float code is ever emitted), but
+    // the core is RV64IMAC with no counters, no Sstc, no B/K and 16 PMP entries
+    // (pkg/config.vh).  A Spike that accepts an F opcode, an F opcode or a Zbb
+    // instruction that the DUT traps on hides exactly the divergence co-sim is
+    // for.  sim/Makefile exports SPIKE_ISA_ECE411 / SPIKE_EXTRA_ECE411 from
+    // bin/get_options.py (spike_isa / spike_extra); the defaults below are the
+    // same values, so a hand-run Vtop_tb still models the chip.
+    const char *isa   = getenv("SPIKE_ISA_ECE411");
+    const char *extra = getenv("SPIKE_EXTRA_ECE411");
+    if (!isa || !*isa)  isa   = "rv64imac_zicsr_zifencei";
+    if (!extra)         extra = "--priv=msu";   /* v1.1.0: 16 PMP regions, no --pmpregions */
+
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "%s --isa=rv64gc_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zicsr_zifencei %s --log-commits \"%s\" </dev/null 2>&1",
-        spike_bin, mem_space, elf_file);
+        "%s --isa=%s %s %s --log-commits \"%s\" </dev/null 2>&1",
+        spike_bin, isa, extra, mem_space, elf_file);
+    fprintf(stderr, "[SPIKE_DPI] %s\n", cmd);
 
     int pipefd[2];
     pipe(pipefd);

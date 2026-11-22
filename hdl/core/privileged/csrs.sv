@@ -102,7 +102,7 @@ module csrs import cvw::*;  #(parameter cvw_t P) (
   assign WriteSTIMECMPHM  = CSRSWriteM & (CSRAdrM == STIMECMPH) & STCE & (P.XLEN == 32);
 
   // CSRs
-  assign TVECWriteValM = CSRWriteValM[0] ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00}; // could share this with MTVEC, but reduces to 4-bit AND to mask bits [5:2]
+  assign TVECWriteValM = (P.VECTORED_INTERRUPTS_SUPPORTED & CSRWriteValM[0]) ? {CSRWriteValM[P.XLEN-1:6], 6'b000001} : {CSRWriteValM[P.XLEN-1:2], 2'b00}; // could share this with MTVEC, but reduces to 4-bit AND to mask bits [5:2]
   flopenr #(P.XLEN) STVECreg(clk, reset, WriteSTVECM, TVECWriteValM, STVEC_REGW);
   flopenr #(P.XLEN) SSCRATCHreg(clk, reset, WriteSSCRATCHM, CSRWriteValM, SSCRATCH_REGW);
   flopenr #(P.XLEN) SEPCreg(clk, reset, WriteSEPCM, NextEPCM, SEPC_REGW);
