@@ -35,6 +35,13 @@
 #                      period follows MHZ (postpnr/sdc_delays.py --period).
 #                      The period is rounded to a whole even number of ps.
 #                      SUMMARY and the TOTAL line name the clock either way.
+#   --recrem-as-setuphold
+#                      simulate a copy of the SDF with each RECREM written as
+#                      SETUPHOLD (same pins, edges and values), for cell models
+#                      that check an async reset with $setuphold(posedge CK,
+#                      negedge R) and have no $recrem: VCS drops a RECREM it
+#                      has no $recrem for without a message, and the model's
+#                      placeholder limits are checked instead
 #   --ignore-neg-delay SDFCOM_NIOD (VCS: negative IOPATH delay) does not fail
 #                      the build; the build line and SUMMARY count them, and
 #                      TOTAL says the run is not sign-off
@@ -112,7 +119,7 @@ if [ "${1:-}" = __one ]; then
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0 RECREM_SH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -125,6 +132,7 @@ while [ $# -gt 0 ]; do
     --clk-mhz) CLK_MHZ="$2"; shift;;
     --vm-paths) VMP="$2"; shift;;
     --ignore-neg-delay) IGN_NIOD=1;;
+    --recrem-as-setuphold) RECREM_SH=1;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -224,7 +232,7 @@ one_file() {   # one_file <desc> <glob>...: the first glob with matches in $PNR_
   [ ${#hits[@]} -eq 1 ] || { echo "ERR:$desc: ${#hits[@]} candidates (${hits[*]:-none}) in $PNR_DIR for $*" ; return; }
   unz "${hits[0]}"
 }
-SDF_max="" SDF_min=""
+SDF_max="" SDF_min="" SDF_max_src=""
 if [ $SRC = vm_paths ]; then
   NETLIST="$(unz "$V_NETLIST")"
   SDF_max="$(unz "$V_SDF")"; SDF_min="$SDF_max"; SDF_MODE="one SDF from vm_paths.sh, min:typ:max triples"
@@ -249,6 +257,36 @@ else
   else
     stop "need one SDF (min:typ:max) or two (max and min) in $PNR_DIR, found ${#sdfs[@]}"
   fi
+fi
+# --recrem-as-setuphold: RECREM (reset) (clock) (recovery) (removal) is the
+# check $setuphold(clock, reset, setup, hold) makes, so the keyword is rewritten
+# in a line-for-line copy: pins, edges and values untouched, and SDF line numbers
+# unchanged (pin.sh's SDF-message checks cite them).  Cached in postpnr/work/sdf/
+# by the source's path, size and mtime, so an unchanged SDF is not recompiled.
+RECREM_RE='\([[:space:]]*RECREM([[:space:]]|$)'
+recrem_sdf() {   # recrem_sdf <sdf>: the copy's path, or ERR:<why>
+  local src="$1" d="$R/postpnr/work/sdf" key dst
+  key="$(stat -L -c '%n %s %Y' "$src")"
+  dst="$d/$(printf '%s' "$src" | sha256sum | cut -c1-12)_$(basename "${src%.sdf}").recrem.sdf"
+  mkdir -p "$d"
+  if [ ! -f "$dst" ] || [ "$(cat "$dst.key" 2>/dev/null)" != "$key" ]; then
+    sed -E "s/$RECREM_RE/(SETUPHOLD\1/g" "$src" > "$dst.tmp" || { echo "ERR:rewriting $src failed"; return; }
+    [ "$(wc -l < "$src")" = "$(wc -l < "$dst.tmp")" ] || { echo "ERR:$dst.tmp: line count differs from $src"; return; }
+    ! grep -qE "$RECREM_RE" "$dst.tmp" || { echo "ERR:$dst.tmp still has RECREM"; return; }
+    mv -f "$dst.tmp" "$dst"; echo "$key" > "$dst.key"
+  fi
+  echo "$dst"
+}
+if [ $RECREM_SH = 1 ]; then
+  for c in max min; do
+    v="SDF_$c"; src="${!v}"
+    n="$(grep -cE "$RECREM_RE" "$src" || true)"
+    if [ "$n" = 0 ]; then log "sdf:     --recrem-as-setuphold: $(basename "$src") has no RECREM, used as it is"; continue; fi
+    if [ $c = min ] && [ "$src" = "$SDF_max_src" ]; then SDF_min="$SDF_max"; continue; fi
+    out="$(recrem_sdf "$src")"; [[ "$out" == ERR:* ]] && stop "--recrem-as-setuphold: ${out#ERR:}"
+    log "sdf:     --recrem-as-setuphold: $n RECREM -> SETUPHOLD ($c corner), simulating $out"
+    printf -v "$v" '%s' "$out"; [ $c = max ] && SDF_max_src="$src"
+  done
 fi
 export SDF_max SDF_min
 # The SDC: vm_paths.sh's SDC=, else the drop folder's one *.sdc, else none.
