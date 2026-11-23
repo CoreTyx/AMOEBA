@@ -141,7 +141,8 @@ $(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz
 # order.  To add one: write userland/NAME.c, append NAME here.
 
 PROGS := arith mem proc sys \
-         pfault smc_jit ctxsw spawn signals misalign counters sleep stackgrow memstress fdchurn
+         pfault smc_jit ctxsw spawn signals misalign counters sleep stackgrow memstress fdchurn \
+         upriv uaccess straddle tlbcoh atomics faultsweep mduirq
 
 # Helper binaries placed in /bin for the programs above but not run by /init.
 HELPERS := child

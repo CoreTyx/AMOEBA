@@ -174,6 +174,20 @@ static inline int  sys_setitimer(int which, const struct itimerval *v, struct it
 static inline int  sys_ftruncate(int fd, long len)             { return SYS2(__NR_ftruncate, fd, len); }
 static inline int  sys_flush_icache(void *start, void *end)    { return SYS3(__NR_riscv_flush_icache, start, end, 0); }
 
+/* ---- hardware-edge programs (upriv, uaccess, straddle, tlbcoh, atomics) ---- */
+#define __NR_mremap     216
+#define MREMAP_MAYMOVE  1
+#define MREMAP_FIXED    2
+#define SIGTRAP         5
+#define TRAP_BRKPT      1
+#define ILL_ILLOPC      1
+#define EFAULT          14
+#define ENOSYS          38
+static inline long sys_mremap(void *old, size_t old_len, size_t new_len, int flags, void *new_addr)
+{
+    return SYS6(__NR_mremap, old, old_len, new_len, flags, new_addr, 0);
+}
+
 static inline __attribute__((noreturn)) void sys_exit(int code)
 {
     SYS1(__NR_exit_group, code);

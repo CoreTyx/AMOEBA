@@ -60,6 +60,48 @@ static inline long u_now_ns(void)
     return t.tv_sec * 1000000000L + t.tv_nsec;
 }
 
+/* ---- expected faults --------------------------------------------------- */
+/* u_probe(fn, arg) runs fn(arg) and returns the signal it raised, 0 if none;
+ * u_fault holds that signal's si_code and si_addr, or fn's return value. */
+struct u_fault_info { int sig, code; void *addr; long ret; };
+static volatile struct u_fault_info u_fault;
+static u_jmpbuf u_probe_jb;
+static void u_probe_handler(int sig, void *info, void *uc)
+{
+    (void)uc;
+    u_fault.sig = sig;
+    u_fault.code = si_code(info);
+    u_fault.addr = si_addr(info);
+    u_longjmp(u_probe_jb, 1);
+}
+static inline void u_probe_install(void)
+{
+    u_signal(SIGSEGV, u_probe_handler);
+    u_signal(SIGILL, u_probe_handler);
+    u_signal(SIGBUS, u_probe_handler);
+    u_signal(SIGTRAP, u_probe_handler);
+}
+static __attribute__((noinline, unused)) int u_probe(long (*fn)(long), long arg)
+{
+    u_fault.sig = 0;
+    u_fault.code = 0;
+    u_fault.addr = 0;
+    if (u_setjmp(u_probe_jb) == 0)
+        u_fault.ret = fn(arg);
+    return u_fault.sig;
+}
+/* The probe raised sig with code (any code if code < 0) at addr. */
+static inline int u_faulted(int sig, int code, const void *addr)
+{
+    return u_fault.sig == sig && (code < 0 || u_fault.code == code) && u_fault.addr == addr;
+}
+
+static inline void *u_map(size_t len, int prot, int flags)
+{
+    long p = sys_mmap(0, len, prot, flags | MAP_ANONYMOUS, -1, 0);
+    return p < 0 && p > -4096 ? 0 : (void *)p;
+}
+
 #define U_PAGE 4096UL
 #define U_FAIL(name, why) do { return prog_fail((name), (why)); } while (0)
 #endif
