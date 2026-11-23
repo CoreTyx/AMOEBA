@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two pin-bench runs (hvl/pin): RTL against netlist, golden against new.
 
-    pin_trace_cmp.py <runA> <runB> [--no-cycles] [--only-link]
+    pin_trace_cmp.py <runA> <runB> [--no-cycles | --cycle-slack=N] [--only-link]
 
 Each argument is a run directory or a single trace file.  For a directory,
 every trace both runs have is compared, and the result is the worst of them:
@@ -20,8 +20,14 @@ comparison that silently skipped the strict trace would look like a pass.
 By default everything is cycle-exact: a netlist must do the same thing on the
 same cycle as its RTL.  --no-cycles compares the transaction trace by content
 and order only (runs whose timing legitimately differs, e.g. different FPGA
-latencies) and skips the per-cycle trace.  --only-link compares pin_trace.log
-alone (the pre-postpnr behaviour).
+latencies) and skips the per-cycle trace.  --cycle-slack=N sits between: the
+transaction trace must match record for record in content and order, and each
+record's cycle may differ by at most N (the largest shift is reported as
+"cycle shift +-S"); the console still matches byte for byte; the per-cycle
+trace is not compared, since a shifted run differs on every cycle after the
+shift.  For a netlist whose clock-domain crossings resolve an edge earlier or
+later than the RTL's.  --only-link compares pin_trace.log alone (the
+pre-postpnr behaviour).
 Exit 0 on match, 1 on mismatch, 2 on usage error.
 """
 import gzip
@@ -59,9 +65,27 @@ def load_link(path, cycles):
     return recs
 
 
-def cmp_link(pa, pb, cycles):
+def split_cyc(rec):
+    """'L 573 R addr ...' -> (573, 'L R addr ...'); a record with no cycle -> (None, rec)."""
+    p = rec.split()
+    if len(p) > 1 and p[1].lstrip("-").isdigit():
+        return int(p[1]), " ".join([p[0]] + p[2:])
+    return None, rec
+
+
+def cmp_link(pa, pb, cycles, slack=0):
     a, b = load_link(pa, cycles), load_link(pb, cycles)
+    shift = 0
     for i, (ra, rb) in enumerate(zip(a, b)):
+        if slack:
+            (ca, ka), (cb, kb) = split_cyc(ra[1]), split_cyc(rb[1])
+            if ka == kb and ca is not None and cb is not None:
+                if abs(cb - ca) > slack:
+                    return False, [f"MISMATCH link trace at record {i}: same transaction, but cycle {cb} vs {ca} "
+                                   f"is a shift of {cb - ca:+d}, beyond --cycle-slack {slack} ({pa}:{ra[0]} vs {pb}:{rb[0]})",
+                                   f"  A    : {ra[1]}", f"  B    : {rb[1]}"]
+                shift = max(shift, abs(cb - ca))
+                continue
         if ra[1] != rb[1]:
             out = [f"MISMATCH link trace at record {i} ({pa}:{ra[0]} vs {pb}:{rb[0]})"]
             for j in range(max(0, i - 3), i):
@@ -74,7 +98,9 @@ def cmp_link(pa, pb, cycles):
         return False, [f"MISMATCH link trace: {short} ends after {min(len(a), len(b))} records; {pl} continues with:",
                        f"  {longer[min(len(a), len(b))][1]}"]
     errs = sum(1 for _, r in a if r.startswith("E"))
-    msg = (f"link {len(a)} records{'' if cycles else ' (cycles ignored)'}"
+    how = (f" (cycle shift +-{shift}, within --cycle-slack {slack})" if slack
+           else "" if cycles else " (cycles ignored)")
+    msg = (f"link {len(a)} records{how}"
            f"{f', but both contain {errs} checker errors' if errs else ''}")
     return errs == 0, [msg]
 
@@ -177,9 +203,16 @@ def is_cycle_file(path):
 
 
 def main(argv):
-    flags = {a for a in argv if a.startswith("--")}
+    slack = 0
+    for a in [a for a in argv if a.startswith("--cycle-slack=")]:
+        v = a.split("=", 1)[1]
+        if not v.isdigit():
+            print(f"--cycle-slack=N needs a whole number of cycles, not '{v}'")
+            return 2
+        slack = int(v)
+    flags = {a for a in argv if a.startswith("--") and not a.startswith("--cycle-slack=")}
     args = [a for a in argv if not a.startswith("--")]
-    if len(args) != 2 or flags - {"--no-cycles", "--only-link"}:
+    if len(args) != 2 or flags - {"--no-cycles", "--only-link"} or (slack and "--no-cycles" in flags):
         print(__doc__)
         return 2
     cycles = "--no-cycles" not in flags
@@ -190,11 +223,13 @@ def main(argv):
         if not (la and lb):
             print(f"MISMATCH: pin_trace.log missing in {A if not la else B}")
             return 1
-        results.append(cmp_link(la, lb, cycles))
+        results.append(cmp_link(la, lb, cycles, slack))
         if "--only-link" not in flags and cycles:
             ca = find(A, "pin_cycle.log.gz", "pin_cycle.log")
             cb = find(B, "pin_cycle.log.gz", "pin_cycle.log")
-            if ca and cb:
+            if slack:
+                results.append((True, [f"per-cycle pin trace not compared (--cycle-slack {slack})"]))
+            elif ca and cb:
                 results.append(cmp_cycle(ca, cb, A, B))
             elif ca or cb:
                 results.append((False, [f"MISMATCH: pin_cycle.log only in {A if ca else B}"]))
@@ -205,7 +240,10 @@ def main(argv):
         if is_cycle_file(A) != is_cycle_file(B):
             print("MISMATCH: one file is a pin cycle trace and the other is not")
             return 1
-        results.append(cmp_cycle(A, B) if is_cycle_file(A) else cmp_link(A, B, cycles))
+        if is_cycle_file(A) and slack:
+            print("--cycle-slack does not apply to a per-cycle trace")
+            return 2
+        results.append(cmp_cycle(A, B) if is_cycle_file(A) else cmp_link(A, B, cycles, slack))
     else:
         print(f"usage: both arguments must be run directories or both files: {A}, {B}")
         return 2

@@ -35,6 +35,13 @@
 #                      period follows MHZ (postpnr/sdc_delays.py --period).
 #                      The period is rounded to a whole even number of ps.
 #                      SUMMARY and the TOTAL line name the clock either way.
+#   --cycle-slack N    netlist rows: the link trace must match the golden's
+#                      record for record (type, address, data, order) and each
+#                      record's cycle may differ by at most N; the console must
+#                      still match; the per-cycle pin trace is not compared.
+#                      For clock-domain crossings that resolve an edge earlier
+#                      or later than in RTL.  Default 0: cycle-exact.  The row
+#                      shows the largest shift, trace=MATCH(+-S)
 #   --recrem-as-setuphold
 #                      simulate a copy of the SDF with each RECREM written as
 #                      SETUPHOLD (same pins, edges and values), for cell models
@@ -58,7 +65,8 @@
 #   win   no pad output-window error: every output settles and holds per the
 #         SDC's set_output_delay (hvl/pin/pin_cycle_trace.sv)
 #   trace the run's pins, cycle by cycle, its link transactions and its console
-#         are exactly the golden RTL's (bin/pin_trace_cmp.py)
+#         are exactly the golden RTL's (bin/pin_trace_cmp.py); with --cycle-slack
+#         N, the link transactions within N cycles and no per-cycle pin check
 # and every corner's build must annotate its SDF with no SDFCOM_* message.
 #
 # Inputs launch IN_MAX after the core_clk edge in the max corner and IN_MIN in
@@ -102,9 +110,15 @@ if [ "${1:-}" = __one ]; then
   tchk=0 waived=0
   [ -f "$d/TCHK_COUNT" ] && { eval "$(cat "$d/TCHK_COUNT")"; tchk=$((tchk - waived)); }
   win="$(zcat -f "$d/sim.log" 2>/dev/null | grep -c '\[PIN_IO\] ERROR.*output window' || true)"
-  if python3 "$R/bin/pin_trace_cmp.py" "$GOLDEN/traces/$n" "$d" > "$d/CMP" 2>&1; then trace=MATCH
+  # --cycle-slack applies to the netlist only: VCS RTL must match the golden exactly.
+  cs=(); [ "$corner" != rtl ] && [ "${CYCLE_SLACK:-0}" -gt 0 ] && cs=(--cycle-slack="$CYCLE_SLACK")
+  if python3 "$R/bin/pin_trace_cmp.py" "$GOLDEN/traces/$n" "$d" ${cs[@]+"${cs[@]}"} > "$d/CMP" 2>&1; then trace=MATCH
   elif grep -q '^MISMATCH' "$d/CMP"; then trace=DIFF
   else trace=NONE; fi
+  tshow=$trace
+  if [ $trace = MATCH ] && [ ${#cs[@]} -gt 0 ]; then
+    tshow="MATCH(+-$(grep -oE 'cycle shift \+-[0-9]+' "$d/CMP" | grep -oE '[0-9]+$' || echo '?'))"
+  fi
   ok=PASS
   [ $func = PASS ] && [ "$tchk" = 0 ] && [ "$win" = 0 ] && [ $trace = MATCH ] || ok=FAIL
   why=""
@@ -114,12 +128,12 @@ if [ "${1:-}" = __one ]; then
   [ -f "$d/sim.log" ] && gzip -f "$d/sim.log"
   rm -f "$d/memory.lst"
   printf '%-4s %-40s %-4s func=%s tchk=%s%s win=%s trace=%s%s\n' "$ok" "$n" "$corner" "$func" "$tchk" \
-         "$([ "$waived" -gt 0 ] && echo "(+${waived}w)")" "$win" "$trace" "${why:+  $why}" | tee "$d/ROW"
+         "$([ "$waived" -gt 0 ] && echo "(+${waived}w)")" "$win" "$tshow" "${why:+  $why}" | tee "$d/ROW"
   exit 0
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0 RECREM_SH=0
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0 RECREM_SH=0 CYCLE_SLACK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -133,6 +147,7 @@ while [ $# -gt 0 ]; do
     --vm-paths) VMP="$2"; shift;;
     --ignore-neg-delay) IGN_NIOD=1;;
     --recrem-as-setuphold) RECREM_SH=1;;
+    --cycle-slack) CYCLE_SLACK="$2"; shift;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -329,7 +344,7 @@ if [ -n "$RTL_REF" ]; then
 else
   log "WARNING: no RTL_REF (drop/pnr.env) -- cannot prove the netlist came from golden RTL $gsha"
 fi
-export GOLDEN OUT MAX_ERRORS
+export GOLDEN OUT MAX_ERRORS CYCLE_SLACK
 
 # ---- the SDC ------------------------------------------------------------------------------
 # --clk-mhz: the period in ns, a whole even number of ps so the bench's
@@ -411,6 +426,8 @@ if [ -s "$R/postpnr/waivers.txt" ] && grep -qvE '^[[:space:]]*(#|$)' "$R/postpnr
   log "WAIVERS: $(grep -cvE '^[[:space:]]*(#|$)' "$PIN_WAIVERS") pattern(s) in postpnr/waivers.txt -- waived violations are still listed"
 fi
 [ -n "${INITREG:-}" ] && log "WARNING: INITREG=$INITREG -- registers start at a value, not X: NOT a sign-off run"
+[[ "$CYCLE_SLACK" =~ ^[0-9]+$ ]] || stop "--cycle-slack needs a whole number of cycles, not '$CYCLE_SLACK'"
+[ "$CYCLE_SLACK" -gt 0 ] && log "trace:   --cycle-slack $CYCLE_SLACK: netlist link transactions must match the golden in content and order, each within $CYCLE_SLACK cycles; console exact; per-cycle pin trace NOT compared"
 [ $IGN_NIOD = 1 ] && log "WARNING: --ignore-neg-delay -- SDFCOM_NIOD (negative IOPATH delay) does not fail the build: NOT a sign-off run"
 IFS=, read -r -a CORN <<<"$CORNERS"
 for c in "${CORN[@]}"; do case "$c" in max|min) ;; *) stop "--corners: $c is not max or min";; esac; done
@@ -469,6 +486,6 @@ for c in "${CORN[@]}" rtl; do
 done
 ins="$(for f in "$OUT"/runs/{max,min}/*/sim.log.gz; do [ -f "$f" ] && zcat "$f" | grep -m1 'clk_out insertion' | sed "s|^|$(basename "$(dirname "$(dirname "$f")")") |"; done 2>/dev/null | sort -u | head -4)"
 [ -n "$ins" ] && log "$ins"
-log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")$([ $IGN_NIOD = 1 ] && echo "  (--ignore-neg-delay: not sign-off)")"
+log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")$([ $IGN_NIOD = 1 ] && echo "  (--ignore-neg-delay: not sign-off)")$([ "$CYCLE_SLACK" -gt 0 ] && echo "  (--cycle-slack $CYCLE_SLACK)")"
 pack
 [ "$pass" = "$total" ] && [ "$total" -gt 0 ]
