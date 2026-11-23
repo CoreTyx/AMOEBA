@@ -35,6 +35,9 @@
 #                      period follows MHZ (postpnr/sdc_delays.py --period).
 #                      The period is rounded to a whole even number of ps.
 #                      SUMMARY and the TOTAL line name the clock either way.
+#   --ignore-neg-delay SDFCOM_NIOD (VCS: negative IOPATH delay) does not fail
+#                      the build; the build line and SUMMARY count them, and
+#                      TOTAL says the run is not sign-off
 #   --vm-paths FILE    the model paths (vm_paths.sh format) to use; default:
 #                      $VM_PATHS, else vm_paths.sh beside this checkout
 #                      (../vm_paths.sh), else hvl/pin/vm_paths.sh
@@ -109,7 +112,7 @@ if [ "${1:-}" = __one ]; then
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ=""
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -121,6 +124,7 @@ while [ $# -gt 0 ]; do
     --no-build) BUILD=0;;
     --clk-mhz) CLK_MHZ="$2"; shift;;
     --vm-paths) VMP="$2"; shift;;
+    --ignore-neg-delay) IGN_NIOD=1;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -369,6 +373,7 @@ if [ -s "$R/postpnr/waivers.txt" ] && grep -qvE '^[[:space:]]*(#|$)' "$R/postpnr
   log "WAIVERS: $(grep -cvE '^[[:space:]]*(#|$)' "$PIN_WAIVERS") pattern(s) in postpnr/waivers.txt -- waived violations are still listed"
 fi
 [ -n "${INITREG:-}" ] && log "WARNING: INITREG=$INITREG -- registers start at a value, not X: NOT a sign-off run"
+[ $IGN_NIOD = 1 ] && log "WARNING: --ignore-neg-delay -- SDFCOM_NIOD (negative IOPATH delay) does not fail the build: NOT a sign-off run"
 IFS=, read -r -a CORN <<<"$CORNERS"
 for c in "${CORN[@]}"; do case "$c" in max|min) ;; *) stop "--corners: $c is not max or min";; esac; done
 log "preflight: tools, model paths, netlist ports and cells ($OUT/preflight.log)"
@@ -379,7 +384,7 @@ for c in "${CORN[@]}"; do
   v="SDF_$c"
   if [ $BUILD = 1 ]; then
     log "build:   gate, SDF $c corner ($(basename "${!v}"))"
-    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 </dev/null &
+    SIM=vcs DUT=gate PIN_SDF="${!v}" PIN_SDF_CORNER="$c" PIN_SDF_IGNORE_NIOD=$IGN_NIOD "$P/pin.sh" build > "$OUT/build_$c.log" 2>&1 </dev/null &
     bpid=$!
     heartbeat $bpid "$OUT/build_$c.log" "building $c corner ($OUT/build_$c.log)"
     wait $bpid \
@@ -387,7 +392,7 @@ for c in "${CORN[@]}"; do
            why="$(grep -E '^pin\.sh: ' "$OUT/build_$c.log" | tail -1)"
            stop "gate build, $c corner: ${why:-see above} ($OUT/build_$c.log)"; }
   fi
-  grep -E '^build: (SDF|ignored|dropped)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
+  grep -E '^build: (SDF|ignored|dropped|--ignore-neg-delay)' "$OUT/build_$c.log" 2>/dev/null | sed 's/^/         /' | tee -a "$SUM"
 done
 if [ $VCS_RTL = 1 ]; then
   log "build:   golden RTL under VCS"
@@ -426,6 +431,6 @@ for c in "${CORN[@]}" rtl; do
 done
 ins="$(for f in "$OUT"/runs/{max,min}/*/sim.log.gz; do [ -f "$f" ] && zcat "$f" | grep -m1 'clk_out insertion' | sed "s|^|$(basename "$(dirname "$(dirname "$f")")") |"; done 2>/dev/null | sort -u | head -4)"
 [ -n "$ins" ] && log "$ins"
-log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")"
+log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")$([ $IGN_NIOD = 1 ] && echo "  (--ignore-neg-delay: not sign-off)")"
 pack
 [ "$pass" = "$total" ] && [ "$total" -gt 0 ]

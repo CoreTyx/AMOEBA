@@ -32,6 +32,9 @@
 #   PIN_VM_PATHS      the vm_paths.sh to source instead of hvl/pin/vm_paths.sh
 #                     (postpnr/run.sh sets it to the one it found)
 #   PIN_PATHS_EXTRA   a file sourced after vm_paths.sh (postpnr's pnr.env)
+#   PIN_SDF_IGNORE_NIOD=1   SDF builds: SDFCOM_NIOD (negative IOPATH delay)
+#                     does not fail the build; the build line counts them
+#                     (postpnr/run.sh --ignore-neg-delay).  Not sign-off.
 #   PIN_RTL_ROOT      take hdl/ and pkg/ from this tree instead of this checkout
 #                     (the golden RTL at a pinned commit, with this bench)
 #   PIN_BUILD, PIN_RUNS   build and run directories instead of sim/pin/...
@@ -47,6 +50,7 @@
 #     or any other SDF* message (SDFPE: a parse error, which ABORTS annotation),
 #     except SDFCOM_UHICD on a wire into a forte_top output port, and
 #     SDFCOM_IWSBA on an INTERCONNECT through an assign (still annotated),
+#     and, with PIN_SDF_IGNORE_NIOD=1, SDFCOM_NIOD (negative IOPATH delay),
 #   - an annotation VCS does not report completed with 0 errors and 0 warnings,
 # and every run of it fails on any 'Timing violation' (setup, hold, recovery,
 # removal, width, period) not matched by PIN_WAIVERS, even if the bench passed.
@@ -367,11 +371,15 @@ build() {
 sdf_gate() {
   local bad summ now
   now="$(src_hash)"
+  # Which rules a clean annotation was judged by: a strict one also stands for
+  # an --ignore-neg-delay build, never the other way round.
+  local mode=strict ok_rec; [ "${PIN_SDF_IGNORE_NIOD:-}" = 1 ] && mode=niod
+  ok_rec="$(cat "$BUILD/sdf_ok" 2>/dev/null || true)"
   # VCS skips an unchanged design ("need not be recompiled") and prints no
   # annotation at all: accept that only if this exact configuration (sources,
   # netlist, SDF path/size/mtime, corner) annotated cleanly before.
   if grep -q "design hasn't changed and need not be recompiled" "$BUILD/build.log"; then
-    if [ "$(cat "$BUILD/sdf_ok" 2>/dev/null)" = "$now" ]; then
+    if [ "$ok_rec" = "$now strict" ] || [ "$ok_rec" = "$now $mode" ]; then
       echo "build: SDF $SDF ($SDF_CORNER) unchanged since it annotated completely"
       return 0
     fi
@@ -424,19 +432,27 @@ sdf_gate() {
     [ -z "$uh_badl" ] \
       || sdf_fail "SDFCOM_UHICD on SDF line(s) $(echo $uh_badl) that are not a wire into a forte_top output port"
   fi
-  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | grep -vE 'Warning-\[SDFCOM_(UHICD|IWSBA)\]' || true)"
+  # --ignore-neg-delay: SDFCOM_NIOD (negative IOPATH delay) counted, not failed.
+  local ok_tags='UHICD|IWSBA' nn_n=0
+  if [ "$mode" = niod ]; then
+    ok_tags='UHICD|IWSBA|NIOD'
+    nn_n="$(grep -c 'Warning-\[SDFCOM_NIOD\]' "$BUILD/build.log" || true)"
+  fi
+  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | grep -vE "Warning-\\[SDFCOM_($ok_tags)\\]" || true)"
   if [ -n "$bad" ]; then
-    awk '/(Warning|Error)-\[SDF[A-Z0-9_]*\]/ { show = ($0 !~ /SDFCOM_(UHICD|IWSBA)/); left = 5 }
+    awk -v ok="SDFCOM_($ok_tags)" '/(Warning|Error)-\[SDF[A-Z0-9_]*\]/ { show = ($0 !~ ok); left = 5 }
          show && left-- > 0' "$BUILD/build.log" | head -40 | sed 's/^/  | /' >&2
     sdf_fail "$(wc -l <<<"$bad") SDF message(s): $(grep -oE 'SDF[A-Z0-9_]*' <<<"$bad" | sort | uniq -c | awk '{printf "%s x%s ", $2, $1}')(first above; all in $BUILD/build.log)"
   fi
   summ="$(sed -n '/SDF annotation begin/,/SDF annotation \(completed\|aborted\)/p' "$BUILD/build.log")"
   if [ -z "$summ" ] || grep -q 'SDF annotation aborted' <<<"$summ" || ! grep -q 'SDF annotation completed' <<<"$summ" \
-     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE "Total warnings: +(0|$uh_n|$((uh_n + iw_n)))\$" <<<"$summ"; then
+     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE "Total warnings: +(0|$uh_n|$((uh_n + iw_n))|$((uh_n + nn_n))|$((uh_n + iw_n + nn_n)))\$" <<<"$summ"; then
     echo "$summ" | tail -12 | sed 's/^/  | /' >&2
     sdf_fail "annotation of $SDF did not complete cleanly (above; $BUILD/build.log)"
   fi
-  echo "$now" > "$BUILD/sdf_ok"
+  # Recorded as strict when no NIOD was actually ignored.
+  if [ "$nn_n" -gt 0 ]; then echo "$now niod"; else echo "$now strict"; fi > "$BUILD/sdf_ok"
+  [ "$nn_n" -gt 0 ] && echo "build: --ignore-neg-delay: $nn_n SDFCOM_NIOD (negative IOPATH delay) IGNORED -- not a sign-off build"
   if [ $((uh_n + iw_n)) -gt 0 ]; then
     echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors; $uh_n SDFCOM_UHICD (wires into forte_top output ports, run.sh compensates), $iw_n SDFCOM_IWSBA (INTERCONNECT through an assign, still annotated); no other SDF* message"
   else
