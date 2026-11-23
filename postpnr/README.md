@@ -116,11 +116,25 @@ postpnr/run.sh --only '^smoke$' --corners max                         # minutes:
 postpnr/run.sh --jobs 4                                               # hours; each job holds a VCS licence
 ```
 
+With today's drop (one-corner SDF, no SDC, 2 small negative delays) the command that passes, and what it does and does not prove, is in `postpnr/DEBUGGING.md` §8:
+
+```
+postpnr/run.sh --clk-mhz 200 --corners max --jobs 4 --recrem-as-setuphold --cycle-slack 4 --ignore-neg-delay
+```
+
 To update: `git -C ~/AMOEBA pull`, then `git pull` in the clone. If a new bundle came with the pull, extract its golden as above. `vm_paths.sh`, `drop/` and `results/` are untouched by both.
 
 Without git, the bundle works on its own: `tar -xzf postpnr_bundle_<sha12>.tgz -C <dir>`, add `vm_paths.sh`, and run `PNR_DIR=... <dir>/postpnr/run.sh`. In that case `run.sh` checks every file against the bundle.
 
 `--only '^(smoke|bm_|isa_)'` narrows the images, and `--corners max` runs one corner. `--with-vcs-rtl` also runs the golden RTL under 4-state VCS and compares it.
+
+Options that change the rules (each off by default; SUMMARY and `TOTAL` say when one is used; full detail in `DEBUGGING.md`):
+
+| option | what it does |
+|---|---|
+| `--recrem-as-setuphold` | Simulates a line-for-line copy of the SDF with each `RECREM` written as `SETUPHOLD` (same pins, edges and recovery/removal values), cached in `postpnr/work/sdf/`. Needed when the cell models check async reset with `$setuphold(posedge CK, negedge R)` and have no `$recrem` (`variants.sh --static-only` shows it). VCS otherwise drops every `RECREM` **without a message** and checks the model's placeholder limits. |
+| `--cycle-slack N` | Netlist rows only: link transactions must match the golden in type, address, data and order, each within N cycles; the console must match exactly; the per-cycle pin trace is not compared. The row shows the largest shift, `trace=MATCH(+-S)`. For async-FIFO crossings that resolve an edge earlier or later than in RTL. |
+| `--ignore-neg-delay` | `SDFCOM_NIOD` (negative IOPATH delay) is counted instead of failing the build. Not sign-off. |
 
 `--clk-mhz MHZ` runs `core_clk` at a target frequency instead of the SDC's period. The SDC's I/O delays are board delays and stay as they are; the negedge capture, sample points and output windows follow the new period, and `sdc_delays.py` refuses a period the I/O budget cannot fit (input delay `-max` must be under half a period, output delay `-max` under a period). The golden needs no change: its traces count cycles, not time. SUMMARY's `clock:` line and the `TOTAL` line name the clock. A pass at MHZ means no timing violation and identical pins on these programs at that clock. It is not STA: only the paths the programs exercise are checked. A clock faster than the SDC's is one PnR did not close timing at, and `sdc_delays.py` warns.
 
@@ -129,7 +143,7 @@ Without git, the bundle works on its own: `tar -xzf postpnr_bundle_<sha12>.tgz -
 2. **Drop folder.** Find the files and record their checksums.
 3. **Golden check.** The golden's RTL must be `RTL_REF`.
 4. **SDC.** `sdc_delays.py` derives the bench's timing, or refuses.
-5. **Corner builds.** One build per corner. Any `SDFCOM_*` message fails it, as does a missing SDF-annotation confirmation. `+neg_tchk`, `-negdelay`, `+define+NTC` and `+define+RECREM` are on, and timing checks are never disabled.
+5. **Corner builds.** One build per corner. Any `SDF*` message fails it, except `SDFCOM_UHICD` on a pad-to-output-port wire and `SDFCOM_IWSBA` on an `INTERCONNECT` (§5), each checked against its SDF line, and `SDFCOM_NIOD` under `--ignore-neg-delay`. A missing SDF-annotation confirmation also fails it. `+neg_tchk`, `-negdelay`, `+define+NTC` and `+define+RECREM` are on, and timing checks are never disabled. VCS says nothing about an SDF check that no model check matches (it is dropped), so a clean build does not prove every check got its SDF value: see `DEBUGGING.md` §4.
 6. **Runs.** Every image × corner, compared with its golden.
 
 The result is in `postpnr/results/<stamp>/SUMMARY`, and everything else is in `postpnr/results/<stamp>.tgz`.
@@ -148,7 +162,7 @@ FAIL bm_sorting_algo                          min  func=PASS tchk=3 win=0 trace=
 | `func` | The bench passed the program: tohost exit 0, no link-protocol error, no X/Z on any output, watchdogs quiet. |
 | `tchk` | No VCS `Timing violation` (setup, hold, recovery, removal, width, period) from the cell models with SDF limits. **Any one fails the row**, even if `func` passed. `postpnr/waivers.txt` is the only exception: empty by policy, and waived hits stay listed. |
 | `win` | Pad timing per the SDC. Every output settles by `T - output_delay(max)` after the `core_clk` edge and holds until `-output_delay(min)` after the next. VCS checks only see internal flops; this is the pad side (`hvl/pin/pin_cycle_trace.sv`). |
-| `trace` | Pins, link transactions and console are identical to the golden RTL, **cycle for cycle** (`bin/pin_trace_cmp.py`). A mismatch shows the first differing cycle, field by field, with the link transactions around it. |
+| `trace` | Pins, link transactions and console are identical to the golden RTL, **cycle for cycle** (`bin/pin_trace_cmp.py`). A mismatch shows the first differing cycle, field by field, with the link transactions around it. With `--cycle-slack N`, link transactions within N cycles, console exact, no per-cycle pin check. |
 
 ## 5. The timing the bench applies
 
@@ -159,7 +173,6 @@ FAIL bm_sorting_algo                          min  func=PASS tchk=3 win=0 trace=
 - **Outputs:** sampled at `T - set_output_delay -max` after the edge, and window-checked as in §4.
   The wires from the pad drivers to `forte_top`'s output ports cannot be annotated by VCS (`SDFCOM_UHICD`: they leave the annotated scope). `pin.sh` accepts that message only when its SDF line is exactly such a wire, and `run.sh` measures the largest per output group (`sdf_out_wires.py`) and makes the **max** corner's window that much stricter, so a pass holds with the wire included. `SDFCOM_IWSBA` ("INTERCONNECT will still be annotated": a cell-to-cell wire whose net passes through an `assign` in the netlist) is also accepted, since VCS annotates that delay, but only when its SDF line is an `INTERCONNECT` entry. Any other `SDFCOM_*` still fails the build.
 
-If the cell models check an async reset with `$setuphold(posedge CK, negedge R)` and have no `$recrem` (`postpnr/variants.sh --static-only` shows the counts), the SDF's `RECREM` entries reach no check and VCS drops them **without a message**, so the model's placeholder limits are checked instead. `run.sh --recrem-as-setuphold` simulates a line-for-line copy of the SDF with each `RECREM` keyword written as `SETUPHOLD` (same pins, edges and recovery/removal values), cached in `postpnr/work/sdf/`.
   A positive `-min` (the board's hold ending before the edge, as when `-min` equals `-max`) is checked as `-min 0`: nothing launched at an edge reaches the pad before it, so the SDC then requires only that outputs stay quiet from `T - max` to the edge. `sdc_delays.py` warns when it does this.
 
 **`sdc_delays.py` refuses, and says why, when:**
@@ -174,6 +187,8 @@ Note that `synth/constraints.sdc` has numbers marked PLACEHOLDER, and `synth/tim
 **The golden doesn't depend on the SDC.** Traces count cycles from reset release and sample inputs at the clock edge, so the golden does not depend on the period or the I/O delays. `selfcheck.sh` proves that on the RTL with a 7 ns clock and moved sample points.
 
 ## 6. Triage
+
+**`postpnr/DEBUGGING.md` is the full guide:** how to tell a simulation-setup problem from an SDF problem from a PnR problem, the IP-safe commands for each, and the case studies so far (RECREM dropped, the clock-crossing cycle shift, the single-corner SDF, negative delays).
 
 - **`trace=DIFF`:** `runs/<corner>/<name>/CMP` names the first differing cycle and field.
   - Rerun that image with waves: `WAVES=1`, and `+PIN_FSDB` through `hvl/pin/pin.sh` with the same env.

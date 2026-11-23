@@ -1,6 +1,6 @@
 # FORTE post-PnR verification: onboarding
 
-As of 2026-11-16. Live, editable copy: the team doc this file was exported from.
+As of 2026-11-23. Live, editable copy: the team doc this file was exported from (update both).
 
 ## The chip
 
@@ -49,7 +49,7 @@ For post-PnR work, `postpnr/`, `hvl/pin/` and the trace compare in `bin/` are wh
 
 | Path | What it is |
 | --- | --- |
-| `postpnr/` | The post-PnR flow: `prepare.sh`, `pack.sh` (EWS); `run.sh`, `variants.sh` (VM); `sdc_delays.py`, `sdf_out_wires.py`, `selfcheck.sh`, `waivers.txt` (empty by policy); the committed golden bundle `postpnr_bundle_<sha12>.tgz`; `README.md` (the full guide) and this file |
+| `postpnr/` | The post-PnR flow: `prepare.sh`, `pack.sh` (EWS); `run.sh`, `variants.sh` (VM); `sdc_delays.py`, `sdf_out_wires.py`, `selfcheck.sh`, `waivers.txt` (empty by policy); the committed golden bundle `postpnr_bundle_<sha12>.tgz`; `README.md` (the full guide), `DEBUGGING.md` (simulation vs SDF vs PnR problems) and this file |
 | `hvl/pin/` | The pin-only chip bench: `pin_tb.sv` with the link and UART agents, `pin_cycle_trace.sv`, `pin.sh` (build and run, RTL or gate), `tests/` (directed programs and command scripts), `models/` (local stand-ins for pads and SRAMs), `vm_paths.example.sh` |
 | `bin/pin_trace_cmp.py` | Compares two runs' traces, cycle-exact by default |
 | `hdl/forte_*.sv` | Chip-level RTL: pads, chip, SoC, uncore, link core and PHY, reset sync, DFT lock |
@@ -87,7 +87,7 @@ flowchart TB
   subgraph VM["TSMC VM: check the netlist with run.sh"]
     direction LR
     V1["4. Set up<br/>vm_paths.sh, drop folder; golden must be RTL_REF"] --> V2["5. Preflight<br/>ports match forte_top; every cell has a model"] --> V3["6. SDC to bench timing<br/>input delays, output windows, pad-wire margin"]
-    V3 --> V4["7. Build each corner<br/>VCS + SDF, max and min; any SDFCOM fails but UHICD"] --> V5["8. Run every program<br/>339 images x 2 corners, 4-state, starting from X"] --> V6["9. Judge each row<br/>func, tchk, win, and trace vs golden: PASS or FAIL"]
+    V3 --> V4["7. Build each corner<br/>VCS + SDF, max and min; any SDF message fails but the accepted ones"] --> V5["8. Run every program<br/>339 images x 2 corners, 4-state, starting from X"] --> V6["9. Judge each row<br/>func, tchk, win, and trace vs golden: PASS or FAIL"]
   end
   E3 -- "git push, then git pull" --> V1
 ```
@@ -117,7 +117,9 @@ FAIL bm_sorting_algo   min  func=PASS tchk=3 win=0 trace=MATCH
 | `win` | Every output settles and holds inside its SDC window | Timing at the pads, which VCS's checks never see | `hvl/pin/pin_cycle_trace.sv` |
 | `trace` | Pins every cycle, link transactions and console are identical to the golden RTL's | Equivalence with the RTL | `bin/pin_trace_cmp.py` |
 
-A build fails before any row runs if its SDF does not annotate cleanly: any `SDFCOM_*` message fails it, except the pad-wire `UHICD` messages described under Policies.
+A build fails before any row runs if its SDF does not annotate cleanly: any `SDF*` message fails it, except the ones listed under Policies. With `--cycle-slack N`, `trace` compares link transactions within N cycles and the console exactly, and skips the per-cycle pin trace; the row shows `trace=MATCH(+-S)`.
+
+**When something fails, start with `postpnr/DEBUGGING.md`:** it tells a simulation-setup problem from an SDF problem from a real PnR problem.
 
 Results land in `postpnr/results/<stamp>/SUMMARY` (paste this back) and `postpnr/results/<stamp>.tgz` (logs, traces, consoles).
 
@@ -167,6 +169,9 @@ postpnr/run.sh --jobs 4                             # hours, inside tmux; each j
 | `--clk-mhz MHZ` | Run `core_clk` at a target frequency instead of the SDC's period; I/O delays stay as the SDC gives them |
 | `--with-vcs-rtl` | Also run the golden RTL under 4-state VCS and compare |
 | `--vm-paths FILE` | A different model-path file |
+| `--recrem-as-setuphold` | Simulate the SDF with `RECREM` written as `SETUPHOLD`: our models check async reset only with `$setuphold` |
+| `--cycle-slack N` | Netlist link transactions may be up to N cycles early or late; content and order still exact |
+| `--ignore-neg-delay` | `SDFCOM_NIOD` counted, not failed; not sign-off |
 | `WAVES=1` (env) | A separate waveform build |
 | `INITREG=0\|1\|random` (env) | Registers start at a value: triage only, never sign-off |
 
@@ -177,10 +182,14 @@ These are settled; change one only by agreement, and record why.
 | Topic | Decision |
 | --- | --- |
 | Where things run | Gate+SDF on the VM; the golden locally with Verilator, pinned to the netlist's RTL commit by `RTL_REF` |
-| Corners | Max and min, from the SDF's min:typ:max triples |
+| Corners | Max and min, from the SDF's min:typ:max triples or two SDFs. Today's SDF has one process corner, so the min corner is not yet a real fast-corner test. |
 | Timing violations | Any VCS `Timing violation` fails its row. `postpnr/waivers.txt` stays empty. |
-| SDF annotation | Any `SDFCOM_*` message fails the build, with one exception (next row) |
+| SDF annotation | Any `SDF*` message fails the build, except the rows below, each checked against its SDF line |
 | Pad-wire exception (2026-11-16) | `SDFCOM_UHICD` on a wire from a pad driver to a `forte_top` output port is accepted: VCS cannot annotate wires that leave the annotated scope. `sdf_out_wires.py` measures the largest such wire, and the max corner's output window is tightened by it, so a pass still holds with the wire included. |
+| Assign-wire exception (2026-11-22) | `SDFCOM_IWSBA` is accepted when its SDF line is an `INTERCONNECT`: a cell-to-cell wire through an `assign`, which VCS still annotates. |
+| Negative IOPATH (2026-11-22) | `SDFCOM_NIOD` fails the build unless `--ignore-neg-delay`, which marks the run not sign-off. The 2 seen are under 20 ps. |
+| Reset recovery/removal (2026-11-22) | Our cell models check async reset as `$setuphold(posedge CK, negedge R)`; the SDF writes it as `RECREM`. `--recrem-as-setuphold` carries the SDF's values into the model's check. It loosens nothing. |
+| Cycle slack (2026-11-22) | Netlist rows may use `--cycle-slack 4`: link transactions identical in content and order, each within 4 cycles of the golden. Exact (0) by default; VCS RTL rows are always exact. |
 | I/O timing | From the PnR SDC, relative to `core_clk`. A positive output `-min` is checked as 0: what an edge launches cannot reach the pad before that edge. |
 | Initial state | Sign-off starts from X. `INITREG` is for triage only, and every row says so when it is used. |
 | Physical-only cells | Fill, decap, tap and endcap cells with no Verilog are listed in `IGNORE_CELLS`; the build refuses any such cell that connects a non-power pin. |
@@ -188,28 +197,35 @@ These are settled; change one only by agreement, and record why.
 
 ## Status and open items
 
-The netlist compiles and elaborates on the VM, but no build has yet annotated its SDF cleanly, so no program has run on it. The blocker is `SDFCOM_CFTC`: timing checks the SDF has that the selected cell models lack.
+As of 2026-11-23: **smoke passes at 200 MHz on both corners** (`func=PASS tchk=0 win=0 trace=MATCH(+-2)`), and the full sweep (339 images × max and min) has been started with the command below. Read its min-corner rows as a near-copy of max (see the first open item).
 
-### Where the VM has got to
+```
+postpnr/run.sh --clk-mhz 200 --jobs 4 --ignore-neg-delay --recrem-as-setuphold --cycle-slack 4
+```
 
-| Step | Status | Notes |
-| --- | --- | --- |
-| SDC accepted | Done | `core_clk` 4 ns; inputs max 1.5 / min 0.4 ns; outputs max 1.5 ns, min checked as 0 |
-| Preflight | Done | Model lists in `vm_paths.sh`; physical-only cells in `IGNORE_CELLS` |
-| Compile and elaborate | Done | VCS V-2023.12 |
-| `SDFCOM_NDI` (340, negative delays) | Fixed, untested on VM | SDF builds compile with `-negdelay` (`1b4671e`) |
-| `SDFCOM_IANE` / `TANE` (5200, the SRAM macros) | Fixed, untested on VM | Unit-delay SRAM define dropped for SDF builds (`fd9fc7a`) |
-| `SDFCOM_UHICD` (208, pad wires) | Fixed, untested on VM | Accepted and compensated (`fd9fc7a`) |
+### How smoke got to PASS (2026-11-22)
+
+Each blocker, which layer it was in, and the fix. `postpnr/DEBUGGING.md` has the detail and the commands.
+
+| Blocker | Layer | Fix |
+|---|---|---|
+| `SDFCOM_ICBF` (instances not found) | build | disappeared after a clean rebuild; a stale incremental build is suspected |
+| VCS exit 139, `Failed to mkdir .../simv.daidir` | build directory | `rm -rf sim/pin/build/vcs_gate_sdfmax` |
+| 15 `SDFCOM_IWSBA` | build gate | accepted when the SDF line is an `INTERCONNECT` (wires through an `assign`, still annotated); unrelated to `UHICD` (`6f4058a`) |
+| 2 `SDFCOM_NIOD` (negative IOPATH, under 5 and 5-20 ps) | build gate | `--ignore-neg-delay`, not sign-off (`e4b3c3b`) |
+| 24 `$setuphold` violations on `negedge R`, limits `(1000,500)`, then `status is x` | simulation setup | the SDF's 277 `RECREM` entries had no `$recrem` to annotate in any library variant and were silently dropped; `--recrem-as-setuphold` (`8661ebc`) |
+| `trace=DIFF`: same 17 link transactions, 2 cycles early from record 10 | pass rule | async-FIFO crossing between the two clock trees; `--cycle-slack 4` (`d91fe87`) |
 
 ### What is left, in order
 
 | Item | Status | What to do |
-| --- | --- | --- |
-| `SDFCOM_CFTC` (538): recovery/removal on async-reset flops, `$period` on the clock gate | Next | Run `postpnr/variants.sh` and keep, per threshold-voltage flavour, the `STDCELL_MODELS` file whose build shows only `UHICD`. If none models these checks, decide whether STA alone covers them, as a reviewed exception. |
+|---|---|---|
+| **The SDF has one process corner** | Open | Timing checks are identical in min and max, wires 94% identical, and cell delays differ by only 5-20%. `--corners min` is not a fast-corner test. Ask PnR for a second SDF from the hold/fast analysis view, name the two `*max*.sdf` / `*min*.sdf` in `drop/`, and leave `SDF=` unset in `vm_paths.sh`. |
+| **No SDC in the runs** | Open | Recent SUMMARYs say `sdc: NONE`, so I/O timing comes from `--clk-mhz` and there is no output-window check. Set `SDC=` in `vm_paths.sh` to the SDC PnR signed off with (or use the drop folder), then drop `--clk-mhz` or keep it to test a target frequency. |
+| **2 negative IOPATH delays** | Open | Both tiny. Proposed: replace `--ignore-neg-delay` with a size limit (`--neg-delay-max-ps 20`) that accepts only negligible ones. Not built yet. |
+| Silent-drop guard | Proposed | Fail the build when the SDF has a check kind (e.g. `RECREM`) that no cell model has, unless the matching flag is given, so the next silent drop cannot pass unnoticed. |
 | `RTL_REF` unknown | Open | Find the commit the netlist came from. If it is `8e27c2d`, write `RTL_REF=8e27c2da1fbced03250b01b124ee74f6ba75ece5` to `drop/pnr.env`; otherwise make and push a new golden. |
 | `VCS_FLAGS` in `vm_paths.sh` | Open | Use `(-j4 -fgp)`: `-debug_acc+all -kdb` slow every run, and `WAVES=1` gives waveforms |
-| `PAD_MODELS` has 881 files | Open | Narrow it to the files that define `io_in` / `io_out` and what they need |
-| Smoke, then the full run | Open | 678 simulations: 339 images × 2 corners |
 | Linux tier | Open | Optional: rebuild `testcode/linux` (the local `boot.lst` is stale), regenerate the golden with that tier, repack |
 
 Not yet tested: DFT/scan (the bench's `dft` command is a stub).
@@ -229,6 +245,17 @@ Each of these cost a VM round trip once.
 - A unit-delay model has no specify block, so nothing in the SDF can annotate it (`IANE` / `TANE`).
 - An unchanged rebuild prints no annotation at all. The gate then relies on the `sdf_ok` record of the last clean annotation.
 - A parse error (`SDFPE`) aborts annotation silently and the run continues with no delays; the gate fails it.
+
+- **VCS drops an SDF check that no model check matches, without a message.** A clean build does not prove every check got its value: round limits like `(1000,500)` in a violation are the model's placeholders. `variants.sh --static-only` compares the check kinds.
+- Two warnings that appear together are not necessarily a pair: compare the SDF lines they cite.
+- `build_<corner>.log` shows only the first 40 lines of SDF messages and often ends mid-message; the full list is in `sim/pin/build/vcs_gate_sdf<corner>/build.log`.
+- An SDF can carry min:typ:max triples and still be one process corner. Check the min/max ratios (`DEBUGGING.md` §7) before calling a min-corner pass a hold sign-off.
+
+**Simulation**
+
+- A failed timing check drives the flop's output X, so `tchk>0` usually also causes `func=FAIL` and `trace=DIFF`. Fix `tchk` first.
+- `core_clk` and `link_clk` share a pad but not a clock tree: async-FIFO latency in the netlist can differ from RTL by a cycle or two.
+- VCS exit 139 within a second of starting is a broken build directory, not the design: remove `sim/pin/build/vcs_gate_sdf<corner>`.
 
 **Shell**
 
