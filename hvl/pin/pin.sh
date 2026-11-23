@@ -45,8 +45,8 @@
 #   - any VCS SDFCOM_* message at compile time (an SDF entry not annotated --
 #     a missing instance, pin or arc means some delay or check is not modelled),
 #     or any other SDF* message (SDFPE: a parse error, which ABORTS annotation),
-#     except SDFCOM_UHICD on a wire into a forte_top output port, and an
-#     SDFCOM_UHICD + SDFCOM_IWSBA pair on the same SDF line (still annotated),
+#     except SDFCOM_UHICD on a wire into a forte_top output port, and
+#     SDFCOM_IWSBA on an INTERCONNECT through an assign (still annotated),
 #   - an annotation VCS does not report completed with 0 errors and 0 warnings,
 # and every run of it fails on any 'Timing violation' (setup, hold, recovery,
 # removal, width, period) not matched by PIN_WAIVERS, even if the bench passed.
@@ -383,11 +383,11 @@ sdf_gate() {
   # because postpnr/run.sh measures those wires (postpnr/sdf_out_wires.py) and
   # tightens the output-window check by the largest.  Any other SDF message fails.
   #
-  # SDFCOM_UHICD followed by SDFCOM_IWSBA ("INTERCONNECT will still be
-  # annotated") for the SAME SDF line: VCS reports the up-hierarchy delay but
-  # still annotates it, so the pair is accepted.  Paired by the SDF line each
-  # message cites; an IWSBA with no UHICD on its line fails the build.
-  local uh_n uh_lines uh_badl iw_n iw_lines iw_orphan pair_n=0
+  # SDFCOM_IWSBA ("INTERCONNECT will still be annotated"): a cell-to-cell
+  # INTERCONNECT whose net passes through a continuous assignment (an assign in
+  # the netlist).  VCS annotates the delay anyway, so it is accepted -- only
+  # when each message's SDF line is an INTERCONNECT entry.  Unrelated to UHICD.
+  local uh_n uh_lines uh_badl iw_n iw_lines iw_badl
   # SDF line number cited by each message with tag $1 ("<sdf>, <line>" follows the tag).
   msg_sdf_lines() { grep -A1 "Warning-\[$1\]" "$BUILD/build.log" | grep -oE ', [0-9]+[[:space:]]*$' | tr -dc '0-9\n' | grep . || true; }
   uh_n="$(grep -c 'Warning-\[SDFCOM_UHICD\]' "$BUILD/build.log" || true)"
@@ -396,21 +396,18 @@ sdf_gate() {
     iw_lines="$(msg_sdf_lines SDFCOM_IWSBA)"
     [ "$(grep -c . <<<"$iw_lines")" = "$iw_n" ] \
       || sdf_fail "$iw_n SDFCOM_IWSBA message(s), but could not read the SDF line of each ($BUILD/build.log)"
-    iw_orphan="$(awk 'NR == FNR { u[$1] = 1; next } !($1 in u)' <(echo "x"; msg_sdf_lines SDFCOM_UHICD) <(echo "$iw_lines") | sort -un | head -5)"
-    [ -z "$iw_orphan" ] \
-      || sdf_fail "SDFCOM_IWSBA on SDF line(s) $(echo $iw_orphan) with no SDFCOM_UHICD for the same line"
+    iw_badl="$(awk 'NR == FNR { want[$1] = 1; next }
+                    FNR in want { if ($0 !~ /^[[:space:]]*\(INTERCONNECT[[:space:]]/) print FNR; delete want[FNR] }
+                    END { for (l in want) print l }' <(echo "$iw_lines") "$SDF" | sort -un | head -5)"
+    [ -z "$iw_badl" ] \
+      || sdf_fail "SDFCOM_IWSBA on SDF line(s) $(echo $iw_badl) that are not an INTERCONNECT entry"
   fi
   if [ "$uh_n" -gt 0 ]; then
     uh_lines="$(msg_sdf_lines SDFCOM_UHICD)"
     [ "$(grep -c . <<<"$uh_lines")" = "$uh_n" ] \
       || sdf_fail "$uh_n SDFCOM_UHICD message(s), but could not read the SDF line of each ($BUILD/build.log)"
-    # A UHICD that VCS still annotated (IWSBA on its line) needs no further check.
-    if [ "$iw_n" -gt 0 ]; then
-      pair_n="$(awk 'NR == FNR { w[$1] = 1; next } $1 in w' <(echo "x"; echo "$iw_lines") <(echo "$uh_lines") | grep -c . || true)"
-      uh_lines="$(awk 'NR == FNR { w[$1] = 1; next } !($1 in w)' <(echo "x"; echo "$iw_lines") <(echo "$uh_lines"))"
-    fi
   fi
-  # The rest of the UHICDs must each be a wire into a forte_top output port.
+  # Each UHICD must be a wire into a forte_top output port.
   if [ -n "$(grep . <<<"${uh_lines:-}" || true)" ]; then
     uh_badl="$(awk -v div="$(grep -m1 -oE '\(DIVIDER[[:space:]]+[^[:space:])]' "$SDF" | awk '{print $2}')" '
         NR == FNR { want[$1] = 1; next }
@@ -440,8 +437,8 @@ sdf_gate() {
     sdf_fail "annotation of $SDF did not complete cleanly (above; $BUILD/build.log)"
   fi
   echo "$now" > "$BUILD/sdf_ok"
-  if [ "$uh_n" -gt 0 ]; then
-    echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors; $uh_n SDFCOM_UHICD: $pair_n still annotated (SDFCOM_IWSBA on the same SDF line), $((uh_n - pair_n)) a wire into a forte_top output port (run.sh compensates); no other SDF* message"
+  if [ $((uh_n + iw_n)) -gt 0 ]; then
+    echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors; $uh_n SDFCOM_UHICD (wires into forte_top output ports, run.sh compensates), $iw_n SDFCOM_IWSBA (INTERCONNECT through an assign, still annotated); no other SDF* message"
   else
     echo "build: SDF $SDF ($SDF_CORNER) annotated completely: 0 errors, 0 warnings, no SDF* messages"
   fi
