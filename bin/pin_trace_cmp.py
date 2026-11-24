@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two pin-bench runs (hvl/pin): RTL against netlist, golden against new.
 
-    pin_trace_cmp.py <runA> <runB> [--no-cycles | --cycle-slack=N] [--only-link]
+    pin_trace_cmp.py <runA> <runB> [--no-cycles | --cycle-slack=N | --reorder=N] [--only-link]
 
 Each argument is a run directory or a single trace file.  For a directory,
 every trace both runs have is compared, and the result is the worst of them:
@@ -26,13 +26,20 @@ record's cycle may differ by at most N (the largest shift is reported as
 "cycle shift +-S"); the console still matches byte for byte; the per-cycle
 trace is not compared, since a shifted run differs on every cycle after the
 shift.  For a netlist whose clock-domain crossings resolve an edge earlier or
-later than the RTL's.  --only-link compares pin_trace.log alone (the
+later than the RTL's.  --reorder=N also lets transactions to different
+addresses swap places, as the I- and D-cache fills do when a timing shift
+changes which one reaches the bus first: every record must still appear in both
+traces with the same content, the records for each address (and for each T, I
+and E kind) must come in the same order, writes must stay in order with each
+other, and each record's cycle may differ from its counterpart's by at most N.
+--only-link compares pin_trace.log alone (the
 pre-postpnr behaviour).
 Exit 0 on match, 1 on mismatch, 2 on usage error.
 """
 import gzip
 import os
 import sys
+from collections import Counter, defaultdict
 
 CYCLE_FIELDS = ["io_in", "ready", "rvalid", "irq", "uart_rx", "test_mode", "scan_en",
                 "fault_inject", "io_out", "req", "wr", "uart_tx", "status"]
@@ -101,6 +108,75 @@ def cmp_link(pa, pb, cycles, slack=0):
     how = (f" (cycle shift +-{shift}, within --cycle-slack {slack})" if slack
            else "" if cycles else " (cycles ignored)")
     msg = (f"link {len(a)} records{how}"
+           f"{f', but both contain {errs} checker errors' if errs else ''}")
+    return errs == 0, [msg]
+
+
+def link_group(rec):
+    """Records in one group must keep their relative order under --reorder: one address, or one T/I/E kind."""
+    p = rec.split()
+    if p[0] == "L":
+        return ("L", p[2])
+    if p[0] == "I":
+        return ("I", p[1])
+    return (p[0],)
+
+
+def first_unpaired(a_keys, b_keys):
+    """The first record of a_keys with no counterpart left in b_keys."""
+    left = Counter(b_keys)
+    for k in a_keys:
+        if left[k] == 0:
+            return k
+        left[k] -= 1
+    return None
+
+
+def cmp_link_reorder(pa, pb, window):
+    a, b = load_link(pa, True), load_link(pb, True)
+    a_recs = [(n, *split_cyc(r)) for n, r in a]
+    b_recs = [(n, *split_cyc(r)) for n, r in b]
+    a_keys = [k for _, _, k in a_recs]
+    b_keys = [k for _, _, k in b_recs]
+    if Counter(a_keys) != Counter(b_keys):
+        only_a = first_unpaired(a_keys, b_keys)
+        only_b = first_unpaired(b_keys, a_keys)
+        out = [f"MISMATCH link trace: the two runs do not make the same transactions ({pa} vs {pb})"]
+        if only_a:
+            out.append(f"  only in A: {only_a}")
+        if only_b:
+            out.append(f"  only in B: {only_b}")
+        return False, out
+
+    a_writes = [k for k in a_keys if k.split()[1] == "W"]
+    b_writes = [k for k in b_keys if k.split()[1] == "W"]
+    if a_writes != b_writes:
+        i = next(i for i, (x, y) in enumerate(zip(a_writes, b_writes)) if x != y)
+        return False, [f"MISMATCH link trace: write {i} differs in order ({pa} vs {pb})",
+                       f"  A    : {a_writes[i]}", f"  B    : {b_writes[i]}"]
+
+    groups_b = defaultdict(list)
+    for n, cyc, k in b_recs:
+        groups_b[link_group(k)].append((n, cyc, k))
+    taken = Counter()
+    shift = 0
+    for n, cyc, k in a_recs:
+        g = link_group(k)
+        nb, cb, kb = groups_b[g][taken[g]]
+        taken[g] += 1
+        if kb != k:
+            return False, [f"MISMATCH link trace: records for {' '.join(g)} come in a different order "
+                           f"({pa}:{n} vs {pb}:{nb})", f"  A    : {k}", f"  B    : {kb}"]
+        if cyc is not None and cb is not None:
+            if abs(cb - cyc) > window:
+                return False, [f"MISMATCH link trace: same transaction, but cycle {cb} vs {cyc} is a shift of "
+                               f"{cb - cyc:+d}, beyond --reorder {window} ({pa}:{n} vs {pb}:{nb})",
+                               f"  A    : {k}", f"  B    : {kb}"]
+            shift = max(shift, abs(cb - cyc))
+
+    moved = sum(1 for x, y in zip(a_keys, b_keys) if x != y)
+    errs = sum(1 for k in a_keys if k.startswith("E"))
+    msg = (f"link {len(a)} records, {moved} out of place (cycle shift +-{shift}, within --reorder {window})"
            f"{f', but both contain {errs} checker errors' if errs else ''}")
     return errs == 0, [msg]
 
@@ -202,20 +278,33 @@ def is_cycle_file(path):
         return f.readline().startswith("# pin_cycle")
 
 
+def cycles_option(argv, name):
+    """--name=N -> N; absent -> 0; not a whole number -> None."""
+    v = 0
+    for a in [a for a in argv if a.startswith(f"--{name}=")]:
+        n = a.split("=", 1)[1]
+        if not n.isdigit():
+            print(f"--{name}=N needs a whole number of cycles, not '{n}'")
+            return None
+        v = int(n)
+    return v
+
+
 def main(argv):
-    slack = 0
-    for a in [a for a in argv if a.startswith("--cycle-slack=")]:
-        v = a.split("=", 1)[1]
-        if not v.isdigit():
-            print(f"--cycle-slack=N needs a whole number of cycles, not '{v}'")
-            return 2
-        slack = int(v)
-    flags = {a for a in argv if a.startswith("--") and not a.startswith("--cycle-slack=")}
+    slack = cycles_option(argv, "cycle-slack")
+    window = cycles_option(argv, "reorder")
+    if slack is None or window is None:
+        return 2
+    flags = {a for a in argv if a.startswith("--") and "=" not in a}
     args = [a for a in argv if not a.startswith("--")]
-    if len(args) != 2 or flags - {"--no-cycles", "--only-link"} or (slack and "--no-cycles" in flags):
+    loose_modes = ("--no-cycles" in flags) + (slack > 0) + (window > 0)
+    if len(args) != 2 or flags - {"--no-cycles", "--only-link"} or loose_modes > 1:
         print(__doc__)
         return 2
     cycles = "--no-cycles" not in flags
+
+    def link(la, lb):
+        return cmp_link_reorder(la, lb, window) if window else cmp_link(la, lb, cycles, slack)
     A, B = args
     results = []
     if os.path.isdir(A) and os.path.isdir(B):
@@ -223,12 +312,12 @@ def main(argv):
         if not (la and lb):
             print(f"MISMATCH: pin_trace.log missing in {A if not la else B}")
             return 1
-        results.append(cmp_link(la, lb, cycles, slack))
-        if "--only-link" not in flags and cycles:
+        results.append(link(la, lb))
+        if "--only-link" not in flags:
             ca = find(A, "pin_cycle.log.gz", "pin_cycle.log")
             cb = find(B, "pin_cycle.log.gz", "pin_cycle.log")
-            if slack:
-                results.append((True, [f"per-cycle pin trace not compared (--cycle-slack {slack})"]))
+            if loose_modes:
+                results.append((True, ["per-cycle pin trace not compared"]))
             elif ca and cb:
                 results.append(cmp_cycle(ca, cb, A, B))
             elif ca or cb:
@@ -240,10 +329,10 @@ def main(argv):
         if is_cycle_file(A) != is_cycle_file(B):
             print("MISMATCH: one file is a pin cycle trace and the other is not")
             return 1
-        if is_cycle_file(A) and slack:
-            print("--cycle-slack does not apply to a per-cycle trace")
+        if is_cycle_file(A) and loose_modes:
+            print("--no-cycles, --cycle-slack and --reorder do not apply to a per-cycle trace")
             return 2
-        results.append(cmp_cycle(A, B) if is_cycle_file(A) else cmp_link(A, B, cycles, slack))
+        results.append(cmp_cycle(A, B) if is_cycle_file(A) else link(A, B))
     else:
         print(f"usage: both arguments must be run directories or both files: {A}, {B}")
         return 2

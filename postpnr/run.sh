@@ -42,6 +42,17 @@
 #                      For clock-domain crossings that resolve an edge earlier
 #                      or later than in RTL.  Default 0: cycle-exact.  The row
 #                      shows the largest shift, trace=MATCH(+-S)
+#   --no-cycles        netlist rows: the link trace must match the golden's in
+#                      type, address, data and order, at any cycle; the console
+#                      must still match; the per-cycle pin trace is not compared.
+#                      NOT a sign-off run
+#   --reorder N        netlist rows: as --cycle-slack N, but transactions to
+#                      different addresses may also swap places (I- and D-cache
+#                      fills reaching the bus in a different order after a
+#                      timing shift).  Every transaction must still appear with
+#                      the same content; same-address records, writes, tohost
+#                      and interrupts keep their order.  Row: trace=MATCH(+-S)
+#   --no-cycles, --cycle-slack and --reorder: at most one
 #   --recrem-as-setuphold
 #                      simulate a copy of the SDF with each RECREM written as
 #                      SETUPHOLD (same pins, edges and values), for cell models
@@ -112,11 +123,13 @@ if [ "${1:-}" = __one ]; then
   win="$(zcat -f "$d/sim.log" 2>/dev/null | grep -c '\[PIN_IO\] ERROR.*output window' || true)"
   # --cycle-slack applies to the netlist only: VCS RTL must match the golden exactly.
   cs=(); [ "$corner" != rtl ] && [ "${CYCLE_SLACK:-0}" -gt 0 ] && cs=(--cycle-slack="$CYCLE_SLACK")
+  [ "$corner" != rtl ] && [ "${REORDER:-0}" -gt 0 ] && cs=(--reorder="$REORDER")
+  [ "$corner" != rtl ] && [ "${NO_CYCLES:-0}" = 1 ] && cs=(--no-cycles)
   if python3 "$R/bin/pin_trace_cmp.py" "$GOLDEN/traces/$n" "$d" ${cs[@]+"${cs[@]}"} > "$d/CMP" 2>&1; then trace=MATCH
   elif grep -q '^MISMATCH' "$d/CMP"; then trace=DIFF
   else trace=NONE; fi
   tshow=$trace
-  if [ $trace = MATCH ] && [ ${#cs[@]} -gt 0 ]; then
+  if [ $trace = MATCH ] && [ "${cs[0]:-}" != --no-cycles ] && [ ${#cs[@]} -gt 0 ]; then
     tshow="MATCH(+-$(grep -oE 'cycle shift \+-[0-9]+' "$d/CMP" | grep -oE '[0-9]+$' || echo '?'))"
   fi
   ok=PASS
@@ -133,7 +146,7 @@ if [ "${1:-}" = __one ]; then
 fi
 
 # ---- options ---------------------------------------------------------------------------
-ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0 RECREM_SH=0 CYCLE_SLACK=0
+ONLY="" CORNERS="max,min" JOBS=1 GOLDEN="" VCS_RTL=0 MAX_ERRORS=1 BUILD=1 VMP="${VM_PATHS:-}" CLK_MHZ="" IGN_NIOD=0 RECREM_SH=0 CYCLE_SLACK=0 NO_CYCLES=0 REORDER=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift;;
@@ -148,6 +161,8 @@ while [ $# -gt 0 ]; do
     --ignore-neg-delay) IGN_NIOD=1;;
     --recrem-as-setuphold) RECREM_SH=1;;
     --cycle-slack) CYCLE_SLACK="$2"; shift;;
+    --no-cycles) NO_CYCLES=1;;
+    --reorder) REORDER="$2"; shift;;
     -h|--help) sed -n '2,/^set -uo/{/^set -uo/d;p}' "$0"; exit 0;;
     *) echo "run.sh: unknown option $1 (--help)" >&2; exit 2;;
   esac
@@ -344,7 +359,7 @@ if [ -n "$RTL_REF" ]; then
 else
   log "WARNING: no RTL_REF (drop/pnr.env) -- cannot prove the netlist came from golden RTL $gsha"
 fi
-export GOLDEN OUT MAX_ERRORS CYCLE_SLACK
+export GOLDEN OUT MAX_ERRORS CYCLE_SLACK NO_CYCLES REORDER
 
 # ---- the SDC ------------------------------------------------------------------------------
 # --clk-mhz: the period in ns, a whole even number of ps so the bench's
@@ -428,6 +443,10 @@ fi
 [ -n "${INITREG:-}" ] && log "WARNING: INITREG=$INITREG -- registers start at a value, not X: NOT a sign-off run"
 [[ "$CYCLE_SLACK" =~ ^[0-9]+$ ]] || stop "--cycle-slack needs a whole number of cycles, not '$CYCLE_SLACK'"
 [ "$CYCLE_SLACK" -gt 0 ] && log "trace:   --cycle-slack $CYCLE_SLACK: netlist link transactions must match the golden in content and order, each within $CYCLE_SLACK cycles; console exact; per-cycle pin trace NOT compared"
+[[ "$REORDER" =~ ^[0-9]+$ ]] || stop "--reorder needs a whole number of cycles, not '$REORDER'"
+[ $((NO_CYCLES + (CYCLE_SLACK > 0) + (REORDER > 0))) -gt 1 ] && stop "--no-cycles, --cycle-slack, --reorder: pick one"
+[ "$REORDER" -gt 0 ] && log "trace:   --reorder $REORDER: netlist link transactions must match the golden in content, each within $REORDER cycles; different addresses may swap; same-address records and writes keep their order; console exact; per-cycle pin trace NOT compared"
+[ $NO_CYCLES = 1 ] && log "WARNING: --no-cycles -- netlist link transactions must match the golden in content and order at any cycle; console exact; per-cycle pin trace NOT compared: NOT a sign-off run"
 [ $IGN_NIOD = 1 ] && log "WARNING: --ignore-neg-delay -- SDFCOM_NIOD (negative IOPATH delay) does not fail the build: NOT a sign-off run"
 IFS=, read -r -a CORN <<<"$CORNERS"
 for c in "${CORN[@]}"; do case "$c" in max|min) ;; *) stop "--corners: $c is not max or min";; esac; done
@@ -486,6 +505,6 @@ for c in "${CORN[@]}" rtl; do
 done
 ins="$(for f in "$OUT"/runs/{max,min}/*/sim.log.gz; do [ -f "$f" ] && zcat "$f" | grep -m1 'clk_out insertion' | sed "s|^|$(basename "$(dirname "$(dirname "$f")")") |"; done 2>/dev/null | sort -u | head -4)"
 [ -n "$ins" ] && log "$ins"
-log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")$([ $IGN_NIOD = 1 ] && echo "  (--ignore-neg-delay: not sign-off)")$([ "$CYCLE_SLACK" -gt 0 ] && echo "  (--cycle-slack $CYCLE_SLACK)")"
+log "TOTAL: $pass/$total pass  $CLK_NOTE$([ -n "${INITREG:-}" ] && echo "  (INITREG=$INITREG: not sign-off)")$([ $IGN_NIOD = 1 ] && echo "  (--ignore-neg-delay: not sign-off)")$([ "$CYCLE_SLACK" -gt 0 ] && echo "  (--cycle-slack $CYCLE_SLACK)")$([ "$REORDER" -gt 0 ] && echo "  (--reorder $REORDER)")$([ $NO_CYCLES = 1 ] && echo "  (--no-cycles: not sign-off)")"
 pack
 [ "$pass" = "$total" ] && [ "$total" -gt 0 ]
