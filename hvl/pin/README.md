@@ -88,7 +88,7 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 | `irq <0\|1> <0\|1>` / `fault_inject <0\|1>` | pins |
 | `dump_mem <hexaddr> <nbytes> <path>` | write memory to a file |
 | `dft ...` | stub: fails until DFT testing exists |
-| `finish` | pass, if no checker has fired |
+| `finish` | wait for the console to be idle for two frames (an error after the 16-byte TX FIFO's worth), then pass, if no checker has fired |
 
 ## Plusargs
 

@@ -45,9 +45,11 @@ module pin_uart_agent (
   int     min_low    = 0;        // shortest low run seen, in core cycles
   int     txq[$];               // bits 7:0 the byte; bit 8 = send it with a bad (0) stop bit
   longint cyc        = 0;
+  longint idle_cyc   = 0;        // uart_tx samples high since the last frame ended
   string  tail       = "";       // last chars, for pattern matching
 
   function automatic int bit_cyc(); return 16 * (div << prescale); endfunction
+  function automatic int frame_cyc(); return 10 * bit_cyc(); endfunction
 
   function automatic void err(input string m);
     errors++;
@@ -114,9 +116,11 @@ module pin_uart_agent (
     forever begin
       rx_sample_point();
       s = uart_tx;
-      if (rst_n !== 1'b1) begin prev = 1'b1; continue; end   // X (power-up) counts as in reset
+      if (rst_n !== 1'b1) begin prev = 1'b1; idle_cyc = 0; continue; end   // X (power-up) counts as in reset
       cyc++;
-      if ($isunknown(s)) begin err($sformatf("uart_tx is %b", s)); prev = 1'b1; continue; end
+      if ($isunknown(s)) begin err($sformatf("uart_tx is %b", s)); prev = 1'b1; idle_cyc = 0; continue; end
+      if (s == 1'b1) idle_cyc++;
+      else idle_cyc = 0;
       if (prev == 1'b1 && s == 1'b0) begin
         // Start bit.  Sample the middle of every bit from here, cycle by cycle.
         t_fall = cyc; low_run = 0; c = 0;
@@ -141,6 +145,7 @@ module pin_uart_agent (
                                       div, min_low, min_low / (16 << prescale)));
         else got(c);
         prev = s;
+        idle_cyc = 0;
       end else prev = s;
     end
   end

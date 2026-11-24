@@ -235,6 +235,22 @@ module pin_tb;
     repeat (n) @(posedge core_clk);
   endtask
 
+  // A test ends on tohost, a link write, while the chip may still be sending the
+  // console: up to its 16-byte TX FIFO plus the byte in the shift register.  The
+  // link write picks up any clock-crossing shift and the UART does not, so stopping
+  // at once would make the last byte depend on timing.  Wait for the line to be
+  // idle for two frames instead.
+  localparam int CONSOLE_QUEUE_FRAMES = 17;
+  localparam int CONSOLE_IDLE_FRAMES  = 2;
+
+  task automatic drain_console();
+    longint idle_needed = CONSOLE_IDLE_FRAMES * uart.frame_cyc();
+    longint give_up     = (CONSOLE_QUEUE_FRAMES + CONSOLE_IDLE_FRAMES + 1) * uart.frame_cyc();
+    longint waited;
+    for (waited = 0; waited < give_up && uart.idle_cyc < idle_needed; waited++) @(posedge core_clk);
+    if (uart.idle_cyc < idle_needed) err($sformatf("console still sending %0d cycles after finish", waited));
+  endtask
+
   // ---- the command interpreter ----------------------------------------------------
   int  exit_code = -1;
 
@@ -317,7 +333,7 @@ module pin_tb;
         if (link.dump(addr, int'(v), a3) != 0) err($sformatf("dump_mem: cannot write %s", a3));
       end
       "dft":    err("dft: DFT/scan testing is a stub until the DFT flow lands");
-      "finish": verdict(1, "");
+      "finish": begin drain_console(); verdict(1, ""); end
       default:  err($sformatf("line %0d: unknown command '%s'", lineno, cmd));
     endcase
   endtask
