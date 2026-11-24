@@ -1,6 +1,9 @@
 // @stress tier=pr build=no_spike duts=legacy,forte timeout=2000000 ecc=no dummy=no pin=no
 //
-// st_pmp_partial -- the PMP partial-match rule (Priv. spec, PMP priority and
+// st_pmp_partial -- why the PMP partial-match rule cannot be broken here: the
+// 16 B grain (G = 2) makes a partial match impossible, so this checks that grain
+// and the accesses and straddling fetches at grain boundaries.  The rule (Priv.
+// spec, PMP priority and
 // matching): "The matching PMP entry must match all bytes of an access, or the
 // access fails, irrespective of the L, R, W, and X bits."
 //

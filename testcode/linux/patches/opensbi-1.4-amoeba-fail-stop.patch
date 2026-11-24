@@ -1,0 +1,163 @@
+AMOEBA: fail-stop on the core's custom fault causes 16, 19, 20 and 21.
+
+Stock OpenSBI 1.4 sends unknown exception codes from S/U-mode to the kernel
+(sbi_trap_handler's default case), where Linux reports "unknown exception"
+and SIGILLs the running process; from M-mode it dumps registers and hangs
+with no indication of what failed.  These causes are uncorrectable hardware
+faults (docs/memory_map.md), so report what the hardware recorded on the
+console and halt the hart instead.
+
+Applied by testcode/linux/Makefile after unpacking the pinned tarball.
+
+--- a/lib/sbi/sbi_trap.c	2026-11-23 20:55:31.081199083 -0600
+--- a/lib/sbi/sbi_trap.c	2026-11-23 20:55:31.081199083 -0600
++++ b/lib/sbi/sbi_trap.c	2026-11-23 23:53:41.411820901 -0600
+@@ -244,6 +244,134 @@
+ 	return 0;
+ }
+ 
++/*
++ * AMOEBA/FORTE custom exception causes (hdl/core/privileged/trap.sv,
++ * docs/memory_map.md).  Each reports a hardware fault the core detected but
++ * could not correct, so machine state can no longer be trusted:
++ *   16  redundant-compute (FT shadow) mismatch that retry could not resolve
++ *   19  uncorrectable ECC error in the register file or a pipeline register
++ *   20  uncorrectable ECC error in a dirty D$ line: modified data was lost
++ *   21  as 20, but the line's tag was lost too: its address is unknown, and
++ *       mtval is only the access that found its cache set
++ * Stock OpenSBI does not know these codes and redirects them to the kernel,
++ * which reports "unknown exception" and sends SIGILL to whatever process is
++ * running -- for causes 20/21 usually not the owner of the lost data, which then
++ * carries on with stale memory.  Report what the hardware recorded and stop.
++ */
++#define AMOEBA_CAUSE_FT_UNRESOLVED	16
++#define AMOEBA_CAUSE_ECC_IEU		19
++#define AMOEBA_CAUSE_ECC_DCACHE		20
++#define AMOEBA_CAUSE_ECC_DCACHE_TAG	21
++#define AMOEBA_CSR_MSECFAULT		0x7c0
++#define AMOEBA_CSR_MFTSTATUS		0x7c2
++
++/*
++ * The report goes straight to the 16550 (testcode/linux/dts/amoeba.dts:
++ * byte registers at 0x10000000), not through sbi_printf.  A lost dirty line
++ * can be ANY modified line in the cache set, including OpenSBI's own data:
++ * sbi_printf's console lock, read back stale from memory as "held", hung the
++ * first version of this handler before it printed a word.  Nothing below
++ * reads writable OpenSBI state -- only .rodata strings, CSRs and the UART.
++ * Single hart and terminal, so ignoring the console lock is safe.
++ */
++#define AMOEBA_UART_BASE		0x10000000UL
++#define AMOEBA_UART_THR			0
++#define AMOEBA_UART_LSR			5
++#define AMOEBA_UART_LSR_THRE		0x20
++
++static void amoeba_putc(char c)
++{
++	volatile u8 *uart = (volatile u8 *)AMOEBA_UART_BASE;
++	ulong spin;
++
++	/* Bounded: a dead UART must not stop the hart reaching its hang. */
++	for (spin = 0; spin < 1000000; spin++)
++		if (uart[AMOEBA_UART_LSR] & AMOEBA_UART_LSR_THRE)
++			break;
++	uart[AMOEBA_UART_THR] = (u8)c;
++}
++
++static void amoeba_puts(const char *str)
++{
++	for (; *str; str++) {
++		if (*str == '\n')
++			amoeba_putc('\r');
++		amoeba_putc(*str);
++	}
++}
++
++static void amoeba_puthex(ulong val)
++{
++	static const char digits[] = "0123456789abcdef";
++	int shift;
++
++	amoeba_puts("0x");
++	for (shift = __riscv_xlen - 4; shift >= 0; shift -= 4)
++		amoeba_putc(digits[(val >> shift) & 0xf]);
++}
++
++static void amoeba_putdec(ulong val)
++{
++	char buf[24];
++	int i = sizeof(buf) - 1;
++
++	buf[i] = '\0';
++	do {
++		buf[--i] = (char)('0' + val % 10);
++		val /= 10;
++	} while (val && i > 0);
++	amoeba_puts(&buf[i]);
++}
++
++static void __noreturn amoeba_fail_stop(ulong mcause, ulong mtval,
++					 const struct sbi_trap_regs *regs)
++{
++	ulong mpp = (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT;
++	const char *what, *mode;
++
++	/* A switch, not a table of string pointers: OpenSBI is position-independent,
++	 * and relocated pointers live in writable data the lost line may have held. */
++	switch (mpp) {
++	case PRV_U: mode = "U"; break;
++	case PRV_S: mode = "S"; break;
++	case PRV_M: mode = "M"; break;
++	default:    mode = "?"; break;
++	}
++
++	switch (mcause) {
++	case AMOEBA_CAUSE_FT_UNRESOLVED:
++		what = "unresolved redundant-compute mismatch";
++		break;
++	case AMOEBA_CAUSE_ECC_IEU:
++		what = "uncorrectable ECC error, register file or pipeline";
++		break;
++	case AMOEBA_CAUSE_ECC_DCACHE_TAG:
++		what = "uncorrectable ECC error in a dirty D$ line's tag, data lost, address unknown";
++		break;
++	default:
++		what = "uncorrectable ECC error in a dirty D$ line, data lost";
++		break;
++	}
++
++	amoeba_puts("\nAMOEBA FAIL-STOP: ");
++	amoeba_puts(what);
++	amoeba_puts("\nAMOEBA FAIL-STOP: mepc ");
++	amoeba_puthex(regs->mepc);
++	amoeba_puts(" mtval ");
++	amoeba_puthex(mtval);
++	amoeba_puts(" from ");
++	amoeba_puts(mode);
++	amoeba_puts("-mode\nAMOEBA FAIL-STOP: msecfault ");
++	amoeba_puthex(csr_read(AMOEBA_CSR_MSECFAULT));
++	amoeba_puts(" mftstatus ");
++	amoeba_puthex(csr_read(AMOEBA_CSR_MFTSTATUS));
++	/* Last line, and the one CI matches: everything above has been sent. */
++	amoeba_puts("\nAMOEBA FAIL-STOP: hart halted (mcause ");
++	amoeba_putdec(mcause);
++	amoeba_puts(")\n");
++	sbi_hart_hang();
++}
++
+ /**
+  * Handle trap/interrupt
+  *
+@@ -304,6 +432,13 @@
+ 		rc  = sbi_ecall_handler(regs);
+ 		msg = "ecall handler failed";
+ 		break;
++	case AMOEBA_CAUSE_FT_UNRESOLVED:
++	case AMOEBA_CAUSE_ECC_IEU:
++	case AMOEBA_CAUSE_ECC_DCACHE:
++	case AMOEBA_CAUSE_ECC_DCACHE_TAG:
++		/* From any mode, M included: never redirected to the kernel. */
++		amoeba_fail_stop(mcause, mtval, regs);
++		break;
+ 	case CAUSE_LOAD_ACCESS:
+ 	case CAUSE_STORE_ACCESS:
+ 		sbi_pmu_ctr_incr_fw(mcause == CAUSE_LOAD_ACCESS ?

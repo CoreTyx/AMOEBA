@@ -66,7 +66,7 @@ module forte_soc import cvw::*; #(
     // open as rv64_core_wrapper does: nothing in the ASIC consumes it yet, and
     // routing it to a pad is a decision for the DFT discussion.
     .PrivModeUncorrectableFaultW (),
-    // Fault flags for the read-only counters forte_uncore serves at ECC_COUNTER_BASE.
+    // Fault flags for the counters and last-error records forte_uncore serves at ECC_COUNTER_BASE.
     .FaultEvents);
 
   forte_uncore #(.P(P), .PERIPH_ONCHIP(PERIPH_ONCHIP)) uncore(

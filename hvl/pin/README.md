@@ -88,6 +88,7 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 | `irq <0\|1> <0\|1>` / `fault_inject <0\|1>` | pins |
 | `dump_mem <hexaddr> <nbytes> <path>` | write memory to a file |
 | `dft_hold <cycles>` | Pause the link, arm `scan_en`, enter hold without reset, check each frozen clock, exit and resume. Requires positive cycles; quiet-link timeout defaults to 10,000 clocks. Gate runs check `req`/`wr`; RTL also checks RF, pipeline, timer, cache/bus FSMs, MDU, page walker, fault/CSR/PLIC state and write enables. No actual scan chains in RTL; `full_tb` phase S tests shifting/reload. |
+| `dft_locked <cycles>` | The same pin sequence as a hold entry, then `scan_en` toggling as for a shift, on a part whose software cleared the DFT lock (`hdl/forte_dft_lock.sv`): nothing may happen, and the link keeps running. RTL checks `test_mode_dft`, `scan_en_dft` and `hold` stay low every cycle; any build relies on the program still finishing (`tests/dft_lock.cmd`). |
 | `dft ...` | fails: scan shifting is tested at gate level (`synth/scripts/full_tb` on `dft`) |
 | `finish` | pass, if no checker has fired |
 

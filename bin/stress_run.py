@@ -13,7 +13,7 @@ Per seed:
     in a stress program even though it is compiled -march=rv64gc
   * runs the matching make target (strict exit is on by default)
   * expect=pass: make must succeed and the log must say "test PASSED";
-    expect=fail (harness self-checks): the run must FAIL
+    expect=fail (harness self-checks): the run must FAIL, printing --fail-sig
 Writes sim/stress_results/<id>.json and appends a line to $GITHUB_STEP_SUMMARY.
 Exit status 0 only if every seed met its expectation.
 """
@@ -75,7 +75,7 @@ def run_seed(a, seed):
     cflags = f"-DSEED={seed} -DST_SCALE={a.scale}"
     if a.build == "spike":
         cflags += " -DCOSIM"
-    if a.variant == "dummy":
+    if "dummy" in a.variant:             # dummy, ecc_dummy
         cflags += f" -DST_DUMMY_INSERT={4 + seed % 13}"
     link_args = ""
     if a.link_args == "rand":
@@ -97,6 +97,7 @@ def run_seed(a, seed):
     stem = os.path.splitext(os.path.basename(a.path))[0]
     fp = fp_lint(os.path.join(SIM, "bin", stem + ".dis"))
     passed = p.returncode == 0 and "test PASSED" in log
+    dis = os.path.join(SIM, "bin", stem + ".dis")
     st_line = next((l for l in log.splitlines() if "[ST] pass=" in l), "")
     fails = [l for l in log.splitlines() if "  FAIL [" in l][:10]
     # A must-fail self-check only counts if the SIMULATOR delivered the FAIL
@@ -104,10 +105,15 @@ def run_seed(a, seed):
     # otherwise look like the harness catching the bad program.
     sim_verdict = any(m in log for m in ("test FAILED", "TB Error: Timed out",
                                           "halted without a tohost exit"))
+    # ... and only the intended failure: a self-check that failed some other way
+    # (a different trap, a timeout instead of an exit code) is a broken harness.
     if a.expect == "fail":
-        ok = (not passed) and sim_verdict
+        ok = (not passed) and sim_verdict and (not a.fail_sig or a.fail_sig in log)
     else:
-        ok = passed and not fp
+        # The F/D lint needs the disassembly; without it the lint proves nothing.
+        ok = passed and not fp and os.path.isfile(dis)
+        if passed and not os.path.isfile(dis):
+            fp = [f"no disassembly at {dis}: the F/D lint could not run"]
     return dict(seed=seed, ok=ok, passed=passed, rc=p.returncode, secs=round(dt, 1), fp_insns=fp[:5],
                 summary=st_line.strip(), fails=fails, run=run_name,
                 tail=log.splitlines()[-25:] if not ok else [])
@@ -136,6 +142,7 @@ def main():
     ap.add_argument("--link-args", default="")
     ap.add_argument("--variant", default="")
     ap.add_argument("--xfail", default="")
+    ap.add_argument("--fail-sig", default="", help="expect=fail: text the failing run must print")
     ap.add_argument("--id", default="")
     a = ap.parse_args()
 
@@ -170,6 +177,12 @@ def main():
     if xfail:
         print(f"known failure ({a.xfail}): not failing the job")
         return 0
+    if a.xfail and ok:
+        # XPASS: the deviation is fixed, so the xfail now hides nothing but its
+        # own staleness.  Fail until the header's xfail= is removed.
+        print(f"XPASS: marked xfail ({a.xfail}) but passed -- remove xfail= from {a.path}")
+        gh_error(f"{os.path.basename(a.path)} XPASS", [f"marked xfail ({a.xfail}) but passed: remove xfail="])
+        return 1
     return 0 if ok else 1
 
 

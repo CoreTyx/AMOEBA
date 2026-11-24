@@ -60,6 +60,9 @@ module icache_ecc_flush_tb;
   logic CacheMiss, CacheAccess;
   logic [2:0]  SecErr;
   logic        DedErr;
+  logic        DedTagErr;     // the tag share of DedErr
+  cvw::cache_ded_info_t DedInfo; // where it was (set, ways, source)
+  logic        EccDedDirtyFaultTagLost; // with EccDedDirtyFault: the line's tag was lost (cause 21)
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -79,8 +82,8 @@ module icache_ecc_flush_tb;
     .FaultInjectSec(1'b0), .FaultInjectDed(1'b0), .FaultLfsr('0), .FaultCount('0),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
-    .EccDedDirtyFault, .EccDedDirtyFaultAdr
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr, .DedTagErr, .DedInfo,
+    .EccDedDirtyFault, .EccDedDirtyFaultAdr, .EccDedDirtyFaultTagLost
   );
 
   always #5 clk = ~clk;
@@ -288,7 +291,7 @@ module icache_ecc_flush_tb;
 
     $display("icache_ecc_flush_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");
-    else $display("%0d FAILURES", errors);
+    else $fatal(1, "%0d FAILURES", errors);   // non-zero exit: make, and so CI, fails
     $finish;
   end
 

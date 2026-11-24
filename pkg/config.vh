@@ -288,7 +288,7 @@ localparam DTLB_ENTRIES = 32'd8;
 // floor for CACHE_SRAMLEN = 128 to divide evenly and for the AHB burst to stay
 // at 8 beats of AHBW.
 // Reviewed - pending area estimates (each is 8KB = 2KB * 4)
-localparam DCACHE_NUMWAYS = 32'd4;
+localparam DCACHE_NUMWAYS = 32'd2;  // 2 x 1 KiB = 2 KiB; same 128-row tag/data macros as the I$
 localparam DCACHE_WAYSIZEINBYTES = 32'd1024;
 localparam DCACHE_LINELENINBITS = 32'd128;
 localparam ICACHE_NUMWAYS = 32'd2; 

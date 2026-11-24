@@ -9,8 +9,11 @@
 //   - a second SC after a successful one fails (SC always clears the reservation)
 //   - SC to a different address than the LR fails and does not write
 //   - .w and .d, aq/rl variants, LR sign-extension for .w
-//   - a constrained LR/SC increment loop interrupted by a timer every few
-//     hundred cycles still makes progress and never loses or doubles an update
+//   - a constrained LR/SC increment loop interrupted by a timer every 2-4k
+//     cycles still makes progress and never loses or doubles an update: the
+//     handler adds to the same counter and kills the reservation (sc to a dummy
+//     word, as a kernel does on a context switch), so an SC that still succeeded
+//     after the interrupt would overwrite the handler's update
 //   - LR/SC to MMIO, a hole or a read-only page fault (no silent success)
 #include "../lib/stress.h"
 
@@ -38,12 +41,20 @@ static inline uint64_t lr_sc_w(volatile uint32_t *a, uint64_t v, uint64_t *old) 
 }
 
 static volatile uint64_t g_irqs;
+static volatile uint64_t g_ctr ST_ALIGNED(64);
+static volatile uint64_t g_resv_kill ST_ALIGNED(64);
+#define HANDLER_ADD 1000
 static int timer_irq(st_frame_t *f) {
     if (f->cause != (CAUSE_INTR | IRQ_M_TIMER)) return 0;
     g_irqs++;
     /* handler traffic of its own, as a real kernel's would be */
     static volatile uint64_t scratch[16];
     for (int i = 0; i < 16; i++) scratch[i] += (uint64_t)i;
+    /* Another context updates the counter the loop is incrementing, then the
+     * reservation is killed the way a kernel does on a context switch.  The
+     * interrupted LR/SC must now fail its SC and retry. */
+    g_ctr += HANDLER_ADD;
+    { uint64_t t; __asm__ volatile ("sc.d %0, zero, (%1)" : "=&r"(t) : "r"(&g_resv_kill) : "memory"); (void)t; }
     /* Measured: this handler costs ~1.7k cycles (GCC 14 build).  Re-arming
      * closer than that leaves the timer already expired at mret, so the next
      * interrupt is taken at once and the loop never runs (CI saw 4272
@@ -53,7 +64,6 @@ static int timer_irq(st_frame_t *f) {
     return 1;
 }
 
-static volatile uint64_t g_ctr ST_ALIGNED(64);
 static volatile uint64_t g_other ST_ALIGNED(64);
 static volatile uint32_t g_w[4] ST_ALIGNED(64);
 
@@ -111,7 +121,8 @@ int main(void) {
     csr_clear(mstatus, MSTATUS_MIE);
     csr_clear(mie, MIP_MTIP);
     st_timer_off();
-    ST_CHECK_EQ("no lost or doubled increment", *x, INCS);
+    ST_CHECK_EQ("no lost or doubled increment (loop + handler)", *x, (uint64_t)INCS + HANDLER_ADD * g_irqs);
+    ST_CHECK("SCs were made to retry by the handler", fails > 0);
     ST_CHECK("interrupts actually landed in the loop", g_irqs > 10);
     st_puts("[ST] irqs "); st_putdec(g_irqs); st_puts(" sc retries "); st_putdec(fails); st_putc('\n');
 
@@ -123,11 +134,16 @@ int main(void) {
         __asm__ volatile (".option push\n.option norvc\nlr.w t0, (%0)\n.option pop" :: "r"(tgt[i].a) : "t0", "memory");
         st_expect_clear();
         ST_CHECK_EQ(tgt[i].n, g_trap_cause, CAUSE_LOAD_ACCESS);
+        int hole = tgt[i].a == ST_HOLE_ADDR;           /* nothing there to read back */
+        uint32_t before = hole ? 0 : *(volatile uint32_t *)tgt[i].a;
+        uint64_t rd = 0x5c5c;                          /* kept if the sc traps */
         st_expect(ST_EXPECT_SKIP);
-        __asm__ volatile (".option push\n.option norvc\nsc.w t0, zero, (%0)\n.option pop" :: "r"(tgt[i].a) : "t0", "memory");
+        __asm__ volatile (".option push\n.option norvc\nsc.w %0, zero, (%1)\n.option pop"
+                          : "+r"(rd) : "r"(tgt[i].a) : "memory");
         st_expect_clear();
-        ST_CHECK("  sc faults (store access) or fails without a reservation",
-                 g_trap_cause == CAUSE_STORE_ACCESS || g_trap_cause == ~0UL);
+        if (st_trapped()) ST_CHECK_EQ("  sc faults as a store access", g_trap_cause, CAUSE_STORE_ACCESS);
+        else              ST_CHECK("  sc without a reservation reports failure (rd != 0)", rd != 0);
+        if (!hole) ST_CHECK_EQ("  the device register was not written", *(volatile uint32_t *)tgt[i].a, before);
     }
     uint64_t root = pt_new_identity_root(0);
     uint64_t fr = frame_alloc();

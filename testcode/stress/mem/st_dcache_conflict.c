@@ -3,8 +3,8 @@
 //
 // st_dcache_conflict -- D$ set-conflict and write-back stress.
 //
-// The D$ is 4 ways x 64 sets x 16-byte lines (pkg/config.vh, via amoeba_cfg.h),
-// so addresses 1 KiB apart share a set.  Each round picks a set and 5..16
+// The D$ is 2 ways x 64 sets x 16-byte lines (pkg/config.vh, via amoeba_cfg.h),
+// so addresses 1 KiB apart share a set.  Each round picks a set and WAYS+1..16
 // aliases of it -- always more than the ways -- and writes them with a random
 // mix of sb/sh/sw/sd that together build known 64-bit patterns, then reads them
 // back in a different order with different widths.  Every access is a conflict

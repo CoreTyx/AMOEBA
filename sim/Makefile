@@ -175,7 +175,11 @@ CVW_INCDIRS  = +incdir+$(CURDIR)/../hdl/core +incdir+$(CURDIR)/../pkg +incdir+$(
 # Changing this does not invalidate an existing build directory; run the matching
 # clean (or touch this Makefile) to force a recompile.
 EXTRA_DEFINES ?=
-COMMON_FLAGS = +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
+# --assert: Verilator drops immediate assertions without it.  The ones that
+# exist are the link bridge's protocol checks (hdl/forte_link_core.sv,
+# forte_link_phy.sv), so this only changes DUT=forte builds; prim_assert's
+# concurrent ones stay VCS-only (hdl/prim_assert.sv).
+COMMON_FLAGS = --assert +incdir+$(CURDIR)/../hvl/common $(CVW_INCDIRS) $(PRIM_INC) $(ECE411_NO_FLOAT) +define+DW_SUPPRESS_WARN +incdir+$(DW)/sim_ver $(DUMMY_TRACE_DEF) $(RETIRE_TRACE_DEF) $(EXTRA_DEFINES)
 # $(DUT_DEF) is load-bearing and was missing: only the VER_* flag sets carried
 # it, so `make vcs_isa_regression DUT=forte` silently built the LEGACY DUT.  VCS
 # is the only flow with -xprop, so for as long as that was true the ASIC top had
@@ -378,6 +382,40 @@ linux_boot_ecc_inject: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb $(LINUX_MEMLST)
 		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/boot_uart.log" \
 		|& tee $(CURDIR)/$(LINUX_ECC_INJECT_RUN_DIR)/simulation.log
 
+# ── Firmware fail-stop on an uncorrectable D$ error (cause 20/21) ─────────────
+# Same simulator as linux_boot_ecc_inject.  Once the kernel prints its banner
+# (~32M cycles, S-mode running), the testbench adds cache DED injection
+# (FI_CONTROL bit 7) on top of the six core units.  The next store into an
+# injected line makes a dirty uncorrectable line, the core traps with cause 20
+# (or 21 when the flip that hit was in the line's tag: the injector arms both),
+# and OpenSBI (testcode/linux/patches/opensbi-1.4-amoeba-fail-stop.patch) must
+# report it and halt -- not redirect it to Linux as an "unknown exception".
+# +FI_ONESHOT_ECE411 stops cache injection at that first cause-20/21 trap, so no
+# further flip lands in OpenSBI's stack while it reports (see top_tb.svh).
+# Passes only on a cause-20/21 report; any other fail-stop cause, a kernel
+# oops/panic or the stock redirect fails it.
+# LINUX_FAILSTOP_ARM_ON=AMOEBA_LINUX_BOOT_OK arms in userspace instead (~424M cycles).
+LINUX_FAILSTOP_ARM_ON   ?= Linux version 6.6
+LINUX_FAILSTOP_MASK     ?= 80
+LINUX_FAILSTOP_TIMEOUT  ?= 80000000
+LINUX_FAILSTOP_PASS     ?= AMOEBA FAIL-STOP: hart halted (mcause 20)|AMOEBA FAIL-STOP: hart halted (mcause 21)
+LINUX_FAILSTOP_FAIL     ?= $(LINUX_FAIL)|unknown exception|AMOEBA FAIL-STOP: hart halted (mcause 1
+LINUX_FAILSTOP_RUN_DIR  ?= verilator/linux_failstop_cache_ded
+
+.PHONY: linux_failstop_cache_ded
+linux_failstop_cache_ded: verilator/$(LINUX_ECC_INJECT_DIR)/Vtop_tb $(LINUX_MEMLST)
+	mkdir -p $(LINUX_FAILSTOP_RUN_DIR)
+	cd verilator && ./$(LINUX_ECC_INJECT_DIR)/Vtop_tb \
+		+TIMEOUT_ECE411=$(LINUX_FAILSTOP_TIMEOUT) \
+		+CLOCK_PERIOD_PS_ECE411=$(shell python3 $(CURDIR)/../bin/get_options.py clock) \
+		+MEMLST_ECE411="$(LINUX_MEMLST)" \
+		+FI_ARM_ON_UART_ECE411="$(LINUX_FAILSTOP_ARM_ON)" \
+		+FI_ARM_MASK_ECE411=$(LINUX_FAILSTOP_MASK) +FI_ONESHOT_ECE411 \
+		+UART_PASS_ECE411="$(LINUX_FAILSTOP_PASS)" \
+		+UART_FAIL_ECE411="$(LINUX_FAILSTOP_FAIL)" \
+		+UARTLOG_ECE411="$(CURDIR)/$(LINUX_FAILSTOP_RUN_DIR)/boot_uart.log" \
+		|& tee $(CURDIR)/$(LINUX_FAILSTOP_RUN_DIR)/simulation.log
+
 .PHONY: freertos
 freertos: verilator/$(NO_SPIKE_DIR)/Vtop_tb
 	$(MAKE) -C $(CURDIR)/../testcode/freertos build
@@ -511,11 +549,16 @@ FREERTOS_TESTS    ?= $(shell find $(CURDIR)/../testcode/freertos -name 'tc_*.c')
 
 RISCV_FORMAL_MONITOR_DIR = $(CURDIR)/../third_party/riscv-formal/monitor
 RISCV_FORMAL_MONITOR     = $(RISCV_FORMAL_MONITOR_DIR)/generate.py
-RVFIMON_ISA          ?= rv64imafdc_zb
-# Local fixes on top of the generated monitor, applied in order.  Applied by
-# generated-files and re-applied by check-generated, so regenerating cannot
-# silently drop them.
-RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-clz-ctz.patch $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch $(CURDIR)/../patches/rvfimon-w-low32.patch
+# The ISA of the CHIP (pkg/config.vh: RV64IMAC, no F/D, no Zb/Zk), not of the
+# compiler target: a monitor for a bigger ISA expects encodings this core
+# correctly traps on to execute, and its false alarms had to be waived.
+RVFIMON_ISA          ?= rv64imac
+# Local fixes on top of the generated monitor, applied in order (div-zero builds
+# on div-overflow).  Applied by generated-files and re-applied by
+# check-generated, so regenerating cannot silently drop them.
+# patches/rvfimon-clz-ctz.patch fixes Zbb's clz/ctz models and is kept for a
+# configuration with Zbb; rv64imac has no such instructions to patch.
+RVFIMON_PATCHES      = $(CURDIR)/../patches/rvfimon-div-overflow.patch $(CURDIR)/../patches/rvfimon-div-zero.patch $(CURDIR)/../patches/rvfimon-w-low32.patch
 
 .PHONY: generate-rtl
 generate-rtl:
@@ -526,7 +569,7 @@ generated-files:
 	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT)
 	cd $(RISCV_FORMAL_MONITOR_DIR) && \
 	    python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $(CURDIR)/../hvl/common/rvfimon.v
-	for p in $(RVFIMON_PATCHES); do patch -s $(CURDIR)/../hvl/common/rvfimon.v < $$p; done
+	for p in $(RVFIMON_PATCHES); do patch -s --no-backup-if-mismatch $(CURDIR)/../hvl/common/rvfimon.v < $$p; done
 
 .PHONY: check-generated
 check-generated:
@@ -534,7 +577,7 @@ check-generated:
 	python3 $(CURDIR)/../bin/rvfi_reference.py 1 $(RVFI_NO_FLOAT); \
 	cd $(RISCV_FORMAL_MONITOR_DIR) && python3 generate.py -i $(RVFIMON_ISA) -a -r 0 -c 1 > $$tmp/rvfimon.v; \
 	for p in $(RVFIMON_PATCHES); do \
-		patch -s $$tmp/rvfimon.v < $$p || { echo "ERROR: $$p no longer applies to the generated monitor."; echo "The submodule moved; rebase or drop the patch if it is upstream now."; rm -rf $$tmp; exit 1; }; \
+		patch -s --no-backup-if-mismatch $$tmp/rvfimon.v < $$p || { echo "ERROR: $$p no longer applies to the generated monitor."; echo "The submodule moved; rebase or drop the patch if it is upstream now."; rm -rf $$tmp; exit 1; }; \
 	done; \
 	diff $(CURDIR)/../hvl/common/rvfimon.v $$tmp/rvfimon.v || (echo "ERROR: rvfimon.v is stale — run 'make generated-files'" && rm -rf $$tmp && exit 1); \
 	rm -rf $$tmp; \

@@ -85,7 +85,18 @@ static uint64_t u_body(uint64_t arg) {
                 if (*w != sig(p, s, round)) errors++;
                 *w = sig(p, s, round + 1);
             }
-            if ((n % SWAP_EVERY) == SWAP_EVERY - 1) u_swap(u_rand(), u_rand());
+            if ((n % SWAP_EVERY) == SWAP_EVERY - 1) {
+                /* Swap the page just accessed -- its translation is in the DTLB
+                 * -- with another, then read it again at once: a translation that
+                 * survived the sfence reads the other page's frame. */
+                uint64_t q = (p + 1 + u_rand() % (NPAGES - 1)) % NPAGES;
+                u_swap(p, q);
+                for (uint64_t s = 0; s < 8; s++) {
+                    volatile uint64_t *w = (volatile uint64_t *)(VA_BASE + p * ST_PAGE + s * 504);
+                    checks++;
+                    if (*w != sig(p, s, round + 1)) errors++;
+                }
+            }
         }
     }
     g_u_errors = errors;
@@ -121,7 +132,7 @@ int main(void) {
     uint64_t r = st_run_in_mode(PRV_U, (uint64_t (*)(uint64_t))st_u_alias((uint64_t)u_body), 0, usp);
     ST_CHECK_EQ("U saw no stale translation", r, 0);
     ST_CHECK_EQ("U error count", g_u_errors, 0);
-    ST_CHECK_EQ("all slots checked", g_u_checks, (uint64_t)ROUNDS * NPAGES * 8);
+    ST_CHECK_EQ("all slots checked", g_u_checks, (uint64_t)ROUNDS * NPAGES * 8 + g_swaps * 8);
     ST_CHECK("swaps happened", g_swaps >= (uint64_t)ROUNDS * NPAGES / SWAP_EVERY / 2);
 
     st_section("kernel view agrees with U view");

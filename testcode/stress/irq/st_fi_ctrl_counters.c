@@ -3,7 +3,7 @@
 // st_fi_ctrl_counters -- the AMOEBA fault-tolerance MMIO as firmware will use
 // it, and its protection from the OS.
 //   - FI_CONTROL (0x1007000b) is a single byte, resets to 0 on silicon, and
-//     holds every value; the 18 fault counters (0x10080000) read as words and,
+//     holds every value; the 23 fault counters (0x10080000) read as words and,
 //     with no faults injected, stay at zero across a burst of real work
 //   - OpenSBI-style PMP: a NAPOT entry without permissions over the FT MMIO
 //     block makes S/U loads and stores access-fault while M still works, and a
@@ -16,7 +16,7 @@
 #define FI_BLOCK_SIZE 0x10000UL
 #define CNT_BLOCK     ECC_COUNTER_BASE  /* 4 KiB of fault counters */
 #define CNT_BLOCK_SIZE 0x1000UL
-#define NCOUNTERS     18
+#define NCOUNTERS     23                /* hdl/core/cvw.sv FAULT_COUNTERS */
 
 static volatile uint8_t *const g_fi = (volatile uint8_t *)FI_CONTROL_ADDR;
 static uint64_t s_ld_counter(uint64_t i) { return *(volatile uint32_t *)(ECC_COUNTER_BASE + 4 * i); }
@@ -70,5 +70,29 @@ int main(void) {
     pmp_write_cfg(1, PMP_OFF);                      /* ignored: entry is locked */
     ST_CHECK_EQ("locked cfg cannot be cleared", m_try_lw(ECC_COUNTER_BASE, &v), 1);
     ST_CHECK_EQ("the console (UART) is still reachable from M", m_try_lbu(UART_BASE_ADDR + UART_LSR, &v), 0);
+
+    st_section("a locked entry's address cannot be moved either");
+    /* Rewriting pmpaddr is the other way around a lock: move the region off the
+     * block it protects.  Both locked entries must keep their address. */
+    uint64_t a0 = pmp_read_addr(0), a1 = pmp_read_addr(1);
+    pmp_write_addr(0, a0 ^ (0x100UL << AMOEBA_PMP_G));
+    pmp_write_addr(1, 0);
+    ST_CHECK_EQ("locked pmpaddr0 ignores writes", pmp_read_addr(0), a0);
+    ST_CHECK_EQ("locked pmpaddr1 ignores writes", pmp_read_addr(1), a1);
+    ST_CHECK_EQ("  M is still refused at FI_CONTROL", m_try_sb(FI_CONTROL_ADDR, 0x34), 1);
+
+    /* Priv. spec: a locked TOR entry also locks the pmpaddr BELOW it (its base).
+     * Entries 4/5 form an empty TOR range (top == base), so they match nothing. */
+    uint64_t base = (0x8F000000UL >> 2);
+    pmp_write_addr(4, base);
+    pmp_write_addr(5, base);
+    pmp_write_addr(6, base + 0x40);                         /* unlocked control */
+    pmp_write_cfg(5, PMP_TOR | PMP_L);
+    pmp_write_addr(4, base + (0x40UL << AMOEBA_PMP_G));
+    pmp_write_addr(5, base + (0x80UL << AMOEBA_PMP_G));
+    pmp_write_addr(6, base + 0x80);
+    ST_CHECK_EQ("locked TOR entry 5 keeps its top", pmp_read_addr(5), base);
+    ST_CHECK_EQ("... and locks the base below it (pmpaddr4)", pmp_read_addr(4), base);
+    ST_CHECK("unlocked pmpaddr6 does take writes (control)", pmp_read_addr(6) != base + 0x40);
     return st_result();
 }

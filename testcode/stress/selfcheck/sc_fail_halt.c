@@ -1,4 +1,4 @@
-// @stress tier=pr build=no_spike expect=fail timeout=200000 pin=no
+// @stress tier=pr build=no_spike expect=fail timeout=200000 pin=no fail_sig=halted without a tohost exit
 // Harness self-test for strict exit: the explicit halt encoding reached
 // without a tohost exit must FAIL, not end the run cleanly.
 #include "../lib/stress.h"

@@ -106,7 +106,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   output logic                 ICacheAccess,                             // Report I$ read to performance counters
   output logic                 ICacheMiss,                               // Report I$ miss to performance counters
   output logic [2:0]           ICacheSec,                                // fault flags for the counters (cache.sv)
-  output logic                 ICacheDed
+  output logic                 ICacheDed,
+  output logic                 ICacheTagDed,                             // ... of which an uncorrectable tag
+  output cache_ded_info_t      ICacheDedInfo                             // ... and where it was
 );
 
   localparam [31:0]            nop = 32'h00000013;                       // instruction for NOP
@@ -277,7 +279,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       localparam            LLENPOVERAHBW = P.LLEN / P.AHBW; // Number of AHB beats in a LLEN word. AHBW cannot be larger than LLEN. (implementation limitation)
       logic [P.PA_BITS-1:0] ICacheBusAdr;
       logic                 ICacheBusAck;
-      logic                 UnusedICacheEccDedDirtyFault;
+      logic                 UnusedICacheEccDedDirtyFault, UnusedICacheEccDedTagLost; // no dirty lines in the I$
       logic [P.PA_BITS-1:0] UnusedICacheEccDedDirtyFaultAdr;
       logic [1:0]           CacheBusRW, BusRW, CacheRWF;
 
@@ -297,7 +299,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .ReadDataWord(ICacheInstrF), .AmoWord(), .AmoOffset('0),
              .SelHPTW('0),
              .CacheMiss(ICacheMiss), .CacheAccess(ICacheAccess),
-             .SecErr(ICacheSec), .DedErr(ICacheDed),
+             .SecErr(ICacheSec), .DedErr(ICacheDed), .DedTagErr(ICacheTagDed), .DedInfo(ICacheDedInfo),
              .ByteMask('0), .BeatCount('0), .SelBusBeat('0),
              .WriteData('0),
              .CacheRW(CacheRWF),
@@ -306,7 +308,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
              .PAdr(PCPF),
              .CacheCommitted(CacheCommittedF), .InvalidateCache(InvalidateICacheM), .InvalidateFlushStage(FlushW), .CMOpM('0),
              .EccDedDirtyFault(UnusedICacheEccDedDirtyFault),
-             .EccDedDirtyFaultAdr(UnusedICacheEccDedDirtyFaultAdr));
+             .EccDedDirtyFaultAdr(UnusedICacheEccDedDirtyFaultAdr),
+             .EccDedDirtyFaultTagLost(UnusedICacheEccDedTagLost));
 
       ahbcacheinterface #(P, BEATSPERLINE, AHBWLOGBWPL, LINELEN, LLENPOVERAHBW, 1)
       ahbcacheinterface(.HCLK(clk), .HRESETn(~reset), .DFTHold,
@@ -338,7 +341,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
       assign ICacheBusyF = 1'b0;
-      assign {ICacheSec, ICacheDed} = '0;
+      assign {ICacheSec, ICacheDed, ICacheTagDed, ICacheDedInfo} = '0;
     end
 
     // mux between the alignments of uncached reads.
@@ -351,7 +354,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
     assign ICacheBusyF = 1'b0;
-    assign {ICacheSec, ICacheDed} = '0;
+    assign {ICacheSec, ICacheDed, ICacheTagDed, ICacheDedInfo} = '0;
     assign InstrRawF = IROMInstrF;
   end
 

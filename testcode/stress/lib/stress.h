@@ -1019,6 +1019,12 @@ static inline void st_init(void) {
      * under the whole test.  Dummies are architecturally invisible, so every
      * result must be unchanged. */
     csr_write(0x7c1, (uint64_t)(ST_DUMMY_INSERT));
+    /* A variant whose insertion silently stayed off would pass while testing
+     * nothing: the rate must read back. */
+    if (csr_read(0x7c1) != (uint64_t)(ST_DUMMY_INSERT)) {
+        st_puts("[ST] dummy insertion did not enable (CSR 0x7c1 readback)\n");
+        st_m_exit(0x7c1);
+    }
 #endif
     st_puts("[ST] seed "); st_putdec((uint64_t)SEED); st_putc('\n');
 }

@@ -116,7 +116,7 @@ module cache_ecc_unit_tb;
 
     $display("cache_ecc_unit_tb: %0d/%0d checks passed", totalchecks - errors, totalchecks);
     if (errors == 0) $display("ALL TESTS PASSED");
-    else $display("%0d FAILURES", errors);
+    else $fatal(1, "%0d FAILURES", errors);   // non-zero exit: make, and so CI, fails
     $finish;
   end
 
