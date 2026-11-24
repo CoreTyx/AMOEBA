@@ -156,13 +156,16 @@ def cmp_link_reorder(pa, pb, window):
                        f"  A    : {a_writes[i]}", f"  B    : {b_writes[i]}"]
 
     groups_b = defaultdict(list)
-    for n, cyc, k in b_recs:
-        groups_b[link_group(k)].append((n, cyc, k))
+    for ib, (n, cyc, k) in enumerate(b_recs):
+        groups_b[link_group(k)].append((ib, n, cyc, k))
     taken = Counter()
     shift = 0
-    for n, cyc, k in a_recs:
+    worst = None
+    max_moved = 0
+    in_place_shift = 0
+    for ia, (n, cyc, k) in enumerate(a_recs):
         g = link_group(k)
-        nb, cb, kb = groups_b[g][taken[g]]
+        ib, nb, cb, kb = groups_b[g][taken[g]]
         taken[g] += 1
         if kb != k:
             return False, [f"MISMATCH link trace: records for {' '.join(g)} come in a different order "
@@ -172,13 +175,25 @@ def cmp_link_reorder(pa, pb, window):
                 return False, [f"MISMATCH link trace: same transaction, but cycle {cb} vs {cyc} is a shift of "
                                f"{cb - cyc:+d}, beyond --reorder {window} ({pa}:{n} vs {pb}:{nb})",
                                f"  A    : {k}", f"  B    : {kb}"]
+            moved_by = abs(ib - ia)
+            max_moved = max(max_moved, moved_by)
+            if moved_by == 0:
+                in_place_shift = max(in_place_shift, abs(cb - cyc))
+            if worst is None or abs(cb - cyc) > abs(worst[2] - worst[1]):
+                worst = (k, cyc, cb, moved_by, n, nb)
             shift = max(shift, abs(cb - cyc))
 
     moved = sum(1 for x, y in zip(a_keys, b_keys) if x != y)
     errs = sum(1 for k in a_keys if k.startswith("E"))
-    msg = (f"link {len(a)} records, {moved} out of place (cycle shift +-{shift}, within --reorder {window})"
+    msg = (f"link {len(a)} records, {moved} out of place (cycle shift +-{shift}, within --reorder {window}; "
+           f"moved at most {max_moved} places; records in place shift +-{in_place_shift})"
            f"{f', but both contain {errs} checker errors' if errs else ''}")
-    return errs == 0, [msg]
+    out = [msg]
+    if worst and worst[2] != worst[1]:
+        k, ca, cb, moved_by, na, nb = worst
+        out.append(f"  largest shift: {k}, cycle {ca} -> {cb} ({cb - ca:+d}), moved {moved_by} places "
+                   f"({pa}:{na} vs {pb}:{nb})")
+    return errs == 0, out
 
 
 # ---- pin_cycle.log ------------------------------------------------------------
@@ -339,6 +354,9 @@ def main(argv):
     ok = all(r[0] for r in results)
     if ok:
         print("MATCH: " + "; ".join(r[1][0] for r in results))
+        for r in results:
+            for detail in r[1][1:]:
+                print(detail)
     else:
         bad = [r for r in results if not r[0]]
         lines = [l for r in bad for l in r[1]]
