@@ -28,6 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module hazard (
+  input  logic  DFTHold,                          // DFT hold: no flush (forte_chip.sv)
   input  logic  BPWrongE, CSRWriteFenceM, RetM, TrapM,
   input  logic  StructuralStallD,
   input  logic  LSUStallM, IFUStallF,
@@ -36,6 +37,7 @@ module hazard (
   // Shadow retry has the same whole-pipeline semantics as a cache/bus stall.
   input  logic  FTStall,                           // result is not yet trusted
   input  logic  wfiM, IntPendingM,
+  input  logic  ExceptionWaitsM,                  // exception held off by a committed fetch (privileged.sv)
   input  logic  InjectD,
   // Stall & flush outputs
   output logic StallF, StallD, StallE, StallM, StallW,
@@ -98,7 +100,8 @@ module hazard (
   // An older M-stage trap/return/CSR flush cancels younger FT diagnosis. A fresh
   // mismatch in E must not hold the flushing instruction forever; flopenrc clears
   // only when enabled, so trap flushing must also release the stall.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | (FTStall & ~FlushMCause);
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (LSUStallM & ~FlushWCause) | ExternalStall | (FTStall & ~FlushMCause) |
+                       ExceptionWaitsM;
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0
@@ -119,8 +122,10 @@ module hazard (
   assign LatestUnstalledW = ~StallW & StallM;
 
   // Each stage flushes if the previous stage is the last one stalled (for cause) or the system has reason to flush
-  assign FlushD = LatestUnstalledD | FlushDCause; // coverage tag: LatestUnstalledD always 0
-  assign FlushE = LatestUnstalledE | FlushECause;
-  assign FlushM = LatestUnstalledM | FlushMCause;
-  assign FlushW = LatestUnstalledW | FlushWCause;
+  // A DFT hold stalls every stage (ExternalStall) and must not flush either:
+  // the flush causes come from scanned registers that change while they shift.
+  assign FlushD = (LatestUnstalledD | FlushDCause) & ~DFTHold; // coverage tag: LatestUnstalledD always 0
+  assign FlushE = (LatestUnstalledE | FlushECause) & ~DFTHold;
+  assign FlushM = (LatestUnstalledM | FlushMCause) & ~DFTHold;
+  assign FlushW = (LatestUnstalledW | FlushWCause) & ~DFTHold;
 endmodule

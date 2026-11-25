@@ -469,7 +469,7 @@ module rv64_core_wrapper import cvw::*; (
     // cleared by a flush is never selected.
     assign monitor_pc_wdata = RetW                                ? EPCW        :  // mret/sret: return to saved EPC
                               TrapW                               ? TrapVectorW :  // exception: jump to handler
-                              PCSrcW_r                            ? IEUAdrW     :  // taken branch/jump: resolved target
+                              PCSrcW_r                            ? {IEUAdrW[63:1], 1'b0} :  // taken branch/jump: resolved target, LSB cleared as jalr does
                               ((InstrValidM | DummyM) & (|PCM))   ? PCM         :  // sequential: lookahead to M
                               ((InstrValidE | DummyE) & (|PCE))   ? PCE         :
                               ((InstrValidD | DummyD) & (|PCD))   ? PCD         :

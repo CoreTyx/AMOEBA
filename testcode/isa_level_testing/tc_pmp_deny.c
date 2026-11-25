@@ -20,7 +20,6 @@
 #define PMP_W     0x02UL
 #define PMP_X     0x04UL
 #define PMP_TOR   0x08UL
-#define PMP_NA4   0x10UL
 #define PMP_NAPOT 0x18UL
 #define PMP_L     0x80UL
 
@@ -60,20 +59,24 @@ __asm__ (
     "    li t0, 0x20000\n     csrc mstatus, t0\n"      // MPRV off
     "    li t0, 0x1800\n      csrs mstatus, t0\n"      // MPP = M
     "    mret\n"
-    // Two full-size instructions in one 8-byte block, so that an entry can
-    // cover both or exactly one of them.
+    // Straight-line code over two PMP grains (16 B each, pkg/config.vh
+    // PMP_G = 2), ending in an ecall in the second, so that an entry can
+    // cover both grains or exactly one of them.
     ".option push\n"
+    // Align while 2-byte padding is allowed. The preceding RVC code may end
+    // on a halfword boundary.
+    ".align 5\n"
     ".option norvc\n"
-    ".align 3\n"
     ".globl pmp_stub\n"
     "pmp_stub:\n"
-    "    nop\n"
+    "    nop\n    nop\n    nop\n    nop\n"
     "    ecall\n"
     ".option pop\n"
 );
 extern void pmp_trap(void);
 extern void pmp_stub(void);
 #define STUB ((uint64_t)pmp_stub)
+#define GRAIN 16UL                        /* PMP grain: the smallest region */
 
 static void clear_trap(void) { trap_cause = NO_TRAP; trap_epc = NO_TRAP; trap_tval = NO_TRAP; }
 
@@ -212,7 +215,7 @@ int main(void) {
     // ---- Top-of-range regions with no permissions, [lo, hi): the words on
     // either side of each bound.
     {
-        static const uint64_t bounds[][2] = { {0x1008, 0x1100}, {0x1200, 0x1ff8}, {0x0ff8, 0x2008}, {0x1400, 0x1408} };
+        static const uint64_t bounds[][2] = { {0x1010, 0x1100}, {0x1200, 0x1ff0}, {0x0ff0, 0x2010}, {0x1400, 0x1410} }   /* 16 B PMP grain */;
         test_begin("top-of-range regions");
         before = trap_count; bad = 0;
         for (unsigned i = 0; i < sizeof bounds / sizeof bounds[0]; i++) {
@@ -240,13 +243,13 @@ int main(void) {
     went_through("store at the bound", ZW(0x1000), 0x9999);
 
     // ---- The lowest-numbered matching entry decides.
-    pmp_set(napot(Z(0x1800), 8), napot(Z(0x1000), 4096), 0, (PMP_NAPOT | PMP_W | PMP_R) | (PMP_NAPOT << 8), 1);
+    pmp_set(napot(Z(0x1800), GRAIN), napot(Z(0x1000), 4096), 0, (PMP_NAPOT | PMP_W | PMP_R) | (PMP_NAPOT << 8), 1);
     went_through("allowed word inside a refused page", probe_load(Z(0x1800)), pattern(0x1800));
     probe_load(Z(0x17f8));
     refused("the word before it", CAUSE_LOAD_ACCESS, Z(0x17f8));
-    probe_load(Z(0x1808));
-    refused("the word after it", CAUSE_LOAD_ACCESS, Z(0x1808));
-    pmp_set(napot(Z(0x1000), 4096), napot(Z(0x1800), 8), 0, PMP_NAPOT | ((PMP_NAPOT | PMP_W | PMP_R) << 8), 1);
+    probe_load(Z(0x1810));
+    refused("the word after it", CAUSE_LOAD_ACCESS, Z(0x1810));
+    pmp_set(napot(Z(0x1000), 4096), napot(Z(0x1800), GRAIN), 0, PMP_NAPOT | ((PMP_NAPOT | PMP_W | PMP_R) << 8), 1);
     probe_load(Z(0x1800));
     refused("the same word, entries the other way round", CAUSE_LOAD_ACCESS, Z(0x1800));
 
@@ -262,27 +265,27 @@ int main(void) {
 
     // ---- Fetches.  The first one brings the stub's line into the cache; the
     // refused ones after it are cache hits.
-    pmp_set(napot(STUB, 8), 0, 0, PMP_NAPOT | PMP_X, 1);
+    pmp_set(napot(STUB, 2 * GRAIN), 0, 0, PMP_NAPOT | PMP_X, 1);
     probe_fetch(STUB);
     test_begin("fetch from an execute-only block reaches the ecall");
     check("mcause", trap_cause, CAUSE_ECALL_S);
-    check("mepc", trap_epc, STUB + 4);
+    check("mepc", trap_epc, STUB + GRAIN);
     probe_load(STUB);
     refused("load from an execute-only block", CAUSE_LOAD_ACCESS, STUB);
 
-    pmp_set(STUB >> 2, (STUB + 4) >> 2, 0, (PMP_NA4 | PMP_X) | ((PMP_NA4 | PMP_R) << 8), 1);
+    pmp_set(napot(STUB, GRAIN), napot(STUB + GRAIN, GRAIN), 0, (PMP_NAPOT | PMP_X) | ((PMP_NAPOT | PMP_R) << 8), 1);
     probe_fetch(STUB);
-    refused("fetch running on into a block that is not executable", CAUSE_INSTR_ACCESS, STUB + 4);
+    refused("fetch running on into a block that is not executable", CAUSE_INSTR_ACCESS, STUB + GRAIN);
 
-    pmp_set(napot(STUB, 8), 0, 0, PMP_NAPOT | PMP_R, 1);
+    pmp_set(napot(STUB, 2 * GRAIN), 0, 0, PMP_NAPOT | PMP_R, 1);
     probe_fetch(STUB);
     refused("fetch from a read-only block", CAUSE_INSTR_ACCESS, STUB);
 
-    pmp_set(napot(STUB, 8), 0, 0, PMP_NAPOT | PMP_X, 1);
+    pmp_set(napot(STUB, 2 * GRAIN), 0, 0, PMP_NAPOT | PMP_X, 1);
     probe_fetch(STUB);
     test_begin("fetch from the block again once it is executable");
     check("mcause", trap_cause, CAUSE_ECALL_S);
-    check("mepc", trap_epc, STUB + 4);
+    check("mepc", trap_epc, STUB + GRAIN);
 
     // ---- A device register: a refused store must not reach the bus.
     before = *(volatile uint64_t *)MTIMECMP;

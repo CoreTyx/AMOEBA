@@ -17,7 +17,9 @@
 #define configUSE_PREEMPTION                    1
 #define configUSE_TIME_SLICING                  1
 #define configUSE_IDLE_HOOK                     0
+#ifndef configUSE_TICK_HOOK   /* overridable per test: // @freertos-cflags */
 #define configUSE_TICK_HOOK                     0
+#endif
 #define configUSE_DAEMON_TASK_STARTUP_HOOK      0
 
 /* ---- Clock / tick ---- */
@@ -35,10 +37,14 @@
  * Tick counts (not wall-clock milliseconds) are what the tc_*.c tests assert
  * on, so shortening the tick does not weaken them.
  */
+#ifndef configTICK_RATE_HZ   /* overridable per test: // @freertos-cflags */
 #define configTICK_RATE_HZ                      ( ( TickType_t ) 10000 )
+#endif
 
 /* ---- Memory ---- */
+#ifndef configTOTAL_HEAP_SIZE   /* overridable per test: // @freertos-cflags */
 #define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 64 * 1024 ) )
+#endif
 #define configMINIMAL_STACK_SIZE                ( ( uint32_t ) 256 )  /* in words */
 #define configMAX_TASK_NAME_LEN                 16
 #define configSTACK_DEPTH_TYPE                  uint32_t

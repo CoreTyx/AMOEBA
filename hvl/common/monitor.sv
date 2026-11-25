@@ -7,6 +7,17 @@ module monitor #(
     mon_itf itf
 );
 
+    // +STRICT_EXIT_ECE411: only the explicit halt encoding ends a run, exactly
+    // as under ECE411_LINUX.  Without it a program that parks in `j .` or
+    // `beq zero,zero,.` -- a hang, a lost interrupt, a trap loop -- ends the
+    // run with $finish and exit status 0, i.e. a silent PASS.  With it a
+    // self-loop keeps running until tohost or the timeout, and top_tb.svh
+    // fails a halt that arrives without a tohost exit.  sim/Makefile passes it
+    // by default (STRICT_EXIT ?= 1); every program built on bin/startup.s or
+    // test_utils.h already reports through tohost first.
+    bit strict_exit;
+    initial strict_exit = $test$plusargs("STRICT_EXIT_ECE411");
+
     function bit is_halt(input logic [31:0] inst);
 `ifdef ECE411_LINUX
         // Both OpenSBI and the kernel contain self-branch park loops -- `j .`
@@ -15,7 +26,10 @@ module monitor #(
         // a Linux run; the UART matcher in top_tb.svh decides pass/fail.
         is_halt = (inst == 32'hf0002013);
 `else
-        is_halt = inst inside {32'h00000063, 32'h0000006f, 32'hf0002013};
+        if (strict_exit)
+            is_halt = (inst == 32'hf0002013);
+        else
+            is_halt = inst inside {32'h00000063, 32'h0000006f, 32'hf0002013};
 `endif
     endfunction
 

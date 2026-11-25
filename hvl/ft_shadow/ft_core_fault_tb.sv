@@ -64,6 +64,7 @@ module ft_core_fault_tb;
   // Directly exercise older-flush priority, including interrupted WFI, whose
   // trap intentionally preserves W while clearing the younger stages.
     hazard flush_priority_probe (
+      .DFTHold(1'b0),
       .BPWrongE(1'b0),
       .CSRWriteFenceM(probe_csr),
       .RetM(probe_ret),
@@ -78,6 +79,7 @@ module ft_core_fault_tb;
       .FTStall(1'b1),
       .wfiM(probe_wfi),
       .IntPendingM(probe_pending),
+      .ExceptionWaitsM(1'b0),
       .InjectD(1'b0),
       .StallF(),
       .StallD(),

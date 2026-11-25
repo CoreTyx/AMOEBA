@@ -30,6 +30,7 @@
 
 module privileged import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
+  input  logic              DFTHold,         // DFT hold (forte_chip.sv)
   input  logic              StallD, StallE, StallM, StallW,
   input  logic              FlushD, FlushE, FlushM, FlushW,
   // CSR Reads and Writes, and values needed for traps
@@ -97,6 +98,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] TrapVectorM,                                    // Trap vector, to IFU PC logic
   // control outputs
   output logic              RetM, TrapM,                                    // return instruction, or trap
+  output logic              ExceptionWaitsM,                                // exception held off by a fetch the IFU has committed to
   output logic              sfencevmaM,                                     // sfence.vma instruction
   input  logic              InvalidateICacheM,                              // fence instruction
   output logic              BigEndianM,                                     // Use big endian in current privilege mode
@@ -146,13 +148,13 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .PrivModeSecFaultW, .PrivModeUncorrectableFaultW);
 
   // decode privileged instructions
-  privdec #(P) pmd(.clk, .reset, .StallW, .FlushW, .InstrM(InstrM[31:7]),
+  privdec #(P) pmd(.clk, .reset, .DFTHold, .StallW, .FlushW, .InstrM(InstrM[31:7]),
     .PrivilegedM, .IllegalIEUFPUInstrM, .IllegalCSRAccessM,
     .PrivilegeModeW, .STATUS_TSR, .STATUS_TVM, .STATUS_TW, .TrapM, .IllegalInstrFaultM,
     .EcallFaultM, .BreakpointFaultM, .sretM, .mretM, .RetM, .wfiM, .wfiW, .sfencevmaM);
 
   // Control and Status Registers
-  csr #(P) csr(.clk, .reset, .FlushM, .FlushW, .StallE, .StallM, .StallW,
+  csr #(P) csr(.clk, .reset, .DFTHold, .FlushM, .FlushW, .StallE, .StallM, .StallW,
     .InstrM, .InstrOrigM, .PCM, .PCSpillM, .SrcAM, .IEUAdrxTvalM,
     .FTStatus,
     .CSRReadM, .CSRWriteM, .PrivModeSecFaultW, .PrivModeUncorrectableFaultW,
@@ -179,7 +181,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .InstrPageFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalIEUFPUInstrM);
 
   // trap logic
-  trap #(P) trap(.reset,
+  trap #(P) trap(.reset, .DFTHold,
     .InstrMisalignedFaultM, .InstrAccessFaultM, .HPTWInstrAccessFaultM, .HPTWInstrPageFaultM, .IllegalInstrFaultM, .FTUnresolvedFaultM,
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
@@ -190,4 +192,9 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),
     .DCacheEccDedTrapTakenM,
     .IntPendingM, .DelegateM, .CauseM);
+
+  // TrapM waits out CommittedF.  The faults reach Memory from registers, a cycle into the
+  // instruction's stay there, by when the next fetch may be under way, and the IFU's stall
+  // alone does not hold Memory through a Decode flush.  Hold it for the trap.
+  assign ExceptionWaitsM = ExceptionM & CommittedF;
 endmodule

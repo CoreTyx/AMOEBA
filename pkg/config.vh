@@ -316,7 +316,9 @@ localparam PMP_ENTRIES = 32'd16;
 
 // grain size should be a full cache line to avoid problems with accesses within a cache line
 // that span grain boundaries but are handled without a spill
-localparam PMP_G = 32'd0;  // pending thought experiement
+localparam PMP_G = 32'd2;  // 2^(G+2) = 16 B = one cache line: no aligned access or
+                            // line-internal fetch can straddle a grain, so PMP matching on
+                            // the access's base address is exact (Priv. spec partial-match rule)
 
 // Address space
 // boot_shim.bin, per testcode/linux/README.md's memory layout.
