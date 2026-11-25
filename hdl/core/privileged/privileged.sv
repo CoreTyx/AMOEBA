@@ -115,9 +115,10 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
   // D$ SECDED: uncorrectable data error on a dirty line -- own cause (20), independent of the IEU
   // regfile's ECC DED (cause 19) above.
   input  logic              DCacheEccDedFaultM,                            // registered D$ dirty-DED fault presented to trap logic
+  input  logic              DCacheEccDedFaultTagLostM,                     // ... and its tag was lost too: cause 21 instead of 20
   input  logic [P.XLEN-1:0] DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM, // captured trap metadata
   input  logic              DCacheEccDedDirtyFaultM,                       // raw (unregistered) pulse, for MSECFAULT logging
-  output logic              DCacheEccDedTrapTakenM                         // cause 20 was selected and consumed
+  output logic              DCacheEccDedTrapTakenM                         // cause 20 or 21 was selected and consumed
 );
 
   logic [4:0]               CauseM;                                         // trap cause
@@ -186,7 +187,7 @@ module privileged import cvw::*;  #(parameter cvw_t P) (
     .BreakpointFaultM, .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
     .LoadAccessFaultM, .StoreAmoAccessFaultM, .EcallFaultM, .InstrPageFaultM,
     .LoadPageFaultM, .StoreAmoPageFaultM, .HardwareErrorFaultM(EccDedFaultM), .PrivilegeModeW,
-    .DCacheEccDedFaultM,
+    .DCacheEccDedFaultM, .DCacheEccDedFaultTagLostM,
     .MIP_REGW, .MIE_REGW, .MIDELEG_REGW, .MEDELEG_REGW, .STATUS_MIE, .STATUS_SIE,
     .InstrValidM, .CommittedM, .CommittedF,
     .TrapM, .wfiM, .wfiW, .InterruptM, .ExceptionM, .HardwareErrorTrapM(EccDedTrapTakenM),

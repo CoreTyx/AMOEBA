@@ -31,7 +31,7 @@
 
 module cache import cvw::*; #(parameter cvw_t P,
                               parameter PA_BITS, LINELEN,  NUMSETS,  NUMWAYS, LOGBWPL, WORDLEN, MUXINTERVAL, READ_ONLY_CACHE,
-                              parameter SCRUBBER_ENABLED = 1'b0,
+                              parameter SCRUBBER_ENABLED = 1'b0,  // 0 on the chip: the scrubber is not instantiated (see "Background scrubber" below)
                               parameter SCRUB_INTERVAL_CYCLES = 0,
                               parameter logic [FI_COUNT_BITS-1:0] FI_PHASE = '0) (  // this cache's event phase on the shared generator
   input  logic                   clk,
@@ -64,6 +64,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   output logic                   CacheAccess,       // Cache access
   output logic [2:0]             SecErr,            // Pulses: tag, line, and store-repaired line corrected this cycle
   output logic                   DedErr,            // Pulse: an uncorrectable line or tag was dropped or reported
+  output logic                   DedTagErr,         // Pulse: an uncorrectable TAG was dropped or reported (a subset of DedErr)
+  output cache_ded_info_t        DedInfo,           // Where the DedErr error was: set, way(s), source, line address
   // lsu control
   input  logic                   SelHPTW,           // Use PAdr from Hardware Page Table Walker rather than NextSet
   // Bus fsm interface
@@ -78,7 +80,10 @@ module cache import cvw::*; #(parameter cvw_t P,
   // the only surviving copy of modified data can't simply be dropped. See cachefsm.sv/wallypipelinedcore.sv
   // for the trap path this feeds (its own cause, independent of the IEU regfile's ECC DED / cause 19).
   output logic                   EccDedDirtyFault,
-  output logic [PA_BITS-1:0]     EccDedDirtyFaultAdr
+  output logic [PA_BITS-1:0]     EccDedDirtyFaultAdr,
+  // With EccDedDirtyFault: the lost line's TAG was uncorrectable, so its address is unknown and
+  // EccDedDirtyFaultAdr is only the access that found the set (trap cause 21 rather than 20).
+  output logic                   EccDedDirtyFaultTagLost
 );
 
   // Cache parameters
@@ -146,6 +151,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   logic [NUMWAYS-1:0]            TagSecErrWay, TagDedErrWay;
   logic [NUMWAYS-1:0]            TagDedDirtyWay;     // valid+dirty ways whose tag is uncorrectable
   logic                          TagDedDirty, DropTagDedDirty;
+  logic [NUMWAYS-1:0]            TagDedCleanWay;     // valid+clean ways whose tag is uncorrectable
+  logic                          TagDedClean, DropTagDedClean;
   logic                          EccDedLostLine;     // cachefsm: dirty line dropped on eviction/flush (uncorrectable data)
   logic                          EccDedCleanDrop;    // cachefsm: clean line dropped for an uncorrectable error
   logic                          LatchHitWord, SelHitWord;
@@ -228,7 +235,7 @@ module cache import cvw::*; #(parameter cvw_t P,
     .SelectedWay, .HitWay, .HitWayLive, .ValidWay, .ValidMismatch(ValidMismatchWay),
     .DirtyWay, .DirtyWayLive, .HitDirtyWay, .DirtyMismatch(DirtyMismatchWay),
     .TagSecErr(TagSecErrWay), .TagDedErr(TagDedErrWay),
-    .TagDedDirtyWay, .DropTagDedDirty,
+    .TagDedDirtyWay, .DropTagDedDirty, .TagDedCleanWay, .DropTagDedClean,
     .FlushStage, .InvalidateCache, .InvalidateFlushStage);
 
   // Select victim way for associative caches
@@ -308,13 +315,38 @@ module cache import cvw::*; #(parameter cvw_t P,
   assign DataSecErr = DataSecErrQ & (|SelectedWay);
   assign DataDedErr = DataDedErrQ & (|SelectedWay);
 
-  cachescrubber #(.NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS), .SETLEN(SETLEN),
-                  .READ_ONLY_CACHE(READ_ONLY_CACHE), .SCRUB_INTERVAL_CYCLES(SCRUB_INTERVAL_CYCLES)) scrubber (
-    .clk, .reset, .ScrubReq, .ScrubGrant, .ScrubSet, .ScrubWay, .ScrubWayIdx,
-    .ValidWay(|(ValidWay & ScrubWay)), .DirtyWay(|(DirtyWay & ScrubWay)),
-    .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr,
-    .ScrubCorrectTag, .ScrubCorrectData, .ScrubInvalidate, .ScrubTrap,
-    .ScrubBusy);
+  // Background scrubber.  The chip runs with it DISABLED (lsu.sv/ifu.sv leave
+  // SCRUBBER_ENABLED at 0): an error is found when its line is next accessed --
+  // a load, fetch, store, eviction or flush -- and a set's tags are all checked
+  // on any lookup of that set.  Disabled, it is not instantiated at all: every
+  // Scrub* signal below is a constant 0, so the scrub legs of the way-select and
+  // set muxes, its ORs into the correction, busy, DED and fault paths, and the
+  // request hold-off in cachefsm.sv all fold away in synthesis.  Merely gating
+  // ScrubGrant was not enough: the FSM kept running WAIT <-> REQUEST, and an
+  // upset in its state could still enter TAG_WAIT..COMMIT without a grant,
+  // stall the cache and act on stale error flags (a spurious invalidate, or a
+  // false cause-20 trap).
+  // Re-enabling it is a parameter change, but read cachescrubber.sv's tag-DED
+  // handling first: it invalidates a DIRTY line whose tag is uncorrectable
+  // without raising the fault the demand path raises (cachefsm.sv
+  // DropTagDedDirty), which would lose modified data silently; and its dirty
+  // data DED keeps the line where the demand path drops it after reporting.
+  // hvl/cache/cache_integration_tb.sv still instantiates it enabled.
+  if (SCRUBBER_ENABLED) begin : scrub
+    cachescrubber #(.NUMSETS(NUMSETS), .NUMWAYS(NUMWAYS), .SETLEN(SETLEN),
+                    .READ_ONLY_CACHE(READ_ONLY_CACHE), .SCRUB_INTERVAL_CYCLES(SCRUB_INTERVAL_CYCLES)) scrubber (
+      .clk, .reset, .ScrubReq, .ScrubGrant, .ScrubSet, .ScrubWay, .ScrubWayIdx,
+      .ValidWay(|(ValidWay & ScrubWay)), .DirtyWay(|(DirtyWay & ScrubWay)),
+      .TagSecErr, .TagDedErr, .DataSecErr, .DataDedErr,
+      .ScrubCorrectTag, .ScrubCorrectData, .ScrubInvalidate, .ScrubTrap,
+      .ScrubBusy);
+  end else begin : noscrub
+    assign {ScrubReq, ScrubBusy} = '0;
+    assign {ScrubCorrectTag, ScrubCorrectData, ScrubInvalidate, ScrubTrap} = '0;
+    assign ScrubSet    = '0;
+    assign ScrubWay    = '0;
+    assign ScrubWayIdx = '0;
+  end
 
   // The scrubber's ScrubBusy output only rises the cycle *after* it's granted (once CurrState
   // actually reaches its own decode states), but cachefsm decides whether to start a *new* demand
@@ -339,6 +371,8 @@ module cache import cvw::*; #(parameter cvw_t P,
   // that reads it (the way arriving), or a flush reaching it, reports it and drops it; cacheway.sv
   // already keeps it out of DirtyWay so it is never written back to a wrong address.
   assign TagDedDirty = FlushCache ? |(TagDedDirtyWay & FlushWay) : |TagDedDirtyWay;
+  // A clean line with an uncorrectable tag is dropped the same way, without a fault (cacheway.sv).
+  assign TagDedClean = FlushCache ? |(TagDedCleanWay & FlushWay) : |TagDedCleanWay;
 
   // Select word from cache line
   subcachelineread #(LINELEN, WORDLEN, MUXINTERVAL) subcachelineread(
@@ -522,7 +556,8 @@ module cache import cvw::*; #(parameter cvw_t P,
     .ScanLast, .ScanStart, .ScanIssue, .ScanArrive, .RowIdle,
     .ScrubOwnsWaySelect,
     .SelCorrectTag(SelCorrectTagDemand), .SelCorrectData(SelCorrectDataDemand),
-    .TagDedDirty, .DropTagDedDirty, .EccDedLostLine, .EccDedCleanDrop, .LatchHitWord, .SelHitWord,
+    .TagDedDirty, .DropTagDedDirty, .TagDedClean, .DropTagDedClean,
+    .EccDedLostLine, .EccDedCleanDrop, .LatchHitWord, .SelHitWord,
     .EccDedDirtyFault(EccDedDirtyFaultDemand));
 
   assign EccDedDirtyFault = EccDedDirtyFaultDemand | ScrubTrap;
@@ -539,6 +574,30 @@ module cache import cvw::*; #(parameter cvw_t P,
 
   // Fault flags for the counters (faultcount_apb), demand and scrubber alike
   assign SecErr = {StoreRepairsData, SelCorrectData, SelCorrectTag};
-  assign DedErr = EccDedCleanDrop | EccDedDirtyFault | ScrubInvalidate;
+  assign DedErr = EccDedCleanDrop | EccDedDirtyFault | ScrubInvalidate | DropTagDedClean;
+  // The tag share of DedErr: clean or dirty line dropped for its tag on a lookup or flush, or the
+  // scrubber invalidating for one (TagDedErr follows the scrubber's way while it owns the select).
+  assign DedTagErr = DropTagDedClean | DropTagDedDirty | (ScrubInvalidate & TagDedErr);
+  // DropTagDedDirty raises EccDedDirtyFault in the same cycle (cachefsm.sv).
+  assign EccDedDirtyFaultTagLost = DropTagDedDirty;
+
+  // Where the DedErr error was, for the last-error record (faultcount_apb).  The set the arrays
+  // were reading: the scrubber's, the flush row's, or the access's.  The way(s): those dropped for
+  // an uncorrectable tag (several can go at once on a lookup), else the selected way: the hit way
+  // on a lookup, the victim on an eviction, the flush way on a flush.
+  logic              ScrubDed, TagDrop;
+  logic [SETLEN-1:0] DedSet;
+  logic [NUMWAYS-1:0] DedWays, TagDropWays;
+  assign ScrubDed    = ScrubInvalidate | ScrubTrap;
+  assign TagDrop     = DropTagDedDirty | DropTagDedClean;
+  assign TagDropWays = (({NUMWAYS{DropTagDedDirty}} & TagDedDirtyWay) | ({NUMWAYS{DropTagDedClean}} & TagDedCleanWay))
+                       & (FlushCache ? FlushWay : '1);
+  assign DedSet      = ScrubDed ? ScrubSet : FlushCache ? FlushAdrCurr : PAdr[SETTOP-1:OFFSETLEN];
+  assign DedWays     = ScrubDed ? ScrubWay : TagDrop ? TagDropWays : SelectedWay;
+  // Sized for up to 4 ways and 4096 sets; a larger cache needs wider fields in cvw.sv
+  assign DedInfo.Source  = ScrubDed ? 2'd3 : FlushCache ? 2'd2 : EccDedLostLine ? 2'd1 : 2'd0;
+  assign DedInfo.Ways    = 4'(DedWays);
+  assign DedInfo.Set     = 12'(DedSet);
+  assign DedInfo.LineAdr = 32'({Tag, DedSet, {OFFSETLEN{1'b0}}});
 
 endmodule

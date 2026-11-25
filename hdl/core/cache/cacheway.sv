@@ -86,7 +86,12 @@ module cacheway #(parameter NUMSETS=512, READ_ONLY_CACHE = 0) (
   // It is excluded from DirtyWay so no eviction or flush ever writes it to a wrong address, flagged
   // here, and dropped when cachefsm pulses DropTagDedDirty (which also raises the dirty-data fault).
   output logic                        TagDedDirtyWay,  // This way holds a valid, dirty line with an uncorrectable tag
-  input  logic                        DropTagDedDirty); // cachefsm: invalidate this way if TagDedDirtyWay (gated to FlushWay during a flush)
+  input  logic                        DropTagDedDirty, // cachefsm: invalidate this way if TagDedDirtyWay (gated to FlushWay during a flush)
+  // A valid, CLEAN line whose tag is uncorrectable can never hit again (HitWay excludes it) but
+  // loses nothing: memory has the data.  Dropped the same way, without a fault, so the error is
+  // counted once and the way is freed instead of sitting there until it is replaced.
+  output logic                        TagDedCleanWay,  // This way holds a valid, clean line with an uncorrectable tag
+  input  logic                        DropTagDedClean); // cachefsm: invalidate this way if TagDedCleanWay (gated to FlushWay during a flush)
 
   logic [NUMSETS-1:0]                ValidBits, ValidBitsRedundant;
   logic [NUMSETS-1:0]                DirtyBits, DirtyBitsRedundant;
@@ -153,7 +158,8 @@ module cacheway #(parameter NUMSETS=512, READ_ONLY_CACHE = 0) (
   assign TagDedDirtyWay = HitDirtyWay & TagDedErrWayLive;
   assign DirtyWayLive = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErrWayLive;
   assign DirtyWay = (SelScrub ? ScrubWay : SelecteDirty) & HitDirtyWay & ~TagDedErr;        // exclusion-tag: icache DirtyWay
-  assign TagDedDropWay = DropTagDedDirty & TagDedDirtyWay & (~FlushCache | FlushWay);
+  assign TagDedCleanWay = ValidWay & ~DirtyEff & TagDedErrWayLive;
+  assign TagDedDropWay = ((DropTagDedDirty & TagDedDirtyWay) | (DropTagDedClean & TagDedCleanWay)) & (~FlushCache | FlushWay);
 
   /////////////////////////////////////////////////////////////////////////////////////////////
   // Valid Bits -- 2-copy redundancy. A mismatch on a CLEAN line resolves to invalid, since a 0->1

@@ -43,6 +43,8 @@
 //   dft_hold   <cycles>             a DFT hold session of <cycles> frozen
 //                                   cycles (see "DFT hold" below); the
 //                                   program must then finish as if untouched
+//   dft_locked <cycles>             the same pin sequence on a part whose DFT
+//                                   lock is cleared: it must be ignored
 //   dft ...                         STUB: scan shifting is tested at gate
 //                                   level (synth/scripts/full_tb on dft)
 //   finish
@@ -398,6 +400,32 @@ module pin_tb;
     $display("[PIN_TB] dft_hold %0d: %0d frozen cycles", dft_holds, n);
   endtask
 
+  // dft_locked <cycles>: drive test_mode/scan_en exactly as a hold entry and a
+  // scan shift would (scan_en toggling every cycle), on a part whose software
+  // has cleared the DFT lock (hdl/forte_dft_lock.sv).  Nothing may happen: the
+  // link is not paused, because a locked part must keep running.  RTL checks
+  // the gated controls every cycle; on any build the script checks that the
+  // program kept running (hvl/pin/tests/dft_lock.cmd).
+  task automatic dft_locked(input longint n);
+    if (n < 1) begin err("dft_locked: cycles must be positive"); return; end
+    @(posedge core_clk); #(tco_ns);
+    scan_en = 1'b1;
+    run_cycles(3); #(tco_ns);
+    test_mode = 1'b1; scan_en = 1'b0;
+    for (longint c = 0; c < n; c++) begin
+      @(posedge core_clk); #(tco_ns);
+      scan_en = c[0];
+`ifdef PIN_TB_RTL
+      if (dut.chip.test_mode_dft !== 1'b0) err($sformatf("dft_locked: test_mode reached the chip at cycle %0d", c));
+      if (dut.chip.scan_en_dft   !== 1'b0) err($sformatf("dft_locked: scan_en reached the chains at cycle %0d", c));
+      if (dut.chip.hold          !== 1'b0) err($sformatf("dft_locked: the chip entered a DFT hold at cycle %0d", c));
+`endif
+    end
+    test_mode = 1'b0; scan_en = 1'b0;
+    run_cycles(3);
+    $display("[PIN_TB] dft_locked: %0d cycles of test_mode/scan_en ignored", n);
+  endtask
+
   // ---- the command interpreter ----------------------------------------------------
   int  exit_code = -1;
   int commands_executed = 0;
@@ -487,6 +515,7 @@ module pin_tb;
         if (link.dump(addr, int'(v), a3) != 0) err($sformatf("dump_mem: cannot write %s", a3));
       end
       "dft_hold": begin void'($sscanf(a1, "%d", t)); dft_hold(t); end
+      "dft_locked": begin void'($sscanf(a1, "%d", t)); dft_locked(t); end
       "dft":    err("dft: scan shifting is tested at gate level (synth/scripts/full_tb on the dft branch)");
       "finish": begin drain_console(); verdict(1, ""); end
       default:  err($sformatf("line %0d: unknown command '%s'", lineno, cmd));

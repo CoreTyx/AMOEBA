@@ -61,6 +61,29 @@
       if (fi_out_of_reset == 2'b01 && `FICONTROL.FaultInjectMask != 8'h3f)
         $fatal(1, "fault-injection units not armed out of reset: mask %h", `FICONTROL.FaultInjectMask);
     end
+
+    // Arm more injection units mid-run, once the console prints a given line:
+    //   +FI_ARM_MASK_ECE411=<hex>     units to add to FI_CONTROL (80 = cache DED, 40 = cache SEC)
+    //   +FI_ARM_ON_UART_ECE411=<pat>  '|'-separated patterns, matched like +UART_PASS_ECE411
+    // The cache units cannot be armed from reset: an injected DED lands within a few hundred
+    // cycles, before OpenSBI has a trap handler.  The units go into fault_inject_apb's
+    // simulation-only SimArmMask, which keeps them set even if software rewrites
+    // FI_CONTROL.  Used by `make -C sim linux_failstop_cache_ded`.
+    string      fi_arm_on_uart = "";
+    logic [7:0] fi_arm_mask    = '0;
+    bit         fi_arm_req     = 1'b0;   // set by uart_flush_line on a matching line
+    bit         fi_armed       = 1'b0;
+    initial begin
+      void'($value$plusargs("FI_ARM_ON_UART_ECE411=%s", fi_arm_on_uart));
+      void'($value$plusargs("FI_ARM_MASK_ECE411=%h", fi_arm_mask));
+    end
+    always @(posedge clk) begin
+      if (fi_arm_req && !fi_armed) begin
+        fi_armed               <= 1'b1;
+        `FICONTROL.SimArmMask  <= fi_arm_mask;
+        $display("TB: fault injection armed at %0t: adding units %h to FI_CONTROL", $time, fi_arm_mask);
+      end
+    end
 `endif
 
 `ifdef ECE411_DUT_FORTE
@@ -100,6 +123,28 @@
 `else
     `define RT_TAP  dut
     `define RT_CORE dut.soc.core
+`endif
+
+`ifdef ECE411_SIM_INJECT
+    // +FI_ONESHOT_ECE411: after arming, stop both caches' injectors (cachefi.sv
+    // SimCancel: no new events, pending flips dropped) as soon as the first D$
+    // uncorrectable-error trap (cause 20 or 21) is taken.  The injector arms a tag flip and
+    // a line flip every 512 cycles; left running it keeps landing DEDs in the
+    // firmware's own stack while its trap entry is still saving registers, and that
+    // nested trap corrupts the entry (mscratch already swapped) -- a test artefact,
+    // not something two independent upsets would do within a few hundred cycles.
+    bit fi_oneshot  = 1'b0;
+    bit fi_stopped  = 1'b0;
+    initial fi_oneshot = $test$plusargs("FI_ONESHOT_ECE411");
+    always @(posedge clk) begin
+      if (fi_oneshot && fi_armed && !fi_stopped && `RT_CORE.DCacheEccDedTrapTakenM) begin
+        fi_stopped <= 1'b1;
+        `RT_CORE.lsu.bus.dcache.dcache.faultinject.SimCancel <= 1'b1;
+        `RT_CORE.ifu.bus.icache.icache.faultinject.SimCancel <= 1'b1;
+        $display("TB: cause-20/21 trap taken at %0t (PC %h): cache injection stopped",
+                 $time, `RT_CORE.priv.priv.PCM);
+      end
+    end
 `endif
 
 `ifdef ECE411_RETIRE_TRACE
@@ -170,13 +215,148 @@
     // misaligned access TRAPS, and the monitor's model of the trapped
     // instruction (rd/mem_rmask fields) does not match CVW's RVFI taps.
     //
-    // Causes 2 and 3 (illegal instruction, breakpoint) are waived for the same
-    // reason: the monitor is generated for rv64imafdc_zb (RVFIMON_ISA), so it
-    // expects F/D/Zb encodings -- which this RV64IMAC core correctly traps on --
-    // to execute, and it has no model of absent CSRs (no Zicntr, no Sstc).  The
-    // stress suite asserts those traps directly (testcode/stress/priv).
+    // Causes 2 and 3 (illegal instruction, breakpoint) are NOT waived: the
+    // monitor is generated for the chip's own ISA (sim/Makefile RVFIMON_ISA =
+    // rv64imac), so an encoding the core traps on is one the model traps on too,
+    // and the monitor checks those traps like any other instruction.  (A monitor
+    // for rv64imafdc_zb needed them waived: it expected F/D/Zb to execute.)
+    //
+    // Causes 16, 19, 20 and 21 are the core's hardware-error traps (redundant
+    // compute unresolved, register/pipeline ECC, D$ dirty line lost).  The model
+    // has no ECC or redundancy, so it expects the instruction to complete; the
+    // tests that raise them check cause, mepc and mtval themselves
+    // (testcode/stress/mem/st_cache_ecc_directed.c, hvl/ft_shadow, hvl/ecc).
     assign mon_itf.mmu_fault[0] = mon_itf.valid[0] && `RT_TAP.TrapW &&
-                                  (TrapCauseW inside {5'd0, 5'd1, 5'd2, 5'd3, 5'd4, 5'd5, 5'd6, 5'd7, 5'd12, 5'd13, 5'd15});
+                                  (TrapCauseW inside {5'd0, 5'd1, 5'd4, 5'd5, 5'd6, 5'd7, 5'd12, 5'd13, 5'd15,
+                                                      5'd16, 5'd19, 5'd20, 5'd21});
+
+`ifndef ECE411_NO_RVFI
+    // ---- ECC mailbox: deterministic cache corruption for directed tests -----
+    // A program stores a target address to ECC_MBOX_ADDR, then ECC_MBOX_MAGIC|op
+    // to ECC_MBOX_CMD.  When that store retires, the testbench flips two bits in
+    // every way of the target's set whose stored tag matches the target -- two
+    // flips make the codeword uncorrectable (DED):
+    //   op 1 / 2   D$ tag / line        op 3 / 4   I$ tag / line
+    //   op 15      flip back the bits the last op flipped (repair)
+    // Rows are {tag|line, check bits} (cachearray.sv), so the flipped bits are
+    // data bits above the check bits.  Sizes are read from the cache instance at
+    // run time.  Inert unless that exact address and magic are stored (the top
+    // page of RAM, above every program's stack).  Used by
+    // testcode/stress/mem/st_cache_ecc_directed.c.
+    localparam longint unsigned ECC_MBOX_ADDR  = 64'h8FFF_F000;
+    localparam longint unsigned ECC_MBOX_CMD   = 64'h8FFF_F008;
+    localparam longint unsigned ECC_MBOX_MAGIC = 64'hECC0_DE00;
+  `define ECC_DC `RT_CORE.lsu.bus.dcache.dcache
+  `define ECC_IC `RT_CORE.ifu.bus.icache.icache
+
+    longint unsigned ecc_mbox_target = '0;
+    int ecc_last_op = 0;                 // what op 15 undoes
+    longint unsigned ecc_last_target = '0;
+
+    // Row index of every way of the target's set whose tag matches, as a bit mask.
+    function automatic int ecc_rows_dc(input longint unsigned adr, output int set, output int nways);
+      int taglen, linelen, offlen, setlen, nsets, tw, hits;
+      longint unsigned tagmask, want, have;
+      nways   = $bits(`ECC_DC.HitWay);
+      taglen  = $bits(`ECC_DC.Tag);
+      linelen = $bits(`ECC_DC.ReadDataLine);
+      nsets   = $size(`ECC_DC.CacheArray.CacheTagMem.ram.RAM) / nways;
+      offlen  = $clog2(linelen / 8);
+      setlen  = $clog2(nsets);
+      tw      = $bits(`ECC_DC.CacheArray.CacheTagMem.ram.RAM[0]);
+      tagmask = (64'(1) << taglen) - 1;
+      set     = int'((adr >> offlen) & (64'(nsets) - 64'd1));
+      want    = (adr >> (offlen + setlen)) & tagmask;
+      hits    = 0;
+      for (int w = 0; w < nways; w++) begin
+        have = (64'(`ECC_DC.CacheArray.CacheTagMem.ram.RAM[w*nsets+set]) >> (tw - taglen)) & tagmask;
+        if (have == want) hits |= (1 << w);
+      end
+      return hits;
+    endfunction
+    function automatic int ecc_rows_ic(input longint unsigned adr, output int set, output int nways);
+      int taglen, linelen, offlen, setlen, nsets, tw, hits;
+      longint unsigned tagmask, want, have;
+      nways   = $bits(`ECC_IC.HitWay);
+      taglen  = $bits(`ECC_IC.Tag);
+      linelen = $bits(`ECC_IC.ReadDataLine);
+      nsets   = $size(`ECC_IC.CacheArray.CacheTagMem.ram.RAM) / nways;
+      offlen  = $clog2(linelen / 8);
+      setlen  = $clog2(nsets);
+      tw      = $bits(`ECC_IC.CacheArray.CacheTagMem.ram.RAM[0]);
+      tagmask = (64'(1) << taglen) - 1;
+      set     = int'((adr >> offlen) & (64'(nsets) - 64'd1));
+      want    = (adr >> (offlen + setlen)) & tagmask;
+      hits    = 0;
+      for (int w = 0; w < nways; w++) begin
+        have = (64'(`ECC_IC.CacheArray.CacheTagMem.ram.RAM[w*nsets+set]) >> (tw - taglen)) & tagmask;
+        if (have == want) hits |= (1 << w);
+      end
+      return hits;
+    endfunction
+
+    // Flip the two bits for op at the target; returns how many ways were hit.
+    // Tag ops flip the two lowest tag bits, line ops the two lowest line bits.
+    /* verilator lint_off BLKSEQ */
+    function automatic int ecc_apply(input int op, input longint unsigned adr);
+      int set, nways, rows, n, tb, db;
+      n = 0;
+      if (op == 1 || op == 2) begin
+        rows = ecc_rows_dc(adr, set, nways);
+        tb = $bits(`ECC_DC.CacheArray.CacheTagMem.ram.RAM[0])  - $bits(`ECC_DC.Tag);
+        db = $bits(`ECC_DC.CacheArray.CacheDataMem.ram.RAM[0]) - $bits(`ECC_DC.ReadDataLine);
+        for (int w = 0; w < nways; w++) if (((rows >> w) & 1) != 0) begin
+          n++;
+          if (op == 1) begin
+            `ECC_DC.CacheArray.CacheTagMem.ram.RAM[w*(($size(`ECC_DC.CacheArray.CacheTagMem.ram.RAM))/nways)+set][tb]   ^= 1'b1;
+            `ECC_DC.CacheArray.CacheTagMem.ram.RAM[w*(($size(`ECC_DC.CacheArray.CacheTagMem.ram.RAM))/nways)+set][tb+1] ^= 1'b1;
+          end else begin
+            `ECC_DC.CacheArray.CacheDataMem.ram.RAM[w*(($size(`ECC_DC.CacheArray.CacheDataMem.ram.RAM))/nways)+set][db]   ^= 1'b1;
+            `ECC_DC.CacheArray.CacheDataMem.ram.RAM[w*(($size(`ECC_DC.CacheArray.CacheDataMem.ram.RAM))/nways)+set][db+1] ^= 1'b1;
+          end
+        end
+      end else if (op == 3 || op == 4) begin
+        rows = ecc_rows_ic(adr, set, nways);
+        tb = $bits(`ECC_IC.CacheArray.CacheTagMem.ram.RAM[0])  - $bits(`ECC_IC.Tag);
+        db = $bits(`ECC_IC.CacheArray.CacheDataMem.ram.RAM[0]) - $bits(`ECC_IC.ReadDataLine);
+        for (int w = 0; w < nways; w++) if (((rows >> w) & 1) != 0) begin
+          n++;
+          if (op == 3) begin
+            `ECC_IC.CacheArray.CacheTagMem.ram.RAM[w*(($size(`ECC_IC.CacheArray.CacheTagMem.ram.RAM))/nways)+set][tb]   ^= 1'b1;
+            `ECC_IC.CacheArray.CacheTagMem.ram.RAM[w*(($size(`ECC_IC.CacheArray.CacheTagMem.ram.RAM))/nways)+set][tb+1] ^= 1'b1;
+          end else begin
+            `ECC_IC.CacheArray.CacheDataMem.ram.RAM[w*(($size(`ECC_IC.CacheArray.CacheDataMem.ram.RAM))/nways)+set][db]   ^= 1'b1;
+            `ECC_IC.CacheArray.CacheDataMem.ram.RAM[w*(($size(`ECC_IC.CacheArray.CacheDataMem.ram.RAM))/nways)+set][db+1] ^= 1'b1;
+          end
+        end
+      end
+      return n;
+    endfunction
+    /* verilator lint_on BLKSEQ */
+
+    always @(posedge clk) begin
+      if (!rst && mon_itf.valid[0] && mon_itf.mem_wmask[0] != '0) begin
+        if (mon_itf.mem_addr[0] == ECC_MBOX_ADDR) ecc_mbox_target <= mon_itf.mem_wdata[0];
+        if (mon_itf.mem_addr[0] == ECC_MBOX_CMD &&
+            (mon_itf.mem_wdata[0] & ~64'hFF) == ECC_MBOX_MAGIC) begin
+          automatic int op = int'(mon_itf.mem_wdata[0] & 64'hFF);
+          automatic int n;
+          if (op == 15) begin
+            n = ecc_apply(ecc_last_op, ecc_last_target);   // a second flip of the same bits repairs
+            $display("TB: ECC mailbox: repaired op %0d at %h (%0d way(s))", ecc_last_op, ecc_last_target, n);
+            ecc_last_op <= 0;
+          end else begin
+            n = ecc_apply(op, ecc_mbox_target);
+            $display("TB: ECC mailbox: op %0d at %h corrupted %0d way(s)", op, ecc_mbox_target, n);
+            // The test must corrupt a resident line; anything else is a bug in the test.
+            if (n == 0) $fatal(1, "TB: ECC mailbox: op %0d found no way holding %h", op, ecc_mbox_target);
+            ecc_last_op     <= op;
+            ecc_last_target <= ecc_mbox_target;
+          end
+        end
+      end
+    end
+`endif
 
     // ---- UART transmit tap -------------------------------------------------
     // syscalls_amoeba.c reaches printf() -- and therefore configASSERT() -- by
@@ -253,6 +433,10 @@
                 $fwrite(uart_log_fd, "%s\n", line);
                 $fflush(uart_log_fd);
             end
+`ifdef ECE411_SIM_INJECT
+            if (!fi_armed && fi_arm_mask != '0 && str_matches_any(line, fi_arm_on_uart))
+                fi_arm_req = 1'b1;
+`endif
             if (str_matches_any(line, uart_fail_str)) begin
                 $error("TB: UART matched a failure pattern -- test FAILED");
                 $fatal;

@@ -220,7 +220,7 @@ int main(void) {
             uint64_t dw = hi ? ((a << 32) | (neighbour & 0xffffffffUL)) : (m->sz == 4 ? ((neighbour << 32) | (a & 0xffffffffUL)) : a);
             *cell = dw;
             if (state == 0) { for (int e = 1; e <= 5; e++) (void)*(volatile uint64_t *)((uint64_t)cell ^ ((uint64_t)e << 13)); }
-            else if (state == 1) (void)*cell;
+            else if (state == 1) { st_fence_i(); (void)*cell; }   /* fence.i writes the D$ back: resident and CLEAN */
             else *cell = dw;
             uint64_t addr = (uint64_t)cell + (hi ? 4 : 0);
             uint64_t old = m->fn(addr, b);

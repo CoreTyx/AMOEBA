@@ -1,4 +1,4 @@
-// @stress tier=pr seeds=2 nightly_seeds=8 weekly_seeds=64 build=no_spike duts=legacy,forte timeout=150000000
+// @stress tier=pr seeds=2 nightly_seeds=8 weekly_seeds=64 build=no_spike duts=legacy,forte timeout=300000000
 //
 // st_minikernel -- context-switch storm and spawn/exit churn under a small
 // preemptive S-mode kernel.  What Linux does all day, compressed:

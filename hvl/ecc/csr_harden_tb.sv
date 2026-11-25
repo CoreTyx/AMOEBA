@@ -1,5 +1,6 @@
 ///////////////////////////////////////////
 // csr_harden_tb.sv
+// tests for csr hardening
 //
 // Written: Saipranavvk saipranavvk@gmail.com 28 August 2026
 // Modified: 29 August 2026 — Updated for TMR + redundant-check-bit hardening

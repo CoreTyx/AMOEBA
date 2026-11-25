@@ -572,8 +572,8 @@ Notable settings (see the file for the full parameter list):
 | MMU | Sv39/Sv48/Sv57 | Virtual memory with SVPBMT, SVINVAL, SVADU |
 | I/D TLBs | 32 entries | Per-cache TLBs |
 | PMP | 16 entries | Physical memory protection |
-| I-cache | 4-way, 4 KiB/way, 512-bit lines | |
-| D-cache | 4-way, 4 KiB/way, 512-bit lines | |
+| I-cache | 2-way, 1 KiB/way (2 KiB), 128-bit lines | SECDED tags and lines |
+| D-cache | 2-way, 1 KiB/way (2 KiB), 128-bit lines | SECDED tags and lines, write-back |
 | Branch predictor | GShare, 10-bit index, 6-bit LHR, 16-entry RAS | |
 | Integer divider | 4 bits/cycle | Multi-cycle, stalls E-stage |
 

@@ -17,9 +17,13 @@ Header syntax (first lines of each test; key=value, space separated):
   duts            DUTs to run on (legacy = rv64_core_wrapper, forte = ASIC top)
   timeout         cycle budget per run
   expect          pass | fail (harness self-checks must FAIL)
+  fail_sig        expect=fail only, and required there: text the failing run must
+                  print, so that only the intended failure counts.  Must be the
+                  last key: it takes the rest of the line (it may contain spaces)
   ecc / dummy     nightly+ variants: also run on the ECC-injection build /
-                  with random dummy-instruction insertion (default yes for
-                  no_spike pass tests; set =no to opt out)
+                  with random dummy-instruction insertion / with both at once
+                  (ecc_dummy, when neither is opted out); default yes for
+                  no_spike pass tests; set =no to opt out
   pin             nightly: also run on the chip-level pin bench (default yes)
   @stress-variant an extra configuration with overrides (e.g. a co-sim test's
                   forte run without Spike)
@@ -43,7 +47,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.join(REPO, "testcode", "stress")
 TIERS = ["pr", "nightly", "weekly"]
 KNOWN = {"tier", "seeds", "nightly_seeds", "weekly_seeds", "build", "duts", "timeout",
-         "expect", "ecc", "dummy", "pin", "xfail"}
+         "expect", "ecc", "dummy", "pin", "xfail", "fail_sig"}
 CHUNK = {"pr": 2, "nightly": 8, "weekly": 16}
 SCALE = {"pr": 1, "nightly": 2, "weekly": 4}
 MAX_ENTRIES = 256
@@ -58,7 +62,13 @@ def parse(path):
                 if base is not None and not line.startswith("//"):
                     break
                 continue
-            kv = dict(tok.split("=", 1) for tok in m.group(2).split() if "=" in tok)
+            body = m.group(2)
+            sig = None
+            if "fail_sig=" in body:                  # rest of the line, spaces and all
+                body, sig = body.split("fail_sig=", 1)
+            kv = dict(tok.split("=", 1) for tok in body.split() if "=" in tok)
+            if sig is not None:
+                kv["fail_sig"] = sig.strip()
             bad = set(kv) - KNOWN
             if bad:
                 raise SystemExit(f"{path}: unknown @stress key(s) {sorted(bad)}")
@@ -130,18 +140,21 @@ def entries(tier, pin=False):
                         name=name, path=rel, build=build, dut=dut,
                         seeds=" ".join(map(str, chunk)), timeout=int(cfg.get("timeout", 10000000)) * SCALE[tier],
                         expect=expect, scale=SCALE[tier], link_args=link_args, variant="",
-                        xfail=cfg.get("xfail", ""),
+                        xfail=cfg.get("xfail", ""), fail_sig=cfg.get("fail_sig", ""),
                         id=f"{name}-{dut}-{build}-{chunk[0]}"))
             # nightly+ variants on the legacy no-spike build
             if tier != "pr" and vi == 0 and expect == "pass" and not pin:
                 n = max(2, seeds_for(cfg, tier) // 4)
-                for var in ("ecc", "dummy"):
-                    if cfg.get(var, "yes") != "yes":
+                for var in ("ecc", "dummy", "ecc_dummy"):
+                    # ecc_dummy: both at once -- injected faults and corrections
+                    # landing among inserted dummies, the coincidences the separate
+                    # variants never produce.  Needs both to be allowed.
+                    if any(cfg.get(v, "yes") != "yes" for v in var.split("_")):
                         continue
                     out.append(dict(
-                        name=name, path=rel, build="ecc" if var == "ecc" else "no_spike", dut="legacy",
+                        name=name, path=rel, build="ecc" if var.startswith("ecc") else "no_spike", dut="legacy",
                         seeds=" ".join(map(str, range(101, 101 + n))), timeout=2 * int(cfg.get("timeout", 10000000)),
-                        expect="pass", scale=1, link_args="", variant=var, xfail=cfg.get("xfail", ""),
+                        expect="pass", scale=1, link_args="", variant=var, xfail=cfg.get("xfail", ""), fail_sig="",
                         id=f"{name}-{var}"))
         if pin and tier != "pr" and expect == "pass" and base.get("pin", "yes") == "yes":
             n = 2 if tier == "nightly" else 4
@@ -197,6 +210,8 @@ def main():
                         raise SystemExit(f"{path}: unknown dut {d}")
             if base.get("tier", "pr") not in TIERS:
                 raise SystemExit(f"{path}: unknown tier")
+            if base.get("expect", "pass") == "fail" and not base.get("fail_sig"):
+                raise SystemExit(f"{path}: expect=fail needs fail_sig=<text the failure prints>")
             n += 1
         for t in TIERS:
             for p in (False, True):

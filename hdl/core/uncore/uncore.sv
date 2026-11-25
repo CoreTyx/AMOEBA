@@ -187,8 +187,8 @@ module uncore import cvw::*;  #(parameter cvw_t P)(
     assign PRDATA[5] = '0; assign PREADY[5] = 1'b1;
   end
 
-  // Read-only fault counters at ECC_COUNTER_BASE (faultcount_apb.sv).
-  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold(1'b0), .PADDR(PADDR[6:2]),
+  // Fault counters and last-error records at ECC_COUNTER_BASE (faultcount_apb.sv).
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold(1'b0), .PSEL(PSEL[6]), .PENABLE, .PWRITE, .PADDR(PADDR[6:2]),
     .PRDATA(PRDATA[6]), .PREADY(PREADY[6]), .FaultEvents);
 
 

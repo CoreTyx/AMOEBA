@@ -49,6 +49,9 @@ module cache_integration_tb;
   logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
   logic [2:0]  SecErr;
   logic        DedErr;
+  logic        DedTagErr;     // the tag share of DedErr
+  cvw::cache_ded_info_t DedInfo; // where it was (set, ways, source)
+  logic        EccDedDirtyFaultTagLost; // with EccDedDirtyFault: the line's tag was lost (cause 21)
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -68,8 +71,8 @@ module cache_integration_tb;
     .FaultInjectSec(1'b0), .FaultInjectDed(1'b0), .FaultLfsr('0), .FaultCount('0),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
-    .EccDedDirtyFault, .EccDedDirtyFaultAdr
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr, .DedTagErr, .DedInfo,
+    .EccDedDirtyFault, .EccDedDirtyFaultAdr, .EccDedDirtyFaultTagLost
   );
   always @(posedge clk)
     if (reset) SecCount <= '0;
@@ -302,8 +305,13 @@ module cache_integration_tb;
     s = dirtyadr[SETLEN+OFFSETLEN-1:OFFSETLEN];
     check("store hit sets dirty", way >= 0 && peekdirty(way, s));
 
-    // ── 6. Double-bit inject on the now-DIRTY line: must trap, NOT invalidate (would silently drop
-    //       the only copy of the modified data), and must not touch valid/dirty state. ──
+    // ── 6. Double-bit inject on the now-DIRTY line: report, then drop.  The fault pulse (trap
+    //       cause 20, with the address) comes first; then the line is invalidated and never
+    //       written back -- memory keeps its older copy.  (It used to stay valid and dirty, so
+    //       every later access re-trapped: in the firmware's own trap path that looped forever
+    //       before any report.)  The faulting load itself is not refetched: the cache releases
+    //       the stall after the pulse and the core's trap discards whatever it returned.  The
+    //       next load of the line misses and gets memory's older copy. ──
     begin
       bit sawfault, sawmiss;
       flipdatacheckbits(way, s, 2, 5);
@@ -320,9 +328,12 @@ module cache_integration_tb;
           doload(dirtyadr, result);
         end
       join
-      check("DED dirty: escalated as a fault pulse, not silently refetched", sawfault && !sawmiss);
-      check("DED dirty: line remains valid and dirty afterward", peekvalid(way, s) && peekdirty(way, s));
-      flipdatacheckbits(way, s, 2, 5); // restore the line before testing background scrub behavior
+      check("DED dirty: reported as a fault pulse before any refetch", sawfault && !sawmiss);
+      check("DED dirty: the modified line is dropped (not left valid and dirty)", !(peekvalid(way, s) && peekdirty(way, s)));
+      check("DED dirty: the corrupted line was not written back",
+            mem[{dirtyadr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}}] === {NUMWAYS{64'h1111222233334444}});
+      doload(dirtyadr, result);
+      check("DED dirty: a reload misses and returns memory's older copy", result === 64'h1111222233334444);
     end
 
     // ── 7. Scrubber: correct a tag SEC on an otherwise idle line and persist the correction. ──
@@ -409,7 +420,7 @@ module cache_integration_tb;
       sawverify = 0;
       for (int i = 0; i < 20000 && !sawverify; i++) begin
         @(negedge clk);
-        sawverify = dut.scrubber.VerifyPass;
+        sawverify = dut.scrub.scrubber.VerifyPass;
       end
       check("scrubber: a detected error enters the verify pass", sawverify);
       if (sawverify) flipdatacheckbits(verifyway, verifyset, 1);
@@ -562,7 +573,7 @@ module cache_integration_tb;
 
     $display("cache_integration_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");
-    else $display("%0d FAILURES", errors);
+    else $fatal(1, "%0d FAILURES", errors);   // non-zero exit: make, and so CI, fails
     $finish;
   end
 

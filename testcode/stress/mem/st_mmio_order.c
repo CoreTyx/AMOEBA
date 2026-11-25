@@ -15,7 +15,7 @@
 #define ST_SCALE 1
 #endif
 
-static uint64_t g_buf[8192] ST_ALIGNED(4096);   /* 64 KiB: 16x the D$ */
+static uint64_t g_buf[8192] ST_ALIGNED(4096);   /* 64 KiB: 32x the D$ */
 
 static void churn(int i) {
     /* cached traffic that misses and writes back around the MMIO accesses */
@@ -48,15 +48,18 @@ int main(void) {
     ST_CHECK_EQ("partial writes merge", CLINT_MTIMECMP, 0xcdef3344ab667788UL);
     st_timer_off();
 
-    st_section("mtime is monotonic across cached traffic");
-    uint64_t last = st_mtime(), nonmono = 0;
+    st_section("mtime is read from the device every time (uncached) and monotonic");
+    /* Each read is separated by churn() -- cache misses and write-backs, many
+     * cycles -- so a live mtime has always moved on.  A read that returned the
+     * same value would have come from a cache, not the CLINT. */
+    uint64_t last = st_mtime(), stale = 0;
     for (int i = 0; i < 300; i++) {
         churn(i);
         uint64_t t = (i & 1) ? st_mtime() : ((uint64_t)CLINT_MTIME_HI << 32 | CLINT_MTIME_LO);
-        if ((i & 1) && t < last) nonmono++;
+        if ((i & 1) && t <= last) stale++;
         if (i & 1) last = t;
     }
-    ST_CHECK_EQ("64-bit mtime never goes backwards", nonmono, 0);
+    ST_CHECK_EQ("64-bit mtime strictly increases between reads", stale, 0);
 
     st_section("MSIP toggles");
     for (int i = 0; i < 32; i++) {
