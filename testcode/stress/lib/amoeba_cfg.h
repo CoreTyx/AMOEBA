@@ -23,7 +23,7 @@
 #define AMOEBA_CLINT_SUPPORTED                  1
 #define AMOEBA_COUNTERS                         0
 #define AMOEBA_DCACHE_LINELENINBITS             128
-#define AMOEBA_DCACHE_NUMWAYS                   4
+#define AMOEBA_DCACHE_NUMWAYS                   2
 #define AMOEBA_DCACHE_SUPPORTED                 1
 #define AMOEBA_DCACHE_WAYSIZEINBYTES            1024
 #define AMOEBA_DIVCOPIES                        4
@@ -163,7 +163,7 @@
 #define AMOEBA_ICACHE_LINE_BYTES          16
 #define AMOEBA_DCACHE_SETS                64
 #define AMOEBA_ICACHE_SETS                64
-#define AMOEBA_DCACHE_BYTES               4096
+#define AMOEBA_DCACHE_BYTES               2048
 #define AMOEBA_ICACHE_BYTES               2048
 #define AMOEBA_MISA_EXT_BITS              0x141105ULL
 #define AMOEBA_HAS_COUNTERS               0

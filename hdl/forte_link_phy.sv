@@ -260,8 +260,8 @@ module forte_link_phy import forte_link_pkg::*; #(
   // FIFO empty would leave the previous beat in wdat_r and put it on the wire
   // with nothing to say so.  The whole-transaction-buffered rule above is what
   // makes this impossible; this is the check that it holds, through the CDC.
-  // Written as if/$fatal, not `assert`: Verilator drops immediate assertions
-  // unless built with --assert, which no Verilator flow in this repo passes.
+  // Written as if/$fatal, not `assert`, so it fires even in a Verilator build
+  // made without --assert (sim/Makefile COMMON_FLAGS and hvl/pin/pin.sh do pass it).
   always @(posedge link_clk) if (armed & ocmd_ready & st != LM_IDLE & ~(ocmd_valid & ~ocmd_data[64]))
     $fatal(1, "link phy: write-beat pop in state %0d found valid=%b is_cmd=%b",
            st, ocmd_valid, ocmd_data[64]);

@@ -21,6 +21,7 @@
 #define NWORK (1500 * ST_SCALE)
 
 static uint8_t g_mem[4096] ST_ALIGNED(64);
+static uint8_t g_pgx[8192] ST_ALIGNED(4096);   /* a page boundary at g_pgx + 4096, always */
 
 /* ---------------- part 1: exact traps ---------------- */
 typedef int (*ld_probe_t)(uint64_t, uint64_t, uint64_t *);
@@ -108,6 +109,12 @@ int main(void) {
                 if (!t || g_trap_cause != CAUSE_MISALIGNED_LOAD || g_trap_tval != base + (uint64_t)off)
                     st_check_failed(g_lds[l].n, g_trap_cause | (g_trap_tval << 8), CAUSE_MISALIGNED_LOAD, pi * 100 + off);
                 else g_st_pass++;
+                /* The trapping load must not write rd: the probe's register still
+                 * holds its 0x5a.. sentinel, as seen through the load's own width. */
+                uint64_t want = 0x5a5a5a5a5a5a5a5aUL;
+                if (g_lds[l].sz < 8) want &= (1UL << (8 * g_lds[l].sz)) - 1;
+                if (v != want) st_check_failed("  trapping load left rd untouched", v, want, pi * 100 + off);
+                else g_st_pass++;
             }
         for (unsigned k = 0; k < ST_ARRAY_LEN(g_sts); k++)
             for (int off = 1; off < g_sts[k].sz; off++) {
@@ -120,11 +127,10 @@ int main(void) {
             }
     }
     /* across a 16-byte line and a 4 KiB page boundary */
-    uint64_t pb = ((uint64_t)g_mem + 4096) & ~4095UL;
-    if (pb + 8 <= (uint64_t)g_mem + 4096) {
-        ST_CHECK_EQ("ld across page boundary traps", probe_ld(pb - 4, PRV_M, 0), 1);
-        ST_CHECK_EQ("  cause", g_trap_cause, CAUSE_MISALIGNED_LOAD);
-    }
+    uint64_t pb = (uint64_t)g_pgx + 4096;
+    ST_CHECK_EQ("ld across page boundary traps", probe_ld(pb - 4, PRV_M, 0), 1);
+    ST_CHECK_EQ("  cause", g_trap_cause, CAUSE_MISALIGNED_LOAD);
+    ST_CHECK_EQ("  tval", g_trap_tval, pb - 4);
     ST_CHECK_EQ("ld across line boundary traps", probe_ld(base + 12, PRV_S, 0), 1);
     ST_CHECK_EQ("  tval", g_trap_tval, base + 12);
 

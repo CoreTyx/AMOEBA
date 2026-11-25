@@ -1,4 +1,4 @@
-// @stress tier=pr build=no_spike duts=legacy,forte timeout=4000000 ecc=no dummy=no pin=no
+// @stress tier=pr build=no_spike duts=legacy,forte timeout=8000000 ecc=no dummy=no pin=no
 //
 // st_straddle_fetch -- a 32-bit instruction that straddles a page boundary
 // must fault when EITHER page denies the fetch.  Regression test for an IFU
@@ -30,7 +30,7 @@ static void setup(uint64_t b0, uint64_t b1, uint64_t fr0, uint64_t fr1) {
     sfence_all();
 }
 
-static void expect_fault(const char *what, uint64_t tval) {
+static void expect_cause(const char *what, uint64_t cause, uint64_t tval) {
     uint64_t r = st_run_expect_abort(PRV_U, (uint64_t (*)(uint64_t))(VA + 0xffe), 5, g_usp);
     st_puts("  "); st_puts(what);
     if (r == ST_TRAP_ABORTED) { st_puts(": fault cause "); st_putdec(g_trap_cause); st_puts(" tval "); st_puthex(g_trap_tval); }
@@ -38,10 +38,11 @@ static void expect_fault(const char *what, uint64_t tval) {
     st_putc('\n');
     ST_CHECK_EQ(what, r, ST_TRAP_ABORTED);
     if (r == ST_TRAP_ABORTED) {
-        ST_CHECK_EQ("  cause = fetch page fault", g_trap_cause, CAUSE_FETCH_PAGE);
+        ST_CHECK_EQ("  cause", g_trap_cause, cause);
         ST_CHECK_EQ("  tval", g_trap_tval, tval);
     }
 }
+static void expect_fault(const char *what, uint64_t tval) { expect_cause(what, CAUSE_FETCH_PAGE, tval); }
 
 int main(void) {
     st_init();
@@ -72,6 +73,40 @@ int main(void) {
     setup(PTE_R | PTE_U | PTE_A, ok, fr0, fr1);          expect_fault("page 0 X=0", VA + 0xffe);
     setup(PTE_R | PTE_X | PTE_A, ok, fr0, fr1);          expect_fault("page 0 U=0 (supervisor page)", VA + 0xffe);
     setup(PTE_R | PTE_X | PTE_U, ok, fr0, fr1);          expect_fault("page 0 A=0 (Svade)", VA + 0xffe);
+
+    // The same faults a second time with no sfence in between: wherever the walker
+    // cached the translation, the check now comes from the TLB-hit path.
+    st_section("again with nothing flushed (TLB-hit path)");
+    setup(PTE_R | PTE_U | PTE_A, ok, fr0, fr1);          expect_fault("page 0 X=0", VA + 0xffe);
+                                                         expect_fault("page 0 X=0, again", VA + 0xffe);
+    setup(ok, PTE_R | PTE_U | PTE_A, fr0, fr1);          expect_fault("page 1 X=0", VA + ST_PAGE);
+                                                         expect_fault("page 1 X=0, again", VA + ST_PAGE);
+
+    st_section("both pages deny: the first half's fault wins");
+    setup(PTE_R | PTE_U | PTE_A, PTE_R | PTE_U | PTE_A, fr0, fr1); expect_fault("both X=0", VA + 0xffe);
+    setup(0, 0, fr0, fr1);                               expect_fault("both V=0", VA + 0xffe);
+
+    // First half from the TLB (the control run cached page 0), second half walks
+    // and finds no mapping: flush page 1 only.
+    st_section("first half cached, second half's walk faults");
+    setup(ok, ok, fr0, fr1);
+    ST_CHECK_EQ("warm both pages", st_run_in_mode(PRV_U, (uint64_t (*)(uint64_t))(VA + 0xffe), 5, g_usp), 6);
+    *g_pte[1] = 0;
+    sfence_va(VA + ST_PAGE);
+    expect_fault("page 1 V=0, page 0 cached", VA + ST_PAGE);
+
+    // The first half is denied by PMP (an access fault, no page walk involved)
+    // while the second page has no mapping (a page fault from its walk).  The
+    // first half is checked first, so the access fault must be reported, at the
+    // instruction's address -- not the walker's page fault for the second page.
+    st_section("first half PMP-denied, second half unmapped");
+    setup(ok, 0, fr0, fr1);
+    pmp_write_addr(0, pmp_napot_addr(fr0, ST_PAGE));
+    pmp_write_cfg(0, PMP_NAPOT | PMP_R | PMP_W);         // frame 0: no execute
+    sfence_all();
+    expect_cause("page 0 frame PMP no-X, page 1 V=0", CAUSE_FETCH_ACCESS, VA + 0xffe);
+    pmp_write_cfg(0, 0);
+    sfence_all();
 
     csr_write(satp, 0);
     sfence_all();

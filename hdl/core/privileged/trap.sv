@@ -37,6 +37,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   input  logic                 LoadPageFaultM, StoreAmoPageFaultM,              // various trap sources
   input  logic                 HardwareErrorFaultM,                             // IEU ECC DED — uncorrectable hardware error
   input  logic                 DCacheEccDedFaultM,                              // D$ SECDED DED on a dirty line — own cause, not shared with HardwareErrorFaultM
+  input  logic                 DCacheEccDedFaultTagLostM,                       // ... the lost line's tag was uncorrectable: its address is unknown (cause 21)
   input  logic                 wfiM, wfiW,                                      // wait for interrupt instruction
   input  logic [1:0]           PrivilegeModeW,                                  // current privilege mode
   input  logic [11:0]          MIP_REGW, MIE_REGW, MIDELEG_REGW,                // interrupt pending, enabled, and delegate CSRs
@@ -48,7 +49,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   output logic                 InterruptM,                                      // Interrupt is occurring
   output logic                 ExceptionM,                                      // exception is occurring
   output logic                 HardwareErrorTrapM,                              // cause 19 selected and accepted
-  output logic                 DCacheEccDedTrapTakenM,                          // cause 20 selected and accepted
+  output logic                 DCacheEccDedTrapTakenM,                          // cause 20 or 21 selected and accepted
   output logic                 IntPendingM,                                     // Interrupt is pending, might occur if enabled
   output logic                 DelegateM,                                       // Delegate trap to supervisor handler
   output logic [4:0]           CauseM                                           // trap cause
@@ -105,7 +106,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   // writes and the ECC/D$ DED trap-taken signals are gated with it.
   assign TrapM = ((ExceptionM & ~CommittedF) | InterruptM) & ~DFTHold;
   assign HardwareErrorTrapM = TrapM & ~InterruptM & (CauseM == 5'd19);
-  assign DCacheEccDedTrapTakenM = TrapM & ~InterruptM & (CauseM == 5'd20);
+  assign DCacheEccDedTrapTakenM = TrapM & ~InterruptM & ((CauseM == 5'd20) | (CauseM == 5'd21));
 
   ///////////////////////////////////////////
   // Cause priority defined in privileged spec
@@ -142,6 +143,7 @@ module trap import cvw::*;  #(parameter cvw_t P) (
     else if (StoreAmoMisalignedFaultM & P.ZICCLSM_SUPPORTED)  CauseM = 5'd6; // See priority in Privileged Spec 3.1.15
     else if (LoadMisalignedFaultM & P.ZICCLSM_SUPPORTED)      CauseM = 5'd4;
     else if (HardwareErrorFaultM)                             CauseM = 5'd19; // hardware error (ECC DED) -- IEU regfile
-    else if (DCacheEccDedFaultM)                              CauseM = 5'd20; // hardware error (ECC DED) -- D$ dirty line
+    else if (DCacheEccDedFaultM)                              CauseM = DCacheEccDedFaultTagLostM ? 5'd21  // D$ dirty line lost with its tag: address unknown
+                                                                                                  : 5'd20; // D$ dirty line lost: mtval is its address
     else                                                      CauseM = 5'd0;
 endmodule

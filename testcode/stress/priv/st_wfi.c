@@ -29,11 +29,19 @@ static int irq_hook(st_frame_t *f) {
     return 0;
 }
 
-static uint64_t g_after_wfi;
-/* wfi with the address of the following instruction recorded */
-static void wfi_marked(void) {
-    __asm__ volatile (".option push\n.option norvc\nla t0, 1f\n sd t0, 0(%0)\n wfi\n1: nop\n.option pop"
-                      :: "r"(&g_after_wfi) : "t0", "memory");
+static uint64_t g_after_wfi, g_wait_end;
+/* wfi, then spin until *cnt moves from `before`, all in one block so the only
+ * legal mepc values are known: the instruction after the wfi (the interrupt
+ * woke it) or an instruction of the wait loop (wfi returned early, as the spec
+ * allows, and the interrupt arrived while spinning) -- [g_after_wfi, g_wait_end). */
+static void wfi_then_wait(volatile uint64_t *cnt, uint64_t before) {
+    __asm__ volatile (".option push\n.option norvc\n"
+                      "la t0, 1f\n sd t0, 0(%[aw])\n la t0, 2f\n sd t0, 0(%[we])\n"
+                      " wfi\n"
+                      "1: ld t1, 0(%[cnt])\n beq t1, %[b], 1b\n"
+                      "2:\n.option pop"
+                      :: [aw] "r"(&g_after_wfi), [we] "r"(&g_wait_end), [cnt] "r"(cnt), [b] "r"(before)
+                      : "t0", "t1", "memory");
 }
 
 static uint64_t s_wfi_body(uint64_t delay) {
@@ -82,12 +90,11 @@ int main(void) {
         uint64_t t0 = st_mtime();
         st_set_mtimecmp(t0 + d);
         csr_set(mstatus, MSTATUS_MIE);
-        wfi_marked();
-        /* an early return would leave the interrupt to arrive here */
-        while (g_timer_irqs == before) ;
+        wfi_then_wait(&g_timer_irqs, before);
         csr_clear(mstatus, MSTATUS_MIE);
         ST_CHECK_EQ("exactly one timer interrupt", g_timer_irqs, before + 1);
-        ST_CHECK("mepc is after the WFI (or later)", g_irq_epc >= g_after_wfi);
+        ST_CHECK("mepc is the instruction after the WFI, or in its wait loop",
+                 g_irq_epc >= g_after_wfi && g_irq_epc < g_wait_end);
         ST_CHECK("woke well before the backstop", st_mtime() - t0 < BACKSTOP / 2);
     }
     st_timer_off();

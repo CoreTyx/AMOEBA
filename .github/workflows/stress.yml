@@ -146,7 +146,8 @@ jobs:
           python3 bin/stress_run.py --path "${{ matrix.path }}" --build "${{ matrix.build }}" \
             --dut "${{ matrix.dut }}" --seeds "${{ matrix.seeds }}" --timeout "${{ matrix.timeout }}" \
             --expect "${{ matrix.expect }}" --scale "${{ matrix.scale }}" --link-args "${{ matrix.link_args }}" \
-            --variant "${{ matrix.variant }}" --xfail "${{ matrix.xfail }}" --id "${{ matrix.id }}"
+            --variant "${{ matrix.variant }}" --xfail "${{ matrix.xfail }}" --id "${{ matrix.id }}" \
+            --fail-sig "${{ matrix.fail_sig }}"
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
@@ -325,6 +326,9 @@ jobs:
           run hvl/pin/tests/uart_full.c hvl/pin/tests/uart_full.cmd
           run hvl/pin/tests/wfi_wake.c hvl/pin/tests/wfi_wake.cmd
           run testcode/stress/mem/st_dcache_conflict.c hvl/pin/tests/reset_midrun.cmd
+          # DFT lock from the pins: a hold works unlocked; once software clears the
+          # lock, test_mode/scan_en are ignored and the program keeps running
+          run hvl/pin/tests/dft_lock.c hvl/pin/tests/dft_lock.cmd
           # riscv-tests the RVFI-checked top_tb run cannot judge (see
           # testcode/riscv_tests/exclude.txt) run here, on the chip top
           git submodule update --init --recursive third_party/riscv-tests

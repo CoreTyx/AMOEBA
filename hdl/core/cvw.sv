@@ -47,14 +47,23 @@ package cvw;
     return {1'b0, state[15:1]} ^ (state[0] ? 16'hB400 : 16'h0000);
   endfunction
 
+  // Where an uncorrectable cache error was found, sent with each *CacheDed pulse and kept by
+  // faultcount_apb as that cache's last-error record (docs/memory_map.md).
+  typedef struct packed {
+    logic [1:0]  Source;   // 0 a lookup, 1 an eviction, 2 a flush, 3 the scrubber
+    logic [3:0]  Ways;     // the way(s) dropped, one bit per way
+    logic [11:0] Set;      // the set
+    logic [31:0] LineAdr;  // the line's physical address [31:0]; meaningless for a tag error
+  } cache_ded_info_t;
+
   // Fault events, one flag per detecting register/lane, registered once in the core and
   // counted by faultcount_apb at ECC_COUNTER_BASE.  *Unresolved and Tmr* are levels
   // (counted on their rising edge); every other flag is a one-cycle pulse.
   typedef struct packed {
     logic [1:0] RegfileSec, RegfileDed;  // register-file read operands (RD1E, RD2E)
     logic [4:0] PipeSec, PipeDed;        // ECC pipeline registers (ImmExtE, SrcAM, IEUResultM, WriteDataM, IFResultW)
-    logic [2:0] ICacheSec;               // tag, line, store-repaired line corrections
-    logic       ICacheDed;               // uncorrectable line dropped or reported
+    logic [2:0] ICacheSec;               // [2] store-repaired line, [1] line, [0] tag corrections
+    logic       ICacheDed;               // uncorrectable line or tag dropped or reported
     logic [2:0] DCacheSec;
     logic       DCacheDed;
     logic [1:0] FTDetect;                // {CMP, ALU} replica mismatch
@@ -62,8 +71,11 @@ package cvw;
     logic [1:0] ResidueDetect;           // {DIV, MUL} residue mismatch
     logic [1:0] ResidueUnresolved;
     logic       TmrCorrected, TmrUncorrectable; // privilege-mode TMR
+    logic       ICacheTagDed, DCacheTagDed;     // the *CacheDed event was an uncorrectable TAG
+    logic       DCacheDataLost;          // a dirty D$ line was lost (trap cause 20 or 21 raised)
+    cache_ded_info_t ICacheDedInfo, DCacheDedInfo; // where, for the *CacheDed pulse
   } fault_events_t;
-  localparam int FAULT_COUNTERS = 18;
+  localparam int FAULT_COUNTERS = 23;
 
   //`include "../../pkg/BranchPredictorType.vh"
 

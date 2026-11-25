@@ -1,4 +1,4 @@
-// @stress tier=pr build=no_spike expect=fail timeout=500000 pin=no
+// @stress tier=pr build=no_spike expect=fail timeout=500000 pin=no fail_sig=FAIL [must fail] 1 == 2
 // Harness self-test: a failing ST_CHECK_EQ must turn into a FAIL exit code.
 #include "../lib/stress.h"
 int main(void) {

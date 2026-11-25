@@ -4,10 +4,11 @@
 // for loads, stores and fetches, from S and U, with exact cause and tval.
 //
 // A walker that accepts a reserved encoding gives software a mapping the OS
-// never created.  Each case is run twice: once on a TLB miss (fault raised by
-// the walker), once after a legal access to a neighbouring offset has had the
-// chance to cache something (fault raised on the TLB-hit path, the cache of an
-// earlier, different PTE).
+// never created.  Each case faults on a TLB miss (raised by the walker).  An
+// illegal PTE can never be cached, so the TLB-hit path is tested separately,
+// for the faults that depend on permission bits of a cached, legal entry:
+// cache the translation through an access it allows, then make the access it
+// forbids with no PTE change and no sfence.
 //
 // Cases (privileged spec, Sv39 4.3.2 / 4.4):
 //   V=0; W=1,R=0 (reserved); reserved bits 63:54 set (no Svnapot/Svpbmt);
@@ -55,12 +56,17 @@ static void expect_fault_leaf(const char *what, uint64_t pte_bits_raw, int kind,
     sfence_all();
     if (!access_faults(kind, va + 0x10, prv)) st_check_failed(what, g_trap_cause, page_cause(kind), (int)kind);
     else g_st_pass++;
-    /* TLB-hit path: make the page legal, touch it, break it again, retry */
-    *slot = pte_leaf(g_frame, PTE_R | PTE_W | PTE_X | PTE_AD | (prv == PRV_U ? PTE_U : 0));
-    sfence_va(va);
-    (void)access_ok(kind == FX ? FX : LD, va + 0x10, prv);
-    *slot = pte_bits_raw;
-    sfence_va(va);
+}
+
+/* TLB-hit path: map va with legal but restricted bits, make an access they allow
+ * (the translation is now cached), then the one they forbid -- no PTE write, no
+ * sfence in between, so the hardware can only decide from the cached entry. */
+static void expect_fault_cached(const char *what, uint64_t bits, int allowed_kind, int kind, uint64_t prv) {
+    uint64_t va = next_va();
+    *pt_slot(g_root, va, 0) = pte_leaf(g_frame, bits);
+    sfence_all();
+    if (!access_ok(allowed_kind, va + 0x10, prv)) st_check_failed(what, g_trap_cause, 0, 0x200 | kind);
+    else g_st_pass++;
     if (!access_faults(kind, va + 0x18, prv)) st_check_failed(what, g_trap_cause, page_cause(kind), 0x100 | kind);
     else g_st_pass++;
 }
@@ -116,6 +122,25 @@ int main(void) {
     expect_fault_leaf("S fetch from U page (even with SUM)", ppn | PTE_V | PTE_R | PTE_X | PTE_A | PTE_U, FX, PRV_S);
     csr_clear(mstatus, MSTATUS_SUM);
 
+    st_section("permission faults from a cached translation (TLB hit)");
+    for (int pass = 0; pass < 2; pass++) {
+        uint64_t prv = pass ? PRV_U : PRV_S;
+        uint64_t u = pass ? PTE_U : 0;
+        expect_fault_cached("cached read-only page, store", PTE_R | PTE_AD | u, LD, ST, prv);
+        expect_fault_cached("cached D=0 page, store (Svade)", PTE_R | PTE_W | PTE_A | u, LD, ST, prv);
+    }
+    {
+        /* S reads a U page with SUM set (cached), then SUM is cleared: the cached
+         * entry's U bit must now deny it.  mstatus changes, the PTE does not. */
+        uint64_t va = next_va();
+        *pt_slot(g_root, va, 0) = pte_leaf(g_frame, PTE_R | PTE_W | PTE_AD | PTE_U);
+        sfence_all();
+        csr_set(mstatus, MSTATUS_SUM);
+        ST_CHECK("cached U page, S load with SUM", access_ok(LD, va + 0x10, PRV_S));
+        csr_clear(mstatus, MSTATUS_SUM);
+        ST_CHECK("  same entry, SUM cleared: S load faults", access_faults(LD, va + 0x18, PRV_S));
+    }
+
     st_section("non-leaf PTE encodings");
     {
         uint64_t va = next_va();
@@ -146,11 +171,13 @@ int main(void) {
     for (unsigned i = 0; i < ST_ARRAY_LEN(noncanon); i++) {
         uint64_t va = noncanon[i];
         int t = probe_ld(va, PRV_S, 0);
+        // Priv. spec 4.4: an address whose bits 63:39 are not all equal to bit 38
+        // raises a PAGE fault -- not an access fault.
         ST_CHECK("non-canonical load faults", t);
-        ST_CHECK("  as a load page fault or access fault",
-                 g_trap_cause == CAUSE_LOAD_PAGE || g_trap_cause == CAUSE_LOAD_ACCESS);
+        ST_CHECK_EQ("  as a load page fault", g_trap_cause, CAUSE_LOAD_PAGE);
         t = probe_sd(va, PRV_S, 1);
         ST_CHECK("non-canonical store faults", t);
+        ST_CHECK_EQ("  as a store page fault", g_trap_cause, CAUSE_STORE_PAGE);
     }
 
     st_section("SUM / MXR enable exactly what they should");

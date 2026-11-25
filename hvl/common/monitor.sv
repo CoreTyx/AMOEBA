@@ -619,7 +619,7 @@ module monitor #(
 
         logic [15:0] errcode;
 
-        riscv_formal_monitor_rv64imafdc_zb monitor(
+        riscv_formal_monitor_rv64imac monitor(
             .clock              (itf.clk),
             .reset              (itf.rst),
             .rvfi_valid         (rvfi_valid),
@@ -649,8 +649,10 @@ module monitor #(
         // The generated riscv-formal models cannot represent a misaligned data
         // access: spec_trap is hardcoded to (addr & (size-1)) != 0, and
         // spec_mem_rmask / spec_rd_wdata both assume one naturally-aligned
-        // word.  CVW sets ZICCLSM_SUPPORTED and completes such accesses in
-        // hardware, so the monitor's verdict on them carries no information.
+        // word.  Upstream CVW sets ZICCLSM_SUPPORTED and completes such accesses
+        // in hardware; this chip does not (pkg/config.vh ZICCLSM_SUPPORTED = 0), so
+        // they trap -- and the trapped instruction's fields still do not match what
+        // CVW's RVFI taps report.  Either way the verdict carries no information.
         //
         // The verdict is ignored rather than the instruction skipped.  Gating
         // rvfi_valid was tried and does not work: the monitor keeps a shadow PC,

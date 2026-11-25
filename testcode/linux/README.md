@@ -48,7 +48,9 @@ make -C testcode/linux smoke
 make -C sim linux_boot LINUX_MEMLST=$PWD/testcode/linux/build/uart_smoke.lst \
                        LINUX_PASS=AMOEBA_UART_OK LINUX_TIMEOUT=400000
 
-# Full boot image (downloads Linux 6.6 + OpenSBI 1.4, both checksum-pinned)
+# Full boot image (downloads Linux 6.6 + OpenSBI 1.4, both checksum-pinned;
+# OpenSBI is patched with patches/opensbi-1.4-*.patch -- the AMOEBA fail-stop
+# on fault causes 16/19/20, see docs/memory_map.md)
 make -C testcode/linux
 
 # Build the simulator, then boot

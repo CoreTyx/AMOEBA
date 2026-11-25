@@ -14,7 +14,7 @@ uncached, non-idempotent, non-executable, and do not support atomics.
 | `0x0c00_0000–0x0fff_ffff` | PLIC | Simulation SoC; ASIC on-chip with `PERIPH_ONCHIP=1`, external with `=0` |
 | `0x1000_0000–0x1000_0007` | UART | Same placement as PLIC |
 | `0x1007_000b` | FI_CONTROL | Both SoCs, always on-chip |
-| `0x1008_0000–0x1008_0fff` | ECC SEC counters: read-only, 32-bit reads at `+0` register operands (register file reads and the two Execute operand registers), `+4` I$, `+8` D$ | Simulation SoC; not routed on the ASIC |
+| `0x1008_0000–0x1008_0fff` | Fault counters: 23 saturating 16-bit counters, counter *i* as a 32-bit word at `+4*i`, software-clearable; and the I$/D$ last-uncorrectable-error records at `+0x60–0x6c` (see [Fault counters](#fault-counters)) | Both SoCs, on-chip |
 | `0x8000_0000–0x8fff_ffff` | External memory, 256 MiB | Both SoCs |
 
 Reset PC: `0x8000_0000`. Simulation completion address `0x8080_0000` is ordinary
@@ -22,7 +22,8 @@ memory monitored by the testbench. FPGA host registers use a separate address sp
 
 ## FI_CONTROL: `0x1007_000b`
 
-Read/write **byte**, reset **`0x3f`**. Use `lbu`/`sb` or `volatile uint8_t`.
+Read/write **byte**, reset **`0x00`** (`0x3f` in `ECE411_SIM_INJECT` simulation builds,
+which model boot software arming the six core units). Use `lbu`/`sb` or `volatile uint8_t`.
 Wider accesses and neighboring addresses are rejected; neighboring bytes are not aliases.
 
 | Bit | Injection group |
@@ -33,7 +34,8 @@ Wider accesses and neighboring addresses are rejected; neighboring bytes are not
 | 3 | DIV: quotient and remainder in both replicas |
 | 4 | Integer register-file ECC: both read paths |
 | 5 | Pipeline ECC: `RD1EReg`, `RD2EReg`, `ImmExtEReg`, `SrcAMReg`, `IEUResultMReg`, `WriteDataMReg`, `IFResultWReg` |
-| 7:6 | Reserved: read zero, writes ignored |
+| 6 | Cache correctable: one-bit flips into the next I$/D$ tag and line written (`cachefi.sv`) |
+| 7 | Cache uncorrectable: two-bit flips, same placement as bit 6 |
 
 Each injector enable is `fault_inject & FI_CONTROL[bit]`, registered in the core:
 a change to the mask or the pin reaches the injectors one cycle later (the pin
@@ -200,6 +202,50 @@ Each strobe can capture an eligible instruction and replay a previously captured
 instruction when `LFSR[0]`, `DummyValid`, and `InsertOkD` are set. FI_CONTROL does
 not affect dummy insertion.
 
+## Fault counters
+
+`0x1008_0000 + 4*i`, read with 32-bit loads; `{16'b0, count}`, saturating at
+`0xFFFF` ([`faultcount_apb.sv`](../hdl/core/uncore/faultcount_apb.sv)).
+SEC = corrected, DED = uncorrectable.  Reset clears them; so does software: a 32-bit
+store of any value to counter *i*'s word clears that counter, and a store to
+`+0x7c` (word 31) clears all of them.  An event in the cycle of the clear still
+counts.  Machine mode only, like the rest of the block (PMP can hide it from S/U).
+
+| *i* | Counts | *i* | Counts |
+| --- | --- | --- | --- |
+| 0 / 1 | Register-file SEC / DED | 12 / 13 | MUL residue mismatch / unresolved |
+| 2 / 3 | Pipeline-register SEC / DED | 14 / 15 | DIV residue mismatch / unresolved |
+| 4 / 5 | I$ SEC / DED (tag and data) | 16 / 17 | Privilege-mode TMR corrected / uncorrectable |
+| 6 / 7 | D$ SEC / DED (tag and data) | 18 / 19 | I$ tag SEC / tag DED (a subset of 4 / 5) |
+| 8 / 9 | ALU replica mismatch / unresolved | 20 / 21 | D$ tag SEC / tag DED (a subset of 6 / 7) |
+| 10 / 11 | Compare replica mismatch / unresolved | 22 | D$ modified data lost: each cause-20/21 report |
+
+Data-only counts are the totals minus the tag counters. Every counter-22 event is
+also in counter 7; the rest of counter 7 (and all of counter 5) are uncorrectable
+lines that were dropped and refetched with nothing lost.
+
+### Last-error records
+
+One record per cache for the latest uncorrectable error (each event counted by
+counter 5 or 7), to tell a random upset from a bad cell: the same set and way
+again and again points at the SRAM.
+
+| Offset | Word | Contents |
+| --- | --- | --- |
+| `+0x60` | 24 | D$ record |
+| `+0x64` | 25 | D$ line physical address `[31:0]` (only when TAG is 0) |
+| `+0x68` | 26 | I$ record |
+| `+0x6c` | 27 | I$ line physical address `[31:0]` (only when TAG is 0) |
+
+Record bits: `[0]` VALID, `[1]` MULTIPLE (more than one error since the record
+was last cleared; it holds the newest), `[2]` TAG (the tag was uncorrectable, so
+the line's address is unknown), `[3]` LOST (D$: dirty data lost, the same event
+as trap cause 20/21), `[5:4]` SOURCE (0 a lookup, 1 an eviction, 2 a flush,
+3 the scrubber), `[11:8]` WAYS (the way(s) dropped, one bit each), `[27:16]` SET.
+A store of any value to a record's either word clears that record; an error in
+the same cycle wins.  Reset clears both; the clear-all word does not.  Words 23
+and 28–31 read 0.
+
 ## Trap causes
 
 `mcause`/`scause` bit 63 distinguishes interrupts (1) from exceptions (0).
@@ -216,19 +262,37 @@ See [`trap.sv`](../hdl/core/privileged/trap.sv).
 | 8, 9, 11 | Environment call from user, supervisor, machine mode |
 | 12, 13, 15 | Instruction, load, store/atomic page fault |
 | 16 | Custom FT unresolved result |
-| 19 | Uncorrectable storage ECC |
+| 19 | Uncorrectable storage ECC: register file or pipeline register |
+| 20 | Uncorrectable ECC in a dirty D$ line's data: the modified line is lost, `mtval` is its address |
+| 21 | Uncorrectable ECC in a dirty D$ line's tag: the modified line is lost and its address is unknown |
 
 Cause 16 uses the faulting M-stage PC in `mepc` and zero in `mtval`. ALU/CMP and
 DIV terminal faults travel E→M with their instruction; MUL faults originate in M.
 Backpressure retains pending faults. Trap entry suppresses the faulting result,
 flushes younger instructions, and redirects to the `mtvec` base. Cause 19 uses the
-saved ECC fault record for `mepc`/`mtval`.
+saved ECC fault record for `mepc`/`mtval`. Cause 20 sets `mtval` to the lost line's
+address (data error on a hit, eviction or flush). The line is reported and then
+dropped -- never written back, so memory keeps its older copy, and a later access
+reads that copy without a further trap. (Leaving it valid would re-trap on every
+access, which in the firmware's own trap path loops before any report.) Cause 21 is raised instead when
+the dirty line's tag itself is uncorrectable: the address is gone, so `mtval` is
+only the address of the access that found the line's cache set, and software cannot
+tell which page lost data. A clean line with an uncorrectable tag, or any
+uncorrectable line in the I$, is dropped and refetched without a trap (it is counted).
 
-`medeleg` is 16 bits, so causes 16/19 always enter machine mode. Interrupts and
+`medeleg` is 16 bits, so causes 16/19/20/21 always enter machine mode. Interrupts and
 instruction page/access/illegal-instruction faults precede cause 16; remaining
-standard exceptions precede cause 19. With `ZICCLSM_SUPPORTED=0`, load/store
+standard exceptions precede causes 19, 20 and 21. With `ZICCLSM_SUPPORTED=0`, load/store
 misalignment precedes page/access faults. Other exception codes are not generated;
 instruction misalignment is normally absent with compressed instructions enabled.
+
+Firmware: the Linux image's OpenSBI
+([`opensbi-1.4-amoeba-fail-stop.patch`](../testcode/linux/patches/opensbi-1.4-amoeba-fail-stop.patch))
+handles causes 16, 19, 20 and 21 from any mode by printing `AMOEBA FAIL-STOP:` lines
+(cause, `mepc`, `mtval`, trapping mode, `MSECFAULT`, `MFTSTATUS`) and halting the
+hart. Stock OpenSBI would redirect them to Linux, which reports "unknown exception"
+and sends `SIGILL` to whatever process is running. `make -C sim linux_failstop_cache_ded`
+(CI job `ci-linux-failstop-cache-ded`) checks the cause-20/21 path under Linux.
 
 | Interrupt cause | Source |
 | --- | --- |

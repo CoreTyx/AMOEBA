@@ -54,6 +54,8 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   output logic                    DCacheAccess,                         // D cache memory access for performance counters
   output logic [2:0]              DCacheSec,                            // fault flags for the counters (cache.sv)
   output logic                    DCacheDed,
+  output logic                    DCacheTagDed,                         // ... of which an uncorrectable tag
+  output cache_ded_info_t         DCacheDedInfo,                        // ... and where it was
   // address and write data
   input  logic [P.XLEN-1:0]       IEUAdrE,                              // Execution stage memory address
   output logic [P.XLEN-1:0]       IEUAdrM,                              // Memory stage memory address
@@ -104,7 +106,8 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
   // D$ SECDED: uncorrectable data error found on a dirty line -- the only copy of modified data,
   // so it can't simply be discarded. Own trap cause, independent of the IEU regfile's ECC DED.
   output logic                    DCacheEccDedDirtyFaultM,
-  output logic [P.PA_BITS-1:0]    DCacheEccDedDirtyFaultAdrM
+  output logic [P.PA_BITS-1:0]    DCacheEccDedDirtyFaultAdrM,
+  output logic                    DCacheEccDedTagLostM                  // with the fault: the line's tag was lost too (cause 21)
 );
   localparam logic MISALIGN_SUPPORT = P.ZICCLSM_SUPPORTED & P.DCACHE_SUPPORTED;
   localparam MLEN = MISALIGN_SUPPORT ? 2*P.LLEN : P.LLEN; // widen buffer for misaligned accessess
@@ -450,12 +453,13 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
         .ByteMask(ByteMaskSpillM), .BeatCount(BeatCount[AHBWLOGBWPL-1:AHBWLOGBWPL-LLENLOGBWPL]),
         .WriteData(LSUWriteDataSpillM), .SelHPTW,
         .CacheStall(DCacheStallM), .CacheBusy(DCacheBusyM), .CacheMiss(DCacheMiss), .CacheAccess(DCacheAccess),
-        .SecErr(DCacheSec), .DedErr(DCacheDed),
+        .SecErr(DCacheSec), .DedErr(DCacheDed), .DedTagErr(DCacheTagDed), .DedInfo(DCacheDedInfo),
         .CacheCommitted(DCacheCommittedM),
         .CacheBusAdr(DCacheBusAdr), .ReadDataWord(DCacheReadDataWordM), .AmoWord(DCacheAmoWordM), .AmoOffset(IEUAdrM[$clog2(LINELEN/8)-1:0]),
         .FetchBuffer, .CacheBusRW(CacheBusRW),
         .CacheBusAck(DCacheBusAck), .InvalidateCache(1'b0), .InvalidateFlushStage(LSUFlushW), .CMOpM(CacheCMOpM),
-        .EccDedDirtyFault(DCacheEccDedDirtyFaultM), .EccDedDirtyFaultAdr(DCacheEccDedDirtyFaultAdrM));
+        .EccDedDirtyFault(DCacheEccDedDirtyFaultM), .EccDedDirtyFaultAdr(DCacheEccDedDirtyFaultAdrM),
+        .EccDedDirtyFaultTagLost(DCacheEccDedTagLostM));
 
       ahbcacheinterface #(.P(P), .BEATSPERLINE(BEATSPERLINE), .AHBWLOGBWPL(AHBWLOGBWPL), .LINELEN(LINELEN),  .LLENPOVERAHBW(LLENPOVERAHBW), .READ_ONLY_CACHE(0)) ahbcacheinterface(
         .HCLK(clk), .HRESETn(~reset), .DFTHold, .Flush(LSUFlushW),
@@ -498,7 +502,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
       assign DCacheBusyM = 1'b0;
       assign DCacheAmoWordM = '0;
       assign AmoReadWordMuxM = ReadDataWordMuxM; // no cache: the read data already comes from a register
-      assign {DCacheSec, DCacheDed} = '0;
+      assign {DCacheSec, DCacheDed, DCacheTagDed, DCacheEccDedTagLostM, DCacheDedInfo} = '0;
     end
   end else begin : nobus // block: bus, only DTIM
     assign {LSUHWDATA, LSUHADDR, LSUHWRITE, LSUHSIZE, LSUHBURST, LSUHTRANS, LSUHWSTRB} = '0;
@@ -508,7 +512,7 @@ module lsu import cvw::*;  #(parameter cvw_t P) (
     assign AmoReadWordMuxM = ReadDataWordMuxM;
     assign {LSUBusStallM, BusCommittedM} = '0;
     assign {DCacheMiss, DCacheAccess} = '0;
-    assign {DCacheSec, DCacheDed} = '0;
+    assign {DCacheSec, DCacheDed, DCacheTagDed, DCacheEccDedTagLostM, DCacheDedInfo} = '0;
     assign {DCacheStallM, DCacheCommittedM} = '0;
     assign DCacheBusyM = 1'b0;
   end

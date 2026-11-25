@@ -6,7 +6,7 @@
 // On this core fence.i writes the whole D$ back and invalidates the I$.  The
 // new code can be: still dirty in the D$ (never written back), already evicted
 // to memory by unrelated traffic, a single changed halfword in a line the I$
-// holds, or a code region twice the size of the D$ (write-backs happening
+// holds, or a code region four times the size of the D$ (write-backs happening
 // while it is being written).  Each case regenerates functions with fresh
 // return values and requires every one of them after a single fence.i.
 #include "../lib/stress.h"
@@ -14,7 +14,7 @@
 #ifndef ST_SCALE
 #define ST_SCALE 1
 #endif
-#define NF 64                 /* functions, 128 bytes apart: 8 KiB = 2x D$ */
+#define NF 64                 /* functions, 128 bytes apart: 8 KiB = 4x the 2 KiB D$ */
 #define STRIDE 128
 
 static uint8_t g_code[NF * STRIDE] ST_ALIGNED(4096);
@@ -70,7 +70,7 @@ int main(void) {
         for (int i = 0; i < 16; i++) bad += call(i) != (uint64_t)(int64_t)val[i];
         ST_CHECK_EQ("halfword patch in hot lines", bad, 0);
 
-        st_section("D: 8 KiB of code (2x D$) written, then one fence.i");
+        st_section("D: 8 KiB of code (4x D$) written, then one fence.i");
         bad = 0;
         for (int i = 0; i < NF; i++) { val[i] = (int32_t)st_rand(); emit(i, val[i]); }
         st_fence_i();

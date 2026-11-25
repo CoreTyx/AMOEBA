@@ -14,6 +14,10 @@
 //   3. CSRs of absent extensions are illegal everywhere
 //   4. CSRs Linux/OpenSBI require are legal where they must be
 //   5. every legal read-only CSR (bits [11:10] = 3) rejects a write attempt
+//   6. a WRITE that does not read (csrrw x0, N) to a CSR that is illegal in the
+//      current mode traps too -- privilege and existence are checked on writes,
+//      not only on reads.  Only CSRs the read scan found illegal in that mode are
+//      probed, so nothing real is ever written.
 //
 // The probes come from an assembler-generated table -- entry N is
 // `csrrs a0, N, x0 ; ret` at 8 * N -- so no self-modifying code is involved.
@@ -21,6 +25,23 @@
 
 extern char st_csr_rd_table[];
 extern char st_csr_wr_table[];
+extern char st_csr_wo_table[];
+static uint64_t wo_probe(uint64_t csr) {
+    ((uint64_t (*)(uint64_t, uint64_t))(void *)(st_csr_wo_table + 8 * csr))(0, 0);
+    return 0x1e9a1;
+}
+/* 1 if `csrrw x0, csr, x0` traps with an illegal instruction in mode prv. */
+static int wo_traps(uint64_t csr, uint64_t prv) {
+    if (prv == PRV_M) {
+        st_expect(ST_EXPECT_SKIP);
+        g_exp_resume = (uint64_t)(void *)(st_csr_wo_table + 8 * csr + 4);   /* the ret after it */
+        wo_probe(csr);
+        st_expect_clear();
+        return st_trapped() && g_trap_cause == CAUSE_ILLEGAL;
+    }
+    uint64_t r = st_run_expect_abort(prv, wo_probe, csr, (uint64_t)(g_st_lstack + ST_LSTACK_BYTES));
+    return r == ST_TRAP_ABORTED && g_trap_cause == CAUSE_ILLEGAL;
+}
 __asm__ (
     ".text\n.option push\n.option norvc\n.balign 8\n"
     ".globl st_csr_rd_table\n"
@@ -33,6 +54,15 @@ __asm__ (
     ".endr\n"
     /* write attempts on the read-only half (0xc00-0xfff): csrrs x0, N, a1
      * with a1 = 0 changes no bits but is architecturally a write. */
+    /* write-only probes: csrrw x0, N, x0 (rd = x0, so the CSR is NOT read) */
+    ".globl st_csr_wo_table\n"
+    "st_csr_wo_table:\n"
+    ".set st_csr_n, 0\n"
+    ".rept 4096\n"
+    "    csrrw x0, st_csr_n, x0\n"
+    "    ret\n"
+    "    .set st_csr_n, st_csr_n + 1\n"
+    ".endr\n"
     ".globl st_csr_wr_table\n"
     "st_csr_wr_table:\n"
     ".set st_csr_n, 0xc00\n"
@@ -156,6 +186,34 @@ int main(void) {
         st_expect_clear();
         if (g_trap_cause != CAUSE_ILLEGAL) st_check_failed("write to read-only CSR accepted", c, CAUSE_ILLEGAL, __LINE__);
         else g_st_pass++;
+    }
+
+    st_section("a write that does not read (rd = x0) is privilege- and existence-checked too");
+    {
+        uint64_t missed[3] = { 0, 0, 0 }, probed[3] = { 0, 0, 0 };
+        for (int p = 2; p >= 0; p--) {
+            uint64_t prv = p == 2 ? PRV_M : (uint64_t)p;
+            for (unsigned c = 0; c < 4096; c++) {
+                if (g_legal[p][c]) continue;              /* never write a CSR that exists here */
+                /* Every S- and M-level CSR (0x1xx, 0x3xx, custom 0x7c0-0x7ff) -- the
+                 * ones a lower mode must not reach -- and every 16th address
+                 * elsewhere: all 4096 in three modes is ~10x the run's budget. */
+                int important = (c >> 8) == 0x1 || (c >> 8) == 0x3 || (c >= 0x7c0 && c <= 0x7ff);
+                if (!important && (c & 15)) continue;
+                probed[p]++;
+                if (!wo_traps(c, prv)) {
+                    if (missed[p] < 4) st_check_failed("csrrw x0 to a CSR illegal in this mode did not trap",
+                                                       ((uint64_t)prv << 16) | c, CAUSE_ILLEGAL, __LINE__);
+                    missed[p]++;
+                }
+            }
+        }
+        st_puts("[ST] write-only probes: M "); st_putdec(probed[2]); st_puts(" S "); st_putdec(probed[1]);
+        st_puts(" U "); st_putdec(probed[0]); st_puts("; not trapped: M "); st_putdec(missed[2]);
+        st_puts(" S "); st_putdec(missed[1]); st_puts(" U "); st_putdec(missed[0]); st_putc('\n');
+        ST_CHECK_EQ("every write-only probe of an illegal CSR trapped (M)", missed[2], 0);
+        ST_CHECK_EQ("every write-only probe of an illegal CSR trapped (S)", missed[1], 0);
+        ST_CHECK_EQ("every write-only probe of an illegal CSR trapped (U)", missed[0], 0);
     }
 
     return st_result();

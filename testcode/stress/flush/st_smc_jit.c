@@ -89,6 +89,49 @@ static uint32_t encode(const op_t *o) {
 
 static inline int64_t sx32(uint64_t v) { return (int64_t)(int32_t)v; }
 
+/* The model must not use the MDU it is checking: C's *, / and % (and __int128)
+ * compile to mul/mulh/div/rem, so a consistent MDU bug would give the same wrong
+ * answer in both.  Everything below is shifts, adds and st_soft_mul. */
+static uint64_t soft_mulhu(uint64_t a, uint64_t b) {
+    uint64_t al = a & 0xffffffffUL, ah = a >> 32, bl = b & 0xffffffffUL, bh = b >> 32;
+    uint64_t ll = st_soft_mul(al, bl), lh = st_soft_mul(al, bh);
+    uint64_t hl = st_soft_mul(ah, bl), hh = st_soft_mul(ah, bh);
+    uint64_t mid = (ll >> 32) + (lh & 0xffffffffUL) + (hl & 0xffffffffUL);
+    return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+static uint64_t soft_mulh(int64_t a, int64_t b) {          /* signed x signed */
+    uint64_t h = soft_mulhu((uint64_t)a, (uint64_t)b);
+    if (a < 0) h -= (uint64_t)b;
+    if (b < 0) h -= (uint64_t)a;
+    return h;
+}
+static uint64_t soft_mulhsu(int64_t a, uint64_t b) {       /* signed x unsigned */
+    uint64_t h = soft_mulhu((uint64_t)a, b);
+    if (a < 0) h -= b;
+    return h;
+}
+/* Restoring division, b != 0. */
+static void soft_divu(uint64_t a, uint64_t b, uint64_t *q, uint64_t *r) {
+    uint64_t qq = 0, rr = 0;
+    for (int i = 63; i >= 0; i--) {
+        rr = (rr << 1) | ((a >> i) & 1);
+        if (rr >= b) { rr -= b; qq |= 1UL << i; }
+    }
+    *q = qq; *r = rr;
+}
+static uint64_t soft_neg_if(uint64_t v, int neg) { return neg ? (uint64_t)0 - v : v; }
+/* Signed, b != 0 and not (INT_MIN, -1): truncating, remainder takes a's sign. */
+static void soft_divs(int64_t a, int64_t b, uint64_t *q, uint64_t *r) {
+    uint64_t ua = soft_neg_if((uint64_t)a, a < 0), ub = soft_neg_if((uint64_t)b, b < 0), qq, rr;
+    soft_divu(ua, ub, &qq, &rr);
+    *q = soft_neg_if(qq, (a < 0) != (b < 0));
+    *r = soft_neg_if(rr, a < 0);
+}
+static uint64_t soft_div(int64_t a, int64_t b)  { uint64_t q, r; soft_divs(a, b, &q, &r); return q; }
+static uint64_t soft_rem(int64_t a, int64_t b)  { uint64_t q, r; soft_divs(a, b, &q, &r); return r; }
+static uint64_t soft_quot(uint64_t a, uint64_t b) { uint64_t q, r; soft_divu(a, b, &q, &r); return q; }
+static uint64_t soft_mod(uint64_t a, uint64_t b)  { uint64_t q, r; soft_divu(a, b, &q, &r); return r; }
+
 static uint64_t exec_model(const op_t *o, uint64_t a, uint64_t b) {
     int64_t sa = (int64_t)a, sb = (int64_t)b;
     int64_t imm = o->imm;
@@ -109,20 +152,24 @@ static uint64_t exec_model(const op_t *o, uint64_t a, uint64_t b) {
     case K_SRLW: return (uint64_t)sx32((uint32_t)a >> (b & 31));
     case K_SRAW: return (uint64_t)(int64_t)((int32_t)a >> (b & 31));
     case K_MUL:  return st_soft_mul(a, b);
-    case K_MULH: return (uint64_t)(((__int128)sa * (__int128)sb) >> 64);
-    case K_MULHU: return (uint64_t)(((unsigned __int128)a * (unsigned __int128)b) >> 64);
-    case K_MULHSU: return (uint64_t)(((__int128)sa * (__int128)(unsigned __int128)b) >> 64);
+    case K_MULH: return soft_mulh(sa, sb);
+    case K_MULHU: return soft_mulhu(a, b);
+    case K_MULHSU: return soft_mulhsu(sa, b);
     case K_MULW: return (uint64_t)sx32(st_soft_mul(a, b));
-    case K_DIV:  return b == 0 ? ~0UL : (sa == INT64_MIN && sb == -1) ? a : (uint64_t)(sa / sb);
-    case K_DIVU: return b == 0 ? ~0UL : a / b;
-    case K_REM:  return b == 0 ? a : (sa == INT64_MIN && sb == -1) ? 0 : (uint64_t)(sa % sb);
-    case K_REMU: return b == 0 ? a : a % b;
+    case K_DIV:  return b == 0 ? ~0UL : (sa == INT64_MIN && sb == -1) ? a : soft_div(sa, sb);
+    case K_DIVU: return b == 0 ? ~0UL : soft_quot(a, b);
+    case K_REM:  return b == 0 ? a : (sa == INT64_MIN && sb == -1) ? 0 : soft_rem(sa, sb);
+    case K_REMU: return b == 0 ? a : soft_mod(a, b);
     case K_DIVW: { int32_t x = (int32_t)a, y = (int32_t)b;
-                   return (uint64_t)(int64_t)(y == 0 ? -1 : (x == INT32_MIN && y == -1) ? x : x / y); }
-    case K_DIVUW: { uint32_t x = (uint32_t)a, y = (uint32_t)b; return (uint64_t)sx32(y == 0 ? ~0u : x / y); }
+                   return (uint64_t)(int64_t)(y == 0 ? -1 : (x == INT32_MIN && y == -1) ? x
+                                                     : (int32_t)soft_div(x, y)); }
+    case K_DIVUW: { uint32_t x = (uint32_t)a, y = (uint32_t)b;
+                    return (uint64_t)sx32(y == 0 ? ~0u : (uint32_t)soft_quot(x, y)); }
     case K_REMW: { int32_t x = (int32_t)a, y = (int32_t)b;
-                   return (uint64_t)(int64_t)(y == 0 ? x : (x == INT32_MIN && y == -1) ? 0 : x % y); }
-    case K_REMUW: { uint32_t x = (uint32_t)a, y = (uint32_t)b; return (uint64_t)sx32(y == 0 ? x : x % y); }
+                   return (uint64_t)(int64_t)(y == 0 ? x : (x == INT32_MIN && y == -1) ? 0
+                                                     : (int32_t)soft_rem(x, y)); }
+    case K_REMUW: { uint32_t x = (uint32_t)a, y = (uint32_t)b;
+                    return (uint64_t)sx32(y == 0 ? x : (uint32_t)soft_mod(x, y)); }
     case K_ADDI: return a + (uint64_t)imm;
     case K_SLTI: return sa < imm;
     case K_SLTIU: return a < (uint64_t)imm;
