@@ -128,7 +128,7 @@ module forte_uncore import cvw::*; #(
   fault_inject_apb faultcontrol(.PCLK, .PRESETn, .PSEL(PSELP[4]), .PWDATA, .PSTRB, .PWRITE, .PENABLE,
     .PRDATA(PRDATA[4]), .PREADY(PREADY[4]), .FaultInjectMask);
 
-  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold, .PADDR(PADDR[6:2]),
+  faultcount_apb #(P.XLEN) faultcount(.PCLK, .PRESETn, .DFTHold, .PSEL(PSELP[5]), .PENABLE, .PWRITE, .PADDR(PADDR[6:2]),
     .PRDATA(PRDATA[5]), .PREADY(PREADY[5]), .FaultEvents);
 
   if (PERIPH_ONCHIP) begin : onchip

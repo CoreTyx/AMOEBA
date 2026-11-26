@@ -1,6 +1,6 @@
 // @stress tier=pr seeds=3 nightly_seeds=16 weekly_seeds=64 build=no_spike duts=legacy,forte timeout=80000000
 //
-// st_irq_storm -- interrupts every 50-500 cycles, landing on every kind of
+// st_irq_storm -- interrupts every 2.5-6.5k cycles (see m_hook), landing on every kind of
 // instruction the core has, must be invisible to the interrupted program.
 //
 // A U-mode workload under Sv39 runs a mix chosen to keep long-latency and

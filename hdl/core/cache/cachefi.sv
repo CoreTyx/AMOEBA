@@ -54,14 +54,24 @@ module cachefi import cvw::*; #(
   logic [1:0] Sel;
   logic [3:0] Flips;                                // which of the four positions flip
 
-  assign Event = (FaultInjectSec | FaultInjectDed) & (FaultCount == PHASE);
+`ifdef ECE411_SIM_INJECT
+  // Simulation only: set by the testbench (hvl/common/top_tb.svh) to stop this
+  // injector for good -- no new events, and flips still waiting to land are dropped.
+  // linux_failstop_cache_ded uses it to inject exactly up to the first cause-20 trap,
+  // so no flip lands in the firmware's trap path while it reports.
+  logic SimCancel = 1'b0;
+`else
+  localparam logic SimCancel = 1'b0;
+`endif
+
+  assign Event = (FaultInjectSec | FaultInjectDed) & (FaultCount == PHASE) & ~SimCancel;
   always_ff @(posedge clk)
     if (reset) begin
       TagPend  <= 1'b0;
       LinePend <= 1'b0;
     end else if (~DFTHold) begin
-      TagPend  <= Event | (TagPend & ~TagWrite);
-      LinePend <= Event | (LinePend & ~LineWrite);
+      TagPend  <= (Event | (TagPend & ~TagWrite)) & ~SimCancel;
+      LinePend <= (Event | (LinePend & ~LineWrite)) & ~SimCancel;
     end
   // With both enabled, a quarter of the events are uncorrectable. No reset: read only while pending.
   always_ff @(posedge clk)

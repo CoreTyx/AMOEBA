@@ -9,28 +9,31 @@
 // and no other unit's counter moved.  The pipeline mask also flips RD1E/RD2E,
 // whose checks are the register-file counters, so pipeline ECC owns counters
 // 0-3.  One line per round:
-//   FI unit <u> <PASS|FAIL> d <18 counter deltas> result <ok|WRONG>
+//   FI unit <u> <PASS|FAIL> d <23 counter deltas> result <ok|WRONG>
 // Exit code: the number of failed rounds.  Bit 7 (cache DED) traps on a dirty
 // line, so it is left out.
 #include "../../../testcode/isa_level_testing/test_utils.h"
 
 #define FI_CONTROL     (*(volatile uint8_t *)0x1007000bUL)
 #define FAULT_COUNTER  ((volatile uint32_t *)0x10080000UL)
-#define COUNTERS       18
+#define COUNTERS       23   /* hdl/core/cvw.sv FAULT_COUNTERS */
 #define UNITS          7
 
 // faultcount_apb.sv: 0/1 RF SEC/DED, 2/3 pipe SEC/DED, 4/5 I$ SEC/DED,
 // 6/7 D$ SEC/DED, 8/9 ALU, 10/11 CMP, 12/13 MUL, 14/15 DIV (detect,
-// unresolved), 16/17 privilege-mode TMR.
+// unresolved), 16/17 privilege-mode TMR, 18/19 I$ tag SEC/DED, 20/21 D$ tag
+// SEC/DED (subsets of 4-7), 22 D$ modified data lost.
 static const int detect_counter[UNITS] = {8, 10, 12, 14, 0, 2, 6};
 // Counters each unit may move: its detect counter, plus these.
 static const uint32_t unit_counters[UNITS] = {
     1u << 9, 1u << 11, 1u << 13, 1u << 15, 1u << 1,
-    (1u << 0) | (1u << 1) | (1u << 3), (1u << 4) | (1u << 5) | (1u << 7),
+    (1u << 0) | (1u << 1) | (1u << 3),
+    (1u << 4) | (1u << 5) | (1u << 7) | (1u << 18) | (1u << 20),   /* cache SEC flips tags too */
 };
 // Counters that must not move however the unit fares: unresolved and uncorrectable.
 static const uint32_t must_stay_zero = (1u << 1) | (1u << 3) | (1u << 5) | (1u << 7) |
-                                       (1u << 9) | (1u << 11) | (1u << 13) | (1u << 15) | (1u << 17);
+                                       (1u << 9) | (1u << 11) | (1u << 13) | (1u << 15) | (1u << 17) |
+                                       (1u << 19) | (1u << 21) | (1u << 22);
 static const char *unit_name[UNITS] = {"alu", "cmp", "mul", "div", "rf_ecc", "pipe_ecc", "cache_sec"};
 
 static volatile uint64_t seed = 0x0123456789abcdefULL;

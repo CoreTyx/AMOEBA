@@ -17,6 +17,11 @@ module fault_inject_apb import cvw::*; (
   // also ties the master pin high) model boot software that armed the six core units.
 `ifdef ECE411_SIM_INJECT
   localparam logic [FI_UNITS-1:0] RESET_MASK = 8'h3f;
+  // Simulation only: units the testbench adds mid-run (hvl/common/top_tb.svh,
+  // +FI_ARM_MASK_ECE411).  Written by the testbench alone; ORed back in after any
+  // software write, so an armed unit stays armed.  A `force` on FaultInjectMask
+  // would do the same, but crashes Verilator 5.026's -O3 DFG pass.
+  logic [FI_UNITS-1:0] SimArmMask = '0;
 `else
   localparam logic [FI_UNITS-1:0] RESET_MASK = '0;
 `endif
@@ -27,6 +32,10 @@ module fault_inject_apb import cvw::*; (
     if (!PRESETn) FaultInjectMask <= RESET_MASK;
     else if (PSEL & PENABLE & PWRITE & PSTRB[3])
       FaultInjectMask <= PWDATA[31:24];
+`ifdef ECE411_SIM_INJECT
+    else if (|(SimArmMask & ~FaultInjectMask))
+      FaultInjectMask <= FaultInjectMask | SimArmMask;
+`endif
   end
 
   assign PRDATA = {32'b0, FaultInjectMask, 24'b0};

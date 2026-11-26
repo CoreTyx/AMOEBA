@@ -184,6 +184,15 @@ module cachescrubber #(
         // Route by error class, same priority as the demand path: uncorrectable-and-dirty (D$
         // only) traps without touching valid/dirty; uncorrectable-and-clean (or I$) invalidates;
         // correctable commits a re-encoded writeback for whichever of tag/data needed it.
+        // KNOWN ISSUE (the chip runs with the scrubber disabled; cache.sv does not
+        // instantiate it): a tag DED invalidates the line even when it is DIRTY,
+        // and DirtyWay is masked with ~TagDedErr in cacheway.sv, so this cannot
+        // tell.  That drops modified data without a fault.  The demand path raises
+        // cause 21 for the same case (cachefsm.sv DropTagDedDirty).  Before
+        // enabling: route a tag DED on a valid+dirty way (cacheway.sv
+        // TagDedDirtyWay) to ScrubTrap as well as the invalidate.  Also, a dirty
+        // data DED here traps but keeps the line, while the demand path now reports
+        // and then drops it (cachefsm.sv ClearValid): make this match.
         if (TagDedErr | (DataDedErr & ~(DirtyWay & !READ_ONLY_CACHE))) begin
           ScrubInvalidate = 1'b1;
         end else if (DataDedErr & DirtyWay & !READ_ONLY_CACHE) begin

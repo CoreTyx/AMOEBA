@@ -94,6 +94,8 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   output logic       StoreRepairsData,  // This cycle's store-hit write also repairs a correctable error in the line: write all of it
   input  logic       TagDedDirty,       // A valid+dirty way in the set being read (the flush way, during a flush) has an uncorrectable tag
   output logic       DropTagDedDirty,   // Pulse: invalidate that way -- its data can't be written back without an address
+  input  logic       TagDedClean,       // A valid, clean way in the set being read (the flush way, during a flush) has an uncorrectable tag
+  output logic       DropTagDedClean,   // Pulse: invalidate that way -- nothing is lost, memory holds the line
   output logic       EccDedLostLine,    // Pulse: a dirty line leaving the cache (eviction or flush) had uncorrectable data; it was dropped, not written back
   output logic       EccDedCleanDrop,   // Pulse: an access found an uncorrectable error in a clean line (or its tag) and dropped it
   output logic       LatchHitWord,      // Capture the word the core will read, before a store/AMO hit's write lands
@@ -101,7 +103,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   input  logic       ScrubOwnsWaySelect, // The scrubber has an operation in flight (or is being granted this cycle) that needs way-selection state a new demand sequence would otherwise contend for -- hold off starting one until it clears (see cache.sv)
   output logic       SelCorrectTag,     // Pulse: commit a re-encoded tag correction into the hit way
   output logic       SelCorrectData,    // Pulse: commit a re-encoded data correction into the hit way
-  output logic       EccDedDirtyFault   // Pulse: D$ only, uncorrectable data error on a dirty line -- escalate, do not invalidate
+  output logic       EccDedDirtyFault   // Pulse: D$ only, a dirty line with an uncorrectable error was lost -- report it (trap cause 20/21); the line is dropped
 );
 
   logic              resetDelay;
@@ -227,7 +229,7 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
       STATE_DATA_DECODE:      if(TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)))
                                                                                 NextState = STATE_FETCH;      // uncorrectable, but safe to discard: refetch. (TagDedErr never coincides with Hit -- see cacheway.sv -- so this always proceeds as a normal compulsory miss.)
                              else if(DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE)
-                                                                                NextState = STATE_DED_TRAP;   // uncorrectable AND the only copy of modified data -- cannot discard
+                                                                                NextState = STATE_DED_TRAP;   // uncorrectable AND the only copy of modified data: report it, and drop it (ClearValid below)
                              else if(AmoHit)                                   NextState = STATE_AMO_WRITE;     // the word just read is the AMO's operand; it is in HitWordQ next cycle
                              else if((TagSecErr | DataSecErr) & Hit)           NextState = STATE_ECC_WRITEBACK; // correctable: fix durably before completing
                              else if(AnyMiss & (READ_ONLY_CACHE | ~EvictDirty)) NextState = STATE_FETCH;    // exclusion-tag: icache FETCHStatement (an uncorrectable dirty victim is dropped, not written back)
@@ -282,7 +284,13 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign SetValid = CurrState == STATE_WRITE_LINE |
                     (CurrState == STATE_DATA_DECODE & CMOZeroNoEviction) |
                     (CurrState == STATE_WRITEBACK & CacheBusAck & CMOpM[3]);
-  assign ClearValid = (CurrState == STATE_DATA_DECODE & ((CMOpM[0] | (CMOpM[2] & ~HitLineDirty)) | TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)))) |
+  // A hit whose data is uncorrectable is dropped, clean or dirty.  Clean: refetched, nothing lost.
+  // Dirty: the modified data is lost and reported first (EccDedDirtyFault -> trap cause 20, with
+  // its address); memory keeps the older copy.  Report-then-drop, not poison: a line left valid
+  // re-trapped on every access, and in the firmware's own trap stack or scratch that looped
+  // forever before the fail-stop could report anything.  (Clearing valid clears dirty with it,
+  // cacheway.sv, so it is never written back.)
+  assign ClearValid = (CurrState == STATE_DATA_DECODE & ((CMOpM[0] | (CMOpM[2] & ~HitLineDirty)) | TagDedErr | (DataDedErr & Hit))) |
                       (CurrState == STATE_WRITEBACK & CMOpM[2] & CacheBusAck) |
                       FlushDedHit; // drop the uncorrectable flushed line rather than leave it valid
   assign LRUWriteEn = (((CurrState == STATE_DATA_DECODE & (AnyHit | CMOZeroNoEviction) & ~TagSecErr & ~DataSecErr & ~TagDedErr & ~DataDedErr) |
@@ -378,6 +386,9 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign EccDedLostLine = ((CurrState == STATE_DATA_DECODE) & VictimDed) | FlushDedHit;
 
   assign DropTagDedDirty = ((CurrState == STATE_TAG_SCAN) | (CurrState == STATE_FLUSH)) & TagDedDirty & ~READ_ONLY_CACHE;
+  // Same states as above, either cache, no fault and no change of state: the lookup carries on as
+  // the miss it already is for that way.
+  assign DropTagDedClean = ((CurrState == STATE_TAG_SCAN) | (CurrState == STATE_FLUSH)) & TagDedClean;
   assign EccDedCleanDrop = (CurrState == STATE_DATA_DECODE) & (TagDedErr | (DataDedErr & Hit & ~(HitDirty & ~READ_ONLY_CACHE)));
   assign EccDedDirtyFault = ((CurrState == STATE_DATA_DECODE) & DataDedErr & Hit & HitDirty & ~READ_ONLY_CACHE) |
                             DropTagDedDirty | // modified data lost with its tag: reported, never silently dropped

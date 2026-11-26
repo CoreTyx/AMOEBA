@@ -166,7 +166,7 @@ build() {
     # compile with -fcoroutines (same probe as sim/Makefile UNIT_TB_CFLAGS).
     local coro=()
     echo | ${CXX:-g++} -std=c++20 -fcoroutines -x c++ -E - >/dev/null 2>&1 && coro=(-CFLAGS -fcoroutines)
-    verilator --binary -j "$(nproc)" --timing --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style "${coro[@]}" \
+    verilator --binary -j "$(nproc)" --timing --assert --timescale 1ns/1ps -Wno-fatal -Wno-lint -Wno-style "${coro[@]}" \
       +define+ECE411_VERILATOR "${INCS[@]}" "${DEFS[@]}" "${SRCS[@]}" \
       --top-module pin_tb -o pin_tb 2>&1 | tee build.log
     [ -x obj_dir/pin_tb ] || die "verilator build failed, see $BUILD/build.log"

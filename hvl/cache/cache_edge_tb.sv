@@ -59,6 +59,9 @@ module cache_edge_tb;
   logic [31:0] SecCount;      // corrections, counted here from the cache's SecErr pulses
   logic [2:0]  SecErr;
   logic        DedErr;
+  logic        DedTagErr;     // the tag share of DedErr
+  cvw::cache_ded_info_t DedInfo; // where it was (set, ways, source)
+  logic        EccDedDirtyFaultTagLost; // with EccDedDirtyFault: the line's tag was lost (cause 21)
   logic SelHPTW;
   logic CacheBusAck, SelBusBeat;
   logic [LOGBWPL-1:0] BeatCount;
@@ -83,8 +86,8 @@ module cache_edge_tb;
     .FaultInjectSec(fi_sec), .FaultInjectDed(fi_ded), .FaultLfsr(fi_lfsr), .FaultCount(fi_count),
     .CacheRW, .FlushCache, .InvalidateCache, .CMOpM, .NextSet, .PAdr, .ByteMask, .WriteData,
     .CacheCommitted, .CacheStall, .CacheBusy(), .ReadDataWord, .AmoWord(), .AmoOffset('0), .CacheMiss, .CacheAccess, .SelHPTW,
-    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr,
-    .EccDedDirtyFault, .EccDedDirtyFaultAdr
+    .CacheBusAck, .SelBusBeat, .BeatCount, .FetchBuffer, .CacheBusRW, .CacheBusAdr, .SecErr, .DedErr, .DedTagErr, .DedInfo,
+    .EccDedDirtyFault, .EccDedDirtyFaultAdr, .EccDedDirtyFaultTagLost
   );
   always @(posedge clk)
     if (reset) SecCount <= '0;
@@ -166,6 +169,26 @@ module cache_edge_tb;
   end
 
   logic [PA_BITS-1:0] lastfaultadr;
+  // Uncorrectable-error reports, cumulative like dedfaults: every DedErr pulse (the counters' 5/7),
+  // its tag share (counters 19/21), and the faults that lost the line's tag (trap cause 21).
+  int dederrs, dedtagerrs, taglostfaults;
+  cache_ded_info_t lastinfo;   // DedInfo at the last DedErr pulse (the last-error record's source)
+  always @(posedge clk) if (!reset) begin
+    if (DedErr)    begin dederrs++; lastinfo = DedInfo; end
+    if (DedTagErr) dedtagerrs++;
+    if (EccDedDirtyFault && EccDedDirtyFaultTagLost) taglostfaults++;
+  end
+
+  // The last DedErr's record says where it was: source (0 lookup, 1 eviction, 2 flush), set, the
+  // way(s), and for a data error the line's address
+  task automatic checkinfo(input string what, input int src, input int set, input int way,
+                           input logic [PA_BITS-1:0] adr, input bit tagerr);
+    check({what, ": error record source"}, int'(lastinfo.Source) == src);
+    check({what, ": error record set"},    int'(lastinfo.Set) == set);
+    check({what, ": error record way"},    lastinfo.Ways == 4'(1 << way));
+    if (!tagerr) check({what, ": error record line address"}, lastinfo.LineAdr == 32'(lineof(adr)));
+  endtask
+
   always @(posedge clk) if (!reset && EccDedDirtyFault) begin
     dedfaults++;
     lastfaultadr = {EccDedDirtyFaultAdr[PA_BITS-1:OFFSETLEN], {OFFSETLEN{1'b0}}};
@@ -417,6 +440,7 @@ module cache_edge_tb;
     check("data DED, dirty victim: corrupted line not written to memory", mem_read(adr) === memold);
     check("data DED, dirty victim: fault address is the lost line",
           dedfaults != faultsbefore && lastfaultadr == lineof(adr));
+    checkinfo("data DED, dirty victim", 1, set, way, adr, 0);
     doreset();
   endtask
 
@@ -453,6 +477,7 @@ module cache_edge_tb;
     check({"data DED, dirty line", tag, ": line is not left valid after the flush"}, findway(adr) < 0);
     check({"data DED, dirty line", tag, ": fault address is the lost line"},
           dedfaults != faultsbefore && lastfaultadr == lineof(adr));
+    checkinfo({"data DED, dirty line", tag}, 2, set, way, adr, 0);
     check({"data DED, dirty line", tag, ": next set's line survives the flush"}, findway(neighbour) >= 0);
     doreset();
   endtask
@@ -463,7 +488,7 @@ module cache_edge_tb;
   task automatic test_tagded_dirty_flush;
     logic [PA_BITS-1:0] adr, other, neighbour;
     logic [WORDLEN-1:0] r;
-    int way, set, faultsbefore, wbbefore;
+    int way, set, faultsbefore, taglostbefore, wbbefore;
     adr = 16'h10C0;
     other = alias_of(adr, 0);
     neighbour = adr + PA_BITS'(1 << OFFSETLEN);
@@ -478,14 +503,52 @@ module cache_edge_tb;
     way = findway(adr); set = setof(adr);
     check("tag DED flush: bad line is in the last way", way == NUMWAYS - 1);
     faultsbefore = dedfaults;
+    taglostbefore = taglostfaults;
     wbbefore = wbcount;
     fliptagbit(way, set, 4);
     fliptagbit(way, set, 5);
     doflush();
     check("tag DED flush: flush raises a fault", dedfaults != faultsbefore);
+    check("tag DED flush: the fault says the tag was lost (cause 21)", taglostfaults == taglostbefore + 1);
     check("tag DED flush: no writeback was issued for it", wbcount == wbbefore);
     check("tag DED flush: bad line is invalidated", !peekvalid(way, set));
+    checkinfo("tag DED flush", 2, set, way, adr, 1);
     check("tag DED flush: next set's line survives the flush", findway(neighbour) >= 0);
+    doreset();
+  endtask
+
+  // A clean line whose tag takes a 2-bit error can never hit again, and memory still holds its
+  // data, so there is nothing to trap on.  It must still be noticed: counted once as an
+  // uncorrectable error and as a tag error, and the way dropped rather than left occupying the set.
+  task automatic test_tagded_clean;
+    logic [PA_BITS-1:0] adr;
+    logic [WORDLEN-1:0] r;
+    int way, set, faultsbefore, dedbefore, tagbefore, taglostbefore, wbbefore;
+    adr = 16'h1140;
+    setline(adr, 128'h2468ACE013579BDF_FEDCBA9876543210);
+    doload(adr, r);
+    way = findway(adr); set = setof(adr);
+    check("tag DED clean: line is resident and clean", way >= 0 && !peekdirty(way, set));
+    faultsbefore  = dedfaults;
+    dedbefore     = dederrs;
+    tagbefore     = dedtagerrs;
+    taglostbefore = taglostfaults;
+    wbbefore      = wbcount;
+    fliptagbit(way, set, 4);
+    fliptagbit(way, set, 5);
+    doload(adr, r);
+    check("tag DED clean: load returns the right word, refetched", r === refword(adr));
+    check("tag DED clean: no fault (nothing was lost)", dedfaults == faultsbefore);
+    check("tag DED clean: no tag-lost report", taglostfaults == taglostbefore);
+    check("tag DED clean: reported once as an uncorrectable error", dederrs == dedbefore + 1);
+    check("tag DED clean: ... and as a tag error", dedtagerrs == tagbefore + 1);
+    checkinfo("tag DED clean", 0, set, way, adr, 1);
+    check("tag DED clean: nothing written back", wbcount == wbbefore);
+    check("tag DED clean: the bad entry is gone (way dropped, or refilled with the right tag)",
+          !peekvalid(way, set) || peektag(way, set) == adr[PA_BITS-1:SETLEN+OFFSETLEN]);
+    doload(adr, r);
+    check("tag DED clean: a second access reports nothing new", dederrs == dedbefore + 1);
+    check("tag DED clean: second access still correct", r === refword(adr));
     doreset();
   endtask
 
@@ -702,15 +765,22 @@ module cache_edge_tb;
     dostore(a, 64'h7777777777777777);
     w = findway(a); s = setof(a);
     begin
-      int faultsbefore, wbbefore;
+      int faultsbefore, taglostbefore, tagerrsbefore, wbbefore;
       bit strayadr;
+      // All counts below are deltas from here, so an earlier section's fault can't satisfy them.
       faultsbefore = dedfaults;
+      taglostbefore = taglostfaults;
+      tagerrsbefore = dedtagerrs;
       wbbefore = wbcount;
       fliptagbit(w, s, 4);                 // address bits 11 and 12: the corrupted tag names 0x0880,
       fliptagbit(w, s, 5);                 // a line no test ever touches
       doload(a, result);
-      check("tag DED, dirty line: load returns modified data or raises a fault",
-            result === 64'h7777777777777777 || dedfaults != faultsbefore);
+      // The tag is gone, so the modified data cannot be returned: the load must report the loss.
+      check("tag DED, dirty line: the load raises a fault", dedfaults != faultsbefore);
+      check("tag DED, dirty line: the fault says the tag was lost (cause 21)", taglostfaults == taglostbefore + 1);
+      check("tag DED, dirty line: counted as a tag error", dedtagerrs == tagerrsbefore + 1);
+      checkinfo("tag DED, dirty line", 0, s, w, a, 1);
+      check("tag DED, dirty line: the way is dropped", !peekvalid(w, s) || peektag(w, s) == a[PA_BITS-1:SETLEN+OFFSETLEN]);
       // Push the corrupted way out of the set and watch where its writeback goes.
       strayadr = 0;
       for (int k = 0; k < 3; k++) begin
@@ -720,12 +790,12 @@ module cache_edge_tb;
       end
       if (strayadr) $display("  stray writeback to never-cached line %h", lastwbadr);
       check("tag DED, dirty line: no writeback to an address the cache never held", !strayadr);
+      doflush();
+      // With the tag unrecoverable the data cannot reach its real address; the requirement is that
+      // the loss was reported (fault) -- in this section, exactly once -- not that memory is repaired.
+      check("tag DED, dirty line: data reaches memory, or this section reported the loss",
+            mem_read(a) === refget(a) || dedfaults == faultsbefore + 1);
     end
-    doflush();
-    // With the tag unrecoverable the data cannot reach its real address; the requirement is that
-    // the loss is reported (fault), not that memory is somehow repaired.
-    check("tag DED, dirty line: data reaches memory, or the loss was reported",
-          mem_read(a) === refget(a) || dedfaults != 0);
     doreset();
 
     // ── 9b / 9c. Uncorrectable DATA error on a dirty line leaving via eviction / flush. ──
@@ -733,6 +803,10 @@ module cache_edge_tb;
     test_ded_dirty_flush(0);
     test_ded_dirty_flush(1);
     test_tagded_dirty_flush();
+
+    // ── 9d. Uncorrectable TAG error on a CLEAN line: nothing is lost, so no fault -- but it must be
+    //       reported (counted once, as a tag error) and the way dropped, not left to sit there. ──
+    test_tagded_clean();
 
     // ── 10. Random load/store run against the reference model, no faults injected. ──
     randomphase("no-inject", 1500, 0);
@@ -788,7 +862,7 @@ module cache_edge_tb;
 
     $display("cache_edge_tb: %0d/%0d checks passed", checks - errors, checks);
     if (errors == 0) $display("ALL TESTS PASSED");
-    else $display("%0d FAILURES", errors);
+    else $fatal(1, "%0d FAILURES", errors);   // non-zero exit: make, and so CI, fails
     $finish;
   end
 

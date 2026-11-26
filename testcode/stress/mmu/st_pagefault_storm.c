@@ -29,7 +29,7 @@
 #define NFRAMES   12                 /* resident set << working set     */
 /* Measured (GCC 14, legacy): ~2.4M cycles of setup, then ~47k cycles per
  * iteration (~52k per page-in: a 4 KiB copy in, plus a writeback when dirty,
- * through a 4 KiB D$).  1500 iterations needed ~73M cycles against the 60M
+ * through the then-4 KiB D$).  1500 iterations needed ~73M cycles against the 60M
  * budget; 500 is ~26M, ~800 faults at PR scale, thousands at nightly/weekly. */
 #define ITERS     (500 * ST_SCALE)
 #define SLOTS     8                  /* tracked words per page           */
@@ -234,7 +234,7 @@ int main(void) {
     st_putdec(g_nfault[1]); st_putc('/'); st_putdec(g_nfault[2]);
     st_puts(" evictions "); st_putdec(g_nevict); st_puts(" writebacks "); st_putdec(g_nwriteback);
     st_puts(" dirty-marks "); st_putdec(g_ndirty); st_putc('\n');
-    ST_CHECK("thousands of faults", faults >= (uint64_t)ITERS / 2);
+    ST_CHECK("at least one fault per two iterations", faults >= (uint64_t)ITERS / 2);
     ST_CHECK("dirty pages were written back", g_nwriteback > 0);
     ST_CHECK("Svade dirty faults happened", g_ndirty > 0);
     ST_CHECK("code pages faulted in", g_nfault[2] > 0);

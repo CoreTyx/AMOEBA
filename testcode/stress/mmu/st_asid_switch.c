@@ -8,7 +8,9 @@
 // are resident at once.  A TLB that ignores the ASID tag, or matches it with
 // the wrong width (ASID_BITS = 16), hands one process another's pages -- the
 // worst possible post-tapeout bug, because nothing crashes.  Also covered:
-//   - global (G) mappings are shared across ASIDs and survive ASID switches
+//   - a global (G) mapping stays usable and coherent across ASID switches.  (Every
+//     space maps it to the same frame, as the spec requires, so a TLB that ignored
+//     G would still read correct data: G itself is not observable here.)
 //   - reusing an ASID for a NEW address space after `sfence.vma x0, asid`
 //   - ASIDs that differ only in their top bit (catches a truncated compare)
 //   - instruction fetch per address space (ITLB tagging), from U

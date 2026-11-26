@@ -125,9 +125,18 @@ $(LINUX_SRC)/Makefile: $(DL)/linux-$(LINUX_VERSION).tar.xz
 	tar -C $(BUILD) -xf $<
 	touch $@
 
-$(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz
+# Local OpenSBI changes live in patches/opensbi-<version>-*.patch and are applied
+# to a fresh unpack, so editing a patch re-extracts instead of patching twice.
+# (patches/opensbi-1.4-amoeba-fail-stop.patch: halt on fault causes 16/19/20.)
+SBI_PATCHES := $(sort $(wildcard $(TOP)/patches/opensbi-$(OPENSBI_VERSION)-*.patch))
+
+$(SBI_SRC)/Makefile: $(DL)/opensbi-$(OPENSBI_VERSION).tar.gz $(SBI_PATCHES)
 	mkdir -p $(BUILD)
+	rm -rf $(SBI_SRC)
 	tar -C $(BUILD) -xf $<
+	for p in $(SBI_PATCHES); do \
+	    patch -d $(SBI_SRC) -p1 --forward --no-backup-if-mismatch < $$p || exit 1; \
+	done
 	touch $@
 
 # ---- userland ---------------------------------------------------------------

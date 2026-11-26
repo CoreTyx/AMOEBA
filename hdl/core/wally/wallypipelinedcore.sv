@@ -124,6 +124,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [4:0]                    PipeSec, PipeDed;
   logic [2:0]                    ICacheSec, DCacheSec;
   logic                          ICacheDed, DCacheDed, PrivModeSecFaultW;
+  logic                          ICacheTagDed, DCacheTagDed;      // ... of which an uncorrectable tag (counters 19/21)
+  cache_ded_info_t               ICacheDedInfo, DCacheDedInfo;    // ... and where it was (last-error records)
   logic [6:0]                    FTStatus;
   logic [6:0]                    FTStatusSticky;
 
@@ -230,6 +232,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          DCacheEccDedDirtyFaultM;          // raw pulse from cache.sv (demand or scrub path)
   logic [P.PA_BITS-1:0]          DCacheEccDedDirtyFaultAdrM;
   logic                          DCacheEccDedFaultM, DCacheEccDedTrapTakenM; // registered trap record and acknowledgement
+  logic                          DCacheEccDedTagLostM;             // raw, with the pulse: the line's tag was lost too
+  logic                          DCacheEccDedFaultTagLostM;        // registered with the record: cause 21 rather than 20
   logic [P.XLEN-1:0]             DCacheEccDedFaultEPCM, DCacheEccDedFaultMtvalM;
 
   // FENCE.I clears its M-stage control as part of the pipeline flush, but the D-cache
@@ -254,7 +258,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
-    .ICacheAccess, .ICacheMiss, .ICacheSec, .ICacheDed,
+    .ICacheAccess, .ICacheMiss, .ICacheSec, .ICacheDed, .ICacheTagDed, .ICacheDedInfo,
     // Execute
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
@@ -359,7 +363,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .StoreAmoMisalignedFaultM,    // connects to privilege
     .StoreAmoAccessFaultM,        // connects to privilege
     .PCSpillF, .ITLBMissOrUpdateAF, .PTE, .PageType, .ITLBWriteF, .SelHPTW,
-    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheSec, .DCacheDed);
+    .LSUStallM, .DCacheEccDedDirtyFaultM, .DCacheEccDedDirtyFaultAdrM, .DCacheEccDedTagLostM,
+    .DCacheSec, .DCacheDed, .DCacheTagDed, .DCacheDedInfo);
 
   if (P.BUS_SUPPORTED) begin : ebu
     ebu #(P) ebu(// IFU connections
@@ -445,6 +450,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .RegEccSecErrW, .RegEccDedErrW,
       .EccDedFaultM, .EccDedFaultEPCM, .EccDedFaultMtvalM, .EccDedTrapTakenM,
       .DCacheEccDedFaultM, .DCacheEccDedFaultEPCM, .DCacheEccDedFaultMtvalM, .DCacheEccDedTrapTakenM,
+      .DCacheEccDedFaultTagLostM,
       .DCacheEccDedDirtyFaultM,
       .PrivModeUncorrectableFaultW(PrivModeUncorrectableFaultW_priv), .PrivModeSecFaultW);
   end else begin
@@ -495,6 +501,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       DCacheEccDedFaultM      <= 1'b0;
       DCacheEccDedFaultEPCM   <= '0;
       DCacheEccDedFaultMtvalM <= '0;
+      DCacheEccDedFaultTagLostM <= 1'b0;
     end else if (DFTHold) begin
     end else if (DCacheEccDedTrapTakenM) begin
       DCacheEccDedFaultM <= 1'b0;
@@ -502,6 +509,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       DCacheEccDedFaultM      <= 1'b1;
       DCacheEccDedFaultEPCM   <= PCM; // D$ faults always surface at the M-stage, unlike the IEU's W-stage-pipeline-register case above
       DCacheEccDedFaultMtvalM <= {{(P.XLEN-P.PA_BITS){1'b0}}, DCacheEccDedDirtyFaultAdrM};
+      DCacheEccDedFaultTagLostM <= DCacheEccDedTagLostM; // address unknown: trap cause 21
     end
   end
 
@@ -538,7 +546,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
                                 ICacheSec: ICacheSec, ICacheDed: ICacheDed, DCacheSec: DCacheSec, DCacheDed: DCacheDed,
                                 FTDetect: FTDetect, FTUnresolved: FTUnresolved,
                                 ResidueDetect: ResidueDetect, ResidueUnresolved: ResidueUnresolved,
-                                TmrCorrected: PrivModeSecFaultW, TmrUncorrectable: PrivModeUncorrectableFaultW_priv};
+                                TmrCorrected: PrivModeSecFaultW, TmrUncorrectable: PrivModeUncorrectableFaultW_priv,
+                                ICacheTagDed: ICacheTagDed, DCacheTagDed: DCacheTagDed,
+                                DCacheDataLost: DCacheEccDedDirtyFaultM,
+                                ICacheDedInfo: ICacheDedInfo, DCacheDedInfo: DCacheDedInfo};
 
   // floating point unit
   if (P.F_SUPPORTED) begin : fpu
