@@ -359,11 +359,14 @@ module cachefsm #(parameter logic READ_ONLY_CACHE = 1'b0) (
   assign SelFetchBuffer = CurrState == STATE_WRITE_LINE |
                           (CurrState == STATE_ADDRESS_SETUP & FillBufferReturn);
   // DFT hold: one gate for every array, valid/dirty and LRU write.
-  assign CacheEn = ((~Stall | StallConditions) | (CurrState != STATE_ACCESS) | reset | InvalidateCache) & ~DFTHold; // exclusion-tag: dcache CacheEn
+  assign CacheEn = ((~Stall | StallConditions) | (CurrState != STATE_ACCESS) | ScanStart | reset | InvalidateCache) & ~DFTHold; // exclusion-tag: dcache CacheEn
 
   // The lookup.  It starts at way 0, which is also what the arrays read while no access is in
-  // flight (RowIdle): if the arrays are not enabled in ACCESS, the row they hold is still way 0 of
-  // the access's set, read with NextSet the cycle before.
+  // flight (RowIdle).  The arrays are enabled in the cycle it starts (CacheEn), stalled or not: the
+  // row they hold from earlier is not always way 0 of this access's set.  After an I$ flush during
+  // a stall they hold the flush cycle's row -- the redirect target's set (NextSet), in whatever way
+  // the cancelled lookup had reached -- so a lookup started from it skipped way 0 or compared
+  // another set's tags.
   assign ScanStart  = (CurrState == STATE_ACCESS) & (NextState == STATE_TAG_SCAN) & ~DFTHold;
   assign ScanArrive = (CurrState == STATE_TAG_SCAN);
   assign ScanIssue  = (CurrState == STATE_TAG_SCAN) & ~ScanLast;
