@@ -1,5 +1,6 @@
 #!/bin/bash
-# Sequential full_tb regression. Optional --unload-reset compares readout modes.
+# Sequential full_tb regression. Optional --unload-reset compares readout modes;
+# --timing [--corner c] runs every job with the SDF (run.sh --timing).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,17 +8,25 @@ SIM_DIR="$SCRIPT_DIR/sim"
 RESULTS="$SCRIPT_DIR/regressions/$(date +%Y%m%d_%H%M%S)_$$"
 mode=standard
 RUN_OPTIONS=()
+TIMING=0 CORNER=""
+want=""
 for arg in "$@"; do
+    if [[ -n "$want" ]]; then RUN_OPTIONS+=("$arg"); [[ $want == corner ]] && CORNER=$arg; want=""; continue; fi
     case "$arg" in
         --unload-reset) mode=unload_reset ;;
-        --timing) RUN_OPTIONS=(--timing) ;;
-        *) echo "Usage: $0 [--unload-reset] [--timing] (reads paths.sh beside run.sh)" >&2; exit 1 ;;
+        --timing) TIMING=1; RUN_OPTIONS+=(--timing) ;;
+        --corner) want=corner; RUN_OPTIONS+=("$arg") ;;
+        --vm-paths) want=paths; RUN_OPTIONS+=("$arg") ;;
+        --ignore-neg-delay) RUN_OPTIONS+=("$arg") ;;
+        *) echo "Usage: $0 [--unload-reset] [--timing [--corner min|typ|max] [--ignore-neg-delay]] [--vm-paths FILE]" >&2; exit 1 ;;
     esac
 done
-if ((${#RUN_OPTIONS[@]})); then
-    SIM_DIR="$SIM_DIR/timing"
+if ((TIMING)); then
+    # Default corner: min (hold), whatever the paths file's SDF_CORNER says.
+    [[ -n "$CORNER" ]] || { CORNER=min; RUN_OPTIONS+=(--corner min); }
+    SIM_DIR="$SIM_DIR/timing_$CORNER"
+    RESULTS="${RESULTS}_timing_$CORNER"
 fi
-[[ -f "$SCRIPT_DIR/paths.sh" ]] || { echo "Create $SCRIPT_DIR/paths.sh first" >&2; exit 1; }
 mkdir -p "$RESULTS" "$SIM_DIR"
 printf 'test\tresult\texit_code\tseconds\tverdict\n' > "$RESULTS/summary.tsv"
 passed=0

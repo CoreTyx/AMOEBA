@@ -347,6 +347,12 @@ module pin_tb;
     end
     #(tco_ns);
     link_hold_rvalid = 1;
+    // In test mode io_out carries scan-out, not the link: on a netlist that is
+    // the last cells of the chains, X until loaded.  The link is quiet (above)
+    // and the FPGA does not decode io_out during a hold, so the agent's
+    // sampler is paused for the session; req/wr are still checked every
+    // frozen cycle below.  The trace compare (--no-cycles) is unaffected.
+    link.paused = 1;
     scan_en = 1'b1;
     run_cycles(3); #(tco_ns);
     test_mode = 1'b1; scan_en = 1'b0;
@@ -395,6 +401,7 @@ module pin_tb;
 `ifdef PIN_TB_RTL
     if (dut.chip.hold !== 1'b0) err("dft_hold: hold did not release");
 `endif
+    link.paused = 0;
     link_hold_ready = 0; link_hold_rvalid = 0;
     dft_holds++;
     $display("[PIN_TB] dft_hold %0d: %0d frozen cycles", dft_holds, n);

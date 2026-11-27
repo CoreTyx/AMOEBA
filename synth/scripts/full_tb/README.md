@@ -73,6 +73,73 @@ Inputs launch after the clock edge (`+FPGA_TCO_PS`, default 2000 ps), and scan
 outputs are sampled before the next shift edge. Test-mode entry waits three
 clocks for the synchronizer. The default clock is 100 ns (10 MHz).
 
+## Post-PnR from vm_paths.sh (the .v and the .sdf only)
+
+On the VM, with only the post-PnR netlist and its SDF:
+
+```bash
+cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh   # once; fill in NETLIST, SDF,
+                                                     # the models, IGNORE_CELLS
+synth/scripts/full_tb/postpnr_dft.sh --quick --ignore-neg-delay   # minutes: setup check
+synth/scripts/full_tb/postpnr_dft.sh --ignore-neg-delay           # hours: the full run
+```
+
+Paste back `synth/scripts/full_tb/results/<stamp>/SUMMARY`. It holds counts,
+verdicts and RTL register names only. It never holds cell names, model text or
+SDF values; the full logs stay in `results/<stamp>.tgz` on the VM.
+
+| Stage | What it proves |
+|---|---|
+| 1 preflight | Every vm_paths file exists, `vcs` is on PATH, the netlist has `forte_top`, and the SDF has `TIMINGCHECK`. |
+| 2 discover | Chain order, scan-path inversions and logical phase, found by simulating the netlist (below). |
+| 3 zero-delay | All phases pass on the PnR netlist with the discovered data. `BREAK_SE` and `BREAK_MAP` fail. A failure here is the data or the logic, not timing. |
+| 4 timing, per corner | Phase S with the SDF: 40 hold / scan-out / scan-in / resume cases. Then the 11 regression jobs. Timing checks are on, and any violation fails. |
+| 5 holds, per corner | The pin bench's hold regression on the netlist with the SDF. Programs with 16 holds (and the IRQ case) give the same link traffic as without the holds. |
+
+`--corners min,max` is the default; min covers hold. `--from N` skips earlier stages
+(discovery is cached). `--ignore-neg-delay` lets `SDFCOM_NIOD` (negative IOPATH
+delays) through, and marks every affected line "not sign-off".
+
+**Without a scandef, `run.sh --regen` discovers the chains** (`--discover` forces
+this even when there is a scandef). Results go in `sim/meta/<netlist key>/`:
+1. `src/discover_cells.py` lists every flop of the netlist by its physical Q:
+   a leaf cell with a connected Q or QN, excluding the SRAM and pad macros.
+2. The bench, built with `+define+SCAN_DISCOVER` (`src/scan_discover.svh`), does
+   the following after phase A has measured the chains:
+   - It records every flop at reset.
+   - It enters hold-mode scan with reset held and flushes zeros.
+   - For each chain, it shifts one 1 in and watches which flop holds it at
+     each step.
+   - Random loads then settle any position that had more than one candidate.
+     Every position must end with exactly one flop.
+3. `src/discover_meta.py` writes `forte_top.scandef` (order, with `OUT Q|QN`
+   from the inversions seen) and `forte_top.scan_phase.txt`:
+   - A cell stores its bit inverted when its Q at reset is the complement of
+     its register's reset value from `scan_map.awk`'s table.
+   - Cells of a register with no reset value (`ReadDataMWReg`), or with an X at
+     reset, are not listed and get no correction. The summary counts them as
+     "not observed". Phases E, P and I check them by function.
+4. When a scandef or phase file is also given, they are compared: SAME or
+   DIFFERENT, as counts. The discovered ones are used.
+
+SDF builds use the pin bench's rules, so both benches judge an SDF the same way:
+- `hvl/pin/sdf_prep.sh`:
+  - unpacks a `.gz` SDF;
+  - checks for `TIMINGCHECK`;
+  - writes `RECREM` as `SETUPHOLD` when no cell model has a `$recrem` check.
+    Otherwise VCS silently drops those entries.
+- VCS flags `-negdelay +neg_tchk +define+NTC +define+RECREM`, with `+define+ARM_UD_*`
+  dropped.
+- `hvl/pin/sdf_msgs.sh` judges the annotation. It accepts only:
+  - `SDFCOM_UHICD` on wires into `forte_top` output ports;
+  - `SDFCOM_IWSBA` on INTERCONNECT through an assign;
+  - `SDFCOM_NIOD`, and only with `--ignore-neg-delay`.
+
+  Each one is checked against its SDF line.
+- `src/timing_report.py` counts violations per check kind, bench phase and
+  register. It names no cells or pins.
+- `IGNORE_CELLS` stubs come from `hvl/pin/pin.sh ignored-cells`.
+
 ## Timing simulation
 
 Timing mode is for the **post-P&R netlist and matching post-P&R SDF**, both

@@ -895,6 +895,11 @@ module tb_scan;
     $display("[%0t] TRACE task END: phase_a", $time);
   endtask
 
+`ifdef SCAN_DISCOVER
+  // ---- discovery: chain order and inversions from the netlist (no scandef) ---------
+`include "scan_discover.svh"
+`endif
+
   // ---- M: the scandef's map against the pins -----------------------------------
   task automatic phase_m();
     int    g_regs [4], g_cells [4];
@@ -1408,6 +1413,15 @@ module tb_scan;
     idle(20); rst_n = 1'b1; idle(5);
 
     phase_begin(0); phase_a(); phase_end(0);
+`ifdef SCAN_DISCOVER
+    // A discovery build (run.sh, no scandef): A, then the chain walk; no map.
+    if (maxlen == 0) fail("no chain shifts at all: nothing to discover");
+    else phase_discover();
+    if (errors == 0) $display("DISCOVER PASS");
+    else             $display("DISCOVER FAIL (%0d errors)", errors);
+    if (errors != 0) $fatal(1, "discovery failed");
+    $finish;
+`endif
     if (maxlen == 0) fail("no chain shifts at all; skipping M-F");
     else begin
       phase_begin(1); phase_m(); phase_end(1);

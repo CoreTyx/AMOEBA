@@ -149,6 +149,14 @@ Useful focused checks, from `scripts/full_tb/`:
 See [full_tb/README.md](scripts/full_tb/README.md) for each phase, plusargs,
 readout protection and coverage limits.
 
+### Post-PnR with only the netlist and SDF
+
+If the VM has only the PnR `.v` and `.sdf`, set them as `NETLIST` and `SDF` in
+`hvl/pin/vm_paths.sh` and run `synth/scripts/full_tb/postpnr_dft.sh`. Chain
+order and logical phase are then discovered from the netlist, and no scandef or
+phase file is needed. See
+[full_tb/README.md](scripts/full_tb/README.md#post-pnr-from-vm_pathssh-the-v-and-the-sdf-only).
+
 ## 4. Decide what must be regenerated
 
 | Change | Required steps |

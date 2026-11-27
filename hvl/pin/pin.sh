@@ -12,6 +12,7 @@
 #                             With one: $MEM (the image), $RUN and $REPO expand.
 #   compare <runA> <runB>     pin traces must match (bin/pin_trace_cmp.py)
 #   build-dir / runs-dir      print where build / run would go, and stop
+#   ignored-cells             (gate) write the IGNORE_CELLS stub modules; print the file
 #
 # DUT variants -- the first two are the RTL references, the third the netlist:
 #   rtl      forte_top RTL with `SYNTHESIS: SRAM macros and pad cells exactly
@@ -389,71 +390,15 @@ sdf_gate() {
     fi
     sdf_fail "VCS did not recompile, and this configuration has no record of a clean annotation"
   fi
-  # SDFCOM_UHICD on a wire from a cell pin to one of forte_top's own output
-  # ports: VCS cannot annotate a wire that leaves the annotated scope.  Accepted
-  # only when every one is exactly that -- each message's SDF line is checked --
-  # because postpnr/run.sh measures those wires (postpnr/sdf_out_wires.py) and
-  # tightens the output-window check by the largest.  Any other SDF message fails.
-  #
-  # SDFCOM_IWSBA ("INTERCONNECT will still be annotated"): a cell-to-cell
-  # INTERCONNECT whose net passes through a continuous assignment (an assign in
-  # the netlist).  VCS annotates the delay anyway, so it is accepted -- only
-  # when each message's SDF line is an INTERCONNECT entry.  Unrelated to UHICD.
-  local uh_n uh_lines uh_badl iw_n iw_lines iw_badl
-  # SDF line number cited by each message with tag $1 ("<sdf>, <line>" follows the tag).
-  msg_sdf_lines() { grep -A1 "Warning-\[$1\]" "$BUILD/build.log" | grep -oE ', [0-9]+[[:space:]]*$' | tr -dc '0-9\n' | grep . || true; }
-  uh_n="$(grep -c 'Warning-\[SDFCOM_UHICD\]' "$BUILD/build.log" || true)"
-  iw_n="$(grep -c 'Warning-\[SDFCOM_IWSBA\]' "$BUILD/build.log" || true)"
-  if [ "$iw_n" -gt 0 ]; then
-    iw_lines="$(msg_sdf_lines SDFCOM_IWSBA)"
-    [ "$(grep -c . <<<"$iw_lines")" = "$iw_n" ] \
-      || sdf_fail "$iw_n SDFCOM_IWSBA message(s), but could not read the SDF line of each ($BUILD/build.log)"
-    iw_badl="$(awk 'NR == FNR { want[$1] = 1; next }
-                    FNR in want { if ($0 !~ /^[[:space:]]*\(INTERCONNECT[[:space:]]/) print FNR; delete want[FNR] }
-                    END { for (l in want) print l }' <(echo "$iw_lines") "$SDF" | sort -un | head -5)"
-    [ -z "$iw_badl" ] \
-      || sdf_fail "SDFCOM_IWSBA on SDF line(s) $(echo $iw_badl) that are not an INTERCONNECT entry"
-  fi
-  if [ "$uh_n" -gt 0 ]; then
-    uh_lines="$(msg_sdf_lines SDFCOM_UHICD)"
-    [ "$(grep -c . <<<"$uh_lines")" = "$uh_n" ] \
-      || sdf_fail "$uh_n SDFCOM_UHICD message(s), but could not read the SDF line of each ($BUILD/build.log)"
-  fi
-  # Each UHICD must be a wire into a forte_top output port.
-  if [ -n "$(grep . <<<"${uh_lines:-}" || true)" ]; then
-    uh_badl="$(awk -v div="$(grep -m1 -oE '\(DIVIDER[[:space:]]+[^[:space:])]' "$SDF" | awk '{print $2}')" '
-        NR == FNR { want[$1] = 1; next }
-        FNR in want {
-          ok = 0
-          if (match($0, /^[[:space:]]*\(INTERCONNECT[[:space:]]+/)) {
-            n = split(substr($0, RLENGTH + 1), t, /[[:space:]]+/)
-            src = t[1]; dst = t[2]; sub(/^\\/, "", dst); port = dst; sub(/\[[0-9]+\]$/, "", port)
-            if (div == "") div = "/"
-            if (index(src, div) && !index(dst, div) && port ~ /^(io_out|req|wr|uart_tx|status|clk_out)$/) ok = 1
-          }
-          if (!ok) print FNR
-        }' <(echo "$uh_lines") "$SDF" | head -5)"
-    [ -z "$uh_badl" ] \
-      || sdf_fail "SDFCOM_UHICD on SDF line(s) $(echo $uh_badl) that are not a wire into a forte_top output port"
-  fi
-  # --ignore-neg-delay: SDFCOM_NIOD (negative IOPATH delay) counted, not failed.
-  local ok_tags='UHICD|IWSBA' nn_n=0
-  if [ "$mode" = niod ]; then
-    ok_tags='UHICD|IWSBA|NIOD'
-    nn_n="$(grep -c 'Warning-\[SDFCOM_NIOD\]' "$BUILD/build.log" || true)"
-  fi
-  bad="$(grep -E '(Warning|Error)-\[SDF[A-Z0-9_]*\]' "$BUILD/build.log" | grep -vE "Warning-\\[SDFCOM_($ok_tags)\\]" || true)"
-  if [ -n "$bad" ]; then
-    awk -v ok="SDFCOM_($ok_tags)" '/(Warning|Error)-\[SDF[A-Z0-9_]*\]/ { show = ($0 !~ ok); left = 5 }
-         show && left-- > 0' "$BUILD/build.log" | head -40 | sed 's/^/  | /' >&2
-    sdf_fail "$(wc -l <<<"$bad") SDF message(s): $(grep -oE 'SDF[A-Z0-9_]*' <<<"$bad" | sort | uniq -c | awk '{printf "%s x%s ", $2, $1}')(first above; all in $BUILD/build.log)"
-  fi
-  summ="$(sed -n '/SDF annotation begin/,/SDF annotation \(completed\|aborted\)/p' "$BUILD/build.log")"
-  if [ -z "$summ" ] || grep -q 'SDF annotation aborted' <<<"$summ" || ! grep -q 'SDF annotation completed' <<<"$summ" \
-     || ! grep -qE 'Total errors: +0$' <<<"$summ" || ! grep -qE "Total warnings: +(0|$uh_n|$((uh_n + iw_n))|$((uh_n + nn_n))|$((uh_n + iw_n + nn_n)))\$" <<<"$summ"; then
-    echo "$summ" | tail -12 | sed 's/^/  | /' >&2
-    sdf_fail "annotation of $SDF did not complete cleanly (above; $BUILD/build.log)"
-  fi
+  # The message rules (accepted SDFCOM_UHICD / SDFCOM_IWSBA / with
+  # PIN_SDF_IGNORE_NIOD=1 SDFCOM_NIOD, each checked against its SDF line; any
+  # other SDF* message, or an incomplete annotation, fails) live in
+  # sdf_msgs.sh, shared with synth/scripts/full_tb/run.sh.  UHICD wires are
+  # measured by postpnr/sdf_out_wires.py, which tightens the output-window check.
+  # shellcheck source=sdf_msgs.sh
+  source "$P/sdf_msgs.sh"
+  sdf_classify "$BUILD/build.log" "$SDF" "$mode" || sdf_fail "$SDFM_ERR"
+  local uh_n=$SDFM_UH iw_n=$SDFM_IW nn_n=$SDFM_NN
   # Recorded as strict when no NIOD was actually ignored.
   if [ "$nn_n" -gt 0 ]; then echo "$now niod"; else echo "$now strict"; fi > "$BUILD/sdf_ok"
   [ "$nn_n" -gt 0 ] && echo "build: --ignore-neg-delay: $nn_n SDFCOM_NIOD (negative IOPATH delay) IGNORED -- not a sign-off build"
@@ -561,5 +506,9 @@ case "${1:-}" in
   compare)   shift; python3 "$R/bin/pin_trace_cmp.py" "$@";;
   build-dir) echo "$BUILD";;
   runs-dir)  echo "$RUNS";;
+  # ignored-cells: write the IGNORE_CELLS stubs for $NETLIST (SIM=vcs DUT=gate),
+  # into $PIN_BUILD; prints the file, or nothing when IGNORE_CELLS is empty.
+  # synth/scripts/full_tb/run.sh uses it, so both benches stub the same cells.
+  ignored-cells) [ -n "$IGNORED_V" ] && { ignored_cells >&2; echo "$IGNORED_V"; }; true;;
   *)         sed -n '2,/^set -euo pipefail/{/^set -euo/d;p}' "$0"; exit 1;;
 esac
