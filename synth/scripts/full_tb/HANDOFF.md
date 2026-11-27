@@ -3,7 +3,7 @@
 Status as of 2026-11-27.
 - **Branch:** `dft-postpnr-sdf`, based on `dft-hold-integration` (`e56ecf8`). Local only: not
   pushed and not merged.
-- **On the VM:** this tree is unpacked at `/groups/ece427-group4/dft_post_pnr/dft_post_pnr`.
+- **On the VM:** this tree is unpacked at `/groups/ece427-group4/dft_post_pnr/dft_pnr_testing`.
 - **Paths file:** `/groups/ece427-group4/dft_post_pnr/vm_paths.sh`, beside the checkout.
 
 ## Goal
@@ -22,13 +22,13 @@ from those two files and the cell, SRAM and pad models.
 ```bash
 cd /groups/ece427-group4/dft_post_pnr
 # once: the paths file lives HERE, beside the checkout, so a new copy of the
-# repo unpacked over dft_post_pnr/ never replaces it
-cp dft_post_pnr/hvl/pin/vm_paths.example.sh vm_paths.sh   # or copy the post-PnR flow's own
+# repo unpacked over dft_pnr_testing/ never replaces it
+cp dft_pnr_testing/hvl/pin/vm_paths.example.sh vm_paths.sh   # or copy the post-PnR flow's own
 vi vm_paths.sh           # NETLIST=<PnR .v>  SDF=<its .sdf/.sdf.gz>  models, VCS_FLAGS, IGNORE_CELLS
 
 module load Synopsys_x86-64      # if vcs is not on PATH
 tmux new -s dft
-cd /groups/ece427-group4/dft_post_pnr/dft_post_pnr
+cd /groups/ece427-group4/dft_post_pnr/dft_pnr_testing
 synth/scripts/full_tb/postpnr_dft.sh --quick --ignore-neg-delay   # setup check, minutes
 synth/scripts/full_tb/postpnr_dft.sh --ignore-neg-delay           # full, hours (both corners)
 cat synth/scripts/full_tb/results/<stamp>/SUMMARY                 # paste this back
