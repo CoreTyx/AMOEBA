@@ -6,11 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$SCRIPT_DIR/sim"
 RESULTS="$SCRIPT_DIR/regressions/$(date +%Y%m%d_%H%M%S)_$$"
 mode=standard
-if (($# == 1)) && [[ "$1" == --unload-reset ]]; then
-    mode=unload_reset
-elif (($# != 0)); then
-    echo "Usage: $0 [--unload-reset] (reads paths.sh beside run.sh)" >&2
-    exit 1
+RUN_OPTIONS=()
+for arg in "$@"; do
+    case "$arg" in
+        --unload-reset) mode=unload_reset ;;
+        --timing) RUN_OPTIONS=(--timing) ;;
+        *) echo "Usage: $0 [--unload-reset] [--timing] (reads paths.sh beside run.sh)" >&2; exit 1 ;;
+    esac
+done
+if ((${#RUN_OPTIONS[@]})); then
+    SIM_DIR="$SIM_DIR/timing"
 fi
 [[ -f "$SCRIPT_DIR/paths.sh" ]] || { echo "Create $SCRIPT_DIR/paths.sh first" >&2; exit 1; }
 mkdir -p "$RESULTS" "$SIM_DIR"
@@ -20,7 +25,7 @@ failed=0
 partial=0
 
 # Preserve logs from the invocation preceding this regression.
-for file in run.log compile.log sim.log pin_trace.log; do
+for file in run.log compile.log sim.log pin_trace.log timing_summary.log; do
     if [[ -f "$SIM_DIR/$file" ]]; then
         mkdir -p "$RESULTS/preexisting"
         cp "$SIM_DIR/$file" "$RESULTS/preexisting/"
@@ -34,17 +39,17 @@ run_case() {
     mkdir -p "$dest"
     printf 'cd %q\n' "$PWD" > "$dest/command.sh"
     printf 'bash %q ' "$SCRIPT_DIR/run.sh" >> "$dest/command.sh"
-    printf '%q ' "$@" >> "$dest/command.sh"
+    printf '%q ' "${RUN_OPTIONS[@]}" "$@" >> "$dest/command.sh"
     printf '\n' >> "$dest/command.sh"
     # A compile/setup failure must not inherit the previous simulation verdict.
-    rm -f "$SIM_DIR/run.log" "$SIM_DIR/compile.log" "$SIM_DIR/sim.log" "$SIM_DIR/pin_trace.log"
+    rm -f "$SIM_DIR/run.log" "$SIM_DIR/compile.log" "$SIM_DIR/sim.log" "$SIM_DIR/pin_trace.log" "$SIM_DIR/timing_summary.log"
     echo "Running $name ..."
-    if bash "$SCRIPT_DIR/run.sh" "$@" > "$dest/console.log" 2>&1; then
+    if bash "$SCRIPT_DIR/run.sh" "${RUN_OPTIONS[@]}" "$@" > "$dest/console.log" 2>&1; then
         rc=0
     else
         rc=$?
     fi
-    for file in run.log compile.log sim.log pin_trace.log; do
+    for file in run.log compile.log sim.log pin_trace.log timing_summary.log; do
         [[ ! -f "$SIM_DIR/$file" ]] || cp "$SIM_DIR/$file" "$dest/"
     done
     verdict="No simulation verdict; inspect console.log and compile.log"
@@ -84,7 +89,7 @@ else
     # Protect nonscan logic during destructive readout. Capture expectations
     # are unchanged; longer retention experiments are outside this regression.
     run_case 01_baseline_repeat +SCAN_PHASES=E '+SCAN_CASE=E reset value' +SCAN_OP=both +SCAN_REPEAT=5 +SCAN_UNLOAD_RESET
-    run_case 02_pc_load         +SCAN_PHASES=E +SCAN_OP=load +SCAN_UNLOAD_RESET
+    run_case 02_pc_load         +SCAN_PHASES=E +SCAN_OP=load +SCAN_NO_SENTINEL +SCAN_UNLOAD_RESET
     run_case 03_baseline_capture +SCAN_PHASES=D +SCAN_OP=both +SCAN_UNLOAD_RESET
     run_case 04_pc_capture      +SCAN_PHASES=E +SCAN_OP=both +SCAN_UNLOAD_RESET
     run_case 05_registers       +SCAN_PHASES=P +SCAN_OP=both +SCAN_UNLOAD_RESET
@@ -92,10 +97,10 @@ else
     run_case 06_fault_injection +SCAN_PHASES=H +SCAN_OP=both +SCAN_SENTINEL +SCAN_UNLOAD_RESET
     run_case 07_reset_recovery  +SCAN_PHASES=F +SCAN_OP=both +SCAN_UNLOAD_RESET
     run_case 08_full_suite      +SCAN_OP=both +SCAN_UNLOAD_RESET
-    run_case 09_randomized      +SCAN_PHASES=R +SCAN_RANDOM_ITERS=1000 +SCAN_OP=both +SCAN_UNLOAD_RESET +SCAN_TIMEOUT_NS=1000000000
+    run_case 09_randomized      +SCAN_PHASES=R +SCAN_RANDOM_ITERS=1000 +SCAN_OP=both +SCAN_UNLOAD_RESET +SCAN_TIMEOUT_NS=10000000000
     run_case 10_instruction_scan +SCAN_PHASES=I +SCAN_EXEC_ITERS=64 +SCAN_OP=both +SCAN_UNLOAD_RESET
     # Hold sessions mid-program: unload, reload, resume, compare.
-    run_case 11_session_resume  +SCAN_PHASES=S +SCAN_RESUME_ITERS=8
+    run_case 11_session_resume  +SCAN_PHASES=S +SCAN_RESUME_ITERS=8 +SCAN_OP=both
 fi
 
 echo

@@ -2,8 +2,9 @@
 # Build and run tb_scan.sv on the scanned forte_top gate netlist (pads included).
 #   ./run.sh [paths file] [vcs args...] [runtime plusargs...]
 #   ./run.sh clean                     remove generated simulation outputs
-#   ./run.sh                           expect "DFT TB PASS"
+#   ./run.sh                           full suite, load+capture, baseline sentinels
 #   ./run.sh --regen                   regenerate map/hookups, then build/run
+#   ./run.sh --timing                  annotate SDF from paths.sh; enable checks
 #   ./run.sh +define+BREAK_SE           scan enable held off, expect FAIL
 #   ./run.sh +define+BREAK_MAP          one inversion in the map moved, expect FAIL
 #   ./run.sh +define+NO_HARDEN          skip phase H
@@ -13,6 +14,10 @@
 #   STDCELL_MODELS   standard-cell Verilog models
 #   SRAM_MODELS      SRAM macro Verilog models
 #   PAD_MODELS       pad cell Verilog models
+#   PNR_NETLIST     --timing: post-route netlist; never falls back to NETLIST
+#   SDF, SDF_CORNER  --timing: post-route SDF and min|typ|max (default min)
+#   PNR_SCANDEF, PNR_LOGICAL_PHASE  --timing: metadata matching post-route chains
+#   PNR_DIR         metadata directory, default /groups/ece427-group4/experiment2/pnr/pnrout
 #   VCS_FLAGS        extra VCS flags, added after the defaults so they win
 #   SCANDEF          the scandef written with NETLIST; default forte_top.scandef
 #                    next to it. Needed only for --regen: scan_map.awk creates
@@ -55,13 +60,17 @@ SRC_DIR="$SCRIPT_DIR/src"
 SIM_DIR="$SCRIPT_DIR/sim"
 if [[ "${1:-}" == clean ]]; then
     # Netlist-derived metadata is reused until --regen is requested.
-    if [[ -d "$SIM_DIR" ]]; then
-        find "$SIM_DIR" -mindepth 1 -maxdepth 1 \
+    for clean_dir in "$SIM_DIR/timing" "$SIM_DIR"; do
+      if [[ -d "$clean_dir" ]]; then
+        find "$clean_dir" -mindepth 1 -maxdepth 1 \
+            ! -name timing \
             ! -name scan_map.generated.svh \
             ! -name scan_hookups.generated.svh \
             ! -name scan_hookups.generated.report.tsv \
+            ! -name scan_metadata.inputs \
             -exec rm -rf -- {} +
-    fi
+      fi
+    done
     # Also clean outputs left in the script directory by older runs.
     rm -rf -- "$SCRIPT_DIR/csrc" "$SCRIPT_DIR/simv_scan.daidir" \
         "$SCRIPT_DIR/simv_scan" "$SCRIPT_DIR/ucli.key" \
@@ -77,21 +86,14 @@ for source_file in "$SRC_DIR/tb_scan.sv" "$SRC_DIR/scan_random.svh" "$SRC_DIR/sc
     [ -s "$source_file" ] || die "missing source: $source_file; use the complete full_tb/src directory"
 done
 
-# Everything printed from here on (these messages, VCS's output, the results)
-# also goes to sim/run.log.  sim.log keeps the full simulation
-# output, compile.log the full compile.
-exec > >(tee "$SIM_DIR/run.log") 2>&1
-
 PATHS_FILE="$SCRIPT_DIR/paths.sh"
 if [ $# -gt 0 ] && [[ "$1" != [-+]* ]]; then
     PATHS_FILE="$1"
     shift
 fi
 [ -f "$PATHS_FILE" ] || die "no paths file: $PATHS_FILE; create paths.sh beside run.sh or supply a file first"
-echo "run.sh: sourcing $PATHS_FILE"
 # shellcheck disable=SC1090
 source "$(realpath "$PATHS_FILE")"
-[ -z "${SDF:-}" ] || die "full_tb runs zero-delay only; use hvl/pin for SDF simulation"
 
 # Phase I talks to the chip through the same link agent as the pin bench, on
 # the current io_in/io_out protocol.  Both come from the repo unless overridden.
@@ -108,6 +110,7 @@ LINK_PKG=$(realpath "$LINK_PKG"); LINK_AGENT=$(realpath "$LINK_AGENT")
 COMPILE_ARGS=(); RUN_ARGS=()
 runtime_only=0
 REGENERATE=0
+TIMING=0
 for arg in "$@"; do
     if [[ "$arg" == -- ]]; then
         runtime_only=1
@@ -115,6 +118,8 @@ for arg in "$@"; do
         RUN_ARGS+=("$arg")
     elif [[ "$arg" == --regen ]]; then
         REGENERATE=1
+    elif [[ "$arg" == --timing ]]; then
+        TIMING=1
     else
         case "$arg" in
             +define+*|+incdir+*|+libext+*|+nospecify|+notimingcheck|+vcs+*|+v2k)
@@ -124,6 +129,22 @@ for arg in "$@"; do
         esac
     fi
 done
+
+scan_op_given=0
+for arg in "${RUN_ARGS[@]}"; do
+    [[ "$arg" != +SCAN_OP=* ]] || scan_op_given=1
+done
+if (( ! scan_op_given )); then
+    RUN_ARGS+=(+SCAN_OP=both)
+fi
+
+if (( TIMING )); then
+    SIM_DIR="$SIM_DIR/timing"
+fi
+mkdir -p "$SIM_DIR"
+# Keep post-route build products, metadata and logs separate from synthesis.
+exec > >(tee "$SIM_DIR/run.log") 2>&1
+echo "run.sh: sourced $PATHS_FILE; outputs in $SIM_DIR"
 
 # The entries of variable $1, one per line: an array's elements (X=(a/*.v)),
 # or a string split on spaces and glob-expanded (X="a/*.v b.v").  $X alone
@@ -167,12 +188,47 @@ FLAGS=()
 flags=$(set -f; entries VCS_FLAGS)
 [ -z "$flags" ] || mapfile -t FLAGS <<< "$flags"
 
+TIMING_ARGS=(+nospecify +notimingcheck)
+if (( TIMING )); then
+    PNR_DIR=${PNR_DIR:-/groups/ece427-group4/experiment2/pnr/pnrout}
+    [ -n "${PNR_NETLIST:-}" ] || die "--timing requires PNR_NETLIST in paths.sh (post-P&R netlist; NETLIST is not used)"
+    NETLIST=$PNR_NETLIST
+    SCANDEF=${PNR_SCANDEF:-$PNR_DIR/forte_top.scandef}
+    LOGICAL_PHASE=${PNR_LOGICAL_PHASE:-$PNR_DIR/forte_top.scan_phase.txt}
+    for metadata in "$SCANDEF" "$LOGICAL_PHASE"; do
+        [ -s "$metadata" ] || die "missing post-route metadata: $metadata; set PNR_SCANDEF and PNR_LOGICAL_PHASE to files verified against the post-route netlist"
+    done
+    SCANDEF=$(realpath "$SCANDEF")
+    LOGICAL_PHASE=$(realpath "$LOGICAL_PHASE")
+    [ -n "${SDF:-}" ] && [ -s "$SDF" ] || die "--timing requires a nonempty SDF file in paths.sh"
+    SDF=$(realpath "$SDF")
+    SDF_CORNER=${SDF_CORNER:-min}
+    case "$SDF_CORNER" in min|typ|max) ;; *) die "SDF_CORNER must be min, typ, or max" ;; esac
+    # Delay-only SDF cannot establish that hold checks ran.
+    grep -qiE '\([[:space:]]*TIMINGCHECK([[:space:](]|$)' "$SDF" \
+        || die "SDF has no TIMINGCHECK section; export timing checks, not only delays"
+    for arg in "${FLAGS[@]}" "${COMPILE_ARGS[@]}" "${RUN_ARGS[@]}"; do
+        case "$arg" in
+            +nospecify*|+notimingcheck*|+notimingchecks*|+no_notifier*|+no_tchk_msg*|+ntb_disable_timing*|+delay_mode_zero*|+delay_mode_unit*|+timingchecksoff*)
+                die "--timing conflicts with timing suppression option: $arg" ;;
+        esac
+        [[ ! "$arg" =~ ^\+define\+(.+\+)?FUNCTIONAL(\+|=|$) ]] \
+            || die "--timing conflicts with FUNCTIONAL library models"
+    done
+    TIMING_ARGS=(-sdf "$SDF_CORNER:tb_scan.dut:$SDF" +neg_tchk +define+SCAN_TIMING)
+    RUN_ARGS+=(+sdfverbose)
+    echo "run.sh: post-P&R timing simulation, SDF=$SDF corner=$SDF_CORNER scope=tb_scan.dut"
+else
+    echo "run.sh: zero-delay simulation (SDF is used only with --timing)"
+fi
+
 [ -n "${NETLIST:-}" ] || die "NETLIST is not set: configure it in paths.sh"
 [ -f "$NETLIST" ] || die "NETLIST: no such file: $NETLIST"
 NETLIST=$(realpath "$NETLIST")
 SCAN_MAP="$SIM_DIR/scan_map.generated.svh"
 SCAN_HOOKUP_FILE="$SIM_DIR/scan_hookups.generated.svh"
 SCAN_REPORT="$SIM_DIR/scan_hookups.generated.report.tsv"
+METADATA_INPUTS=$(printf '%s\n' "$NETLIST" "${SCANDEF:-}" "${LOGICAL_PHASE:-}")
 if (( REGENERATE )); then
     SCANDEF=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
     [ -f "$SCANDEF" ] || die "no scandef at $SCANDEF: set SCANDEF to the one written with NETLIST"
@@ -209,8 +265,15 @@ if (( REGENERATE )); then
         # An older hookup file must not be paired with the newly generated map.
         rm -f -- "$SCAN_HOOKUP_FILE" "$SCAN_REPORT"
     fi
+    if (( TIMING )); then
+        printf '%s\n' "$METADATA_INPUTS" > "$SIM_DIR/scan_metadata.inputs"
+    fi
     echo "run.sh: regenerated scan map and enabled hookups from $SCANDEF"
 else
+    if (( TIMING )); then
+        [[ -f "$SIM_DIR/scan_metadata.inputs" && "$(cat "$SIM_DIR/scan_metadata.inputs")" == "$METADATA_INPUTS" ]] \
+            || die "post-route metadata inputs changed or cache is missing; run ./run.sh --timing --regen"
+    fi
     [ -s "$SCAN_MAP" ] || die "no cached scan map at $SCAN_MAP; run ./run.sh --regen once"
     # A map older than what it was made from belongs to another netlist.
     stale_src=${SCANDEF:-$(dirname "$NETLIST")/forte_top.scandef}
@@ -255,15 +318,22 @@ if ! command -v vcs >/dev/null; then
     command -v vcs >/dev/null || die "vcs not found; load the simulator environment first"
 fi
 
-# Zero-delay functional simulation: no specify-block delays or timing checks
+# Timing mode retains specify blocks, timing checks and notifier behavior.
 vcs -full64 -sverilog -timescale=1ns/1ps -l compile.log \
-    +nospecify +notimingcheck ${FLAGS[@]+"${FLAGS[@]}"} \
+    "${TIMING_ARGS[@]}" ${FLAGS[@]+"${FLAGS[@]}"} \
     "${COMPILE_ARGS[@]}" \
     "+incdir+$SIM_DIR" "+incdir+$SRC_DIR" \
     "${SRCS[@]}" "$LINK_PKG" "$LINK_AGENT" "$SRC_DIR/tb_scan.sv" "$NETLIST" "${LIBS[@]}" \
     -Mdir=csrc -top tb_scan -o simv_scan
 
-rm -f sim.log
-./simv_scan -l sim.log "${RUN_ARGS[@]}" | grep -E '^\[|^(GROUP|REG|PC|PHASE):|^S (CHECKS|CHECK COVERAGE|COVERAGE|RESUME):|^OUTPUT Z SUMMARY:|DFT TB|^=+'
+rm -f sim.log timing_summary.log
+sim_status=0
+./simv_scan -l sim.log "${RUN_ARGS[@]}" | grep -E '^\[|^(GROUP|REG|PC|PHASE):|^S (CHECKS|CHECK COVERAGE|COVERAGE|RESUME):|^OUTPUT Z SUMMARY:|DFT TB|[Tt]iming violation|\$(setup|hold|recrem|recovery|removal|width|period)|^=+' || sim_status=$?
+if (( TIMING )); then
+    python3 "$SRC_DIR/timing_report.py" compile.log sim.log > timing_summary.log \
+        || { cat timing_summary.log; die "timing/annotation diagnostics failed; see $SIM_DIR/timing_summary.log"; }
+    cat timing_summary.log
+fi
+(( sim_status == 0 )) || die "simulation failed (status $sim_status); see $SIM_DIR/sim.log"
 grep -qE '^DFT TB PASS($| \(partial coverage:)' sim.log \
     || die "simulation did not produce a passing verdict; see $SIM_DIR/sim.log"

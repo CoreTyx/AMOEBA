@@ -652,7 +652,6 @@ report_timing -delay min         > "${p}.hold.rpt"
 report_constraint -all_violators > "${p}.viol.rpt"
 remove_case_analysis $scan_ports
 
-write_sdf $syn_out_dir/$design_toplevel.gate.sdf
 write_sdc $syn_out_dir/$design_toplevel.gate.sdc
 
 write -format verilog -hierarchy -output $syn_out_dir/$design_toplevel.gate.v

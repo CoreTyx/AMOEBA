@@ -4,15 +4,15 @@
 # synthesis.tcl binds the control hookups after mapping (dft_bind_hookups).
 #
 # DFT_SCOPE (environment) picks the scan selection:
-#   pc    (default)  the fetch PC only: 63/64 flops, the pc_tb bench
-#   full             PC + pipeline registers + hardened CSRs (~1,600 flops),
+#   pc               the fetch PC only: 63/64 flops, the pc_tb bench
+#   full  (default)  PC + pipeline registers + hardened CSRs (~1,600 flops),
 #                    the full_tb bench
 # DFT_KEEP_ALL=1 (environment) keeps flops DC would otherwise optimize out
 # (constant, unloaded, duplicate); see where scan_regs is set below.
 # Changing either needs a full re-synthesis: the attributes go into the
 # pre-DFT ddc.
 
-set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "pc"}]
+set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "full"}]
 puts "DFT setup: scope $dft_scope"
 
 # Configure the complete ASIC, including the pad ring. Retain only the chip

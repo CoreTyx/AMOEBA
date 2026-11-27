@@ -65,7 +65,7 @@ set_dft_insertion_configuration -preserve_design_name true -synthesis_optimizati
 # clocks the chains and nothing else.  Errors if a scan flop sits behind an
 # excluded gate.  Must precede dft_drc: excluded gates are not reported as
 # TEST-130.
-set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "pc"}]
+set dft_scope [expr {[info exists ::env(DFT_SCOPE)] && $::env(DFT_SCOPE) ne "" ? $::env(DFT_SCOPE) : "full"}]
 set dft_cg_plan [dft_cg_exclusions chip]
 report_dft_clock_gating_configuration > $rpt/dft_cg_config.rpt
 

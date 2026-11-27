@@ -1,23 +1,36 @@
 include libs.mk
 
+.DEFAULT_GOAL := all
+SHELL := /bin/bash
+# Login Bash initializes the VM's environment-modules command.
+.SHELLFLAGS := -l -e -o pipefail -c
+
 export REPORT_DIR			= reports
+export SYN_OUT_DIR           ?= synout
 # Scan selection read by dft_setup.tcl: pc (PC only, pc_tb) or full (full_tb).
-# make synth DFT_SCOPE=full
-export DFT_SCOPE			?= pc
+# Full-scope synthesis and standalone insertion: make
+export DFT_SCOPE			?= full
 # 1 keeps flops DC would optimize out (constant, unloaded, duplicate) as scan
 # cells: make synth DFT_SCOPE=full DFT_KEEP_ALL=1
 export DFT_KEEP_ALL			?= 0
 
+# Keep these sequential even with make -j: synth cleans the output directory.
+.PHONY: all
+all: synth
+	$(MAKE) dft
+
 .PHONY: synth
 synth: clean
 	mkdir -p $(REPORT_DIR) $(SYN_OUT_DIR)
-	dc_shell -64bit -f synthesis.tcl |& tee $(REPORT_DIR)/synthesis.log
+	module load Synopsys_x86-64; \
+		dc_shell -64bit -f synthesis.tcl |& tee $(REPORT_DIR)/synthesis.log
 	$(MAKE) smol_clean
 
 .PHONY: dft
 dft: synout/forte_top.pre_dft.ddc
 	mkdir -p reports/dft synout/dft
-	REPORT_DIR="$(CURDIR)/reports/dft" SYN_OUT_DIR="$(CURDIR)/synout/dft" \
+	module load Synopsys_x86-64; \
+		REPORT_DIR="$(CURDIR)/reports/dft" SYN_OUT_DIR="$(CURDIR)/synout/dft" \
 		dc_shell -x 'set dft_standalone true; source dft_insert.tcl' |& tee reports/dft/dft.log
 
 .PHONY: smol_clean

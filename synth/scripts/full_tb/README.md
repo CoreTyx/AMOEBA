@@ -8,11 +8,10 @@ The synthesis/scan flow is documented in [DFT_FLOW.md](../../DFT_FLOW.md).
 
 ```bash
 # From synth/, after configuring the VM's synthesis libraries:
-make synth DFT_SCOPE=full
-make dft DFT_SCOPE=full
+make                         # loads Synopsys; full-scope synthesis and insertion
 cd scripts/full_tb
 # Create paths.sh here, then:
-./run.sh --regen +SCAN_OP=both
+./run.sh --regen
 ./regress.sh
 ```
 
@@ -26,16 +25,25 @@ STDCELL_MODELS=(/path/to/cells/*.v)
 SRAM_MODELS=(/path/to/srams/*.v)
 PAD_MODELS=(/path/to/pads.v)
 VCS_FLAGS=()
+# --timing uses this separate post-P&R output set. Set the actual filenames.
+PNR_DIR=/groups/ece427-group4/experiment2/pnr/pnrout
+PNR_NETLIST="$PNR_DIR/your_postroute_netlist.v"
+SDF="$PNR_DIR/your_postroute_delays.sdf"
+SDF_CORNER=min                          # min | typ | max
+PNR_SCANDEF="$PNR_DIR/forte_top.scandef"
+PNR_LOGICAL_PHASE="$PNR_DIR/forte_top.scan_phase.txt"
 # Optional if hdl/ and hvl/ are not at their repository-relative locations:
 # LINK_PKG=/path/to/forte_link_pkg.sv
 # LINK_AGENT=/path/to/pin_link_agent.sv
 ```
 
 Library/model paths accept files, globs, directories or Bash arrays. Keep
-netlists and licensed models local. This bench is zero-delay: nonempty `SDF`
-is rejected and `SDF_CORNER` has no effect.
+netlists and licensed models local. The default simulation is zero-delay.
+`--timing` selects `PNR_NETLIST`, `SDF` and the PNR metadata from this file.
+It never falls back to the synthesis `NETLIST`, `SCANDEF` or `LOGICAL_PHASE`.
 
-`--regen` creates the scan map and enabled internal hookups in `sim/`. Repeat
+`--regen` creates the scan map and enabled internal hookups in `sim/`
+(zero-delay) or `sim/timing/` (post-P&R timing). Repeat
 it after netlist, scandef, phase, mapping or hookup-generator changes; other
 runs reuse the cached files. Update `src/scan_map.awk` when register names or
 classifications change. The synthesis flow writes the logical phase file:
@@ -46,7 +54,7 @@ for separately. Without explicit `LOGICAL_PHASE`, the runner checks local
 snapshot is used.
 
 ```bash
-./run.sh +SCAN_OP=both                         # reuse metadata
+./run.sh                                      # reuse metadata; full defaults
 ./run.sh +SCAN_PHASES=S +SCAN_OP=both          # focused hold/resume
 ./run.sh +SCAN_PHASES=H +SCAN_OP=both +SCAN_SENTINEL
 ./run.sh +define+BREAK_SE                     # negative control: must fail
@@ -57,9 +65,88 @@ snapshot is used.
 A/M/B are prerequisites and always execute. Remaining phases follow
 `+SCAN_PHASES=<letters>`; default `CDEPHFRIS`. `+SCAN_CASE=<substring>` selects
 cases; selecting no executable case fails. `+SCAN_REPEAT=n` repeats cases.
+Plain runs default to load+capture checks (`SCAN_OP=both`), baseline sentinels,
+R1000, I64 and eight S workloads. These defaults apply to timing runs too.
+`+SCAN_NO_SENTINEL` disables baseline sentinels for focused debugging; the older
+`+SCAN_SENTINEL` remains accepted but is no longer necessary.
 Inputs launch after the clock edge (`+FPGA_TCO_PS`, default 2000 ps), and scan
 outputs are sampled before the next shift edge. Test-mode entry waits three
-clocks for the synchronizer.
+clocks for the synchronizer. The default clock is 100 ns (10 MHz).
+
+## Timing simulation
+
+Timing mode is for the **post-P&R netlist and matching post-P&R SDF**, both
+under `/groups/ece427-group4/experiment2/pnr/pnrout` on the VM. Set their actual
+filenames in `paths.sh` as `PNR_NETLIST` and `SDF`; the runner does not guess.
+Synthesis and DFT insertion do not export SDF.
+
+Provide `PNR_SCANDEF` and `PNR_LOGICAL_PHASE` matching the routed chains.
+They default to `forte_top.scandef` and `forte_top.scan_phase.txt` under
+`PNR_DIR`. P&R can reorder chains or rename cells, so synthesis metadata may
+be reused only after verifying that chain order, names and polarity are
+unchanged. Point these PNR variables explicitly at that verified metadata if
+it lives elsewhere. Regenerate the hookups from the post-route netlist.
+Missing PNR metadata is an error; synthesis metadata is never selected implicitly.
+
+Build products, logs and cached metadata are separate under `sim/timing/`.
+Run `--timing --regen` once for the post-route output set; later timing runs
+reuse it. Switching PNR input paths requires regeneration. Ordinary runs retain
+their synthesis cache under `sim/`.
+
+```bash
+./run.sh --timing --regen
+# Focus on reset-free scan/restore during a running workload:
+./run.sh --timing +SCAN_PHASES=S
+# Explicit clock settings (ps): 10 MHz execution, 1 MHz scan/arming
+./run.sh --timing +SCAN_OP=both +FUNC_PERIOD_PS=100000 +SCAN_PERIOD_PS=1000000
+```
+
+- Timing mode annotates `tb_scan.dut` with VCS `-sdf`, enables specify blocks,
+  timing checks and negative timing checks (`+neg_tchk`), and retains notifiers.
+  Nonempty SDF with a TIMINGCHECK section is required. Known suppression flags
+  and the `FUNCTIONAL` library define are rejected.
+- Defaults: functional period 100 ns (10 MHz); scan/arming period 1000 ns
+  (1 MHz). Zero-delay mode uses 100 ns for both. The clock changes rate between
+  complete pulses when TM or SE selects scan/arming. Legacy capture in test mode
+  also uses the scan rate; this is not an at-speed capture test.
+- `+FUNC_PERIOD_PS` and `+SCAN_PERIOD_PS` set the periods. Scan input launches
+  20% into the falling-to-rising interval; output is sampled 80% into it.
+  `+SCAN_SETTLE_PS` sets the post-rising-edge wait before the next control change
+  or internal snapshot: 20000 ps in timing mode, 2000 ps otherwise.
+- Link input launch and forwarded-clock output sampling remain controlled by
+  `+FPGA_TCO_PS` (2000 ps) and `+FPGA_SAMPLE_PS` (5000 ps). These model the
+  off-chip FPGA's delays. Choose them and the settle wait from the actual pad,
+  clock-insertion and model delays. They must be below both clock half-periods.
+  A clean zero-delay run does not establish that these margins suit your SDF.
+- Timing-check violations and SDF annotation warnings/errors fail the runner,
+  even if the functional bench prints PASS. `sim/timing/timing_summary.log` points to
+  diagnostics in `compile.log` and `sim.log`; `+sdfverbose` keeps annotation
+  messages visible. Inspect VCS's annotation coverage: a TIMINGCHECK section
+  alone does not prove checks matched or were enabled by the library models.
+- The default watchdog is 10 s of simulated time in timing mode (1 s otherwise).
+  Increase `+SCAN_TIMEOUT_NS` for larger iteration counts or slower clocks.
+
+SDF supplies cell/interconnect delays and setup/hold/recovery/removal constraints
+for the matching Verilog models. It needs timing-capable standard-cell, pad and
+SRAM models, not functional stubs. Check library defines and annotation coverage
+before trusting a pass. Do not disable timing checks or notifiers to hide Xs.
+
+`SDF_CORNER=min` selects the minimum entries in the SDF delay triplets; `max`
+selects maximum entries and is useful for setup checks. This does not select a
+new process/voltage/temperature library corner. Use appropriate fast/min-delay
+and slow/max-delay exports as well. Slowing the clock helps setup, but generally
+does not fix same-edge hold violations. Synthesis SDF lacks final routed
+interconnect and clock-tree skew. Use post-route SDF and scan-mode min-delay STA
+for physical hold qualification. Simulation only checks paths exercised by its
+stimulus; full_tb is not exhaustive timing signoff.
+
+The runner keeps timing checks enabled during reset, scan entry/exit and
+functional capture as well as shifting. Library models can condition individual
+checks on reset or scan mode: conventional reset-protected unload may disable
+some cell checks. Use phase S for reset-free shifting and inspect the models
+and annotation report before treating it as hold coverage. Recovery/removal or
+hold reports on those transitions need investigation too; the runner does not
+automatically waive startup violations.
 
 ## Phases
 
@@ -74,13 +161,13 @@ clocks for the synchronizer.
 | P: registers | Test individual data/ECC/sticky/MPP registers, using valid ECC codewords and coherent privilege copies. |
 | H: hardening | Inject single/double ECC faults, inconsistent privilege copies and reserved MPP; check repair or retained values and MSECFAULT flags. |
 | F: reset | Load ones, inverted baseline and random state; reset and compare all resettable scanned bits. |
-| R: randomized | Combine edge/random register patterns with valid, SEC, DED, parity-only and TMR cases; default 100 iterations. |
-| I: instructions | Execute short RV64 sequences through the link agent; check scan-visible PCs, pipeline operands, CSRs, WFI endpoint and absence of unexpected memory writes; default 16 sequences. |
+| R: randomized | Combine edge/random register patterns with valid, SEC, DED, parity-only and TMR cases; default 1000 iterations. |
+| I: instructions | Execute short RV64 sequences through the link agent; check scan-visible PCs, pipeline operands, CSRs, WFI endpoint and absence of unexpected memory writes; default 64 sequences. |
 | S: resumable hold | Run generated memory/arithmetic/CSR programs, interrupt with unload/restore, resume and compare against uninterrupted execution. |
 
-`SCAN_OP=capture` (default) loads, captures and reads back. `load` omits capture.
-`both` checks load/readback first, then independently resets/reloads and checks
-capture; failed loads block capture. F substitutes reset for capture. I has no
+`SCAN_OP=both` (default) checks load/readback first, then independently
+resets/reloads and checks capture; failed loads block capture.
+`capture` omits the separate load/readback check. `load` omits capture. F substitutes reset for capture. I has no
 scan-loaded stimulus, so `load` explicitly skips it.
 
 D/E/P/H/R reset independently before loading. Capture is aligned to the first
@@ -114,7 +201,7 @@ clocks. Non-scan state must remain held while scan cells shift on SE=1 edges.
 Exit uses SE=TM=0 for three clocks; two are held and the last may resume.
 Legacy phases enter with SE low and preserve their functional capture edges.
 
-Each of four default programs exercises integer arithmetic, multiply/divide,
+Each of eight default programs exercises integer arithmetic, multiply/divide,
 loads/stores across a 16 KiB data region, branches, CSR swaps and dummy
 insertion. It writes a register/CSR signature, fences, reports through tohost
 and reaches WFI. The uninterrupted reference records completion, signature,
@@ -128,7 +215,7 @@ Per program, S executes:
 - One hold-only (`tm`) control with the same hold/shift duration but no shifts.
 - One link-pause (`ctl`) control with no test-mode/scan-enable activity.
 
-Default coverage is 20 cases: 12 full sessions, four hold-only and four pause
+Default coverage is 40 cases: 24 full sessions, eight hold-only and eight pause
 controls. `+SCAN_RESUME_ITERS=n`, `+SCAN_RESUME_N=n1,n2,...` and
 `+SCAN_RESUME_BUDGET=n` control workload count, interruption positions and
 execution budget. **Reset is never asserted inside a resumable session.**
@@ -154,13 +241,18 @@ change can be reported before combinational pad logic settles.
 
 ## Regression and results
 
+`./regress.sh --timing` runs the same jobs with SDF and saves timing summaries.
 `./regress.sh` runs 11 jobs: repeated baseline, E load-only, D capture, E/P/H/F,
-the full suite, R1000, I64 and S with eight programs. H includes sentinels.
+the full suite, R1000, I64 and S with eight programs. Sentinels are enabled
+by default. The PC load-only job intentionally exercises that explicit mode;
+other jobs use `SCAN_OP=both`. That load-only job disables sentinels so a capture
+failure cannot block the independent load diagnostic.
 `./regress.sh --unload-reset` runs nine directed comparisons: four matched
 protected/unprotected cases plus protected hardening readout. Runs continue
 after failures and execute sequentially because they share `sim/`.
 
-Current logs are `sim/run.log`, `compile.log`, `sim.log` and `pin_trace.log`.
+Current logs are `sim/run.log`, `compile.log`, `sim.log` and `pin_trace.log`
+under `sim/`; timing runs keep the corresponding files under `sim/timing/`.
 Archives and `summary.tsv` are in `regressions/<timestamp>_<pid>/`. Standalone
 runs require `DFT TB PASS`; explicit skips are labeled partial coverage. The
 regression returns 0 for all passes, 1 for any failure, and 2 for partial-only
@@ -174,5 +266,5 @@ Timer/IRQ boundaries, short asynchronous pulses, active UART, MMU/atomic cases
 and Linux scan/resume need additional directed qualification. UART and input
 synchronizers continue running during hold; MTIME and PLIC state are held.
 Counters, scrubbers and disabled processor features need separate qualification
-if enabled. Netlist timing, physical implementation and ATPG coverage are VM
-signoff tasks, not conclusions of this zero-delay bench.
+if enabled. Mapped timing simulation requires the VM. Physical timing signoff and ATPG
+coverage remain separate tasks; a full_tb pass does not establish them.

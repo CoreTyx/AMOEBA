@@ -87,8 +87,8 @@
 //   S  session      a generated program is stopped at cycle N, the chains are
 //                   unloaded and reloaded in a HOLD session (enter_hold /
 //                   exit_hold), and the program must finish exactly as a
-//                   reference run without the session.  Not in the default
-//                   order: it needs the hold-mode RTL (src/scan_resume.svh).
+//                   reference run without the session. Included in the default
+//                   order; it needs the hold-mode RTL (src/scan_resume.svh).
 // Ends with one line per group and register that failed, the PC bits that
 // failed, then "DFT TB PASS" or "DFT TB FAIL".
 //
@@ -119,8 +119,9 @@
 // for the TM_SYNC edges before the rise (every phase but S is a legacy
 // session), and enter_hold()/exit_hold() implement the hold protocol for S.
 //
-// Test cycle as the SPF: 100 ns; inputs change at 10 ns, io_out sampled at
-// 40 ns, core_clk rises at 50 ns.
+// Zero-delay defaults match the 100 ns SPF cycle. Relative to the falling
+// edge: SI changes at 10 ns, SO samples at 40 ns, clock rises at 50 ns.
+// Timing mode defaults to a 1000 ns scan cycle; these offsets scale with it.
 
 `timescale 1ns/1ps
 
@@ -202,7 +203,27 @@ module tb_scan;
     .core_clk(clk), .rst_n, .io_in, .io_out, .req, .clk_out, .wr, .ready, .rvalid,
     .irq, .uart_tx, .uart_rx, .test_mode, .scan_en, .fault_inject, .status);
 
-  always #50 clk = ~clk;            // rises at 50, 150, ...
+  // Change period only between complete pulses. Scan/arming uses the slow
+  // period; functional execution uses its own period. Units here are ns.
+  real func_period_ns = 100.0;
+`ifdef SCAN_TIMING
+  real scan_period_ns = 1000.0;
+  real settle_ns = 20.0;
+`else
+  real scan_period_ns = 100.0;
+  real settle_ns = 2.0;
+`endif
+  real active_half_ns = 50.0;
+  bit clock_configured = 0;
+  initial begin : clock_driver
+    wait (clock_configured);
+    forever begin
+      active_half_ns = ((test_mode === 1'b1) || (scan_en === 1'b1))
+                       ? scan_period_ns / 2.0 : func_period_ns / 2.0;
+      #(active_half_ns) clk = 1'b1;
+      #(active_half_ns) clk = 1'b0;
+    end
+  end
 
   int errors = 0;
   int len [N:1];                    // discovered in phase A
@@ -213,12 +234,12 @@ module tb_scan;
   bit in_check_fail = 1'b0;
   bit have_snapshot = 1'b0;
   // A/M/B are prerequisites. Remaining letters execute in the requested order.
-  string phase_order = "CDEPHFRIS", case_filter = "", scan_op = "capture";
-  bit baseline_ok = 0, sentinel_enabled = 0, sweep_enabled = 0;
+  string phase_order = "CDEPHFRIS", case_filter = "", scan_op = "both";
+  bit baseline_ok = 0, sentinel_enabled = 1, sweep_enabled = 0;
   bit unload_reset_enabled = 1;
   int case_repeats = 1, cases_selected = 0, checks_skipped = 0;
   int unsigned scan_seed = 1;
-  int random_iters = 100, exec_iters = 16;
+  int random_iters = 1000, exec_iters = 64;
   real launch_ns = 2.0; // post-synthesis FPGA_TCO_PS convention
   // Set +SCAN_NO_DUMP to omit large failure snapshots.
   // Set +SCAN_TRACE_CYCLES for per-clock traces or +SCAN_TRACE_SHIFT for shift progress.
@@ -401,12 +422,12 @@ module tb_scan;
   // the edge, so a pin changed after it is stable for the whole next cycle.
   task automatic cycle(input logic [N:1] in_bits, output logic [N:1] out_bits);
     if (trace_cycles) $display("[%0t] TRACE cycle START: SI=%b SE=%b TM=%b RST=%b", $time, in_bits, scan_en, test_mode, rst_n);
-    @(negedge clk); #10;
+    @(negedge clk); #(active_half_ns * 0.2);
     si = in_bits;
-    #30;
+    #(active_half_ns * 0.6);
     out_bits = so;
     if (trace_cycles) $display("[%0t] TRACE cycle SAMPLE: SI=%b SO=%b", $time, in_bits, out_bits);
-    @(posedge clk); #(launch_ns);
+    @(posedge clk); #((settle_ns > launch_ns) ? settle_ns : launch_ns);
   endtask
 
   task automatic idle(input int n);
@@ -738,7 +759,7 @@ module tb_scan;
     set_se(1'b0);
     $display("[%0t] TRACE hold: SE=0, %s", $time, func_cyc == 0 ? "one capture edge" : "enter functional mode");
     if (func_cyc == 0) begin
-      @(posedge clk); #(launch_ns);
+      @(posedge clk); #((settle_ns > launch_ns) ? settle_ns : launch_ns);
     end
     else begin
       if (!keep_test_mode) test_mode = 1'b0;
@@ -1318,6 +1339,15 @@ module tb_scan;
   // ---- run ---------------------------------------------------------------------------------
   initial begin
     int timing_ps, seed_state;
+    real min_half_ns, link_sample_ns;
+    if ($value$plusargs("FUNC_PERIOD_PS=%d", timing_ps)) func_period_ns = timing_ps / 1000.0;
+    if ($value$plusargs("SCAN_PERIOD_PS=%d", timing_ps)) scan_period_ns = timing_ps / 1000.0;
+    if ($value$plusargs("SCAN_SETTLE_PS=%d", timing_ps)) settle_ns = timing_ps / 1000.0;
+    min_half_ns = ((func_period_ns < scan_period_ns) ? func_period_ns : scan_period_ns) / 2.0;
+    if (!(func_period_ns >= 0.010 && scan_period_ns >= 0.010))
+      $fatal(1, "FUNC_PERIOD_PS and SCAN_PERIOD_PS must be at least 10 ps");
+    if (!(settle_ns > 0 && settle_ns < min_half_ns))
+      $fatal(1, "SCAN_SETTLE_PS must be positive and less than either clock half-period");
     void'($value$plusargs("SCAN_PHASES=%s", phase_order));
     void'($value$plusargs("SCAN_CASE=%s", case_filter));
     void'($value$plusargs("SCAN_OP=%s", scan_op));
@@ -1344,7 +1374,12 @@ module tb_scan;
     if (random_iters < 1 || exec_iters < 1 || resume_progs < 1 || resume_budget < 1)
       $fatal(1, "iteration counts must be positive");
     if ($value$plusargs("FPGA_TCO_PS=%d", timing_ps)) launch_ns = timing_ps / 1000.0;
-    if (!(launch_ns > 0 && launch_ns < 50)) $fatal(1, "FPGA_TCO_PS must be between 0 and 50000 exclusive");
+    if (!(launch_ns > 0 && launch_ns < min_half_ns))
+      $fatal(1, "FPGA_TCO_PS must be positive and less than either clock half-period");
+    link_sample_ns = 5.0;
+    if ($value$plusargs("FPGA_SAMPLE_PS=%d", timing_ps)) link_sample_ns = timing_ps / 1000.0;
+    if (!(link_sample_ns > 0 && link_sample_ns < min_half_ns))
+      $fatal(1, "FPGA_SAMPLE_PS must be positive and less than either clock half-period");
     if (case_repeats < 1) $fatal(1, "SCAN_REPEAT must be positive");
     if (scan_op != "capture" && scan_op != "load" && scan_op != "both")
       $fatal(1, "SCAN_OP must be capture, load, or both");
@@ -1352,7 +1387,9 @@ module tb_scan;
     for (int i = 0; i < phase_order.len(); i++)
       if (!(phase_order.substr(i,i) inside {"A","M","B","C","D","E","P","H","F","R","I","S"}))
         $fatal(1, "SCAN_PHASES contains an unknown phase: %s", phase_order.substr(i,i));
-    sentinel_enabled = $test$plusargs("SCAN_SENTINEL");
+    if ($test$plusargs("SCAN_SENTINEL") && $test$plusargs("SCAN_NO_SENTINEL"))
+      $fatal(1, "choose only one of SCAN_SENTINEL and SCAN_NO_SENTINEL");
+    sentinel_enabled = !$test$plusargs("SCAN_NO_SENTINEL");
     sweep_enabled = $test$plusargs("SCAN_SWEEP");
     if ($test$plusargs("SCAN_UNLOAD_RESET") && $test$plusargs("SCAN_UNLOAD_NO_RESET"))
       $fatal(1, "choose only one of SCAN_UNLOAD_RESET and SCAN_UNLOAD_NO_RESET");
@@ -1364,6 +1401,9 @@ module tb_scan;
     rst_n = 1'bx; irq = '0; uart_rx = 1'b1;
     fault_inject = 1'b0; test_mode = 1'b0; si = '0;
     set_se(1'b0);
+    $display("[%0t] CLOCK: functional period=%0.3f ns (%0.3f MHz), scan/arm period=%0.3f ns (%0.3f MHz), post-edge settle=%0.3f ns",
+             $time, func_period_ns, 1000.0/func_period_ns, scan_period_ns, 1000.0/scan_period_ns, settle_ns);
+    clock_configured = 1;
     #0.5; rst_n = 1'b0;
     idle(20); rst_n = 1'b1; idle(5);
 
@@ -1420,7 +1460,11 @@ module tb_scan;
 
   initial begin
     longint timeout_ns;
-    timeout_ns = 100_000_000; // original 100 ms watchdog
+`ifdef SCAN_TIMING
+    timeout_ns = 10_000_000_000; // 10 s for the full suite with slower shifting
+`else
+    timeout_ns = 1_000_000_000; // 1 s for R1000, I64 and eight S workloads
+`endif
     void'($value$plusargs("SCAN_TIMEOUT_NS=%d", timeout_ns));
     if (timeout_ns <= 0) $fatal(1, "SCAN_TIMEOUT_NS must be positive");
     #(timeout_ns);

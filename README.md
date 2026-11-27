@@ -51,10 +51,13 @@ sim/                  Simulation Makefile + build artifacts
   vcs/                  VCS build directory (top_tb binary, dump.fsdb)
   spike/                Spike co-sim output logs
 synth/                Synthesis (Synopsys Design Compiler, EWS-only)
-  Makefile              synth, power_verilator, power_vcs, dv targets
-  synthesis.tcl / power.tcl / dv.tcl
-  reports/              Synthesis, power, area reports
-  outputs/              synth.ddc gate-level netlist
+  Makefile              all (default), synth and dft targets
+  synthesis.tcl         RTL compilation and integrated scan insertion
+  dft_*.tcl             Scan selection, insertion and structural checks
+  DFT_FLOW.md           Synthesis, output files and verification commands
+  scripts/              Full-scope and PC-only scan testbenches
+  reports/              Synthesis, DFT, timing, power and area reports
+  synout/               Mapped checkpoint and inserted netlists
 lint/                 Lint (Synopsys Spyglass, EWS-only)
   Makefile              lint target
   lint.tcl

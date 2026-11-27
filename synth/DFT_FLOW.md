@@ -15,18 +15,15 @@ Before starting:
 
 ```bash
 cd synth
-module load Synopsys_x86-64
-
-make SHELL=/bin/bash '.SHELLFLAGS=-e -o pipefail -c' \
-    synth DFT_SCOPE=full SYN_OUT_DIR="$PWD/synout" REPORT_DIR="$PWD/reports"
-
-make SHELL=/bin/bash '.SHELLFLAGS=-e -o pipefail -c' \
-    dft DFT_SCOPE=full
+make
 ```
 
-The Bash settings support the Makefile's logging pipelines and propagate
-pipeline failures on supported GNU make versions. Also inspect the DC logs
-and DRC reports, rather than relying on the presence of output files alone.
+`make` runs full-scope synthesis followed by standalone insertion. The Makefile
+uses login Bash to initialize the VM module command and loads
+`Synopsys_x86-64` before each DC invocation. Pipefail propagates tool failures
+through logging pipelines. The VM login setup must provide `module`; a failed
+module load stops the recipe. This does not change the parent terminal environment.
+Also inspect the DC logs and DRC reports, rather than relying on output files alone.
 
 These are two different operations:
 
@@ -36,10 +33,10 @@ These are two different operations:
   checkpoint. It does not compile the RTL again. The separate output directory
   makes this the recommended set of files for full_tb.
 
-**Set the scan scope during synthesis.** `DFT_SCOPE=full` selects the PC,
-selected pipeline registers, and hardened CSRs. The default, `pc`, selects only
-the PC. Setting `DFT_SCOPE=full` on `make dft` does not change a PC-only checkpoint
-into a full-scope checkpoint. Actual cell counts depend on mapping and library.
+**Full scope is the default.** It selects the PC, selected pipeline registers,
+and hardened CSRs. Use `make DFT_SCOPE=pc` for PC-only scope. Setting
+`DFT_SCOPE=full` on `make dft` does not change a PC-only checkpoint into a
+full-scope checkpoint. Actual cell counts depend on mapping and library.
 
 `DFT_KEEP_ALL=1` is an optional synthesis setting that retains selected constant,
 unloaded or duplicate state that DC would otherwise optimize away. Changing it
@@ -64,12 +61,13 @@ Paths below are relative to `synth/`, using the commands above.
 
 The integrated insertion from `make synth` also writes netlist, DDC, scandef,
 phase and protocol files directly under `synout/`. It additionally writes
-`forte_top.gate.sdf` and `.gate.sdc` there.
+`forte_top.gate.sdc` there. Synthesis and DFT insertion do not export SDF.
 
 **Use one matching output set.** For example, pair the netlist in `synout/dft/`
 with the scandef and phase file from that same directory and generation.
-Standalone `make dft` does not regenerate SDF. Do not pair its changed netlist
-with an older SDF from the integrated insertion.
+Timing verification instead uses the post-P&R netlist and matching SDF from
+`/groups/ece427-group4/experiment2/pnr/pnrout`; it does not use this synthesis
+netlist with a routed SDF.
 
 ## 3. Run full_tb on the inserted netlist
 
@@ -86,7 +84,13 @@ STDCELL_MODELS=(/path/to/standard_cells/*.v)
 SRAM_MODELS=(/path/to/sram_models/*.v)
 PAD_MODELS=(/path/to/pad_models.v)
 VCS_FLAGS=()  # Add any defines/options required by your library models.
-SDF=
+# Post-P&R timing inputs: replace these example filenames with the actual files.
+PNR_DIR=/groups/ece427-group4/experiment2/pnr/pnrout
+PNR_NETLIST="$PNR_DIR/your_postroute_netlist.v"
+SDF="$PNR_DIR/your_postroute_delays.sdf"
+SDF_CORNER=min  # min | typ | max; selects the SDF triplet entry
+PNR_SCANDEF="$PNR_DIR/forte_top.scandef"
+PNR_LOGICAL_PHASE="$PNR_DIR/forte_top.scan_phase.txt"
 ```
 
 These are ordinary Bash assignments, with no export required. Model settings
@@ -97,17 +101,19 @@ From `synth/`, after loading the Synopsys module:
 
 ```bash
 cd scripts/full_tb
-./run.sh --regen +SCAN_OP=both
+./run.sh --regen
 ./regress.sh
+./run.sh --timing --regen  # post-P&R inputs and timing-capable models required
 ```
 
 - `--regen` builds the scan map and internal hookups from the new files. It
   does not synthesize hardware or generate the logical-phase input.
-- `SCAN_OP=both` checks loading first, then independently reloads and checks
+- `SCAN_OP=both` is the default: it checks loading first, then independently reloads and checks
   capture for the scan-pattern tests.
 - A/M/B always run first. The default remaining phases are C/D/E/P/H/F/R/I/S,
   including randomized patterns, fault injection, instruction execution and
   reset-free hold/restore/resume.
+- Plain runs enable baseline sentinels, R1000, I64 and eight S workloads.
 - `regress.sh` runs 11 jobs with separate logs, including R1000, I64 and S with
   eight programs.
 
@@ -121,7 +127,13 @@ scan-data mismatches. A pad warning does not prove internal link isolation.
 Current logs are under `scripts/full_tb/sim/`. Regression logs and
 `summary.tsv` are under `scripts/full_tb/regressions/<timestamp>_<pid>/`.
 Run simulations sequentially because they share the build/current-log folder.
-Full_tb is zero-delay and rejects nonempty SDF.
+Default runs use the synthesis netlist without delays. `--timing` selects the
+separate `PNR_NETLIST`, `SDF`, `PNR_SCANDEF` and `PNR_LOGICAL_PHASE` inputs,
+with its own cache/logs under `sim/timing/`. It enables timing checks and
+fails reported timing violations or SDF annotation diagnostics. Timing mode
+uses 10 MHz functional and 1 MHz scan/arming clocks by default. See the
+[full_tb timing instructions](scripts/full_tb/README.md#timing-simulation) for
+clock/margin settings, annotation checks and hold-analysis limits.
 
 Useful focused checks, from `scripts/full_tb/`:
 

@@ -30,7 +30,7 @@ localparam string RES_CSR_NAME [RES_NSIG_CSR] = '{"mscratch", "mtvec", "mepc", "
                                                   "mtval", "mstatus", "MSECFAULT", "RANDINSTRFREQ"};
 localparam logic [31:0] RES_FENCEI = 32'h0000100f;
 
-int resume_progs = 4, resume_budget = 60000;
+int resume_progs = 8, resume_budget = 60000;
 int resume_n [$];
 logic [63:0] res_prng;
 
