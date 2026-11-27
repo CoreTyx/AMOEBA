@@ -4,6 +4,8 @@
 #
 #   synth/scripts/full_tb/postpnr_dft.sh [--vm-paths FILE] [--corners min,max]
 #                                        [--ignore-neg-delay] [--quick] [--from N]
+# vm_paths: --vm-paths, else $VM_PATHS, else vm_paths.sh beside the checkout
+# (<repo>/../vm_paths.sh), else hvl/pin/vm_paths.sh.
 #
 # Stages (each one line in results/<stamp>/SUMMARY; later stages still run
 # after a failure unless they depend on it):
@@ -31,7 +33,12 @@
 set -uo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R="$(cd "$D/../../.." && pwd)"
-VMP="${VM_PATHS:-$R/hvl/pin/vm_paths.sh}" CORNERS="min,max" NIOD=0 QUICK=0 FROM=1
+# vm_paths.sh: $VM_PATHS, else beside the checkout (../vm_paths.sh), else hvl/pin/.
+VMP="${VM_PATHS:-}"
+if [ -z "$VMP" ]; then
+  VMP="$(cd "$R/.." && pwd)/vm_paths.sh"; [ -f "$VMP" ] || VMP="$R/hvl/pin/vm_paths.sh"
+fi
+CORNERS="min,max" NIOD=0 QUICK=0 FROM=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --vm-paths) VMP="$2"; shift ;;
@@ -74,7 +81,7 @@ if [ "$FROM" -le 1 ]; then
   pf="$OUT/preflight.log"
   (
     set -e
-    [ -f "$VMP" ] || { echo "no vm_paths file: $VMP (cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh, fill in NETLIST, SDF and the models)"; exit 1; }
+    [ -f "$VMP" ] || { echo "no vm_paths file: $VMP (cp hvl/pin/vm_paths.example.sh ../vm_paths.sh, beside the checkout; fill in NETLIST, SDF and the models)"; exit 1; }
     NETLIST="" SDF="" PDK_FIRST=() STDCELL_MODELS=() SRAM_MODELS=() PAD_MODELS=()
     source "$VMP"
     [ -n "$NETLIST" ] && [ -s "$NETLIST" ] || { echo "NETLIST not set or empty"; exit 1; }

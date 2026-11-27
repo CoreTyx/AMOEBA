@@ -24,8 +24,8 @@
 #   --ignore-neg-delay SDFCOM_NIOD (negative IOPATH delay) is counted, not
 #                      failed: NOT a sign-off run (timing_summary.log says so)
 #
-# The paths file: an explicit one, else $VM_PATHS, else hvl/pin/vm_paths.sh
-# (the pin bench's VM file: NETLIST, SDF, SDF_CORNER, PDK_FIRST, PAD_MODELS,
+# The paths file: an explicit one, else $VM_PATHS, else vm_paths.sh beside the
+# checkout (<repo>/../vm_paths.sh), else hvl/pin/vm_paths.sh (the pin bench's VM file: NETLIST, SDF, SDF_CORNER, PDK_FIRST, PAD_MODELS,
 # SRAM_MODELS, STDCELL_MODELS, VCS_FLAGS), else paths.sh beside this script.
 #   NETLIST          the gate netlist to simulate.  With --timing it is the
 #                    netlist the SDF was written for, unless PNR_NETLIST is set
@@ -143,12 +143,14 @@ done
 [[ -z "$want" ]] || die "${want,,} needs a value"
 
 if [[ -z "$PATHS_FILE" ]]; then
-    for f in "${VM_PATHS:-}" "$REPO_DIR/hvl/pin/vm_paths.sh" "$SCRIPT_DIR/paths.sh"; do
+    # vm_paths.sh beside the checkout (../vm_paths.sh) survives unpacking a
+    # new copy of the repo over the old one.
+    for f in "${VM_PATHS:-}" "$REPO_DIR/../vm_paths.sh" "$REPO_DIR/hvl/pin/vm_paths.sh" "$SCRIPT_DIR/paths.sh"; do
         [[ -n "$f" && -f "$f" ]] && { PATHS_FILE="$f"; break; }
     done
 fi
 [[ -n "$PATHS_FILE" && -f "$PATHS_FILE" ]] \
-    || die "no paths file: fill in hvl/pin/vm_paths.sh (cp hvl/pin/vm_paths.example.sh), or give one with --vm-paths"
+    || die "no paths file: cp hvl/pin/vm_paths.example.sh ../vm_paths.sh (beside the checkout) and fill it in, or give one with --vm-paths"
 PATHS_FILE=$(realpath "$PATHS_FILE")
 PDK_FIRST=()
 # shellcheck disable=SC1090

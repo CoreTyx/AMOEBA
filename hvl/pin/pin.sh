@@ -77,8 +77,13 @@ case "$INITREG" in ""|0|1|random) ;; *) die "INITREG must be 0, 1 or random, not
 
 if [ "$SIM" = vcs ]; then
   # The VM's own paths: not tracked, not in the bundle (see vm_paths.example.sh).
-  VM_PATHS="${PIN_VM_PATHS:-$P/vm_paths.sh}"
-  [ -f "$VM_PATHS" ] || die "no $VM_PATHS: cp $P/vm_paths.example.sh $P/vm_paths.sh and fill it in"
+  # PIN_VM_PATHS, else vm_paths.sh beside the checkout (../vm_paths.sh, kept
+  # when a new copy is unpacked), else hvl/pin/vm_paths.sh.
+  VM_PATHS="${PIN_VM_PATHS:-}"
+  if [ -z "$VM_PATHS" ]; then
+    VM_PATHS="$(cd "$R/.." && pwd)/vm_paths.sh"; [ -f "$VM_PATHS" ] || VM_PATHS="$P/vm_paths.sh"
+  fi
+  [ -f "$VM_PATHS" ] || die "no vm_paths.sh: cp $P/vm_paths.example.sh $(cd "$R/.." && pwd)/vm_paths.sh (beside the checkout) and fill it in"
   # shellcheck source=vm_paths.example.sh
   PDK_FIRST=(); VCS_FLAGS=(); IGNORE_CELLS=()
   source "$VM_PATHS"

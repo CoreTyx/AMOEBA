@@ -38,7 +38,9 @@ PIN=hvl/pin/pin.sh
 # The gate build's SDF, if any: prepared once (sdf_prep.sh), one build per corner.
 CORNERS=("")
 if [[ $DUT == gate ]]; then
-  VMP="${PIN_VM_PATHS:-$ROOT/hvl/pin/vm_paths.sh}"
+  VMP="${PIN_VM_PATHS:-}"
+  if [[ -z $VMP ]]; then VMP="$(cd "$ROOT/.." && pwd)/vm_paths.sh"; [[ -f $VMP ]] || VMP="$ROOT/hvl/pin/vm_paths.sh"; fi
+  export PIN_VM_PATHS="$VMP"
   [[ -f $VMP ]] || { echo "no $VMP"; exit 1; }
   sdf_src=$(PDK_FIRST=(); STDCELL_MODELS=(); SDF=""; source "$VMP" >/dev/null 2>&1; echo "${PIN_SDF:-$SDF}")
   if [[ -n $sdf_src ]]; then

@@ -78,11 +78,16 @@ clocks for the synchronizer. The default clock is 100 ns (10 MHz).
 On the VM, with only the post-PnR netlist and its SDF:
 
 ```bash
-cp hvl/pin/vm_paths.example.sh hvl/pin/vm_paths.sh   # once; fill in NETLIST, SDF,
-                                                     # the models, IGNORE_CELLS
+cp hvl/pin/vm_paths.example.sh ../vm_paths.sh   # once, BESIDE the checkout: fill in
+                                               # NETLIST, SDF, the models, IGNORE_CELLS
 synth/scripts/full_tb/postpnr_dft.sh --quick --ignore-neg-delay   # minutes: setup check
 synth/scripts/full_tb/postpnr_dft.sh --ignore-neg-delay           # hours: the full run
 ```
+
+Every script looks for the paths file in this order: `--vm-paths FILE`, then
+`$VM_PATHS`, then `vm_paths.sh` beside the checkout (`<repo>/../vm_paths.sh`),
+then `hvl/pin/vm_paths.sh`. Keeping it beside the checkout means a newly
+unpacked copy of the repo never replaces it.
 
 Paste back `synth/scripts/full_tb/results/<stamp>/SUMMARY`. It holds counts,
 verdicts and RTL register names only. It never holds cell names, model text or
