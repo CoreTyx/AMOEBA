@@ -1,10 +1,14 @@
 # Handoff: post-PnR DFT tests with SDF
 
 Status as of 2026-11-27.
-- **Branch:** `dft-postpnr-sdf`, based on `dft-hold-integration` (`e56ecf8`). Local only: not
-  pushed and not merged.
+- **Branch:** `dft-postpnr-sdf` on GitHub
+  (https://github.com/CoreTyx/AMOEBA/tree/dft-postpnr-sdf), based on
+  `dft-hold-integration` (`e56ecf8`). Not merged.
 - **On the VM:** this tree is unpacked at `/groups/ece427-group4/dft_post_pnr/dft_pnr_testing`.
 - **Paths file:** `/groups/ece427-group4/dft_post_pnr/vm_paths.sh`, beside the checkout.
+- **Doc locations:** this file is the current status. The run details are in
+  `README.md` here (section "Post-PnR from vm_paths.sh"), and the synthesis side
+  is in `synth/DFT_FLOW.md`.
 
 ## Goal
 
@@ -122,7 +126,8 @@ even when one is given; the given files are then only compared, as counts.
       which corrupts the program by design. The reload case is phase S.
 - `synth/scripts/full_tb/`: `postpnr_dft.sh`, discovery, the `run.sh` rework
   (vm_paths, `--corner`, `--ignore-neg-delay`, `IGNORE_CELLS`), `regress.sh`
-  options, `timing_report.py`, and the README section.
+  options, `timing_report.py`, the README section, and `standin/` (the EWS
+  FreePDK45 stand-in builder).
 
 ## What has been checked (on EWS, with no VM access)
 
@@ -169,11 +174,75 @@ The stand-in is a FreePDK45 synthesis of this branch's own DFT flow. It has
   run in Innovus yet. Until it is, the PnR was done without scan-chain
   awareness or scan hold views, so scan-path hold violations are likely.
 
+## Continuing this work
+
+### Rules
+- **No foundry IP leaves the VM.** Cell names, model or `.lib` text and SDF
+  values never go into git, docs, chat or pasted logs.
+  - `SUMMARY`, `timing_summary.log` and stage 2's output are safe: counts, RTL
+    register names and verdicts only.
+  - Raw logs (`compile.log`, `sim.log`, `discover.log`, `sim/meta/`) are
+    VM-only.
+  - When you need to show something from them, reduce it to counts or
+    SAME/DIFFERENT first.
+- **Getting code onto the VM.** This copy was shipped as a `git archive`
+  tarball (below). The VM can also reach GitHub: the post-PnR flow does
+  `git pull` in `/groups/ece427-group4/post_pnr_tb/AMOEBA`, so a `git clone -b
+  dft-postpnr-sdf` there works too. Either way, keep `vm_paths.sh` beside the
+  checkout, never inside it.
+- **One simulation per checkout at a time.** `run.sh`'s build and log folders
+  are shared, so `regress.sh` and `postpnr_dft.sh` run their jobs one after
+  another.
+
+### Change something and ship it to the VM
+```bash
+# EWS
+git clone git@github.com:CoreTyx/AMOEBA.git && cd AMOEBA && git checkout dft-postpnr-sdf
+# ... edit, test (below), commit, push ...
+git archive --format=tar.gz --prefix=dft_pnr_testing/ -o ~/dft_pnr_testing.tgz HEAD
+scp ~/dft_pnr_testing.tgz <netid>@ece-427-02.ece.illinois.edu:/groups/ece427-group4/dft_post_pnr/
+# VM
+cd /groups/ece427-group4/dft_post_pnr && tar -xzf dft_pnr_testing.tgz   # vm_paths.sh is untouched
+```
+To start from scratch on the VM, remove `dft_pnr_testing/` before unpacking.
+`synth/scripts/full_tb/sim/meta/` caches discovery per netlist, keyed by path,
+size and modification time. A new netlist is discovered again by itself.
+
+### Testing on EWS without the VM
+- **Pin-bench holds on RTL** (Verilator, about 10 min):
+  `PATH=/usr/bin:$PATH PERL5LIB=$PWD/sim/perl5 hvl/pin/hold_regress.sh`.
+  On EWS the old Synopsys make 3.80 comes first on PATH, and Verilator needs
+  `PERL5LIB`.
+- **A full-chip netlist to run full_tb against:**
+  `synth/scripts/full_tb/standin/build.sh <dir>` builds the FreePDK45 stand-in
+  in about 20 min. It writes `<dir>/vm_paths.sh`. Its header lists the
+  stand-in's quirks; use `SCAN_HOOKUPS=0` there. Then:
+  ```bash
+  synth/scripts/full_tb/run.sh --vm-paths <dir>/vm_paths.sh --discover-only
+  SCAN_HOOKUPS=0 synth/scripts/full_tb/run.sh --vm-paths <dir>/vm_paths.sh --regen +SCAN_PHASES=C
+  SIM=vcs DUT=gate PIN_VM_PATHS=<a copy with SDF=""> HOLD_PROGRAMS=testcode/baremetal/basic_arith.c hvl/pin/hold_regress.sh
+  ```
+  To check discovery against the truth, point `NETLIST` at
+  `<dir>/repo/synth/synout/dft/forte_top.gate.v`, where DC's scandef and phase
+  file sit beside it. Then `run.sh --discover-only --discover` prints the
+  SAME/DIFFERENT counts.
+- `vcs`, `dc_shell` and the licence all work on EWS
+  (`/software/Synopsys-2024_x86_64`).
+
+### Where to look when something fails
+| Symptom in SUMMARY | Look at (on the VM) |
+|---|---|
+| 1 preflight FAIL | `results/<stamp>/preflight.log`: the path or model it names |
+| 2 discover: ambiguous / no flop probe / still differ | `sim/meta/<key>/discover.log`. Probes are flops with a connected Q/QN; multibit or unusual scan cells need `discover_cells.py` taught their pins |
+| 3 zero-delay, M or B fails | Discovery or the `scan_map.awk` register table (a renamed register). B checks every reset value, so a wrong phase shows here |
+| 4 annotation PROBLEM | `sim/timing_<c>/compile.log`. An SDF message that `hvl/pin/sdf_msgs.sh` does not accept. Never widen the rules to pass; ask what is not annotated |
+| 4 or 5 TIMING VIOLATIONS | `timing_summary.log`, by phase and register. A real finding, unless it is at startup (X before reset) |
+| 4 phase S "effective SE=1 outside test mode" | Whether the netlist's `chip.scan_en_dft` net is the true or the inverted signal |
+
 ## Next steps
 
 1. Run `--quick`, then the full run, on the VM, and paste back `SUMMARY`.
 2. Triage any failure by stage:
    - stage 2 or 3: discovery or the bench;
    - stage 4 or 5 with violations: real timing findings, to send back to PnR.
-3. Once it is clean, push the branch and open a PR into `dft-hold-integration`.
-   Push only on request.
+3. Once it is clean, open a PR from `dft-postpnr-sdf` into `dft-hold-integration`.
