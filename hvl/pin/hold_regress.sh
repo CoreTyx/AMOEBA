@@ -83,6 +83,16 @@ run 10000
 finish
 EOF
 read -r -a PROGRAMS <<<"${HOLD_PROGRAMS:-testcode/baremetal/basic_arith.c testcode/baremetal/sorting_algo.c hvl/pin/tests/hold_state.c}"
+# Without a RISC-V compiler (the VCS VMs), run the prebuilt images in
+# hvl/pin/hold_images/ (same name, .lst; rebuild them on EWS with
+# bin/generate_memory_file.py -8 when a program changes).
+HAVE_CC=0
+for cc in riscv64-unknown-elf-gcc riscv64-elf-gcc riscv64-linux-gnu-gcc; do command -v $cc >/dev/null && HAVE_CC=1; done
+image() {   # image <program>: the program, or its prebuilt .lst
+  local n; n=$(basename "${1%.*}")
+  if [[ $HAVE_CC == 0 || ${HOLD_PREBUILT:-0} == 1 ]] && [[ -f hvl/pin/hold_images/$n.lst ]]; then echo "hvl/pin/hold_images/$n.lst"; else echo "$1"; fi
+}
+[[ $HAVE_CC == 1 && ${HOLD_PREBUILT:-0} != 1 ]] || echo "NOTE: prebuilt images from hvl/pin/hold_images/" | tee -a "$OUT/SUMMARY"
 failed=0
 for corner in "${CORNERS[@]}"; do
   if [[ -n $corner ]]; then
@@ -112,8 +122,8 @@ for corner in "${CORNERS[@]}"; do
         base="$RUNS/${name}_hold_${profile}_base"
         held="$RUNS/${name}_hold_${profile}_held"
         status=PASS
-        TAG="hold_${profile}_base" "$PIN" run "$program" "$BASE_CMD" "${args[@]}" > "$OUT/${name}_${profile}${sfx}_base.log" 2>&1 || status=FAIL
-        TAG="hold_${profile}_held" "$PIN" run "$program" "$CMD" "${args[@]}" > "$OUT/${name}_${profile}${sfx}_held.log" 2>&1 || status=FAIL
+        TAG="hold_${profile}_base" "$PIN" run "$(image "$program")" "$BASE_CMD" "${args[@]}" > "$OUT/${name}_${profile}${sfx}_base.log" 2>&1 || status=FAIL
+        TAG="hold_${profile}_held" "$PIN" run "$(image "$program")" "$CMD" "${args[@]}" > "$OUT/${name}_${profile}${sfx}_held.log" 2>&1 || status=FAIL
         holds=$(zcat -f "$held/sim.log" 2>/dev/null | grep -c '^\[PIN_TB\] dft_hold ' || true)
         tchk=$(zcat -f "$base/sim.log" "$held/sim.log" 2>/dev/null | grep -c 'Timing violation' || true)
         [[ $holds == "${#gaps[@]}" ]] || status=FAIL
@@ -131,8 +141,8 @@ for corner in "${CORNERS[@]}"; do
     status=PASS
     base="$RUNS/irq_hold_irq_base"
     held="$RUNS/irq_hold_irq_held"
-    TAG=hold_irq_base "$PIN" run hvl/pin/tests/irq.c hvl/pin/tests/irq.cmd > "$OUT/irq${sfx}_base.log" 2>&1 || status=FAIL
-    TAG=hold_irq_held "$PIN" run hvl/pin/tests/irq.c hvl/pin/tests/irq_hold.cmd > "$OUT/irq${sfx}_held.log" 2>&1 || status=FAIL
+    TAG=hold_irq_base "$PIN" run "$(image hvl/pin/tests/irq.c)" hvl/pin/tests/irq.cmd > "$OUT/irq${sfx}_base.log" 2>&1 || status=FAIL
+    TAG=hold_irq_held "$PIN" run "$(image hvl/pin/tests/irq.c)" hvl/pin/tests/irq_hold.cmd > "$OUT/irq${sfx}_held.log" 2>&1 || status=FAIL
     holds=$(zcat -f "$held/sim.log" 2>/dev/null | grep -c '^\[PIN_TB\] dft_hold ' || true)
     tchk=$(zcat -f "$base/sim.log" "$held/sim.log" 2>/dev/null | grep -c 'Timing violation' || true)
     [[ $holds == 4 ]] || status=FAIL
