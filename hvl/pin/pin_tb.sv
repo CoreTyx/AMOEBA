@@ -103,6 +103,12 @@ module pin_tb;
 
   pin_uart_agent uart (.core_clk, .rst_n, .uart_tx, .uart_rx);
 
+  // Per-cycle pin trace and the pad output-window checks (both off unless
+  // their plusargs are given; see pin_cycle_trace.sv).
+  pin_cycle_trace #(.LINK_W(LINK_W)) pins (
+    .core_clk, .rst_n, .io_in, .ready, .rvalid, .irq, .uart_rx, .test_mode,
+    .scan_en, .fault_inject, .io_out, .req, .wr, .uart_tx, .status, .clk_out);
+
 `ifdef PIN_TB_RTL
   // Only the RTL has a forte_chip to ask.
   initial if (dut.chip.LINK_BEATS != BEATS)
@@ -118,7 +124,7 @@ module pin_tb;
   int     status_edges = 0;
 
   function automatic int total_errors();
-    return errors + link.errors + uart.errors;
+    return errors + link.errors + uart.errors + pins.errors;
   endfunction
 
   function automatic void err(input string m);
@@ -244,6 +250,22 @@ module pin_tb;
 
   task automatic run_cycles(input longint n);
     repeat (n) @(posedge core_clk);
+  endtask
+
+  // A test ends on tohost, a link write, while the chip may still be sending the
+  // console: up to its 16-byte TX FIFO plus the byte in the shift register.  The
+  // link write picks up any clock-crossing shift and the UART does not, so stopping
+  // at once would make the last byte depend on timing.  Wait for the line to be
+  // idle for two frames instead.
+  localparam int CONSOLE_QUEUE_FRAMES = 17;
+  localparam int CONSOLE_IDLE_FRAMES  = 2;
+
+  task automatic drain_console();
+    longint idle_needed = CONSOLE_IDLE_FRAMES * uart.frame_cyc();
+    longint give_up     = (CONSOLE_QUEUE_FRAMES + CONSOLE_IDLE_FRAMES + 1) * uart.frame_cyc();
+    longint waited;
+    for (waited = 0; waited < give_up && uart.idle_cyc < idle_needed; waited++) @(posedge core_clk);
+    if (uart.idle_cyc < idle_needed) err($sformatf("console still sending %0d cycles after finish", waited));
   endtask
 
   // ---- DFT hold ---------------------------------------------------------------------
@@ -495,7 +517,7 @@ module pin_tb;
       "dft_hold": begin void'($sscanf(a1, "%d", t)); dft_hold(t); end
       "dft_locked": begin void'($sscanf(a1, "%d", t)); dft_locked(t); end
       "dft":    err("dft: scan shifting is tested at gate level (synth/scripts/full_tb on the dft branch)");
-      "finish": verdict(1, "");
+      "finish": begin drain_console(); verdict(1, ""); end
       default:  err($sformatf("line %0d: unknown command '%s'", lineno, cmd));
     endcase
   endtask

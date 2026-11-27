@@ -18,6 +18,17 @@ NETLIST="${NETLIST:-}"
 
 # SDF for the same netlist.  Empty = zero-delay functional gate simulation
 # (post-synthesis).  Set it for post-PnR timing simulation.
+# postpnr/run.sh: when NETLIST and SDF are both set here, it simulates exactly
+# these (one SDF with min:typ:max triples; .gz allowed; SDF_CORNER is ignored,
+# run.sh builds the corners it is asked for), and SDC is optional:
+# SDC=/path/forte_top.sdc
+# Without an SDC (here or in a drop folder) run.sh needs --clk-mhz and derives
+# the I/O timing from the clock.  When NETLIST and SDF are empty here, run.sh
+# takes netlist, SDF and SDC from the drop folder instead:
+# PNR_DIR=/groups/ece427-group4/post_pnr_tb/drop
+# An SDF build compiles with +neg_tchk +sdfverbose +define+NTC +define+RECREM
+# (the cell-model switches for negative limits and recovery/removal checks)
+# and fails on any SDFCOM_* message.
 SDF="${SDF:-}"
 SDF_CORNER="${SDF_CORNER:-max}"          # min | typ | max
 
@@ -41,5 +52,16 @@ SRAM_TIES="${SRAM_TIES:-}"
 # Extra VCS flags for every VCS build (pin.sh, the self-test, sram_cmp), added
 # after the defaults so they win.  Put site flags here rather than editing the
 # scripts: bundle files are checksummed, and a new bundle replaces them.  e.g.
-#   VCS_FLAGS=(+define+ARM_UD_MODEL -debug_acc+all -kdb -j4)
+#   VCS_FLAGS=(-j4 -fgp)
+# +define+ARM_UD_MODEL (unit-delay SRAM models) is for zero-delay post-synthesis
+# runs only: SDF builds drop it.  -debug_acc+all -kdb slow every run; WAVES=1
+# builds a separate waveform build instead.
 VCS_FLAGS=()
+
+# Physical-only cells (fill, decap, tap, endcap) the libraries have no Verilog
+# for, as cell-name globs, QUOTED (else the shell may expand them as file names):
+#   IGNORE_CELLS=('FILLCAP*' 'DCAP*')
+# Each matching cell gets an empty module (listed in build.log as 'build:
+# ignored ...').  A cell whose instances connect anything but power/ground pins
+# is refused: that one needs a real model.
+IGNORE_CELLS=()

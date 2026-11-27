@@ -12,7 +12,9 @@
 // the report names the shortest low run seen -- which is the actual bit time.
 //
 // RX samples the pin at the core_clk NEGEDGE (mid-cycle, race-free in RTL and
-// netlist alike).  TX launches TCO after the posedge, like every FPGA output.
+// netlist alike), or +UART_SAMPLE_PS after the posedge when given (postpnr/run.sh:
+// T - output_delay(max) of uart_tx, from the SDC).  TX launches TCO after the
+// posedge, like every FPGA output.
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1ns/1ps
 
@@ -27,6 +29,7 @@ module pin_uart_agent (
   int     prescale   = 1;        // +UART_PRESCALE; pkg/config.vh UART_PRESCALE
   int     tx_gap     = 0;        // +UART_TX_GAP: idle bit times between sent bytes
   real    tco_ns     = 2.0;
+  real    smp_ns     = -1.0;     // +UART_SAMPLE_PS; < 0: sample at the negedge
   string  log_path   = "uart.log";
   bit     echo       = 1;        // copy the console to stdout
 
@@ -42,9 +45,11 @@ module pin_uart_agent (
   int     min_low    = 0;        // shortest low run seen, in core cycles
   int     txq[$];               // bits 7:0 the byte; bit 8 = send it with a bad (0) stop bit
   longint cyc        = 0;
+  longint idle_cyc   = 0;        // uart_tx samples high since the last frame ended
   string  tail       = "";       // last chars, for pattern matching
 
   function automatic int bit_cyc(); return 16 * (div << prescale); endfunction
+  function automatic int frame_cyc(); return 10 * bit_cyc(); endfunction
 
   function automatic void err(input string m);
     errors++;
@@ -86,6 +91,7 @@ module pin_uart_agent (
     if ($value$plusargs("UART_PRESCALE=%d", v)) prescale = v;
     if ($value$plusargs("UART_TX_GAP=%d", v)) tx_gap = v;
     if ($value$plusargs("FPGA_TCO_PS=%d", v)) tco_ns = v / 1000.0;
+    if ($value$plusargs("UART_SAMPLE_PS=%d", v)) smp_ns = v / 1000.0;
     if ($value$plusargs("UART_LOG=%s", log_path)) ;
     if ($test$plusargs("UART_QUIET")) echo = 0;
     log_fd = $fopen(log_path, "w");
@@ -93,6 +99,11 @@ module pin_uart_agent (
   end
 
   // ---- RX: chip -> agent ----------------------------------------------------
+  task automatic rx_sample_point();
+    if (smp_ns < 0.0) @(negedge core_clk);
+    else begin @(posedge core_clk); #(smp_ns); end
+  endtask
+
   initial begin : rx
     longint t_fall, low_run;
     logic   s, prev;
@@ -103,18 +114,20 @@ module pin_uart_agent (
     // VCS honours that and Verilator does not, which hid exactly that bug.
     prev = 1'b1;
     forever begin
-      @(negedge core_clk);
+      rx_sample_point();
       s = uart_tx;
-      if (rst_n !== 1'b1) begin prev = 1'b1; continue; end   // X (power-up) counts as in reset
+      if (rst_n !== 1'b1) begin prev = 1'b1; idle_cyc = 0; continue; end   // X (power-up) counts as in reset
       cyc++;
-      if ($isunknown(s)) begin err($sformatf("uart_tx is %b", s)); prev = 1'b1; continue; end
+      if ($isunknown(s)) begin err($sformatf("uart_tx is %b", s)); prev = 1'b1; idle_cyc = 0; continue; end
+      if (s == 1'b1) idle_cyc++;
+      else idle_cyc = 0;
       if (prev == 1'b1 && s == 1'b0) begin
         // Start bit.  Sample the middle of every bit from here, cycle by cycle.
         t_fall = cyc; low_run = 0; c = 0;
         for (k = 0; k <= 9 * bit_cyc() + bit_cyc() / 2; k++) begin
           // k counts cycles since the falling edge; bit b's middle is at
           // (b + 0.5) * bit_cyc.  b = 0 is the start bit, 1..8 data, 9 stop.
-          if (k > 0) begin @(negedge core_clk); s = uart_tx; cyc++; end
+          if (k > 0) begin rx_sample_point(); s = uart_tx; cyc++; end
           if (s == 1'b0) low_run++;
           else if (low_run) begin
             if (min_low == 0 || low_run < min_low) min_low = int'(low_run);
@@ -132,6 +145,7 @@ module pin_uart_agent (
                                       div, min_low, min_low / (16 << prescale)));
         else got(c);
         prev = s;
+        idle_cyc = 0;
       end else prev = s;
     end
   end
@@ -141,11 +155,16 @@ module pin_uart_agent (
     byte c;
     int  e;
     forever begin
-      @(posedge core_clk);
+      // The queue is looked at mid-cycle, not at the posedge: uart_send
+      // queues bytes right after a posedge, and whether this process or the
+      // script runs first at that edge is the simulator's choice -- an RTL
+      // and a netlist build chose differently and sent a cycle apart.
+      @(negedge core_clk);
       if (rst_n !== 1'b1 || txq.size() == 0) continue;
       e = txq.pop_front();
       c = e[7:0];
       n_tx++;
+      @(posedge core_clk);
       for (int b = 0; b < 10; b++) begin
         #(tco_ns);
         uart_rx = (b == 0) ? 1'b0 : (b == 9) ? ~e[8] : c[b - 1];

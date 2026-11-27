@@ -17,12 +17,15 @@ thing at its pins.
 | Console | `pin_uart_agent.sv` | 8N1 at a fixed divisor: one bit = `16 * (div << UART_PRESCALE)` core clocks (32 at div 1) |
 | `rst_n`, `irq[1:0]`, `fault_inject`, `test_mode`/`scan_en`, `status` | `pin_tb.sv` | `irq` = PLIC sources 3 and 6; hold/resume here, inserted-chain checks in `full_tb` |
 | Command interface | `pin_tb.sv` | the script language below |
+| Per-cycle pin trace, pad output windows, `clk_out` | `pin_cycle_trace.sv` | every port every cycle after reset (`pin_cycle.log.gz`); SDC output-delay windows; `clk_out` insertion delay |
 
 **Clocking**, as on the board: `core_clk` (100 MHz) comes from the bench and
 `forte_top` ties `link_clk` to it.  Bench outputs launch `FPGA_TCO_PS` (2 ns)
 after the `core_clk` posedge; chip outputs are sampled `FPGA_SAMPLE_PS` (5 ns)
 after the `clk_out` posedge, so an SDF run's clock insertion delay is tracked
-the way the FPGA tracks it.
+the way the FPGA tracks it.  `+FPGA_SAMPLE_REF=core` samples after the
+`core_clk` posedge instead -- the reference the SDC's `set_output_delay` uses;
+the post-PnR flow (`postpnr/`) sets every one of these from the PnR SDC.
 
 **4-state.**  Every earlier test ran 2-state.  Here the chip's flops start X,
 unwritten memory can read back X (`mem_policy x`), `io_in` can carry X between
@@ -90,7 +93,7 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 | `dft_hold <cycles>` | Pause the link, arm `scan_en`, enter hold without reset, check each frozen clock, exit and resume. Requires positive cycles; quiet-link timeout defaults to 10,000 clocks. Gate runs check `req`/`wr`; RTL also checks RF, pipeline, timer, cache/bus FSMs, MDU, page walker, fault/CSR/PLIC state and write enables. No actual scan chains in RTL; `full_tb` phase S tests shifting/reload. |
 | `dft_locked <cycles>` | The same pin sequence as a hold entry, then `scan_en` toggling as for a shift, on a part whose software cleared the DFT lock (`hdl/forte_dft_lock.sv`): nothing may happen, and the link keeps running. RTL checks `test_mode_dft`, `scan_en_dft` and `hold` stay low every cycle; any build relies on the program still finishing (`tests/dft_lock.cmd`). |
 | `dft ...` | fails: scan shifting is tested at gate level (`synth/scripts/full_tb` on `dft`) |
-| `finish` | pass, if no checker has fired |
+| `finish` | wait for the console to be idle for two frames (an error after the 16-byte TX FIFO's worth), then pass, if no checker has fired |
 
 ## Plusargs
 
@@ -100,6 +103,21 @@ run directory, `$REPO` the checkout.  One command per line, `#` comments:
 Hold controls: `+DFT_QUIET_TIMEOUT=<cycles>`, `+DFT_HOLD_SE=0|1` (default 0;
 1 exercises asserted scan enable while RTL is frozen, without inserted chains).
 `+FPGA_MUTATE=1..3` breaks the bench on purpose (self-test only).
+
+Timing against an SDC (`postpnr/sdc_delays.py --plusargs max|min` prints them):
+`+FPGA_SAMPLE_REF=core|clk_out` (link outputs sampled after `core_clk` or
+`clk_out`), `+UART_SAMPLE_PS` (`uart_tx` sampled that long after the posedge
+instead of at the negedge), `+PIN_CYCLE_TRACE=<file>` (pin.sh always sets it),
+`+PIN_TRACE_SAMPLE_PS` (default 3/4 T), and the pad windows
+`+OUT_MAX_LINK_PS` `+OUT_MIN_LINK_PS` (`io_out`, `req`, `wr`) and
+`+OUT_MAX_SLOW_PS` `+OUT_MIN_SLOW_PS` (`uart_tx`, `status`) -- off unless given,
+and meaningful only with an SDF (in RTL every output moves on the edge).
+
+Every run writes `pin_cycle.log.gz`, the per-cycle pin trace.
+`bin/pin_trace_cmp.py <runA> <runB>` compares it, the link trace and the
+console, cycle-exact.  A gate build with an SDF fails on any `SDFCOM_*`
+message, and a run fails on any VCS `Timing violation` (see `pin.sh`'s header
+for `PIN_WAIVERS`, `INITREG` and the `PIN_*` overrides).
 
 `hold_regress.sh` builds once (Verilator; `JOBS` defaults to 1), then runs
 arithmetic, sorting and memory/CSR workloads under fast and gapped link timing.
